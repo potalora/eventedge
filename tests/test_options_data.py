@@ -93,3 +93,22 @@ class TestGetPutCallRatio:
 
         result = get_put_call_ratio("SOFI")
         assert "put/call" in result.lower() or "ratio" in result.lower()
+
+
+from tradingagents.agents.utils.options_tools import (
+    get_options_chain_tool,
+    get_options_greeks_tool,
+    get_put_call_ratio_tool,
+)
+
+
+class TestOptionsTools:
+    def test_tools_have_correct_names(self):
+        assert get_options_chain_tool.name == "get_options_chain"
+        assert get_options_greeks_tool.name == "get_options_greeks"
+        assert get_put_call_ratio_tool.name == "get_put_call_ratio"
+
+    def test_tools_have_descriptions(self):
+        assert len(get_options_chain_tool.description) > 0
+        assert len(get_options_greeks_tool.description) > 0
+        assert len(get_put_call_ratio_tool.description) > 0

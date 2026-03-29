@@ -23,6 +23,11 @@ from .alpha_vantage import (
     get_global_news as get_alpha_vantage_global_news,
 )
 from .alpha_vantage_common import AlphaVantageRateLimitError
+from .options_data import (
+    get_options_chain as get_yfinance_options_chain,
+    get_options_greeks as get_yfinance_options_greeks,
+    get_put_call_ratio as get_yfinance_put_call_ratio,
+)
 
 # Configuration and routing logic
 from .config import get_config
@@ -57,7 +62,15 @@ TOOLS_CATEGORIES = {
             "get_global_news",
             "get_insider_transactions",
         ]
-    }
+    },
+    "options_data": {
+        "description": "Options chain and analytics",
+        "tools": [
+            "get_options_chain",
+            "get_options_greeks",
+            "get_put_call_ratio",
+        ]
+    },
 }
 
 VENDOR_LIST = [
@@ -106,6 +119,15 @@ VENDOR_METHODS = {
     "get_insider_transactions": {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
+    },
+    "get_options_chain": {
+        "yfinance": get_yfinance_options_chain,
+    },
+    "get_options_greeks": {
+        "yfinance": get_yfinance_options_greeks,
+    },
+    "get_put_call_ratio": {
+        "yfinance": get_yfinance_put_call_ratio,
     },
 }
 
