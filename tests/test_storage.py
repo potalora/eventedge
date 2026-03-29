@@ -125,3 +125,63 @@ class TestDatabase:
         snapshots = tmp_db.get_equity_curve(run_id)
         assert len(snapshots) == 1
         assert snapshots[0]["portfolio_value"] == 5100.0
+
+
+from tradingagents.storage.queries import (
+    get_portfolio_summary,
+    get_recent_signals,
+    get_trade_history,
+)
+
+
+class TestQueries:
+    def test_get_portfolio_summary_empty(self, tmp_db):
+        summary = get_portfolio_summary(tmp_db)
+        assert summary["total_trades"] == 0
+        assert summary["total_pnl"] == 0.0
+
+    def test_get_portfolio_summary_with_trades(self, tmp_db):
+        did = tmp_db.insert_decision(
+            ticker="SOFI", trade_date="2026-03-01", rating="BUY",
+            full_decision="Buy", options_report="",
+        )
+        tmp_db.insert_trade(
+            decision_id=did, ticker="SOFI", instrument_type="stock",
+            action="buy", quantity=100, price=10.0,
+            option_details=None, status="filled", pnl=150.0,
+        )
+        tmp_db.insert_trade(
+            decision_id=did, ticker="SOFI", instrument_type="stock",
+            action="sell", quantity=100, price=11.50,
+            option_details=None, status="filled", pnl=-50.0,
+        )
+        summary = get_portfolio_summary(tmp_db)
+        assert summary["total_trades"] == 2
+        assert summary["total_pnl"] == 100.0
+
+    def test_get_recent_signals(self, tmp_db):
+        tmp_db.insert_decision(
+            ticker="PLTR", trade_date="2026-03-01", rating="BUY",
+            full_decision="Buy PLTR", options_report="",
+        )
+        tmp_db.insert_decision(
+            ticker="SOFI", trade_date="2026-03-02", rating="SELL",
+            full_decision="Sell SOFI", options_report="",
+        )
+        signals = get_recent_signals(tmp_db, limit=5)
+        assert len(signals) == 2
+        assert signals[0]["ticker"] == "SOFI"  # most recent first
+
+    def test_get_trade_history(self, tmp_db):
+        did = tmp_db.insert_decision(
+            ticker="NVDA", trade_date="2026-01-15", rating="BUY",
+            full_decision="Buy", options_report="",
+        )
+        tmp_db.insert_trade(
+            decision_id=did, ticker="NVDA", instrument_type="stock",
+            action="buy", quantity=10, price=500.0,
+            option_details=None, status="filled", pnl=None,
+        )
+        history = get_trade_history(tmp_db, ticker="NVDA")
+        assert len(history) == 1
+        assert history[0]["ticker"] == "NVDA"
