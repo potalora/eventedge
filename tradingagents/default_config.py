@@ -32,4 +32,46 @@ DEFAULT_CONFIG = {
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
+    # Options configuration
+    "options": {
+        "max_risk_per_trade_pct": 0.05,
+        "allowed_strategies": [
+            "long_call", "long_put", "bull_call_spread",
+            "bear_put_spread", "straddle", "strangle",
+        ],
+        "default_expiry_range_days": 45,
+    },
+    # Backtesting configuration
+    "backtest": {
+        "initial_capital": 5000,
+        "max_position_pct": 0.35,
+        "max_options_risk_pct": 0.05,
+        "slippage_bps": 10,
+        "commission_per_trade": 0,
+        "trading_frequency": "weekly",
+        "accuracy_windows": [5, 10, 30],
+    },
+    # Execution configuration
+    "execution": {
+        "mode": "paper",
+        "broker": "alpaca",
+        "confirm_before_trade": True,
+        "daily_loss_limit_pct": 0.10,
+        "execution_enabled": False,
+    },
+    # Scheduler configuration
+    "scheduler": {
+        "enabled": False,
+        "watchlist": [],
+        "scan_time": "07:00",
+        "portfolio_check_times": ["10:00", "15:00"],
+        "timezone": "US/Eastern",
+        "trading_days_only": True,
+    },
+    # Alerts configuration
+    "alerts": {
+        "enabled": False,
+        "channels": [],
+        "notify_on": ["new_signal", "stop_loss", "target_hit", "daily_summary"],
+    },
 }
