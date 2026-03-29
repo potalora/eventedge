@@ -30,6 +30,12 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
+    "py_vollib>=1.0.1",
+    "alpaca-py>=0.35.0",
+    "streamlit>=1.45.0",
+    "plotly>=6.0.0",
+    "apprise>=1.9.2",
+    "apscheduler>=3.11.0",
 ]
 
 [project.scripts]

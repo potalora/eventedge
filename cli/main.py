@@ -1,5 +1,6 @@
 from typing import Optional
 import datetime
+import os
 import typer
 from pathlib import Path
 from functools import wraps
@@ -1191,6 +1192,145 @@ def run_analysis():
 @app.command()
 def analyze():
     run_analysis()
+
+
+@app.command()
+def scan(
+    tickers: list[str] = typer.Argument(..., help="Ticker symbols to analyze"),
+    provider: str = typer.Option("anthropic", help="LLM provider"),
+):
+    """Analyze multiple tickers and display ratings."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from datetime import datetime
+
+    config = DEFAULT_CONFIG.copy()
+    config["llm_provider"] = provider
+    ta = TradingAgentsGraph(debug=False, config=config)
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    table = Table(title="Scan Results")
+    table.add_column("Ticker")
+    table.add_column("Rating")
+    table.add_column("Date")
+
+    for ticker in tickers:
+        try:
+            _, rating = ta.propagate(ticker, today)
+            table.add_row(ticker, rating, today)
+        except Exception as e:
+            table.add_row(ticker, f"ERROR: {e}", today)
+
+    console.print(table)
+
+
+@app.command()
+def backtest(
+    tickers: list[str] = typer.Argument(..., help="Ticker symbols"),
+    start: str = typer.Option(..., help="Start date YYYY-MM-DD"),
+    end: str = typer.Option(..., help="End date YYYY-MM-DD"),
+):
+    """Run backtest on tickers over a date range."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    from tradingagents.backtesting.engine import Backtester
+    from tradingagents.backtesting.report import generate_backtest_report
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from rich.console import Console
+
+    config = DEFAULT_CONFIG.copy()
+    bt = Backtester(config=config)
+    result = bt.run(tickers=tickers, start_date=start, end_date=end)
+
+    console = Console()
+    console.print("\n[bold]Backtest Results[/bold]")
+    for k, v in result["metrics"].items():
+        console.print(f"  {k}: {v}")
+
+    report_path = generate_backtest_report(result, f"results/backtests/{'-'.join(tickers)}")
+    console.print(f"\nReport saved to: {report_path}")
+
+
+@app.command()
+def portfolio():
+    """Show current portfolio positions and P&L."""
+    from tradingagents.storage.db import Database
+    from tradingagents.storage.queries import get_portfolio_summary, get_trade_history
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    db = Database("results/tradingagents.db")
+    summary = get_portfolio_summary(db)
+
+    console.print(f"\n[bold]Portfolio Summary[/bold]")
+    console.print(f"  Total Trades: {summary['total_trades']}")
+    console.print(f"  Total P&L: ${summary['total_pnl']:.2f}")
+
+    trades = get_trade_history(db, limit=10)
+    if trades:
+        table = Table(title="Recent Trades")
+        table.add_column("Date")
+        table.add_column("Ticker")
+        table.add_column("Action")
+        table.add_column("Price")
+        table.add_column("Status")
+        for t in trades:
+            table.add_row(
+                str(t.get("created_at", "")),
+                t["ticker"], t["action"],
+                f"${t['price']:.2f}", t["status"],
+            )
+        console.print(table)
+    db.close()
+
+
+@app.command()
+def dashboard():
+    """Launch the Streamlit dashboard."""
+    import subprocess
+    import sys
+    app_path = os.path.join(os.path.dirname(__file__), "../tradingagents/dashboard/app.py")
+    subprocess.run([sys.executable, "-m", "streamlit", "run", app_path])
+
+
+@app.command()
+def scheduler(action: str = typer.Argument(..., help="start, stop, or status")):
+    """Manage the background scheduler."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    from tradingagents.scheduler.scheduler import TradingScheduler
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from rich.console import Console
+
+    console = Console()
+    config = DEFAULT_CONFIG.copy()
+
+    if action == "start":
+        ts = TradingScheduler(config)
+        ts.start()
+        console.print("[green]Scheduler started.[/green]")
+        console.print("Press Ctrl+C to stop.")
+        try:
+            import time
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            ts.stop()
+            console.print("\n[yellow]Scheduler stopped.[/yellow]")
+    elif action == "status":
+        ts = TradingScheduler(config)
+        status = ts.status()
+        console.print(f"Jobs: {len(status['jobs'])}")
+        for j in status["jobs"]:
+            console.print(f"  {j['name']} — next: {j['next_run']}")
+    elif action == "stop":
+        console.print("[yellow]Scheduler stop requires the running process to be interrupted.[/yellow]")
 
 
 if __name__ == "__main__":
