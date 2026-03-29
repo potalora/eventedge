@@ -5,6 +5,7 @@ from tradingagents.autoresearch.models import (
     ScreenerResult,
     Strategy,
 )
+from tradingagents.autoresearch.walk_forward import WalkForwardWindow
 
 __all__ = [
     "Filter",
@@ -12,4 +13,5 @@ __all__ = [
     "BacktestResults",
     "ScreenerResult",
     "Strategy",
+    "WalkForwardWindow",
 ]
