@@ -32,6 +32,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_global_news
 )
+from tradingagents.agents.utils.options_tools import (
+    get_options_chain_tool,
+    get_options_greeks_tool,
+    get_put_call_ratio_tool,
+)
 
 from .conditional_logic import ConditionalLogic
 from .setup import GraphSetup
@@ -189,6 +194,13 @@ class TradingAgentsGraph:
                     get_income_statement,
                 ]
             ),
+            "options": ToolNode(
+                [
+                    get_options_chain_tool,
+                    get_options_greeks_tool,
+                    get_put_call_ratio_tool,
+                ]
+            ),
         }
 
     def propagate(self, company_name, trade_date):
@@ -235,6 +247,7 @@ class TradingAgentsGraph:
             "sentiment_report": final_state["sentiment_report"],
             "news_report": final_state["news_report"],
             "fundamentals_report": final_state["fundamentals_report"],
+            "options_report": final_state.get("options_report", ""),
             "investment_debate_state": {
                 "bull_history": final_state["investment_debate_state"]["bull_history"],
                 "bear_history": final_state["investment_debate_state"]["bear_history"],
