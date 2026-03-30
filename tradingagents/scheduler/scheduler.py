@@ -4,7 +4,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from .alerts import AlertManager
-from .jobs import daily_scan_job
+from .jobs import daily_scan_job, paper_trading_job, evolution_job
 
 
 class TradingScheduler:
@@ -40,6 +40,28 @@ class TradingScheduler:
                 id=f"portfolio_check_{check_time}",
                 name=f"Portfolio Check {check_time}",
             )
+
+        # Paper trading - runs daily at market close
+        self.scheduler.add_job(
+            paper_trading_job,
+            trigger=CronTrigger(
+                day_of_week="mon-fri", hour=16, minute=30,
+            ),
+            args=[self.config, self.alert_manager],
+            id="paper_trading",
+            name="Daily Paper Trading",
+        )
+
+        # Evolution - runs weekly on Saturday
+        self.scheduler.add_job(
+            evolution_job,
+            trigger=CronTrigger(
+                day_of_week="sat", hour=8, minute=0,
+            ),
+            args=[self.config, self.alert_manager],
+            id="weekly_evolution",
+            name="Weekly Evolution Run",
+        )
 
         self.scheduler.start()
 
