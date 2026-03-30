@@ -8,6 +8,7 @@ from tradingagents.autoresearch.models import (
 from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
 from tradingagents.autoresearch.strategist import Strategist
 from tradingagents.autoresearch.walk_forward import WalkForwardWindow
+from tradingagents.autoresearch.evolution import EvolutionEngine
 
 __all__ = [
     "Filter",
@@ -18,4 +19,5 @@ __all__ = [
     "CachedPipelineRunner",
     "Strategist",
     "WalkForwardWindow",
+    "EvolutionEngine",
 ]
