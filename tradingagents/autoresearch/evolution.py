@@ -237,6 +237,11 @@ class EvolutionEngine:
                         count=len(strategies),
                         names=[s.name for s in strategies])
 
+            # 3b-pre: Batch-fetch historical screener data for all test dates
+            all_test_dates = [w.test_start for w in windows]
+            universe_tickers = [sr.ticker for sr in screener_results]
+            self._prefetch_screener_data(universe_tickers, all_test_dates, regime)
+
             # 3b: Backtest each strategy across walk-forward windows
             for i, strategy in enumerate(strategies):
                 self._emit("step", generation=self._generation, step="backtest",
@@ -491,6 +496,30 @@ class EvolutionEngine:
                               strategy.time_horizon_days)
             for rule in strategy.exit_rules
         )
+
+    def _prefetch_screener_data(self, tickers: list[str], dates: list[str],
+                                regime: str) -> None:
+        """Batch-fetch screener data for all (ticker, date) combos not yet cached."""
+        for date in dates:
+            # Skip if all tickers already cached for this date
+            uncached = [t for t in tickers if (t, date) not in self._screener_cache]
+            if not uncached:
+                continue
+
+            self._emit("step", generation=self._generation, step="screener_fetch",
+                        message=f"Fetching historical data for {len(uncached)} tickers on {date}")
+            results = self.screener.batch_fetch(uncached, date, regime)
+
+            # Populate cache
+            fetched_tickers = set()
+            for sr in results:
+                self._screener_cache[(sr.ticker, date)] = sr
+                fetched_tickers.add(sr.ticker)
+
+            # Mark missing tickers as None so we don't re-fetch
+            for t in uncached:
+                if t not in fetched_tickers:
+                    self._screener_cache[(t, date)] = None
 
     def _get_screener_for_date(self, ticker: str, date: str,
                                fallback: ScreenerResult) -> ScreenerResult:
