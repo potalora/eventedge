@@ -20,7 +20,7 @@ def get_db():
 
 st.set_page_config(page_title="TradingAgents", layout="wide")
 
-page = st.sidebar.radio("Navigation", ["Portfolio", "Analysis", "Backtest", "Trades"])
+page = st.sidebar.radio("Navigation", ["Portfolio", "Analysis", "Backtest", "Trades", "Leaderboard", "Evolution", "Paper Trading"])
 
 if page == "Portfolio":
     from tradingagents.dashboard.pages.portfolio import render
@@ -33,4 +33,13 @@ elif page == "Backtest":
     render(get_db())
 elif page == "Trades":
     from tradingagents.dashboard.pages.trades import render
+    render(get_db())
+elif page == "Leaderboard":
+    from tradingagents.dashboard.pages.leaderboard import render
+    render(get_db())
+elif page == "Evolution":
+    from tradingagents.dashboard.pages.evolution import render
+    render(get_db())
+elif page == "Paper Trading":
+    from tradingagents.dashboard.pages.paper_trading import render
     render(get_db())
