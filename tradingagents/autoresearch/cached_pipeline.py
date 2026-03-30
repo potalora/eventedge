@@ -4,6 +4,8 @@ import copy
 import logging
 from typing import Optional
 
+from tradingagents.autoresearch.models import ScreenerResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,6 +14,8 @@ class CachedPipelineRunner:
 
     On cache hit, returns cached results immediately.
     On cache miss, runs the full pipeline, caches results, and returns them.
+    When fast_backtest is enabled and a ScreenerResult is provided, delegates
+    to FastBacktestRunner for a single-LLM-call backtest instead.
     """
 
     def __init__(self, db, config: dict):
@@ -20,20 +24,30 @@ class CachedPipelineRunner:
         self.ar_config = config.get("autoresearch", {})
         self._hits = 0
         self._misses = 0
+        self._fast_runner = None
 
-    def run(self, ticker: str, trade_date: str, model_tier: str = "haiku") -> dict:
+    def run(self, ticker: str, trade_date: str, model_tier: str = "haiku",
+            screener_result: Optional[ScreenerResult] = None) -> dict:
         """Run pipeline for a ticker/date, using cache when available.
 
         Args:
             ticker: Stock ticker symbol.
             trade_date: Trade date string (YYYY-MM-DD).
             model_tier: "haiku" for cached backtests, "sonnet" for live/paper.
+            screener_result: Pre-fetched screener data. When provided with
+                fast_backtest enabled, uses single-call fast mode.
 
         Returns:
             Dict with keys: rating, market_report, sentiment_report,
             news_report, fundamentals_report, options_report,
             full_decision, debate_summary, analyst_scores.
         """
+        # Fast mode: single LLM call when enabled and screener data available
+        if self._should_use_fast_mode(model_tier, screener_result):
+            return self._get_fast_runner().run(
+                ticker, trade_date, screener_result, model_tier
+            )
+
         # Check cache first
         cached = self.db.get_pipeline_cache(ticker, trade_date, model_tier)
         if cached is not None:
@@ -105,14 +119,32 @@ class CachedPipelineRunner:
         return [self.run(ticker, date, model_tier) for ticker, date in ticker_date_pairs]
 
     def get_cache_stats(self) -> dict:
-        """Return cache hit/miss statistics."""
-        total = self._hits + self._misses
+        """Return cache hit/miss statistics (includes fast runner stats)."""
+        fast_stats = self._fast_runner.get_cache_stats() if self._fast_runner else {"hits": 0, "misses": 0}
+        hits = self._hits + fast_stats["hits"]
+        misses = self._misses + fast_stats["misses"]
+        total = hits + misses
         return {
-            "hits": self._hits,
-            "misses": self._misses,
+            "hits": hits,
+            "misses": misses,
             "total": total,
-            "hit_rate": self._hits / total if total > 0 else 0.0,
+            "hit_rate": hits / total if total > 0 else 0.0,
         }
+
+    def _should_use_fast_mode(self, model_tier: str, screener_result: Optional[ScreenerResult]) -> bool:
+        """Check if fast backtest mode should be used."""
+        return (
+            self.ar_config.get("fast_backtest", True)
+            and model_tier == "haiku"
+            and screener_result is not None
+        )
+
+    def _get_fast_runner(self):
+        """Lazy-init the FastBacktestRunner."""
+        if self._fast_runner is None:
+            from tradingagents.autoresearch.fast_backtest import FastBacktestRunner
+            self._fast_runner = FastBacktestRunner(self.db, self.config)
+        return self._fast_runner
 
     def _build_graph_config(self, model_tier: str) -> dict:
         """Build a TradingAgentsGraph config for the given model tier.

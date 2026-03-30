@@ -78,9 +78,11 @@ DEFAULT_CONFIG = {
     "autoresearch": {
         "max_generations": 15,
         "strategies_per_generation": 4,
-        "tickers_per_strategy": 5,
-        "walk_forward_windows": 3,
+        "tickers_per_strategy": 3,
+        "walk_forward_windows": 2,
         "holdout_weeks": 6,
+        "fast_backtest": True,
+        "fast_backtest_max_workers": 3,
         "min_trades_for_scoring": 5,
         "cache_model": "claude-haiku-4-5-20251001",
         "live_model": "claude-sonnet-4-20250514",

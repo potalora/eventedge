@@ -154,7 +154,7 @@ class TestFullEvolutionLoop:
             # for fitness > 0 (sharpe > 0, profit_factor > 0).
             # 2 tickers × 2 windows = 4 trades: 3 BUY + 1 SELL
             _pipeline_calls = {"n": 0}
-            def _pipeline_side_effect(ticker, date, tier):
+            def _pipeline_side_effect(ticker, date, tier, screener_result=None):
                 _pipeline_calls["n"] += 1
                 # Make 3 out of 4 calls return BUY, 1 returns SELL
                 if _pipeline_calls["n"] % 4 == 0:

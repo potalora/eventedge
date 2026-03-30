@@ -350,13 +350,15 @@ class EvolutionEngine:
             window_trades = []
 
             for ticker in matching_tickers:
-                # Run pipeline for this ticker on test start date
-                pipeline_result = self.pipeline.run(ticker, window.test_start, "haiku")
-
                 # Find screener result for this ticker
                 sr = next((s for s in screener_results if s.ticker == ticker), None)
                 if sr is None:
                     continue
+
+                # Run pipeline for this ticker on test start date
+                pipeline_result = self.pipeline.run(
+                    ticker, window.test_start, "haiku", screener_result=sr
+                )
 
                 # Check entry rules
                 if self._check_entry_rules(strategy, pipeline_result, sr):
@@ -531,10 +533,12 @@ class EvolutionEngine:
             # Run pipeline on holdout date
             holdout_trades = []
             for ticker in matching:
-                pipeline_result = self.pipeline.run(ticker, holdout_start, "haiku")
                 sr = next((s for s in screener_results if s.ticker == ticker), None)
                 if sr is None:
                     continue
+                pipeline_result = self.pipeline.run(
+                    ticker, holdout_start, "haiku", screener_result=sr
+                )
 
                 if self._check_entry_rules(strategy, pipeline_result, sr):
                     rating = pipeline_result.get("rating", "HOLD")

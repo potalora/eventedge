@@ -22,11 +22,14 @@ config = deepcopy(DEFAULT_CONFIG)
 config["autoresearch"].update({
     "max_generations": 1,
     "strategies_per_generation": 4,   # ask for 4, some will pass CRO
-    "tickers_per_strategy": 2,        # only 2 tickers each
-    "walk_forward_windows": 1,        # 1 window (fewer pipeline calls)
+    "tickers_per_strategy": 4,        # 4 tickers each
+    "walk_forward_windows": 2,        # 2 windows
     "holdout_weeks": 4,
     "budget_cap_usd": 50.0,
-    "universe": ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"],
+    "universe": [
+        "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
+        "META", "TSLA", "JPM", "UNH", "V",
+    ],
 })
 
 # Use Haiku everywhere to minimize cost
