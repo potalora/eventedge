@@ -1333,5 +1333,184 @@ def scheduler(action: str = typer.Argument(..., help="start, stop, or status")):
         console.print("[yellow]Scheduler stop requires the running process to be interrupted.[/yellow]")
 
 
+@app.command()
+def autoresearch(
+    generations: int = typer.Option(15, help="Maximum number of generations"),
+    budget: float = typer.Option(150.0, help="Budget cap in USD"),
+    universe: str = typer.Option("sp500_nasdaq100", help="Ticker universe preset"),
+):
+    """Run the autoresearch evolution engine to discover trading strategies."""
+    from copy import deepcopy
+    from tradingagents.autoresearch.evolution import EvolutionEngine
+    from tradingagents.storage.db import Database
+
+    config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"]["max_generations"] = generations
+    config["autoresearch"]["budget_cap_usd"] = budget
+    config["autoresearch"]["universe"] = universe
+
+    db_path = os.path.join(config.get("results_dir", "./results"), "tradingagents.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db = Database(db_path)
+
+    console.print(Panel(
+        f"[bold]Autoresearch Evolution[/bold]\n"
+        f"Generations: {generations}\n"
+        f"Budget: ${budget:.2f}\n"
+        f"Universe: {universe}",
+        title="Configuration",
+    ))
+
+    try:
+        engine = EvolutionEngine(db, config)
+        with console.status("[bold green]Running evolution..."):
+            result = engine.run()
+
+        console.print(f"\n[bold green]Evolution complete![/bold]")
+        console.print(f"Generations run: {result['generations_run']}")
+        console.print(f"Budget used: ${result['budget_used']:.2f}")
+
+        # Print leaderboard
+        if result["leaderboard"]:
+            table = Table(title="Strategy Leaderboard")
+            table.add_column("Rank", style="cyan")
+            table.add_column("Name", style="bold")
+            table.add_column("Instrument")
+            table.add_column("Fitness", style="green")
+            table.add_column("Status")
+
+            for entry in result["leaderboard"][:10]:
+                table.add_row(
+                    str(entry["rank"]),
+                    entry["name"],
+                    entry["instrument"],
+                    f"{entry['fitness_score']:.4f}",
+                    entry["status"],
+                )
+            console.print(table)
+        else:
+            console.print("[yellow]No strategies discovered.[/yellow]")
+
+        cache = result.get("cache_stats", {})
+        if cache:
+            console.print(f"\nCache: {cache.get('hits', 0)} hits, {cache.get('misses', 0)} misses "
+                          f"({cache.get('hit_rate', 0):.0%} hit rate)")
+    finally:
+        db.close()
+
+
+@app.command()
+def leaderboard(
+    limit: int = typer.Option(10, help="Number of strategies to show"),
+    status: str = typer.Option(None, help="Filter by status"),
+):
+    """Show the strategy leaderboard."""
+    from tradingagents.storage.db import Database
+
+    db_path = os.path.join(DEFAULT_CONFIG.get("results_dir", "./results"), "tradingagents.db")
+    if not os.path.exists(db_path):
+        console.print("[yellow]No database found. Run autoresearch first.[/yellow]")
+        return
+
+    db = Database(db_path)
+
+    try:
+        if status:
+            strategies = db.get_strategies_by_status(status)
+        else:
+            strategies = db.get_top_strategies(limit=limit)
+
+        if not strategies:
+            console.print("[yellow]No strategies found.[/yellow]")
+            return
+
+        table = Table(title="Strategy Leaderboard")
+        table.add_column("Rank", style="cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Instrument")
+        table.add_column("Fitness", style="green")
+        table.add_column("Sharpe")
+        table.add_column("Win Rate")
+        table.add_column("Status")
+        table.add_column("Gen")
+
+        for i, s in enumerate(strategies[:limit]):
+            backtest = db.get_strategy_backtest(s["id"])
+            sharpe = f"{backtest['sharpe']:.2f}" if backtest else "N/A"
+            win_rate = f"{backtest['win_rate']:.0%}" if backtest else "N/A"
+
+            table.add_row(
+                str(i + 1),
+                s["name"],
+                s["instrument"],
+                f"{s.get('fitness_score', 0):.4f}",
+                sharpe,
+                win_rate,
+                s["status"],
+                str(s["generation"]),
+            )
+
+        console.print(table)
+    finally:
+        db.close()
+
+
+@app.command()
+def paper_status():
+    """Show status of strategies in paper trading."""
+    from tradingagents.storage.db import Database
+
+    db_path = os.path.join(DEFAULT_CONFIG.get("results_dir", "./results"), "tradingagents.db")
+    if not os.path.exists(db_path):
+        console.print("[yellow]No database found. Run autoresearch first.[/yellow]")
+        return
+
+    db = Database(db_path)
+
+    try:
+        paper_strategies = db.get_strategies_by_status("paper")
+
+        if not paper_strategies:
+            console.print("[yellow]No strategies in paper trading.[/yellow]")
+            return
+
+        for s in paper_strategies:
+            console.print(Panel(
+                f"[bold]{s['name']}[/bold] ({s['instrument']})\n"
+                f"Fitness: {s.get('fitness_score', 0):.4f} | Gen: {s['generation']}",
+                title=f"Strategy #{s['id']}",
+            ))
+
+            trades = db.get_strategy_trades(s["id"], trade_type="paper")
+            completed = [t for t in trades if t.get("exit_date")]
+
+            if completed:
+                winners = [t for t in completed if (t.get("pnl", 0) or 0) > 0]
+                win_rate = len(winners) / len(completed)
+                total_pnl = sum(t.get("pnl", 0) or 0 for t in completed)
+
+                console.print(f"  Trades: {len(completed)} completed, {len(trades) - len(completed)} open")
+                console.print(f"  Win Rate: {win_rate:.0%}")
+                console.print(f"  Total P&L: ${total_pnl:.2f}")
+
+                # Show recent trades
+                table = Table()
+                table.add_column("Ticker")
+                table.add_column("Entry")
+                table.add_column("Exit")
+                table.add_column("P&L")
+
+                for t in completed[-5:]:
+                    pnl_str = f"${t.get('pnl', 0):.2f}"
+                    table.add_row(t["ticker"], t.get("entry_date", ""), t.get("exit_date", ""), pnl_str)
+
+                console.print(table)
+            else:
+                console.print("  No completed trades yet.")
+            console.print("")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     app()
