@@ -149,19 +149,34 @@ class Strategy:
     @classmethod
     def from_db_dict(cls, row: dict) -> "Strategy":
         """Deserialize from database row dict."""
+
+        def _ensure_list(val):
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str):
+                return json.loads(val)
+            return []
+
+        def _ensure_dict(val):
+            if isinstance(val, dict):
+                return val
+            if isinstance(val, str):
+                return json.loads(val)
+            return {}
+
         return cls(
             id=row["id"],
             generation=row["generation"],
-            parent_ids=json.loads(row["parent_ids"]) if row.get("parent_ids") else [],
+            parent_ids=_ensure_list(row.get("parent_ids")),
             name=row["name"],
             hypothesis=row["hypothesis"],
             conviction=row.get("conviction", 50),
             screener=ScreenerCriteria.from_dict(
-                json.loads(row["screener_criteria"]) if row.get("screener_criteria") else {}
+                _ensure_dict(row.get("screener_criteria"))
             ),
             instrument=row["instrument"],
-            entry_rules=json.loads(row["entry_rules"]) if row.get("entry_rules") else [],
-            exit_rules=json.loads(row["exit_rules"]) if row.get("exit_rules") else [],
+            entry_rules=_ensure_list(row.get("entry_rules")),
+            exit_rules=_ensure_list(row.get("exit_rules")),
             position_size_pct=row.get("position_size_pct", 0.05),
             max_risk_pct=row.get("max_risk_pct", 0.05),
             time_horizon_days=row.get("time_horizon_days", 30),
