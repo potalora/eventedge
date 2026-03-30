@@ -53,7 +53,13 @@ class ScreenerCriteria:
     @classmethod
     def from_dict(cls, d: dict) -> "ScreenerCriteria":
         """Deserialize from dict."""
-        filters = [Filter(**f) for f in d.get("custom_filters", [])]
+        raw_filters = d.get("custom_filters", [])
+        filters = []
+        for f in raw_filters:
+            if isinstance(f, dict) and "field" in f and "op" in f:
+                filters.append(Filter(**f))
+            # Skip strings or malformed items — LLMs sometimes return
+            # filters as plain strings like "RSI > 30"
         return cls(
             market_cap_range=d.get("market_cap_range", [0, float("inf")]),
             min_avg_volume=d.get("min_avg_volume", 100_000),

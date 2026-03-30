@@ -2,7 +2,10 @@
 
 import logging
 import re
+import signal
+import time
 from datetime import datetime, timedelta
+from typing import Callable, Optional
 
 from tradingagents.autoresearch.models import (
     Strategy,
@@ -27,6 +30,14 @@ from tradingagents.autoresearch.fitness import (
 from tradingagents.autoresearch.ticker_universe import get_universe
 
 logger = logging.getLogger(__name__)
+
+
+class EvolutionEvent:
+    """Event emitted by the evolution engine for progress reporting."""
+    def __init__(self, kind: str, **data):
+        self.kind = kind
+        self.data = data
+        self.timestamp = time.time()
 
 
 # --- Entry/exit rule pattern matchers ---
@@ -118,7 +129,7 @@ class EvolutionEngine:
     fitness scoring, and reflection into an evolutionary loop.
     """
 
-    def __init__(self, db, config: dict):
+    def __init__(self, db, config: dict, on_event: Optional[Callable] = None):
         self.db = db
         self.config = config
         self.ar_config = config.get("autoresearch", {})
@@ -129,8 +140,21 @@ class EvolutionEngine:
         self._generation = 0
         self._best_fitness_history = []
         self._budget_used = 0.0
+        self._interrupted = False
+        self._on_event = on_event or (lambda e: None)
+        self._start_time = None
 
-    def run(self, start_date: str = None, end_date: str = None) -> dict:
+    def _emit(self, kind: str, **data):
+        """Emit a progress event."""
+        event = EvolutionEvent(kind, **data)
+        self._on_event(event)
+
+    def interrupt(self):
+        """Signal the engine to stop after the current generation completes."""
+        self._interrupted = True
+
+    def run(self, start_date: str = None, end_date: str = None,
+            resume_from: int = 0) -> dict:
         """Main evolution loop.
 
         1. Run screener to get market data + regime
@@ -147,10 +171,14 @@ class EvolutionEngine:
         Args:
             start_date: Backtest start date (default: 2 years ago).
             end_date: Backtest end date (default: today).
+            resume_from: Generation number to resume from (skips earlier gens).
 
         Returns:
             Dict with leaderboard, stats, and progress info.
         """
+        self._start_time = time.time()
+        self._generation = resume_from
+
         if not start_date:
             start_date = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
         if not end_date:
@@ -161,13 +189,22 @@ class EvolutionEngine:
         holdout_weeks = self.ar_config.get("holdout_weeks", 6)
 
         # Step 1: Get universe and run screener
+        self._emit("phase", phase="screener", status="starting",
+                    message=f"Screening universe...")
         universe = get_universe(self.config)
+        self._emit("screener_universe", count=len(universe))
         screener_results = self.screener.run(end_date, universe=universe)
         regime = screener_results[0].regime if screener_results else "TRANSITION"
+        self._emit("phase", phase="screener", status="done",
+                    message=f"Screened {len(screener_results)} tickers, regime={regime}",
+                    tickers=len(screener_results), regime=regime)
 
         # Step 2: Generate walk-forward windows
         windows, holdout = generate_windows(start_date, end_date, num_windows, holdout_weeks)
         test_dates = get_test_dates(windows)
+        self._emit("phase", phase="setup", status="done",
+                    message=f"{len(windows)} walk-forward windows, holdout {holdout[0]} to {holdout[1]}",
+                    windows=len(windows), holdout_start=holdout[0], holdout_end=holdout[1])
 
         logger.info("Evolution starting: %d windows, holdout %s to %s, regime=%s",
                      len(windows), holdout[0], holdout[1], regime)
@@ -175,20 +212,46 @@ class EvolutionEngine:
         # Step 3: Evolution loop
         all_trade_results = []
         while self._generation < max_generations and not self._should_stop():
-            logger.info("=== Generation %d ===", self._generation)
+            if self._interrupted:
+                self._emit("interrupted", generation=self._generation,
+                            message="Interrupted by user — saving progress")
+                break
+
+            gen_start = time.time()
+            self._emit("generation_start", generation=self._generation,
+                        max_generations=max_generations,
+                        message=f"Generation {self._generation}/{max_generations-1}")
 
             # 3a: Propose strategies
+            self._emit("step", generation=self._generation, step="propose",
+                        message="Proposing strategies (Sonnet)...")
             strategies = self.strategist.propose(screener_results, regime, self._generation)
             if not strategies:
-                logger.warning("No strategies proposed in gen %d, skipping", self._generation)
+                self._emit("step", generation=self._generation, step="propose",
+                            message="No strategies proposed, skipping generation")
                 self._generation += 1
                 continue
+            self._emit("step", generation=self._generation, step="propose_done",
+                        message=f"{len(strategies)} strategies approved by CRO",
+                        count=len(strategies),
+                        names=[s.name for s in strategies])
 
             # 3b: Backtest each strategy across walk-forward windows
-            for strategy in strategies:
+            for i, strategy in enumerate(strategies):
+                self._emit("step", generation=self._generation, step="backtest",
+                            message=f"Backtesting '{strategy.name}' ({i+1}/{len(strategies)})",
+                            strategy_name=strategy.name, index=i, total=len(strategies))
                 strategy = self._backtest_strategy(
                     strategy, windows, test_dates, screener_results
                 )
+                bt = strategy.backtest_results
+                if bt:
+                    self._emit("step", generation=self._generation, step="backtest_done",
+                                message=f"  '{strategy.name}': {bt.num_trades} trades, "
+                                        f"Sharpe={bt.sharpe:.2f}, WR={bt.win_rate:.0%}",
+                                strategy_name=strategy.name,
+                                num_trades=bt.num_trades, sharpe=bt.sharpe,
+                                win_rate=bt.win_rate)
 
             # 3c: Rank strategies, update fitness in DB
             strategies = rank_strategies(strategies, self.config)
@@ -199,10 +262,19 @@ class EvolutionEngine:
                         self.db.update_strategy_status(s.id, "backtested")
 
             # Track best fitness for stop criteria
+            best_fitness = 0.0
             if strategies and strategies[0].fitness_score > 0:
-                self._best_fitness_history.append(strategies[0].fitness_score)
+                best_fitness = strategies[0].fitness_score
+                self._best_fitness_history.append(best_fitness)
+
+            self._emit("step", generation=self._generation, step="ranked",
+                        message=f"Best fitness: {best_fitness:.4f} ({strategies[0].name})" if best_fitness > 0 else "No positive fitness this gen",
+                        best_fitness=best_fitness,
+                        rankings=[(s.name, s.fitness_score) for s in strategies[:3]])
 
             # 3d: Reflect
+            self._emit("step", generation=self._generation, step="reflect",
+                        message="Reflecting on generation (Sonnet)...")
             top_all_time = self.db.get_top_strategies(limit=5)
             self.strategist.reflect(self._generation, strategies, top_all_time)
 
@@ -210,20 +282,43 @@ class EvolutionEngine:
             if all_trade_results:
                 update_analyst_weights(self.db, all_trade_results, self.config)
 
+            gen_elapsed = time.time() - gen_start
+            cache = self.pipeline.get_cache_stats()
+            self._emit("generation_done", generation=self._generation,
+                        elapsed_sec=gen_elapsed,
+                        best_fitness=best_fitness,
+                        cache_hits=cache["hits"], cache_misses=cache["misses"],
+                        cache_hit_rate=cache["hit_rate"],
+                        message=f"Gen {self._generation} done in {gen_elapsed:.0f}s "
+                                f"(cache: {cache['hit_rate']:.0%} hit rate)")
+
             self._generation += 1
 
         # Step 4: Holdout validation on top strategies
-        top_strategies = self.db.get_top_strategies(limit=10)
-        if top_strategies and windows:
-            self._run_holdout(top_strategies, holdout[0], holdout[1], screener_results)
+        if not self._interrupted:
+            top_strategies = self.db.get_top_strategies(limit=10)
+            if top_strategies and windows:
+                self._emit("phase", phase="holdout", status="starting",
+                            message=f"Running holdout validation on {len(top_strategies)} strategies...")
+                self._run_holdout(top_strategies, holdout[0], holdout[1], screener_results)
+                self._emit("phase", phase="holdout", status="done",
+                            message="Holdout validation complete")
 
         # Step 5: Return leaderboard
-        return {
+        total_elapsed = time.time() - self._start_time
+        result = {
             "leaderboard": self.get_leaderboard(),
             "generations_run": self._generation,
             "cache_stats": self.pipeline.get_cache_stats(),
             "budget_used": self._budget_used,
+            "elapsed_sec": total_elapsed,
+            "interrupted": self._interrupted,
         }
+        self._emit("complete", elapsed_sec=total_elapsed,
+                    generations=self._generation,
+                    message=f"{'Interrupted' if self._interrupted else 'Complete'} — "
+                            f"{self._generation} generations in {total_elapsed:.0f}s")
+        return result
 
     def _backtest_strategy(
         self,

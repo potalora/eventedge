@@ -1333,13 +1333,66 @@ def scheduler(action: str = typer.Argument(..., help="start, stop, or status")):
         console.print("[yellow]Scheduler stop requires the running process to be interrupted.[/yellow]")
 
 
+def _build_evolution_display(state: dict) -> Table:
+    """Build a Rich table showing current evolution progress."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan", width=20)
+    grid.add_column()
+
+    elapsed = state.get("elapsed", 0)
+    mins, secs = divmod(int(elapsed), 60)
+    grid.add_row("Elapsed", f"{mins}m {secs}s")
+    grid.add_row("Generation", f"{state.get('generation', 0)}/{state.get('max_generations', '?')}")
+    grid.add_row("Phase", state.get("phase", "initializing"))
+    grid.add_row("Regime", state.get("regime", "—"))
+
+    cache = state.get("cache", {})
+    if cache:
+        grid.add_row("Cache", f"{cache.get('hits', 0)} hits / {cache.get('misses', 0)} misses "
+                      f"({cache.get('hit_rate', 0):.0%})")
+
+    best = state.get("best_fitness", 0)
+    if best > 0:
+        grid.add_row("Best Fitness", f"{best:.4f} ({state.get('best_name', '?')})")
+
+    return grid
+
+
+def _build_event_log(events: deque) -> Panel:
+    """Build a Rich panel showing recent events."""
+    lines = []
+    for ev_msg in events:
+        lines.append(ev_msg)
+    content = "\n".join(lines) if lines else "[dim]Waiting for events...[/dim]"
+    return Panel(content, title="Event Log", border_style="blue", height=min(len(lines) + 2, 20))
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if a process with the given PID is running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _get_results_dir() -> str:
+    return DEFAULT_CONFIG.get("results_dir", "./results")
+
+
 @app.command()
 def autoresearch(
     generations: int = typer.Option(15, help="Maximum number of generations"),
     budget: float = typer.Option(150.0, help="Budget cap in USD"),
     universe: str = typer.Option("sp500_nasdaq100", help="Ticker universe preset"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed event output"),
+    resume: bool = typer.Option(False, "--resume", help="Resume from last completed generation"),
+    headless: bool = typer.Option(False, "--headless", help="Run without terminal UI, write JSONL log"),
 ):
     """Run the autoresearch evolution engine to discover trading strategies."""
+    import json
+    import signal
+    import time
     from copy import deepcopy
     from tradingagents.autoresearch.evolution import EvolutionEngine
     from tradingagents.storage.db import Database
@@ -1349,54 +1402,276 @@ def autoresearch(
     config["autoresearch"]["budget_cap_usd"] = budget
     config["autoresearch"]["universe"] = universe
 
-    db_path = os.path.join(config.get("results_dir", "./results"), "tradingagents.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    results_dir = _get_results_dir()
+    db_path = os.path.join(results_dir, "tradingagents.db")
+    os.makedirs(results_dir, exist_ok=True)
     db = Database(db_path)
 
-    console.print(Panel(
-        f"[bold]Autoresearch Evolution[/bold]\n"
-        f"Generations: {generations}\n"
-        f"Budget: ${budget:.2f}\n"
-        f"Universe: {universe}",
-        title="Configuration",
-    ))
+    pid_path = os.path.join(results_dir, "autoresearch.pid")
+    log_path = os.path.join(results_dir, "autoresearch.log")
+
+    # Determine resume generation
+    resume_from = 0
+    if resume:
+        strategies = db.get_top_strategies(limit=1)
+        if strategies:
+            resume_from = max(s.get("generation", 0) for s in strategies) + 1
+            if not headless:
+                console.print(f"[yellow]Resuming from generation {resume_from}[/yellow]")
+
+    if not headless:
+        console.print(Panel(
+            f"[bold]Autoresearch Evolution[/bold]\n"
+            f"Generations: {generations}  |  Budget: ${budget:.2f}  |  Universe: {universe}\n"
+            f"Resume from: gen {resume_from}" + ("  |  Verbose: on" if verbose else ""),
+            title="Configuration",
+        ))
+        console.print("[dim]Press Ctrl+C to pause after current generation completes.[/dim]\n")
+
+    # Shared state for display
+    display_state = {
+        "generation": resume_from,
+        "max_generations": generations,
+        "phase": "initializing",
+        "regime": "—",
+        "cache": {},
+        "best_fitness": 0,
+        "best_name": "—",
+        "elapsed": 0,
+    }
+    event_log = deque(maxlen=30)
+    start_time = time.time()
+    engine = None
+
+    # Event callback for interactive modes
+    def on_event(event):
+        display_state["elapsed"] = time.time() - start_time
+        d = event.data
+        msg = d.get("message", "")
+
+        if event.kind == "phase":
+            display_state["phase"] = f"{d.get('phase', '?')} ({d.get('status', '?')})"
+            if "regime" in d:
+                display_state["regime"] = d["regime"]
+        elif event.kind == "generation_start":
+            display_state["generation"] = d.get("generation", 0)
+            display_state["phase"] = f"gen {d.get('generation', 0)}"
+        elif event.kind == "generation_done":
+            display_state["cache"] = {
+                "hits": d.get("cache_hits", 0),
+                "misses": d.get("cache_misses", 0),
+                "hit_rate": d.get("cache_hit_rate", 0),
+            }
+        elif event.kind == "step":
+            step = d.get("step", "")
+            if step == "ranked":
+                rankings = d.get("rankings", [])
+                if rankings:
+                    display_state["best_fitness"] = rankings[0][1]
+                    display_state["best_name"] = rankings[0][0]
+            display_state["phase"] = f"gen {d.get('generation', 0)} → {step}"
+
+        # Log message
+        if msg:
+            tag = f"[bold cyan]{event.kind}[/bold cyan]"
+            event_log.append(f"{tag}: {msg}")
+
+        # In verbose mode, also print to console directly
+        if verbose and msg:
+            console.print(f"  [dim]{event.kind}[/dim] {msg}")
+
+    # Event callback for headless mode — append JSONL
+    def on_event_headless(event):
+        line = json.dumps({"ts": event.timestamp, "kind": event.kind, **event.data})
+        with open(log_path, "a") as f:
+            f.write(line + "\n")
+
+    # SIGINT handler for graceful pause
+    def handle_sigint(signum, frame):
+        if engine:
+            if not headless:
+                console.print("\n[yellow bold]Ctrl+C received — pausing after current generation...[/yellow bold]")
+            engine.interrupt()
+        else:
+            raise KeyboardInterrupt
+
+    original_handler = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, handle_sigint)
 
     try:
-        engine = EvolutionEngine(db, config)
-        with console.status("[bold green]Running evolution..."):
-            result = engine.run()
+        # Write PID file for headless mode
+        if headless:
+            with open(pid_path, "w") as f:
+                f.write(str(os.getpid()))
 
-        console.print(f"\n[bold green]Evolution complete![/bold]")
-        console.print(f"Generations run: {result['generations_run']}")
-        console.print(f"Budget used: ${result['budget_used']:.2f}")
+        event_cb = on_event_headless if headless else on_event
+        engine = EvolutionEngine(db, config, on_event=event_cb)
 
-        # Print leaderboard
-        if result["leaderboard"]:
-            table = Table(title="Strategy Leaderboard")
-            table.add_column("Rank", style="cyan")
-            table.add_column("Name", style="bold")
-            table.add_column("Instrument")
-            table.add_column("Fitness", style="green")
-            table.add_column("Status")
-
-            for entry in result["leaderboard"][:10]:
-                table.add_row(
-                    str(entry["rank"]),
-                    entry["name"],
-                    entry["instrument"],
-                    f"{entry['fitness_score']:.4f}",
-                    entry["status"],
-                )
-            console.print(table)
+        if headless or verbose:
+            # Headless/verbose: run synchronously, no Rich Live display
+            result = engine.run(resume_from=resume_from)
         else:
-            console.print("[yellow]No strategies discovered.[/yellow]")
+            # Normal mode: Rich live display with progress dashboard
+            with Live(console=console, refresh_per_second=2, transient=False) as live:
+                import threading
 
-        cache = result.get("cache_stats", {})
-        if cache:
-            console.print(f"\nCache: {cache.get('hits', 0)} hits, {cache.get('misses', 0)} misses "
-                          f"({cache.get('hit_rate', 0):.0%} hit rate)")
+                run_result = {}
+                run_error = {}
+
+                def run_engine():
+                    try:
+                        run_result["value"] = engine.run(resume_from=resume_from)
+                    except Exception as e:
+                        run_error["value"] = e
+
+                thread = threading.Thread(target=run_engine, daemon=True)
+                thread.start()
+
+                while thread.is_alive():
+                    display_state["elapsed"] = time.time() - start_time
+                    layout = Table.grid(padding=1)
+                    layout.add_row(_build_evolution_display(display_state))
+                    layout.add_row(_build_event_log(event_log))
+                    live.update(layout)
+                    time.sleep(0.5)
+
+                thread.join()
+
+                if "value" in run_error:
+                    raise run_error["value"]
+                result = run_result.get("value", {})
+
+        if headless:
+            # Headless: write final summary to log
+            summary = json.dumps({
+                "ts": time.time(), "kind": "summary",
+                "generations_run": result.get("generations_run", 0),
+                "elapsed_sec": result.get("elapsed_sec", 0),
+                "budget_used": result.get("budget_used", 0),
+                "interrupted": result.get("interrupted", False),
+                "leaderboard_count": len(result.get("leaderboard", [])),
+            })
+            with open(log_path, "a") as f:
+                f.write(summary + "\n")
+        else:
+            # Print results
+            console.print(f"\n[bold green]{'Paused' if result.get('interrupted') else 'Evolution complete'}![/bold]")
+            console.print(f"Generations run: {result.get('generations_run', 0)}")
+            console.print(f"Elapsed: {result.get('elapsed_sec', 0):.0f}s")
+            console.print(f"Budget used: ${result.get('budget_used', 0):.2f}")
+
+            if result.get("interrupted"):
+                console.print("[yellow]Run with --resume to continue from where you left off.[/yellow]")
+
+            # Print leaderboard
+            if result.get("leaderboard"):
+                table = Table(title="Strategy Leaderboard")
+                table.add_column("Rank", style="cyan")
+                table.add_column("Name", style="bold")
+                table.add_column("Instrument")
+                table.add_column("Fitness", style="green")
+                table.add_column("Gen")
+                table.add_column("Status")
+
+                for entry in result["leaderboard"][:10]:
+                    table.add_row(
+                        str(entry["rank"]),
+                        entry["name"],
+                        entry["instrument"],
+                        f"{entry['fitness_score']:.4f}",
+                        str(entry.get("generation", "?")),
+                        entry["status"],
+                    )
+                console.print(table)
+            else:
+                console.print("[yellow]No strategies discovered.[/yellow]")
+
+            cache = result.get("cache_stats", {})
+            if cache:
+                console.print(f"\nCache: {cache.get('hits', 0)} hits, {cache.get('misses', 0)} misses "
+                              f"({cache.get('hit_rate', 0):.0%} hit rate)")
+    except KeyboardInterrupt:
+        if not headless:
+            console.print("\n[red]Aborted.[/red]")
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+        # Clean up PID file
+        if headless and os.path.exists(pid_path):
+            os.remove(pid_path)
+        db.close()
+
+
+@app.command()
+def autoresearch_status():
+    """Show the current status of a running or completed autoresearch run."""
+    import json
+    from tradingagents.storage.db import Database
+
+    results_dir = _get_results_dir()
+    db_path = os.path.join(results_dir, "tradingagents.db")
+    pid_path = os.path.join(results_dir, "autoresearch.pid")
+    log_path = os.path.join(results_dir, "autoresearch.log")
+
+    # Check if running
+    running = False
+    if os.path.exists(pid_path):
+        try:
+            with open(pid_path) as f:
+                pid = int(f.read().strip())
+            running = _is_pid_alive(pid)
+        except (ValueError, OSError):
+            pass
+    status_str = "[bold green]Running[/bold green]" if running else "[dim]Idle[/dim]"
+    console.print(f"Status: {status_str}")
+
+    # DB stats
+    if not os.path.exists(db_path):
+        console.print("[yellow]No database found. Run autoresearch first.[/yellow]")
+        return
+
+    db = Database(db_path)
+    try:
+        reflections = db.get_reflections()
+        console.print(f"Generations completed: {len(reflections)}")
+
+        # Top strategies
+        top = db.get_top_strategies(limit=3)
+        if top:
+            console.print("\n[bold]Top Strategies:[/bold]")
+            for i, s in enumerate(top, 1):
+                console.print(f"  {i}. {s['name']} — fitness: {s.get('fitness_score', 0):.4f} "
+                              f"({s['instrument']}, gen {s['generation']})")
+
+        # Latest reflection
+        latest = db.get_latest_reflection()
+        if latest:
+            console.print(f"\n[bold]Latest Reflection (gen {latest['generation']}):[/bold]")
+            works = latest.get("patterns_that_work", [])
+            if works:
+                for p in works[:3]:
+                    console.print(f"  [green]+[/green] {p}")
+            fails = latest.get("patterns_that_fail", [])
+            if fails:
+                for p in fails[:3]:
+                    console.print(f"  [red]-[/red] {p}")
     finally:
         db.close()
+
+    # Recent log entries
+    if os.path.exists(log_path):
+        console.print("\n[bold]Recent Events:[/bold]")
+        try:
+            with open(log_path) as f:
+                lines = f.readlines()
+            for line in lines[-5:]:
+                try:
+                    ev = json.loads(line.strip())
+                    msg = ev.get("message", ev.get("kind", ""))
+                    console.print(f"  [dim]{ev.get('kind', '?')}[/dim] {msg}")
+                except json.JSONDecodeError:
+                    pass
+        except OSError:
+            pass
 
 
 @app.command()

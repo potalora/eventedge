@@ -1,13 +1,37 @@
 """Evolution progress dashboard page."""
 
+import os
+
 import streamlit as st
 import pandas as pd
 
 from tradingagents.storage.db import Database
 
 
+def _is_autoresearch_running() -> bool:
+    """Check if an autoresearch process is currently running."""
+    pid_path = os.path.join(
+        os.environ.get("TRADINGAGENTS_RESULTS", "./results"), "autoresearch.pid"
+    )
+    if not os.path.exists(pid_path):
+        return False
+    try:
+        with open(pid_path) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError, ProcessLookupError):
+        return False
+
+
 def render(db: Database):
     st.title("Evolution Progress")
+
+    running = _is_autoresearch_running()
+    if running:
+        st.success("Autoresearch is running — refresh page to see updates")
+    else:
+        st.caption("Autoresearch is idle")
 
     # Get reflections for generation tracking
     reflections = db.get_reflections()

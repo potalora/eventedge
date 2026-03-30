@@ -92,9 +92,9 @@ class MarketScreener:
             if len(lines) < 2:
                 return None
 
-            # Parse into dataframe
+            # Parse into dataframe (skip comment lines starting with #)
             from io import StringIO
-            df = pd.read_csv(StringIO(str(price_csv)))
+            df = pd.read_csv(StringIO(str(price_csv)), comment="#")
             if df.empty or "Close" not in df.columns:
                 return None
 

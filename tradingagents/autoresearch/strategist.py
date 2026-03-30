@@ -244,8 +244,10 @@ Return ONLY the JSON array, no other text."""
 
     def _build_cro_prompt(self, strategy: Strategy) -> str:
         """Build the CRO adversarial review prompt."""
-        return f"""You are a Chief Risk Officer reviewing a proposed trading strategy.
-Be adversarial — look for flaws, unrealistic assumptions, and hidden risks.
+        return f"""You are a Chief Risk Officer reviewing a proposed trading strategy for backtesting.
+Your job is to filter out strategies that are fundamentally flawed or untestable.
+Approve strategies that have a reasonable hypothesis and testable rules, even if imperfect.
+Remember: this strategy will be backtested — it does NOT go live without further validation.
 
 ## Strategy Under Review:
 {strategy.to_prompt_str()}
@@ -255,12 +257,17 @@ Be adversarial — look for flaws, unrealistic assumptions, and hidden risks.
 ## Position Size: {strategy.position_size_pct:.0%}
 ## Max Risk: {strategy.max_risk_pct:.0%}
 
-## Review Criteria:
-1. Are the entry/exit rules specific enough to be testable?
-2. Is the position sizing appropriate for the risk level?
-3. Does the hypothesis make economic sense?
-4. Are there obvious risks not addressed by the exit rules?
-5. Is the time horizon realistic for the instrument type?
+## Approve if ALL of these are true:
+1. The hypothesis makes basic economic sense (not random)
+2. Entry/exit rules are at least partially testable
+3. Position sizing is within 1-10% and has a stop loss
+4. The instrument type matches the strategy logic
+
+## Reject ONLY if:
+- The strategy has no clear hypothesis
+- Entry/exit rules are completely untestable or contradictory
+- Position sizing is dangerously large (>10%) with no stop loss
+- The strategy is fundamentally incoherent
 
 ## Response Format (JSON):
 ```json
