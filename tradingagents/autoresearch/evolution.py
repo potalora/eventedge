@@ -143,6 +143,7 @@ class EvolutionEngine:
         self._interrupted = False
         self._on_event = on_event or (lambda e: None)
         self._start_time = None
+        self._screener_cache: dict[tuple[str, str], ScreenerResult | None] = {}
 
     def _emit(self, kind: str, **data):
         """Emit a progress event."""
@@ -350,10 +351,13 @@ class EvolutionEngine:
             window_trades = []
 
             for ticker in matching_tickers:
-                # Find screener result for this ticker
-                sr = next((s for s in screener_results if s.ticker == ticker), None)
-                if sr is None:
+                # Find end-date screener result as fallback
+                sr_fallback = next((s for s in screener_results if s.ticker == ticker), None)
+                if sr_fallback is None:
                     continue
+
+                # Fetch historical screener data for this window's test date
+                sr = self._get_screener_for_date(ticker, window.test_start, sr_fallback)
 
                 # Run pipeline for this ticker on test start date
                 pipeline_result = self.pipeline.run(
@@ -430,10 +434,10 @@ class EvolutionEngine:
             std_r = statistics.stdev(returns) if len(returns) > 1 else 1.0
 
             winners = [t for t in all_trades if t["pnl_pct"] > 0]
-            losers = [t for t in all_trades if t["pnl_pct"] <= 0]
+            losers = [t for t in all_trades if t["pnl_pct"] < 0]
 
             gross_profit = sum(t["pnl_pct"] for t in winners) if winners else 0
-            gross_loss = abs(sum(t["pnl_pct"] for t in losers)) if losers else 1
+            gross_loss = abs(sum(t["pnl_pct"] for t in losers)) if losers else 0.001
 
             strategy.backtest_results = BacktestResults(
                 sharpe=mean_r / std_r if std_r > 0 else 0.0,
@@ -488,6 +492,24 @@ class EvolutionEngine:
             for rule in strategy.exit_rules
         )
 
+    def _get_screener_for_date(self, ticker: str, date: str,
+                               fallback: ScreenerResult) -> ScreenerResult:
+        """Get screener data for a ticker on a specific date, with caching.
+
+        Falls back to the end-date screener result if historical fetch fails.
+        """
+        key = (ticker, date)
+        if key in self._screener_cache:
+            cached = self._screener_cache[key]
+            return cached if cached is not None else fallback
+
+        result = self.screener.fetch_ticker_data(ticker, date)
+        if result is not None:
+            # Inherit regime from fallback (regime is set at universe level)
+            result.regime = fallback.regime
+        self._screener_cache[key] = result
+        return result if result is not None else fallback
+
     def _should_stop(self) -> bool:
         """Check if evolution should stop.
 
@@ -533,9 +555,10 @@ class EvolutionEngine:
             # Run pipeline on holdout date
             holdout_trades = []
             for ticker in matching:
-                sr = next((s for s in screener_results if s.ticker == ticker), None)
-                if sr is None:
+                sr_fallback = next((s for s in screener_results if s.ticker == ticker), None)
+                if sr_fallback is None:
                     continue
+                sr = self._get_screener_for_date(ticker, holdout_start, sr_fallback)
                 pipeline_result = self.pipeline.run(
                     ticker, holdout_start, "haiku", screener_result=sr
                 )

@@ -278,7 +278,8 @@ class TestFullSimulation:
             mock_llm.side_effect = _mock_llm_factory(max_gen=3, strategies_per_gen=3)
             mock_pipeline.side_effect = lambda t, d, tier, screener_result=None: _mock_pipeline_result(t, d, tier)
 
-            with patch.object(MarketScreener, "apply_filters", return_value=True):
+            with patch.object(MarketScreener, "apply_filters", return_value=True), \
+                 patch.object(MarketScreener, "fetch_ticker_data", return_value=None):
                 engine = EvolutionEngine(db, config)
                 result = engine.run("2023-01-01", "2024-06-01")
 
