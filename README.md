@@ -200,6 +200,19 @@ print(decision)
 
 See `tradingagents/default_config.py` for all configuration options.
 
+## Local Extensions
+
+This fork extends the upstream TradingAgents framework with:
+
+- **Autoresearch** — Autonomous multi-strategy discovery and evolution engine (7 strategies, 8 data sources, Darwinian weight allocation, 2-cohort A/B trial). Run with `python scripts/run_cohorts.py`.
+- **Options Analyst** — Options chain analysis integrated into the core 6-agent pipeline.
+- **Backtesting Engine** — Walk-forward backtesting with portfolio-level metrics.
+- **Execution** — Broker abstraction with Alpaca paper/live trading.
+- **Dashboard** — Streamlit UI for monitoring positions and signals.
+- **Scheduler** — APScheduler-based automated scanning and alerts.
+
+See [CLAUDE.md](CLAUDE.md) for the developer guide and [AUTORESEARCH_ARCHITECTURE_MAP.md](AUTORESEARCH_ARCHITECTURE_MAP.md) for the autoresearch architecture.
+
 ## Contributing
 
 We welcome contributions from the community! Whether it's fixing a bug, improving documentation, or suggesting a new feature, your input helps make this project better. If you are interested in this line of research, please consider joining our open-source financial AI research community [Tauric Research](https://tauric.ai/).

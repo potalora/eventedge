@@ -3,9 +3,12 @@
 import logging
 import re
 import signal
+import statistics
 import time
 from datetime import datetime, timedelta
 from typing import Callable, Optional
+
+import pandas as pd
 
 from tradingagents.autoresearch.models import (
     Strategy,
@@ -43,36 +46,63 @@ class EvolutionEvent:
 # --- Entry/exit rule pattern matchers ---
 
 _ENTRY_PATTERNS = {
-    r"RSI_14 crosses above (\d+)": lambda sr, m: sr.rsi_14 > float(m.group(1)),
-    r"RSI_14 crosses below (\d+)": lambda sr, m: sr.rsi_14 < float(m.group(1)),
+    # RSI thresholds
     r"RSI_14 > (\d+)": lambda sr, m: sr.rsi_14 > float(m.group(1)),
     r"RSI_14 < (\d+)": lambda sr, m: sr.rsi_14 < float(m.group(1)),
+    r"RSI_14 between (\d+) and (\d+)": lambda sr, m: float(m.group(1)) <= sr.rsi_14 <= float(m.group(2)),
+    # Price vs EMAs
     r"price > EMA_10": lambda sr, m: sr.close > sr.ema_10,
     r"price < EMA_10": lambda sr, m: sr.close < sr.ema_10,
     r"price > EMA_50": lambda sr, m: sr.close > sr.ema_50,
     r"price < EMA_50": lambda sr, m: sr.close < sr.ema_50,
+    # EMA crossovers
     r"EMA_10 > EMA_50": lambda sr, m: sr.ema_10 > sr.ema_50,
     r"EMA_10 < EMA_50": lambda sr, m: sr.ema_10 < sr.ema_50,
+    # MACD
     r"MACD > 0": lambda sr, m: sr.macd > 0,
     r"MACD < 0": lambda sr, m: sr.macd < 0,
-    r"BUY signal from pipeline": None,  # handled separately with pipeline result
+    # Bollinger Bands
+    r"bollinger > ([\d.]+)": lambda sr, m: sr.boll_position > float(m.group(1)),
+    r"bollinger < ([\d.]+)": lambda sr, m: sr.boll_position < float(m.group(1)),
+    # Volume
+    r"volume_ratio > ([\d.]+)": lambda sr, m: sr.volume_ratio > float(m.group(1)),
+    r"volume_ratio < ([\d.]+)": lambda sr, m: sr.volume_ratio < float(m.group(1)),
+    # 52-week range position
+    r"52w_position > ([\d.]+)": lambda sr, m: ((sr.close - sr.low_52w) / max(sr.high_52w - sr.low_52w, 0.01)) > float(m.group(1)),
+    r"52w_position < ([\d.]+)": lambda sr, m: ((sr.close - sr.low_52w) / max(sr.high_52w - sr.low_52w, 0.01)) < float(m.group(1)),
+    # Momentum
+    r"change_14d > ([-\d.]+)": lambda sr, m: sr.change_14d > float(m.group(1)),
+    r"change_14d < ([-\d.]+)": lambda sr, m: sr.change_14d < float(m.group(1)),
+    r"change_30d > ([-\d.]+)": lambda sr, m: sr.change_30d > float(m.group(1)),
+    r"change_30d < ([-\d.]+)": lambda sr, m: sr.change_30d < float(m.group(1)),
+    # Pipeline signal
+    r"BUY signal from pipeline": None,  # handled separately
     r"SELL signal from pipeline": None,
     r"HOLD signal from pipeline": None,
 }
 
 
 def _check_entry_rule(rule: str, screener_result: ScreenerResult,
-                       pipeline_result: dict) -> bool:
-    """Check if a single entry rule is satisfied."""
+                       pipeline_result: dict = None,
+                       backtest_mode: bool = False) -> bool:
+    """Check if a single entry rule is satisfied.
+
+    In backtest_mode, pipeline signal rules default to True since we don't
+    run the LLM pipeline during backtesting.
+    """
     rule_lower = rule.lower().strip()
 
     # Pipeline signal rules
-    if "buy signal from pipeline" in rule_lower:
-        return pipeline_result.get("rating", "").upper() in ("BUY", "STRONG BUY")
-    if "sell signal from pipeline" in rule_lower:
-        return pipeline_result.get("rating", "").upper() in ("SELL", "STRONG SELL")
-    if "hold signal from pipeline" in rule_lower:
-        return pipeline_result.get("rating", "").upper() == "HOLD"
+    if "signal from pipeline" in rule_lower:
+        if backtest_mode or pipeline_result is None:
+            return True  # no pipeline in backtest — let screener rules filter
+        if "buy" in rule_lower:
+            return pipeline_result.get("rating", "").upper() in ("BUY", "STRONG BUY")
+        if "sell" in rule_lower:
+            return pipeline_result.get("rating", "").upper() in ("SELL", "STRONG SELL")
+        if "hold" in rule_lower:
+            return pipeline_result.get("rating", "").upper() == "HOLD"
+        return True
 
     # Pattern-based rules
     for pattern, evaluator in _ENTRY_PATTERNS.items():
@@ -144,6 +174,7 @@ class EvolutionEngine:
         self._on_event = on_event or (lambda e: None)
         self._start_time = None
         self._screener_cache: dict[tuple[str, str], ScreenerResult | None] = {}
+        self._forward_price_cache: dict[str, pd.DataFrame] = {}  # ticker -> full OHLCV df
 
     def _emit(self, kind: str, **data):
         """Emit a progress event."""
@@ -209,6 +240,11 @@ class EvolutionEngine:
 
         logger.info("Evolution starting: %d windows, holdout %s to %s, regime=%s",
                      len(windows), holdout[0], holdout[1], regime)
+
+        # Step 2b: Prefetch forward price data for trade simulation
+        universe_tickers = [sr.ticker for sr in screener_results]
+        earliest_test = windows[0].test_start if windows else start_date
+        self._prefetch_forward_prices(universe_tickers, earliest_test, end_date)
 
         # Step 3: Evolution loop
         all_trade_results = []
@@ -333,10 +369,11 @@ class EvolutionEngine:
         test_dates: list[str],
         screener_results: list[ScreenerResult],
     ) -> Strategy:
-        """Backtest a strategy across walk-forward windows.
+        """Backtest a strategy across walk-forward windows using real prices.
 
-        For each test date and ticker, runs the cached pipeline and
-        evaluates entry/exit rules to simulate trades.
+        For each test date and ticker, checks entry rules against screener data.
+        If entry triggers, simulates the trade against real forward prices
+        from yfinance (no LLM calls).
         """
         tickers_per = self.ar_config.get("tickers_per_strategy", 5)
 
@@ -356,50 +393,24 @@ class EvolutionEngine:
             window_trades = []
 
             for ticker in matching_tickers:
-                # Find end-date screener result as fallback
                 sr_fallback = next((s for s in screener_results if s.ticker == ticker), None)
                 if sr_fallback is None:
                     continue
 
-                # Fetch historical screener data for this window's test date
                 sr = self._get_screener_for_date(ticker, window.test_start, sr_fallback)
 
-                # Run pipeline for this ticker on test start date
-                pipeline_result = self.pipeline.run(
-                    ticker, window.test_start, "haiku", screener_result=sr
-                )
-
-                # Check entry rules
-                if self._check_entry_rules(strategy, pipeline_result, sr):
-                    # Simulate entry at close price
+                # Check entry rules (backtest mode — no pipeline)
+                if self._check_entry_rules(strategy, sr, backtest_mode=True):
                     entry_price = sr.close
 
-                    # Simulate exit: check exit rules with a simple price change model
-                    # Use pipeline rating to estimate direction
-                    rating = pipeline_result.get("rating", "HOLD")
-                    if rating and "BUY" in str(rating).upper():
-                        price_change = 0.03  # assume 3% gain for BUY
-                    elif rating and "SELL" in str(rating).upper():
-                        price_change = -0.03
-                    else:
-                        price_change = 0.0
+                    # Simulate trade with real forward prices
+                    trade = self._simulate_trade(
+                        strategy, ticker, window.test_start, entry_price,
+                        window.test_end, sr.regime,
+                    )
+                    if trade is None:
+                        continue
 
-                    exit_price = entry_price * (1 + price_change)
-                    pnl = exit_price - entry_price
-                    pnl_pct = price_change
-
-                    trade = {
-                        "ticker": ticker,
-                        "entry_date": window.test_start,
-                        "exit_date": window.test_end,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "pnl": pnl,
-                        "pnl_pct": pnl_pct,
-                        "regime": sr.regime,
-                        "holding_days": strategy.time_horizon_days,
-                        "analyst_scores": pipeline_result.get("analyst_scores"),
-                    }
                     window_trades.append(trade)
 
                     # Record trade in DB
@@ -408,23 +419,22 @@ class EvolutionEngine:
                             strategy_id=strategy.id,
                             ticker=ticker,
                             trade_type="backtest",
-                            entry_date=window.test_start,
-                            exit_date=window.test_end,
+                            entry_date=trade["entry_date"],
+                            exit_date=trade["exit_date"],
                             instrument=strategy.instrument,
-                            entry_price=entry_price,
-                            exit_price=exit_price,
+                            entry_price=trade["entry_price"],
+                            exit_price=trade["exit_price"],
                             quantity=1,
-                            pnl=pnl,
-                            pnl_pct=pnl_pct,
-                            holding_days=strategy.time_horizon_days,
-                            regime=sr.regime,
+                            pnl=trade["pnl"],
+                            pnl_pct=trade["pnl_pct"],
+                            holding_days=trade["holding_days"],
+                            regime=trade["regime"],
                         )
 
             all_trades.extend(window_trades)
 
             # Compute window Sharpe
             if window_trades:
-                import statistics
                 returns = [t["pnl_pct"] for t in window_trades]
                 mean_r = statistics.mean(returns)
                 std_r = statistics.stdev(returns) if len(returns) > 1 else 1.0
@@ -433,7 +443,6 @@ class EvolutionEngine:
 
         # Compute aggregate backtest results
         if all_trades:
-            import statistics
             returns = [t["pnl_pct"] for t in all_trades]
             mean_r = statistics.mean(returns)
             std_r = statistics.stdev(returns) if len(returns) > 1 else 1.0
@@ -476,13 +485,150 @@ class EvolutionEngine:
 
         return strategy
 
-    def _check_entry_rules(self, strategy: Strategy, pipeline_result: dict,
-                            screener_result: ScreenerResult) -> bool:
+    def _simulate_trade(self, strategy: Strategy, ticker: str,
+                        entry_date: str, entry_price: float,
+                        window_end: str, regime: str) -> dict | None:
+        """Simulate a trade using real forward prices.
+
+        Walks daily prices from entry_date, checking exit rules each day:
+        - Profit target: close >= entry * (1 + target%)
+        - Stop loss: close <= entry * (1 - stop%)
+        - Trailing stop: close <= high_water_mark * (1 - trail%)
+        - Time horizon exceeded
+        - Window end reached
+
+        Returns trade dict or None if no price data available.
+        """
+        if ticker not in self._forward_price_cache:
+            return None
+
+        price_df = self._forward_price_cache[ticker]
+        if price_df.empty:
+            return None
+
+        # Slice from entry_date forward
+        try:
+            entry_dt = pd.Timestamp(entry_date)
+            window_end_dt = pd.Timestamp(window_end)
+            forward = price_df[price_df.index >= entry_dt]
+        except Exception:
+            return None
+
+        if forward.empty:
+            return None
+
+        # Parse exit rule parameters
+        profit_target = None
+        stop_loss = None
+        trailing_stop = None
+        for rule in strategy.exit_rules:
+            rule_lower = rule.lower().strip()
+            m = re.match(r"(\d+)%?\s*profit\s*target", rule_lower)
+            if m:
+                profit_target = float(m.group(1)) / 100.0
+                continue
+            m = re.match(r"(\d+)%?\s*stop\s*loss", rule_lower)
+            if m:
+                stop_loss = float(m.group(1)) / 100.0
+                continue
+            m = re.match(r"(\d+)%?\s*trailing\s*stop", rule_lower)
+            if m:
+                trailing_stop = float(m.group(1)) / 100.0
+                continue
+
+        is_short = strategy.instrument in ("stock_short", "put_option")
+        high_water_mark = entry_price
+        exit_price = entry_price
+        exit_date = entry_date
+        exit_reason = "window_end"
+        holding_days = 0
+
+        for i, (date_idx, row) in enumerate(forward.iterrows()):
+            close = float(row["Close"])
+            current_dt = pd.Timestamp(date_idx)
+            holding_days = i  # trading days since entry
+
+            # Update high water mark for trailing stop
+            if not is_short:
+                high_water_mark = max(high_water_mark, close)
+            else:
+                high_water_mark = min(high_water_mark, close)
+
+            # Skip entry day (we enter at close, check exits starting next day)
+            if i == 0:
+                continue
+
+            exit_price = close
+            exit_date = current_dt.strftime("%Y-%m-%d")
+
+            # Check profit target
+            if profit_target is not None:
+                if not is_short and close >= entry_price * (1 + profit_target):
+                    exit_reason = "profit_target"
+                    break
+                if is_short and close <= entry_price * (1 - profit_target):
+                    exit_reason = "profit_target"
+                    break
+
+            # Check stop loss
+            if stop_loss is not None:
+                if not is_short and close <= entry_price * (1 - stop_loss):
+                    exit_reason = "stop_loss"
+                    break
+                if is_short and close >= entry_price * (1 + stop_loss):
+                    exit_reason = "stop_loss"
+                    break
+
+            # Check trailing stop
+            if trailing_stop is not None:
+                if not is_short and close <= high_water_mark * (1 - trailing_stop):
+                    exit_reason = "trailing_stop"
+                    break
+                if is_short and close >= high_water_mark * (1 + trailing_stop):
+                    exit_reason = "trailing_stop"
+                    break
+
+            # Check time horizon
+            if holding_days >= strategy.time_horizon_days:
+                exit_reason = "time_horizon"
+                break
+
+            # Check window end
+            if current_dt >= window_end_dt:
+                exit_reason = "window_end"
+                break
+
+        # Compute PnL
+        if is_short:
+            pnl = entry_price - exit_price
+            pnl_pct = (entry_price - exit_price) / entry_price if entry_price else 0
+        else:
+            pnl = exit_price - entry_price
+            pnl_pct = (exit_price - entry_price) / entry_price if entry_price else 0
+
+        return {
+            "ticker": ticker,
+            "entry_date": entry_date,
+            "exit_date": exit_date,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "regime": regime,
+            "holding_days": holding_days,
+            "exit_reason": exit_reason,
+        }
+
+    def _check_entry_rules(self, strategy: Strategy,
+                            screener_result: ScreenerResult,
+                            pipeline_result: dict = None,
+                            backtest_mode: bool = False) -> bool:
         """Check if all entry rules are satisfied."""
         if not strategy.entry_rules:
             return True
         return all(
-            _check_entry_rule(rule, screener_result, pipeline_result)
+            _check_entry_rule(rule, screener_result, pipeline_result,
+                               backtest_mode=backtest_mode)
             for rule in strategy.entry_rules
         )
 
@@ -539,6 +685,19 @@ class EvolutionEngine:
         self._screener_cache[key] = result
         return result if result is not None else fallback
 
+    def _prefetch_forward_prices(self, tickers: list[str],
+                                  earliest_date: str, end_date: str) -> None:
+        """Bulk-fetch forward price data for all tickers across the full date range."""
+        if self._forward_price_cache:
+            return  # already fetched
+
+        self._emit("phase", phase="forward_prices", status="starting",
+                    message=f"Fetching forward prices for {len(tickers)} tickers...")
+        price_data = self.screener.fetch_forward_prices(tickers, earliest_date, end_date)
+        self._forward_price_cache.update(price_data)
+        self._emit("phase", phase="forward_prices", status="done",
+                    message=f"Forward prices cached for {len(price_data)} tickers")
+
     def _should_stop(self) -> bool:
         """Check if evolution should stop.
 
@@ -565,7 +724,7 @@ class EvolutionEngine:
 
     def _run_holdout(self, strategies: list[dict], holdout_start: str,
                       holdout_end: str, screener_results: list[ScreenerResult]) -> list:
-        """Run holdout validation on top strategies.
+        """Run holdout validation on top strategies using real prices.
 
         Flags strategies whose holdout Sharpe degrades significantly.
         """
@@ -573,7 +732,6 @@ class EvolutionEngine:
         for strat_dict in strategies:
             strategy = Strategy.from_db_dict(strat_dict)
 
-            # Get matching tickers for holdout
             tickers_per = self.ar_config.get("tickers_per_strategy", 5)
             matching = [sr.ticker for sr in screener_results
                         if self.screener.apply_filters(sr, strategy.screener)][:tickers_per]
@@ -581,30 +739,22 @@ class EvolutionEngine:
             if not matching:
                 continue
 
-            # Run pipeline on holdout date
             holdout_trades = []
             for ticker in matching:
                 sr_fallback = next((s for s in screener_results if s.ticker == ticker), None)
                 if sr_fallback is None:
                     continue
                 sr = self._get_screener_for_date(ticker, holdout_start, sr_fallback)
-                pipeline_result = self.pipeline.run(
-                    ticker, holdout_start, "haiku", screener_result=sr
-                )
 
-                if self._check_entry_rules(strategy, pipeline_result, sr):
-                    rating = pipeline_result.get("rating", "HOLD")
-                    if rating and "BUY" in str(rating).upper():
-                        pnl_pct = 0.03
-                    elif rating and "SELL" in str(rating).upper():
-                        pnl_pct = -0.03
-                    else:
-                        pnl_pct = 0.0
-
-                    holdout_trades.append({"pnl_pct": pnl_pct, "ticker": ticker})
+                if self._check_entry_rules(strategy, sr, backtest_mode=True):
+                    trade = self._simulate_trade(
+                        strategy, ticker, holdout_start, sr.close,
+                        holdout_end, sr.regime,
+                    )
+                    if trade is not None:
+                        holdout_trades.append(trade)
 
             if holdout_trades:
-                import statistics
                 returns = [t["pnl_pct"] for t in holdout_trades]
                 mean_r = statistics.mean(returns)
                 std_r = statistics.stdev(returns) if len(returns) > 1 else 1.0

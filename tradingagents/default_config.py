@@ -99,5 +99,48 @@ DEFAULT_CONFIG = {
         "stop_unchanged_generations": 3,
         "universe": "sp500_nasdaq100",
         "budget_cap_usd": 150.0,
+        # Multi-strategy engine settings
+        "state_dir": "data/state",
+        "total_capital": 5000,
+        "proposals_per_strategy": 3,
+        # Darwinian weights
+        "weight_min": 0.3,
+        "weight_max": 2.5,
+        "weight_up_factor": 1.05,
+        "weight_down_factor": 0.95,
+        # LLM for autoresearch
+        "autoresearch_model": "claude-sonnet-4-6",
+        # Tickers to exclude from trading (compliance, conflict of interest)
+        "blocked_tickers": [],
+        # API keys (user provides when ready)
+        "fred_api_key": "",
+        "finnhub_api_key": "",
+        "regulations_api_key": "",
+        "courtlistener_token": "",
+        "edgar_user_agent": "TradingAgents research@example.com",
+        # Risk gate (hard portfolio controls)
+        "risk_gate": {
+            "max_positions": 8,
+            "max_position_pct": 0.15,
+            "min_position_value": 100.0,
+            "daily_loss_limit_pct": 0.03,
+            "max_drawdown_pct": 0.15,
+            "per_strategy_max": 3,
+            "global_stop_loss_pct": 0.08,
+            "long_only": True,
+        },
+        # Paper trade settings
+        "paper_trade": {
+            "min_trades_for_evaluation": 20,
+            "weight_up_factor": 1.02,
+            "weight_down_factor": 0.98,
+            "exploration_budget_pct": 0.15,
+            "max_vintage_age_days": 540,
+            "learning_loop_calendar_days": 30,
+            "learning_loop_min_strategies": 5,
+            "portfolio_committee_enabled": True,
+            "max_sector_concentration_pct": 0.30,
+            "max_single_position_pct": 0.10,
+        },
     },
 }

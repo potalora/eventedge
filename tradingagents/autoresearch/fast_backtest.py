@@ -124,14 +124,24 @@ class FastBacktestRunner:
         }
 
     def _call_llm(self, prompt: str) -> str:
-        """Call Haiku with the given prompt."""
+        """Call Haiku with the given prompt. Retries on transient errors."""
+        import time as _time
         from tradingagents.llm_clients import create_llm_client
 
         model = self.ar_config.get("cache_model", "claude-haiku-4-5-20251001")
         client = create_llm_client(provider="anthropic", model=model)
         llm = client.get_llm()
-        response = llm.invoke(prompt)
-        return response.content if hasattr(response, "content") else str(response)
+
+        for attempt in range(3):
+            try:
+                response = llm.invoke(prompt)
+                return response.content if hasattr(response, "content") else str(response)
+            except Exception as e:
+                if attempt < 2 and ("500" in str(e) or "529" in str(e) or "overloaded" in str(e).lower()):
+                    logger.warning("LLM call failed (attempt %d/3): %s — retrying", attempt + 1, e)
+                    _time.sleep(2 ** attempt)
+                else:
+                    raise
 
     def _build_prompt(self, ticker: str, trade_date: str,
                       sr: ScreenerResult) -> str:

@@ -1,7 +1,10 @@
+import logging
 import uuid
 from typing import Any, Dict, List
 
 from .base_broker import BaseBroker, OrderResult, AccountInfo
+
+logger = logging.getLogger(__name__)
 
 
 class PaperBroker(BaseBroker):
@@ -90,6 +93,34 @@ class PaperBroker(BaseBroker):
             portfolio_value=self.cash + positions_value,
             buying_power=self.cash,
         )
+
+    def reconstruct_from_trades(self, open_trades: list[dict]) -> None:
+        """Rebuild positions and cash from persisted open trades.
+
+        Called at the start of each daily run to restore broker state
+        from the persistent StateManager trade records, since PaperBroker
+        is ephemeral (created fresh each run).
+        """
+        self.positions.clear()
+        for t in open_trades:
+            ticker = t.get("ticker", "")
+            shares = t.get("shares", 0)
+            avg_price = t.get("entry_price", 0.0)
+            if shares > 0 and ticker:
+                if ticker in self.positions:
+                    pos = self.positions[ticker]
+                    total = pos["quantity"] + shares
+                    pos["avg_price"] = (pos["avg_price"] * pos["quantity"] + avg_price * shares) / total
+                    pos["quantity"] = total
+                else:
+                    self.positions[ticker] = {
+                        "ticker": ticker, "quantity": shares,
+                        "avg_price": avg_price, "instrument_type": "stock",
+                    }
+                self.cash -= shares * avg_price
+
+        if self.cash < 0:
+            logger.warning("Broker cash negative after reconstruction: $%.2f", self.cash)
 
     def cancel_order(self, order_id: str) -> bool:
         return False

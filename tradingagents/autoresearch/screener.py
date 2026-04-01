@@ -53,6 +53,57 @@ class MarketScreener:
         turb = float((diff @ cov_inv @ diff.T).item())
         return turb
 
+    def fetch_forward_prices(self, tickers: list[str], start_date: str,
+                             end_date: str) -> dict[str, pd.DataFrame]:
+        """Fetch daily OHLCV from start_date through end_date for trade simulation.
+
+        Single bulk yf.download() call. Returns dict mapping ticker -> DataFrame
+        with columns [Open, High, Low, Close, Volume], indexed by date.
+        Tickers with no data are omitted from the result.
+        """
+        import yfinance as yf
+        from datetime import datetime, timedelta
+
+        # Add buffer days to end_date to account for weekends/holidays
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=7)
+        end_str = end_dt.strftime("%Y-%m-%d")
+
+        logger.info("Fetching forward prices for %d tickers (%s to %s)...",
+                     len(tickers), start_date, end_date)
+        try:
+            raw = yf.download(
+                tickers, start=start_date, end=end_str,
+                group_by="ticker", threads=True, progress=False,
+            )
+        except Exception as e:
+            logger.error("Forward price download failed: %s", e)
+            return {}
+
+        if raw.empty:
+            return {}
+
+        # Handle single-ticker case (no MultiIndex)
+        if len(tickers) == 1:
+            ticker_dfs = {tickers[0]: raw}
+        else:
+            ticker_dfs = {}
+            available = raw.columns.get_level_values(0).unique()
+            for t in tickers:
+                if t in available:
+                    ticker_dfs[t] = raw[t]
+
+        # Clean up: drop NaN rows, keep only tickers with data
+        result = {}
+        for ticker, df in ticker_dfs.items():
+            if not isinstance(df, pd.DataFrame):
+                continue
+            df = df.dropna(subset=["Close"])
+            if not df.empty:
+                result[ticker] = df
+
+        logger.info("Forward prices fetched for %d/%d tickers", len(result), len(tickers))
+        return result
+
     def batch_fetch(self, tickers: list[str], date: str,
                     regime: str = "TRANSITION") -> list[ScreenerResult]:
         """Fetch screener data for many tickers using a single bulk download.

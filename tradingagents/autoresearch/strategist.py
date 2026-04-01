@@ -206,15 +206,40 @@ class Strategist:
 
 ## Generation: {generation}
 
+## CRITICAL: Trade Generation
+- Use EXACTLY 1 entry rule per strategy. Two rules that must BOTH be true rarely fire together.
+- Use VERY wide thresholds. Most stocks have RSI 40-65, so "RSI_14 < 55" captures many tickers while "RSI_14 < 35" captures almost none.
+- The goal is to generate enough trades to measure signal quality. A strategy with 0 trades is useless — it's better to have wide rules and mediocre signal than tight rules and no data.
+
 ## Requirements:
 - Each strategy must have a clear hypothesis
-- Include specific entry and exit rules
+- Use ONLY entry/exit rules from the vocabulary below (other rules will be ignored)
+- Use EXACTLY 1 entry rule per strategy (ALL must be true — 2+ rules = almost no trades)
 - Specify instrument type: stock_long, stock_short, call_option, put_option, spread
 - Set position_size_pct (0.01-0.10) and max_risk_pct (0.01-0.10)
 - Set time_horizon_days (1-90)
 - Set conviction (0-100)
 - Build on what worked, avoid what failed
 - Diversify across instruments and sectors
+- Set screener_criteria.sector to null — let the screener find tickers across all sectors
+
+## Entry Rule Vocabulary (use EXACTLY these formats):
+- "RSI_14 > N" / "RSI_14 < N" / "RSI_14 between N and M"  (typical range: 40-65)
+- "price > EMA_10" / "price < EMA_10" / "price > EMA_50" / "price < EMA_50"
+- "EMA_10 > EMA_50" / "EMA_10 < EMA_50"
+- "MACD > 0" / "MACD < 0"
+- "bollinger > 0.4" / "bollinger < 0.6"  (0=lower band, 1=upper band; most stocks are 0.3-0.7)
+- "volume_ratio > 0.8" / "volume_ratio < 1.2"  (vs 20d average; most are 0.5-1.5)
+- "52w_position > 0.5" / "52w_position < 0.5"  (0=52w low, 1=52w high; most are 0.4-0.9)
+- "change_14d > 0.02" / "change_14d < -0.02"  (decimal, most are -0.05 to 0.05)
+- "change_30d > 0.03" / "change_30d < -0.03"
+- "BUY signal from pipeline" / "SELL signal from pipeline"
+
+## Exit Rule Vocabulary:
+- "N% profit target"  (e.g. "15% profit target")
+- "N% stop loss"  (e.g. "10% stop loss")
+- "N% trailing stop"
+- "time_horizon exceeded"
 
 ## Response Format (JSON array):
 ```json
@@ -223,8 +248,8 @@ class Strategist:
     "name": "strategy_name",
     "hypothesis": "why this should work",
     "instrument": "stock_long",
-    "entry_rules": ["RSI_14 crosses above 30", "price > EMA_10"],
-    "exit_rules": ["50% profit target", "25% stop loss", "time_horizon exceeded"],
+    "entry_rules": ["EMA_10 > EMA_50"],
+    "exit_rules": ["20% profit target", "10% stop loss", "time_horizon exceeded"],
     "position_size_pct": 0.05,
     "max_risk_pct": 0.05,
     "time_horizon_days": 30,
