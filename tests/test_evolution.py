@@ -66,11 +66,11 @@ class TestCheckEntryRule:
 
     def test_rsi_crosses_above(self):
         sr = _make_screener_result(rsi_14=35.0)
-        assert _check_entry_rule("RSI_14 crosses above 30", sr, {}) is True
+        assert _check_entry_rule("RSI_14 > 30", sr, {}) is True
 
     def test_rsi_crosses_above_fails(self):
         sr = _make_screener_result(rsi_14=25.0)
-        assert _check_entry_rule("RSI_14 crosses above 30", sr, {}) is False
+        assert _check_entry_rule("RSI_14 > 30", sr, {}) is False
 
     def test_price_above_ema10(self):
         sr = _make_screener_result(close=150.0, ema_10=148.0)
@@ -166,21 +166,21 @@ class TestCheckEntryRules:
 
     def test_all_rules_pass(self):
         engine = EvolutionEngine(MagicMock(), _make_config())
-        strategy = Strategy(entry_rules=["RSI_14 crosses above 30", "price > EMA_10"])
+        strategy = Strategy(entry_rules=["RSI_14 > 30", "price > EMA_10"])
         sr = _make_screener_result(rsi_14=35.0, close=150.0, ema_10=148.0)
-        assert engine._check_entry_rules(strategy, {}, sr) is True
+        assert engine._check_entry_rules(strategy, sr) is True
 
     def test_one_rule_fails(self):
         engine = EvolutionEngine(MagicMock(), _make_config())
-        strategy = Strategy(entry_rules=["RSI_14 crosses above 30", "price > EMA_10"])
+        strategy = Strategy(entry_rules=["RSI_14 > 30", "price > EMA_10"])
         sr = _make_screener_result(rsi_14=25.0, close=150.0, ema_10=148.0)
-        assert engine._check_entry_rules(strategy, {}, sr) is False
+        assert engine._check_entry_rules(strategy, sr) is False
 
     def test_empty_rules_returns_true(self):
         engine = EvolutionEngine(MagicMock(), _make_config())
         strategy = Strategy(entry_rules=[])
         sr = _make_screener_result()
-        assert engine._check_entry_rules(strategy, {}, sr) is True
+        assert engine._check_entry_rules(strategy, sr) is True
 
 
 class TestCheckExitRules:
@@ -277,7 +277,7 @@ class TestEvolutionRun:
 
                 strat = Strategy(
                     id=1, name="test_strat", generation=0,
-                    entry_rules=["RSI_14 crosses above 30"],
+                    entry_rules=["RSI_14 > 30"],
                     exit_rules=["50% profit target"],
                     instrument="stock_long",
                     backtest_results=BacktestResults(

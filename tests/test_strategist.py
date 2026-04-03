@@ -45,7 +45,7 @@ def _make_strategy_json(name="test_strat", approved=True):
         "name": name,
         "hypothesis": "Mean reversion after oversold conditions",
         "instrument": "stock_long",
-        "entry_rules": ["RSI_14 crosses above 30", "price > EMA_10"],
+        "entry_rules": ["RSI_14 > 30", "price > EMA_10"],
         "exit_rules": ["50% profit target", "25% stop loss"],
         "position_size_pct": 0.05,
         "max_risk_pct": 0.05,

@@ -220,3 +220,8 @@ __marimo__/
 
 # Generation worktrees
 .worktrees/
+
+# Runtime logs and state
+data/logs/
+data/generations/
+data/state/

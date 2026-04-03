@@ -18,6 +18,7 @@ import tempfile
 from copy import deepcopy
 from unittest.mock import patch, MagicMock
 
+import pandas as pd
 import pytest
 
 from tradingagents.storage.db import Database
@@ -88,7 +89,7 @@ def _strategy_json(gen, count=3):
             "name": f"strat_g{gen}_{i}",
             "hypothesis": f"Gen {gen} strategy {i} — momentum play on tech",
             "instrument": ["stock_long", "call_option", "stock_short"][i % 3],
-            "entry_rules": ["RSI_14 crosses above 30", "price > EMA_10"],
+            "entry_rules": ["RSI_14 > 30", "price > EMA_10"],
             "exit_rules": ["50% profit target", "25% stop loss", "time_horizon exceeded"],
             "position_size_pct": 0.05,
             "max_risk_pct": 0.05,
@@ -166,6 +167,42 @@ def _mock_pipeline_result(ticker, date, tier):
     }
 
 
+def _make_price_df(start_date, num_days, start_price, daily_returns=None):
+    """Create a price DataFrame for testing forward prices."""
+    dates = pd.bdate_range(start=start_date, periods=num_days)
+    if daily_returns is None:
+        daily_returns = [0.005] * num_days
+    prices = [start_price]
+    for r in daily_returns[:num_days - 1]:
+        prices.append(prices[-1] * (1 + r))
+    return pd.DataFrame({
+        "Open": prices, "High": [p * 1.01 for p in prices],
+        "Low": [p * 0.99 for p in prices], "Close": prices,
+        "Volume": [1_000_000] * len(prices),
+    }, index=dates[:len(prices)])
+
+
+# Map tickers to return profiles for realistic forward prices
+_TICKER_RETURNS = {
+    "AAPL": [0.005] * 400,    # steady gainer
+    "MSFT": [-0.003] * 400,   # steady loser
+    "GOOG": [0.008] * 400,    # strong gainer
+    "NVDA": [0.01] * 400,     # very strong gainer
+    "META": [-0.006] * 400,   # loser
+}
+_TICKER_PRICES = {"AAPL": 150.0, "MSFT": 380.0, "GOOG": 140.0, "NVDA": 800.0, "META": 350.0}
+
+
+def _mock_fetch_forward(tickers, start, end):
+    """Mock forward price fetch for all tickers."""
+    result = {}
+    for t in tickers:
+        returns = _TICKER_RETURNS.get(t, [0.002] * 400)
+        price = _TICKER_PRICES.get(t, 100.0)
+        result[t] = _make_price_df("2023-01-01", 400, price, returns)
+    return result
+
+
 # ===========================================================================
 # SIMULATION TESTS
 # ===========================================================================
@@ -230,8 +267,8 @@ class TestPreflightChecks:
 
     def test_entry_exit_rules_work(self):
         sr = _screener_result("AAPL", rsi=35.0, close=150.0)
-        assert _check_entry_rule("RSI_14 crosses above 30", sr, {}) is True
-        assert _check_entry_rule("RSI_14 crosses above 50", sr, {}) is False
+        assert _check_entry_rule("RSI_14 > 30", sr, {}) is True
+        assert _check_entry_rule("RSI_14 > 50", sr, {}) is False
         assert _check_entry_rule("price > EMA_10", sr, {}) is True
         assert _check_entry_rule("BUY signal from pipeline", sr, {"rating": "BUY"}) is True
         assert _check_entry_rule("BUY signal from pipeline", sr, {"rating": "SELL"}) is False
@@ -261,12 +298,11 @@ class TestPreflightChecks:
 class TestFullSimulation:
     """Full 3-generation evolution simulation with real DB."""
 
-    @patch.object(CachedPipelineRunner, "run")
     @patch.object(Strategist, "_call_llm")
     @patch.object(MarketScreener, "run")
     @patch("tradingagents.autoresearch.evolution.get_universe")
     def test_three_generation_evolution(self, mock_universe, mock_screener,
-                                         mock_llm, mock_pipeline):
+                                         mock_llm):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "simulation.db")
             db = Database(db_path)
@@ -276,11 +312,11 @@ class TestFullSimulation:
             mock_universe.return_value = TICKERS
             mock_screener.return_value = SCREENER_RESULTS
             mock_llm.side_effect = _mock_llm_factory(max_gen=3, strategies_per_gen=3)
-            mock_pipeline.side_effect = lambda t, d, tier, screener_result=None: _mock_pipeline_result(t, d, tier)
 
             with patch.object(MarketScreener, "apply_filters", return_value=True), \
                  patch.object(MarketScreener, "fetch_ticker_data", return_value=None), \
-                 patch.object(MarketScreener, "batch_fetch", return_value=SCREENER_RESULTS):
+                 patch.object(MarketScreener, "batch_fetch", return_value=SCREENER_RESULTS), \
+                 patch.object(MarketScreener, "fetch_forward_prices", side_effect=_mock_fetch_forward):
                 engine = EvolutionEngine(db, config)
                 result = engine.run("2023-01-01", "2024-06-01")
 
@@ -380,7 +416,7 @@ class TestStrategyLifecycleSimulation:
                 conviction=80,
                 screener_criteria={"market_cap_range": [1e9, 1e12]},
                 instrument="stock_long",
-                entry_rules=["RSI_14 crosses above 30", "price > EMA_10"],
+                entry_rules=["RSI_14 > 30", "price > EMA_10"],
                 exit_rules=["50% profit target", "25% stop loss"],
                 position_size_pct=0.05, max_risk_pct=0.05,
                 time_horizon_days=30, regime_born="RISK_ON",

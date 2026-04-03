@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 import pytest
+import pandas as pd
 from unittest.mock import patch, MagicMock
 from copy import deepcopy
 
@@ -73,7 +74,7 @@ def _make_strategy_llm_response(names=None):
             "name": name,
             "hypothesis": f"Test hypothesis for {name}",
             "instrument": "stock_long",
-            "entry_rules": ["RSI_14 crosses above 30", "price > EMA_10"],
+            "entry_rules": ["RSI_14 > 30", "price > EMA_10"],
             "exit_rules": ["50% profit target", "25% stop loss"],
             "position_size_pct": 0.05,
             "max_risk_pct": 0.05,
@@ -103,6 +104,21 @@ def _make_reflection_response():
     })
 
 
+def _make_price_df(start_date, num_days, start_price, daily_returns=None):
+    """Create a price DataFrame for testing."""
+    dates = pd.bdate_range(start=start_date, periods=num_days)
+    if daily_returns is None:
+        daily_returns = [0.005] * num_days
+    prices = [start_price]
+    for r in daily_returns[:num_days - 1]:
+        prices.append(prices[-1] * (1 + r))
+    return pd.DataFrame({
+        "Open": prices, "High": [p * 1.01 for p in prices],
+        "Low": [p * 0.99 for p in prices], "Close": prices,
+        "Volume": [1_000_000] * len(prices),
+    }, index=dates[:len(prices)])
+
+
 def _make_pipeline_result(rating="BUY"):
     return {
         "rating": rating,
@@ -120,12 +136,11 @@ def _make_pipeline_result(rating="BUY"):
 class TestFullEvolutionLoop:
     """Test the full evolution loop with 2 generations, all mocked."""
 
-    @patch.object(CachedPipelineRunner, "run")
     @patch.object(Strategist, "_call_llm")
     @patch.object(MarketScreener, "run")
     @patch("tradingagents.autoresearch.evolution.get_universe")
     def test_two_generations(self, mock_universe, mock_screener_run,
-                              mock_llm, mock_pipeline):
+                              mock_llm):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             db = Database(db_path)
@@ -150,19 +165,22 @@ class TestFullEvolutionLoop:
                 _make_reflection_response(),
             ]
 
-            # Need positive mean return AND variance AND at least one loser
-            # for fitness > 0 (sharpe > 0, profit_factor > 0).
-            # 2 tickers × 2 windows = 4 trades: 3 BUY + 1 SELL
-            _pipeline_calls = {"n": 0}
-            def _pipeline_side_effect(ticker, date, tier, screener_result=None):
-                _pipeline_calls["n"] += 1
-                # Make 3 out of 4 calls return BUY, 1 returns SELL
-                if _pipeline_calls["n"] % 4 == 0:
-                    return _make_pipeline_result("SELL")
-                return _make_pipeline_result("BUY")
-            mock_pipeline.side_effect = _pipeline_side_effect
+            # Mock forward prices: AAPL gains, MSFT loses → varied PnL
+            def _mock_fetch_forward(tickers, start, end):
+                result = {}
+                for t in tickers:
+                    if t == "AAPL":
+                        result[t] = _make_price_df("2023-01-01", 400, 150.0, [0.005] * 400)
+                    elif t == "MSFT":
+                        result[t] = _make_price_df("2023-01-01", 400, 380.0, [-0.003] * 400)
+                return result
 
-            with patch.object(MarketScreener, "apply_filters", return_value=True):
+            with patch.object(MarketScreener, "apply_filters", return_value=True), \
+                 patch.object(MarketScreener, "fetch_forward_prices", side_effect=_mock_fetch_forward), \
+                 patch.object(MarketScreener, "batch_fetch", return_value=[
+                     _make_screener_result("AAPL"),
+                     _make_screener_result("MSFT"),
+                 ]):
                 engine = EvolutionEngine(db, config)
                 result = engine.run("2023-01-01", "2024-01-01")
 

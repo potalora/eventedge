@@ -20,21 +20,19 @@ from tradingagents.storage.db import Database
 # ─── Configuration ───────────────────────────────────────────────────────────
 config = deepcopy(DEFAULT_CONFIG)
 config["autoresearch"].update({
-    "max_generations": 1,
-    "strategies_per_generation": 4,   # ask for 4, some will pass CRO
-    "tickers_per_strategy": 4,        # 4 tickers each
-    "walk_forward_windows": 2,        # 2 windows
+    "max_generations": 3,
+    "strategies_per_generation": 4,
+    "tickers_per_strategy": 5,
+    "walk_forward_windows": 2,
     "holdout_weeks": 4,
+    "min_trades_for_scoring": 3,       # lower threshold for scoring
     "budget_cap_usd": 50.0,
-    "universe": [
-        "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
-        "META", "TSLA", "JPM", "UNH", "V",
-    ],
+    "universe": "sp500_nasdaq100",     # full ~72 ticker universe
 })
 
-# Use Haiku everywhere to minimize cost
+# Sonnet for strategy design, Haiku for backtesting/CRO
 config["llm_provider"] = "anthropic"
-config["autoresearch"]["strategist_model"] = "claude-haiku-4-5-20251001"
+config["autoresearch"]["strategist_model"] = "claude-sonnet-4-20250514"
 config["autoresearch"]["cro_model"] = "claude-haiku-4-5-20251001"
 config["autoresearch"]["cache_model"] = "claude-haiku-4-5-20251001"
 
@@ -83,15 +81,17 @@ def on_event(event):
             print(f"           → {n}")
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
+ar = config["autoresearch"]
 print(f"""
 ╔══════════════════════════════════════════════════════════════════════╗
-║                  AUTORESEARCH DRY RUN (1 generation)               ║
+║                  AUTORESEARCH FULL RUN (1 generation)              ║
 ╠══════════════════════════════════════════════════════════════════════╣
-║  Strategies per gen:  2                                            ║
-║  Tickers per strat:   2                                            ║
-║  Walk-forward windows: 1                                           ║
-║  Universe:            AAPL, MSFT, NVDA, GOOGL, AMZN               ║
-║  Models:              All Haiku (cost-optimized)                   ║
+║  Strategies per gen:  {ar['strategies_per_generation']:<47d}║
+║  Tickers per strat:   {ar['tickers_per_strategy']:<47d}║
+║  Walk-forward windows: {ar['walk_forward_windows']:<46d}║
+║  Universe:            {str(ar['universe']):<47s}║
+║  Strategist model:    {ar['strategist_model']:<47s}║
+║  Backtest model:      {ar['cache_model']:<47s}║
 ║  DB:                  {db_path:<51s}║
 ╚══════════════════════════════════════════════════════════════════════╝
 """)
