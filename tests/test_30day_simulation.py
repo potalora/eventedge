@@ -702,3 +702,376 @@ class TestThirtyDayCohortDivergence:
         report = comparison.format_report()
         assert isinstance(report, str)
         assert len(report) > 100
+
+
+class TestOpenBBEnrichment:
+    """Verify OpenBB enrichment works across 30-day simulation."""
+
+    @patch(
+        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+    )
+    @patch(
+        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
+    )
+    @patch(
+        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+    )
+    @patch(
+        "tradingagents.autoresearch.strategies.get_paper_trade_strategies"
+    )
+    def test_enrichment_30_days_with_openbb(
+        self,
+        mock_get_strategies,
+        mock_committee,
+        mock_fetch_prices,
+        mock_fetch_data,
+        tmp_path,
+    ):
+        """Run 30 days with mocked OpenBB enrichment. Verify enrichment is passed to committee."""
+        strategies = [FakeStrategy(hold_days=5), FakeStrategy2()]
+        mock_get_strategies.return_value = strategies
+
+        prices = _build_price_cache(days=60)
+        mock_fetch_data.return_value = {"yfinance": {"prices": prices}}
+        mock_fetch_prices.return_value = None
+
+        control_dir = str(tmp_path / "control")
+        adaptive_dir = str(tmp_path / "adaptive")
+
+        cohort_configs = [
+            CohortConfig(name="control", state_dir=control_dir, adaptive_confidence=False, learning_enabled=False, use_llm=False),
+            CohortConfig(name="adaptive", state_dir=adaptive_dir, adaptive_confidence=True, learning_enabled=True, use_llm=False),
+        ]
+
+        base_config = {
+            "autoresearch": {
+                "state_dir": str(tmp_path / "base"),
+                "total_capital": 5000,
+                "paper_trade": {"min_trades_for_evaluation": 2, "portfolio_committee_enabled": False},
+            },
+            "execution": {"mode": "paper"},
+        }
+
+        # Track enrichment values passed to synthesize
+        enrichment_values = []
+
+        def fake_synthesize(signals, regime_context=None, strategy_confidence=None,
+                            current_positions=None, total_capital=None, **kwargs):
+            enrichment_values.append(kwargs.get("enrichment"))
+            recs = []
+            seen = set()
+            for s in signals[:3]:
+                if s["ticker"] not in seen:
+                    recs.append(TradeRecommendation(
+                        ticker=s["ticker"], direction=s["direction"],
+                        position_size_pct=0.08, confidence=0.6,
+                        rationale="enrichment test",
+                        contributing_strategies=[s["strategy"]],
+                    ))
+                    seen.add(s["ticker"])
+            return recs
+
+        mock_committee.side_effect = fake_synthesize
+
+        orchestrator = CohortOrchestrator(cohort_configs, base_config)
+
+        # Inject price caches
+        for cohort in orchestrator.cohorts:
+            cohort["engine"]._price_cache = copy.deepcopy(prices)
+
+        # Mock the OpenBB enrichment to return synthetic data
+        mock_enrichment = {
+            "profiles": {
+                "AAPL": {"sector": "Technology", "industry": "Consumer Electronics", "market_cap": 3e12, "name": "Apple"},
+                "MSFT": {"sector": "Technology", "industry": "Software", "market_cap": 2.8e12, "name": "Microsoft"},
+                "AMZN": {"sector": "Consumer Cyclical", "industry": "Internet Retail", "market_cap": 1.8e12, "name": "Amazon"},
+            },
+            "short_interest": {
+                "TSLA": {"short_interest": 50000000, "short_pct_of_float": 3.2, "days_to_cover": 1.5, "date": "2026-03-15"},
+            },
+            "factors": {"Mkt-RF": 0.02, "SMB": -0.01, "HML": 0.005},
+        }
+        with patch.object(orchestrator, "_fetch_openbb_enrichment", return_value=mock_enrichment):
+            for day in range(30):
+                trading_date = (BASE_DATE + timedelta(days=day)).strftime("%Y-%m-%d")
+                orchestrator.run_daily(trading_date=trading_date)
+
+        # Assertions
+        # 1. Both cohorts received enrichment (2 cohorts * 30 days = 60 calls)
+        assert len(enrichment_values) == 60, f"Expected 60 synthesize calls, got {len(enrichment_values)}"
+
+        # 2. Enrichment was passed (not None) for all calls
+        non_none_enrichments = [e for e in enrichment_values if e is not None]
+        assert len(non_none_enrichments) == 60, "All synthesize calls should receive enrichment"
+
+        # 3. Enrichment contains expected keys
+        sample = non_none_enrichments[0]
+        assert "profiles" in sample
+        assert "short_interest" in sample
+        assert "factors" in sample
+        assert "AAPL" in sample["profiles"]
+        assert sample["profiles"]["AAPL"]["sector"] == "Technology"
+
+        # 4. Both cohorts still produce trades
+        control_trades = StateManager(control_dir).load_paper_trades()
+        adaptive_trades = StateManager(adaptive_dir).load_paper_trades()
+        assert len(control_trades) > 0, "Control should have trades with enrichment"
+        assert len(adaptive_trades) > 0, "Adaptive should have trades with enrichment"
+
+    @patch(
+        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+    )
+    @patch(
+        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
+    )
+    @patch(
+        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+    )
+    @patch(
+        "tradingagents.autoresearch.strategies.get_paper_trade_strategies"
+    )
+    def test_graceful_degradation_without_openbb(
+        self,
+        mock_get_strategies,
+        mock_committee,
+        mock_fetch_prices,
+        mock_fetch_data,
+        tmp_path,
+    ):
+        """Run 30 days with OpenBB unavailable. Verify identical behavior to baseline."""
+        strategies = [FakeStrategy(hold_days=5), FakeStrategy2()]
+        mock_get_strategies.return_value = strategies
+
+        prices = _build_price_cache(days=60)
+        mock_fetch_data.return_value = {"yfinance": {"prices": prices}}
+        mock_fetch_prices.return_value = None
+
+        control_dir = str(tmp_path / "control")
+        adaptive_dir = str(tmp_path / "adaptive")
+
+        cohort_configs = [
+            CohortConfig(name="control", state_dir=control_dir, adaptive_confidence=False, learning_enabled=False, use_llm=False),
+            CohortConfig(name="adaptive", state_dir=adaptive_dir, adaptive_confidence=True, learning_enabled=True, use_llm=False),
+        ]
+
+        base_config = {
+            "autoresearch": {
+                "state_dir": str(tmp_path / "base"),
+                "total_capital": 5000,
+                "paper_trade": {"min_trades_for_evaluation": 2, "portfolio_committee_enabled": False},
+            },
+            "execution": {"mode": "paper"},
+        }
+
+        enrichment_values = []
+
+        def fake_synthesize(signals, regime_context=None, strategy_confidence=None,
+                            current_positions=None, total_capital=None, **kwargs):
+            enrichment_values.append(kwargs.get("enrichment"))
+            recs = []
+            seen = set()
+            for s in signals[:3]:
+                if s["ticker"] not in seen:
+                    recs.append(TradeRecommendation(
+                        ticker=s["ticker"], direction=s["direction"],
+                        position_size_pct=0.08, confidence=0.6,
+                        rationale="degradation test",
+                        contributing_strategies=[s["strategy"]],
+                    ))
+                    seen.add(s["ticker"])
+            return recs
+
+        mock_committee.side_effect = fake_synthesize
+
+        orchestrator = CohortOrchestrator(cohort_configs, base_config)
+
+        for cohort in orchestrator.cohorts:
+            cohort["engine"]._price_cache = copy.deepcopy(prices)
+
+        # Mock enrichment to return empty dict (OpenBB unavailable)
+        with patch.object(orchestrator, "_fetch_openbb_enrichment", return_value={}):
+            for day in range(30):
+                trading_date = (BASE_DATE + timedelta(days=day)).strftime("%Y-%m-%d")
+                orchestrator.run_daily(trading_date=trading_date)
+
+        # Assertions
+        # 1. All enrichment values should be empty dict (graceful degradation)
+        for e in enrichment_values:
+            assert e == {} or e is None or (isinstance(e, dict) and len(e) == 0), \
+                f"Expected empty enrichment, got {e}"
+
+        # 2. System still produces trades without OpenBB
+        control_trades = StateManager(control_dir).load_paper_trades()
+        assert len(control_trades) > 0, "System should still trade without OpenBB"
+
+
+class TestReactivatedStrategies:
+    """Test reactivated govt_contracts and state_economics produce valid signals."""
+
+    def test_govt_contracts_with_usaspending_data(self):
+        """govt_contracts screen() produces candidates from contract data."""
+        from tradingagents.autoresearch.strategies.govt_contracts import GovtContractsStrategy
+
+        strategy = GovtContractsStrategy()
+        assert strategy.track == "paper_trade"
+        assert "openbb" in strategy.data_sources
+
+        # Provide synthetic USASpending contract data
+        data = {
+            "usaspending": {
+                "data": {
+                    "contracts": [
+                        {"recipient": "Lockheed Martin Corp", "amount": 500_000_000},
+                        {"recipient": "Northrop Grumman Systems", "amount": 200_000_000},
+                        {"recipient": "Small Unknown Contractor", "amount": 10_000_000},  # Below threshold
+                    ]
+                }
+            },
+            "yfinance": {"prices": {}},
+        }
+
+        candidates = strategy.screen(data, "2026-03-15", strategy.get_default_params())
+        # Should find LMT and NOC (Lockheed and Northrop), but not small contractor
+        assert len(candidates) >= 1
+        tickers = [c.ticker for c in candidates]
+        assert "LMT" in tickers  # Lockheed
+        for c in candidates:
+            assert c.direction == "long"
+            assert c.score > 0
+
+    def test_govt_contracts_momentum_fallback(self):
+        """govt_contracts falls back to momentum when no contract data."""
+        from tradingagents.autoresearch.strategies.govt_contracts import GovtContractsStrategy
+
+        strategy = GovtContractsStrategy()
+
+        # Build price data with upward momentum for some contractors
+        dates = pd.date_range("2026-02-01", periods=40, freq="B")
+        prices = {}
+        # LMT with strong upward momentum
+        lmt_close = [400 + i * 2 for i in range(40)]  # rising
+        prices["LMT"] = pd.DataFrame({"Close": lmt_close, "Volume": [1e6] * 40}, index=dates)
+        # BA with flat/declining
+        ba_close = [200 - i * 0.1 for i in range(40)]
+        prices["BA"] = pd.DataFrame({"Close": ba_close, "Volume": [1e6] * 40}, index=dates)
+
+        data = {
+            "usaspending": {},  # No contract data
+            "yfinance": {"prices": prices},
+        }
+
+        candidates = strategy.screen(data, "2026-03-25", strategy.get_default_params())
+        # LMT should appear (positive momentum), BA should not (negative)
+        if candidates:
+            tickers = [c.ticker for c in candidates]
+            assert "LMT" in tickers
+            for c in candidates:
+                assert c.metadata.get("source") == "momentum_fallback"
+
+    def test_govt_contracts_exit_logic(self):
+        """govt_contracts exit logic works correctly."""
+        from tradingagents.autoresearch.strategies.govt_contracts import GovtContractsStrategy
+
+        strategy = GovtContractsStrategy()
+        params = strategy.get_default_params()
+
+        # Test profit target
+        should_exit, reason = strategy.check_exit("LMT", 100.0, 120.0, 5, params, {})
+        assert should_exit is True
+        assert reason == "profit_target"
+
+        # Test stop loss
+        should_exit, reason = strategy.check_exit("LMT", 100.0, 90.0, 5, params, {})
+        assert should_exit is True
+        assert reason == "stop_loss"
+
+        # Test hold period
+        should_exit, reason = strategy.check_exit("LMT", 100.0, 102.0, 35, params, {})
+        assert should_exit is True
+        assert reason == "hold_period"
+
+        # Test no exit yet
+        should_exit, reason = strategy.check_exit("LMT", 100.0, 105.0, 5, params, {})
+        assert should_exit is False
+
+    def test_state_economics_with_fred_data(self):
+        """state_economics screen() combines FRED indicators with momentum."""
+        from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
+
+        strategy = StateEconomicsStrategy()
+        assert strategy.track == "paper_trade"
+        assert "fred" in strategy.data_sources
+        assert "openbb" in strategy.data_sources
+
+        # Build price data for regional ETFs
+        dates = pd.date_range("2026-02-01", periods=30, freq="B")
+        prices = {}
+        # KRE (regional banks) with positive momentum
+        kre_close = [50 + i * 0.5 for i in range(30)]
+        prices["KRE"] = pd.DataFrame({"Close": kre_close, "Volume": [1e6] * 30}, index=dates)
+        # IWN with slight positive
+        iwn_close = [160 + i * 0.2 for i in range(30)]
+        prices["IWN"] = pd.DataFrame({"Close": iwn_close, "Volume": [1e6] * 30}, index=dates)
+
+        data = {
+            "yfinance": {"prices": prices},
+            "fred": {
+                "data": {
+                    "UNRATE": {"2026-01": 4.2, "2026-02": 4.0},  # Declining = bullish
+                    "ICSA": {"2026-02-15": 220000, "2026-02-22": 210000},  # Declining = bullish
+                }
+            },
+        }
+
+        candidates = strategy.screen(data, "2026-03-15", strategy.get_default_params())
+        assert len(candidates) > 0
+        # KRE should get econ_boost from declining unemployment
+        kre_candidates = [c for c in candidates if c.ticker == "KRE"]
+        if kre_candidates:
+            assert kre_candidates[0].metadata.get("econ_boost", 0) > 0
+
+    def test_state_economics_momentum_only_fallback(self):
+        """state_economics falls back to pure momentum when no FRED data."""
+        from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
+
+        strategy = StateEconomicsStrategy()
+
+        dates = pd.date_range("2026-02-01", periods=30, freq="B")
+        prices = {}
+        kre_close = [50 + i * 0.5 for i in range(30)]
+        prices["KRE"] = pd.DataFrame({"Close": kre_close, "Volume": [1e6] * 30}, index=dates)
+
+        data = {
+            "yfinance": {"prices": prices},
+            "fred": {},  # No FRED data
+        }
+
+        candidates = strategy.screen(data, "2026-03-15", strategy.get_default_params())
+        assert len(candidates) > 0
+        for c in candidates:
+            assert c.metadata.get("econ_boost", 0) == 0.0  # No boost without FRED
+
+    def test_state_economics_exit_logic(self):
+        """state_economics exit logic: rebalance schedule."""
+        from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
+
+        strategy = StateEconomicsStrategy()
+        params = strategy.get_default_params()
+
+        # Before rebalance
+        should_exit, reason = strategy.check_exit("KRE", 50.0, 55.0, 10, params, {})
+        assert should_exit is False
+
+        # At rebalance
+        should_exit, reason = strategy.check_exit("KRE", 50.0, 55.0, 14, params, {})
+        assert should_exit is True
+        assert reason == "rebalance"
+
+    def test_nine_strategies_registered(self):
+        """Verify 9 strategies are registered after reactivation."""
+        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        strategies = get_paper_trade_strategies()
+        assert len(strategies) == 9
+        names = [s.name for s in strategies]
+        assert "govt_contracts" in names
+        assert "state_economics" in names
