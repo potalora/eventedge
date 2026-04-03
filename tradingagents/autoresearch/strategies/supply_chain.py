@@ -31,7 +31,7 @@ class SupplyChainStrategy:
 
     name = "supply_chain"
     track = "paper_trade"
-    data_sources = ["finnhub", "yfinance"]
+    data_sources = ["finnhub", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -96,6 +96,21 @@ class SupplyChainStrategy:
                     },
                 )
             )
+
+        # Amplify signal for heavily-shorted names (squeeze potential on disruption)
+        openbb_data = data.get("openbb", {})
+        short_data = openbb_data.get("short_interest", {})
+        profile_data = openbb_data.get("profile", {})
+        for candidate in candidates:
+            if isinstance(short_data, dict) and candidate.ticker in short_data:
+                si = short_data[candidate.ticker]
+                short_pct = si.get("short_pct_of_float", 0)
+                if short_pct > 5.0:  # >5% of float shorted
+                    candidate.score = min(candidate.score * 1.25, 1.0)
+                    candidate.metadata["short_pct_of_float"] = short_pct
+                    candidate.metadata["days_to_cover"] = si.get("days_to_cover", 0)
+            if isinstance(profile_data, dict) and candidate.ticker in profile_data:
+                candidate.metadata["sector"] = profile_data[candidate.ticker].get("sector", "")
 
         return candidates[: params.get("max_positions", 4)]
 

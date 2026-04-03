@@ -22,7 +22,7 @@ class RegulatoryPipelineStrategy:
 
     name = "regulatory_pipeline"
     track = "paper_trade"
-    data_sources = ["regulations", "yfinance"]
+    data_sources = ["regulations", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -82,6 +82,16 @@ class RegulatoryPipelineStrategy:
                     },
                 )
             )
+
+        # Validate ticker-to-regulation mapping with sector data
+        openbb_data = data.get("openbb", {})
+        profile_data = openbb_data.get("profile", {})
+        if isinstance(profile_data, dict):
+            for candidate in candidates:
+                ticker = candidate.ticker
+                if ticker in profile_data:
+                    candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
+                    candidate.metadata["industry"] = profile_data[ticker].get("industry", "")
 
         return candidates[: params.get("max_positions", 3)]
 

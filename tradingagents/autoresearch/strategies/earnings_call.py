@@ -25,7 +25,7 @@ class EarningsCallStrategy:
 
     name = "earnings_call"
     track = "paper_trade"
-    data_sources = ["finnhub", "yfinance"]
+    data_sources = ["finnhub", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -115,6 +115,23 @@ class EarningsCallStrategy:
                     },
                 )
             )
+
+        # Enrich with analyst consensus if available
+        openbb_data = data.get("openbb", {})
+        estimates = openbb_data.get("estimates", {})
+        if isinstance(estimates, dict):
+            for candidate in candidates:
+                est = estimates.get(candidate.ticker, {})
+                if not est:
+                    continue
+                consensus_eps = est.get("consensus_eps")
+                num_analysts = est.get("num_analysts", 0)
+                if consensus_eps is not None:
+                    candidate.metadata["consensus_eps"] = consensus_eps
+                    candidate.metadata["num_analysts"] = num_analysts
+                    # Boost score if many analysts cover (higher conviction)
+                    if num_analysts >= 10:
+                        candidate.score = min(candidate.score * 1.15, 1.0)
 
         return candidates[: params.get("max_positions", 4)]
 

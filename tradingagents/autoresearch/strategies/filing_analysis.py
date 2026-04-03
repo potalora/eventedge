@@ -40,7 +40,7 @@ class FilingAnalysisStrategy:
 
     name = "filing_analysis"
     track = "paper_trade"
-    data_sources = ["edgar", "yfinance"]
+    data_sources = ["edgar", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -147,6 +147,22 @@ class FilingAnalysisStrategy:
             if c.ticker not in by_ticker or c.score > by_ticker[c.ticker].score:
                 by_ticker[c.ticker] = c
         unique = sorted(by_ticker.values(), key=lambda c: c.score, reverse=True)
+
+        # Enrich with analyst consensus for contradiction detection
+        openbb_data = data.get("openbb", {})
+        estimates = openbb_data.get("estimates", {})
+        profile_data = openbb_data.get("profile", {})
+        for candidate in unique:
+            ticker = candidate.ticker
+            if isinstance(estimates, dict) and ticker in estimates:
+                est = estimates[ticker]
+                candidate.metadata["consensus_eps"] = est.get("consensus_eps")
+                candidate.metadata["consensus_revenue"] = est.get("consensus_revenue")
+                candidate.metadata["price_target_mean"] = est.get("price_target_mean")
+                if est.get("num_analysts", 0) >= 5:
+                    candidate.score = min(candidate.score * 1.1, 1.0)
+            if isinstance(profile_data, dict) and ticker in profile_data:
+                candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
 
         return unique[: params.get("max_positions", 5)]
 

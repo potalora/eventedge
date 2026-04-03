@@ -41,7 +41,7 @@ class LitigationStrategy:
 
     name = "litigation"
     track = "paper_trade"
-    data_sources = ["courtlistener", "yfinance"]
+    data_sources = ["courtlistener", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -99,6 +99,28 @@ class LitigationStrategy:
                         "cause": docket.get("cause", ""),
                         "needs_llm_analysis": True,
                         "analysis_type": "litigation",
+                    },
+                )
+            )
+
+        # Merge SEC enforcement actions (higher signal quality)
+        openbb_data = data.get("openbb", {})
+        sec_lit = openbb_data.get("sec_litigation", {})
+        sec_releases = sec_lit.get("releases", []) if isinstance(sec_lit, dict) else []
+        for release in sec_releases:
+            title = release.get("title", "")
+            candidates.append(
+                Candidate(
+                    ticker="",  # LLM will resolve from title
+                    date=date,
+                    direction="short",  # Enforcement = bearish for target
+                    score=0.8,  # High base score for SEC actions
+                    metadata={
+                        "source": "sec_enforcement",
+                        "title": title[:200],
+                        "url": release.get("url", ""),
+                        "release_date": release.get("date", ""),
+                        "needs_llm_analysis": True,
                     },
                 )
             )

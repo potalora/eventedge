@@ -24,7 +24,7 @@ class InsiderActivityStrategy:
 
     name = "insider_activity"
     track = "paper_trade"
-    data_sources = ["edgar", "yfinance"]
+    data_sources = ["edgar", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -131,6 +131,28 @@ class InsiderActivityStrategy:
                         },
                     )
                 )
+
+        # Enrich with OpenBB insider data for officer titles and sector
+        openbb_data = data.get("openbb", {})
+        insider_data = openbb_data.get("insider_trading", {})
+        profile_data = openbb_data.get("profile", {})
+        if isinstance(insider_data, dict) or isinstance(profile_data, dict):
+            for candidate in candidates:
+                ticker = candidate.ticker
+                # Officer title weighting
+                if isinstance(insider_data, dict) and ticker in insider_data:
+                    for obb_trade in insider_data[ticker].get("trades", []):
+                        title = (obb_trade.get("title", "") or "").upper()
+                        if any(t in title for t in ["CEO", "CFO", "COO", "CTO", "PRESIDENT"]):
+                            candidate.score = min(candidate.score * 1.3, 1.0)
+                            candidate.metadata["officer_title"] = obb_trade.get("title", "")
+                            break
+                        elif "DIRECTOR" in title:
+                            candidate.metadata["officer_title"] = obb_trade.get("title", "")
+                            break
+                # Sector context
+                if isinstance(profile_data, dict) and ticker in profile_data:
+                    candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
 
         candidates.sort(key=lambda c: c.score, reverse=True)
         return candidates[: params.get("max_positions", 3)]

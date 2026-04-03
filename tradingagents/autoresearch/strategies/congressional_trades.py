@@ -43,7 +43,7 @@ class CongressionalTradesStrategy:
 
     name = "congressional_trades"
     track = "paper_trade"
-    data_sources = ["congress", "yfinance"]
+    data_sources = ["congress", "yfinance", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -65,6 +65,26 @@ class CongressionalTradesStrategy:
         """Screen congressional trade disclosures for purchase clusters."""
         congress_data = data.get("congress", {})
         trades = congress_data.get("recent_trades", [])
+
+        # Try OpenBB government trades first (stable API), fall back to CapitolTrades
+        openbb_data = data.get("openbb", {})
+        govt_trades = openbb_data.get("government_trades", {})
+        obb_trades = govt_trades.get("trades", []) if isinstance(govt_trades, dict) else []
+
+        if obb_trades:
+            # Normalize OpenBB format and inject into congress data
+            normalized = []
+            for t in obb_trades:
+                normalized.append({
+                    "ticker": t.get("ticker", ""),
+                    "transaction_date": t.get("transaction_date", ""),
+                    "transaction_type": t.get("transaction_type", ""),
+                    "amount": t.get("amount", ""),
+                    "representative": t.get("representative", ""),
+                    "chamber": t.get("chamber", ""),
+                })
+            logger.info("Using OpenBB government trades: %d trades", len(normalized))
+            trades = normalized
 
         if not trades:
             return []
