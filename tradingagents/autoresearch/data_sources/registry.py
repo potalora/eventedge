@@ -119,4 +119,12 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     registry.register(RegulationsSource(api_key=config.get("regulations_api_key")))
     registry.register(CourtListenerSource(token=config.get("courtlistener_token")))
 
+    # OpenBB Platform (optional — graceful skip if not installed)
+    try:
+        from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource
+
+        registry.register(OpenBBSource(fmp_api_key=config.get("fmp_api_key")))
+    except ImportError:
+        logger.info("openbb not installed — OpenBBSource skipped")
+
     return registry

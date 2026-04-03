@@ -113,6 +113,7 @@ DEFAULT_CONFIG = {
         # Tickers to exclude from trading (compliance, conflict of interest)
         "blocked_tickers": [],
         # API keys (user provides when ready)
+        "fmp_api_key": "",
         "fred_api_key": "",
         "finnhub_api_key": "",
         "regulations_api_key": "",

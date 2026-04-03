@@ -13,6 +13,7 @@ from tradingagents.autoresearch.data_sources.fred_source import FREDSource
 from tradingagents.autoresearch.data_sources.finnhub_source import FinnhubSource
 from tradingagents.autoresearch.data_sources.regulations_source import RegulationsSource
 from tradingagents.autoresearch.data_sources.courtlistener_source import CourtListenerSource
+from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource
 
 __all__ = [
     "DataSource",
@@ -26,4 +27,5 @@ __all__ = [
     "FinnhubSource",
     "RegulationsSource",
     "CourtListenerSource",
+    "OpenBBSource",
 ]
