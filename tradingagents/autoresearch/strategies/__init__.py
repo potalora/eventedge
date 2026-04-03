@@ -16,6 +16,8 @@ from .regulatory_pipeline import RegulatoryPipelineStrategy
 from .supply_chain import SupplyChainStrategy
 from .litigation import LitigationStrategy
 from .congressional_trades import CongressionalTradesStrategy
+from .govt_contracts import GovtContractsStrategy
+from .state_economics import StateEconomicsStrategy
 
 __all__ = [
     # Protocol and data classes
@@ -32,6 +34,8 @@ __all__ = [
     "FilingAnalysisStrategy",
     "LitigationStrategy",
     "CongressionalTradesStrategy",
+    "GovtContractsStrategy",
+    "StateEconomicsStrategy",
     # Helper
     "get_all_strategies",
     "get_paper_trade_strategies",
@@ -53,4 +57,6 @@ def get_paper_trade_strategies() -> list[StrategyModule]:
         FilingAnalysisStrategy(),
         LitigationStrategy(),
         CongressionalTradesStrategy(),
+        GovtContractsStrategy(),
+        StateEconomicsStrategy(),
     ]

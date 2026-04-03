@@ -38,8 +38,8 @@ class StateEconomicsStrategy:
     """
 
     name = "state_economics"
-    track = "backtest"
-    data_sources = ["yfinance"]
+    track = "paper_trade"
+    data_sources = ["yfinance", "fred", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -58,43 +58,92 @@ class StateEconomicsStrategy:
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
-        """Screen for top-performing regional ETFs by trailing return."""
+        """Screen for regional ETFs using economic indicators + momentum composite.
+
+        Combines FRED economic indicators with ETF momentum for a
+        composite signal. Falls back to pure momentum if FRED unavailable.
+        """
         prices = data.get("yfinance", {}).get("prices", {})
         lookback = params.get("lookback_days", 21)
         top_n = params.get("top_n", 2)
         min_return = params.get("min_return", 0.0)
 
-        regional_returns: list[tuple[str, str, float]] = []
-
+        # Compute momentum scores
+        etf_scores: list[tuple[str, str, float]] = []
         for name, ticker in REGIONAL_ETFS.items():
             df = prices.get(ticker)
             if df is None or df.empty:
                 continue
-
             df = df.loc[:date]
             if len(df) < lookback:
                 continue
-
             close = df["Close"]
-            trailing_return = (close.iloc[-1] / close.iloc[-lookback]) - 1.0
-            regional_returns.append((name, ticker, trailing_return))
+            momentum = (close.iloc[-1] / close.iloc[-lookback]) - 1.0
+            etf_scores.append((name, ticker, momentum))
 
-        if not regional_returns:
+        if not etf_scores:
             return []
 
-        regional_returns.sort(key=lambda x: x[2], reverse=True)
+        # Enrich with FRED economic indicator context
+        fred_data = data.get("fred", {})
+        fred_indicators = fred_data.get("data", {})
+        econ_boost = {}
+        if fred_indicators:
+            # Check if unemployment is declining (bullish for regionals)
+            unemployment = fred_indicators.get("UNRATE", {})
+            if unemployment:
+                values = sorted(unemployment.items())
+                if len(values) >= 2:
+                    recent = values[-1][1]
+                    prior = values[-2][1]
+                    if recent < prior:  # Declining unemployment
+                        econ_boost["KRE"] = 0.02  # Boost regional banks
+                        econ_boost["XRT"] = 0.01  # Boost retail
+                        econ_boost["XHB"] = 0.01  # Boost homebuilders
+
+            # Check initial claims (leading indicator)
+            claims = fred_indicators.get("ICSA", {})
+            if claims:
+                values = sorted(claims.items())
+                if len(values) >= 2:
+                    recent = values[-1][1]
+                    prior = values[-2][1]
+                    if recent < prior:  # Declining claims = bullish
+                        econ_boost["IWN"] = 0.02  # Small-cap value benefits most
+
+        # Combine momentum + economic boost
+        combined_scores = []
+        for name, ticker, momentum in etf_scores:
+            boost = econ_boost.get(ticker, 0.0)
+            combined = momentum + boost
+            combined_scores.append((name, ticker, combined, momentum, boost))
+
+        combined_scores.sort(key=lambda x: x[2], reverse=True)
 
         candidates = []
-        for name, ticker, ret in regional_returns[:top_n]:
-            if ret < min_return:
+        for name, ticker, combined, momentum, boost in combined_scores[:top_n]:
+            if combined < min_return:
                 continue
+            metadata = {
+                "regional_sector": name,
+                "trailing_return": momentum,
+                "econ_boost": boost,
+                "composite_score": combined,
+            }
+
+            # Add factor context from OpenBB
+            openbb_data = data.get("openbb", {})
+            factors = openbb_data.get("factors_fama_french", {})
+            if isinstance(factors, dict) and "factors" in factors:
+                metadata["fama_french"] = factors["factors"]
+
             candidates.append(
                 Candidate(
                     ticker=ticker,
                     date=date,
                     direction="long",
-                    score=ret,
-                    metadata={"regional_sector": name, "trailing_return": ret},
+                    score=combined,
+                    metadata=metadata,
                 )
             )
 

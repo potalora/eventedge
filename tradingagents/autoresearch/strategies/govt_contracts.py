@@ -48,8 +48,8 @@ class GovtContractsStrategy:
     """
 
     name = "govt_contracts"
-    track = "backtest"
-    data_sources = ["yfinance", "usaspending"]
+    track = "paper_trade"
+    data_sources = ["yfinance", "usaspending", "openbb"]
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
@@ -70,41 +70,82 @@ class GovtContractsStrategy:
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
         """Screen for government contractor opportunities.
 
-        In backtest mode, uses defense contractor universe with momentum
-        as a proxy signal (actual contract announcements aren't available
-        historically through the API).
+        Uses USASpending contract data when available, falls back to
+        defense contractor momentum. Enriches with OpenBB profile/estimates.
         """
-        prices = data.get("yfinance", {}).get("prices", {})
-        if not prices:
-            return []
-
         candidates = []
-        for name, ticker in CONTRACTOR_TICKERS.items():
-            df = prices.get(ticker)
-            if df is None or df.empty:
-                continue
 
-            df = df.loc[:date]
-            if len(df) < 30:
-                continue
+        # Try USASpending contract data first
+        usaspending = data.get("usaspending", {})
+        contracts = usaspending.get("data", {}).get("contracts", [])
 
-            # Use 30-day momentum as a proxy for "recent contract win" signal
-            close = df["Close"]
-            momentum = (close.iloc[-1] / close.iloc[-30]) - 1.0
+        if contracts:
+            for contract in contracts:
+                recipient = (contract.get("recipient", "") or "").lower()
+                amount = contract.get("amount", 0) or 0
 
-            # Positive momentum in defense names may indicate contract activity
-            if momentum > 0.02:
+                # Resolve recipient to ticker
+                ticker = None
+                for keyword, t in CONTRACTOR_TICKERS.items():
+                    if keyword in recipient:
+                        ticker = t
+                        break
+
+                if not ticker or amount < 50_000_000:  # $50M minimum
+                    continue
+
+                score = min(amount / 1_000_000_000, 1.0)  # Scale by $1B
                 candidates.append(
                     Candidate(
                         ticker=ticker,
                         date=date,
                         direction="long",
-                        score=momentum,
-                        metadata={"contractor": name, "momentum_30d": momentum},
+                        score=score,
+                        metadata={
+                            "contractor": recipient,
+                            "contract_amount": amount,
+                            "source": "usaspending",
+                        },
                     )
                 )
+        else:
+            # Fallback: momentum-based screening for defense contractors
+            prices = data.get("yfinance", {}).get("prices", {})
+            if prices:
+                for name, ticker in CONTRACTOR_TICKERS.items():
+                    df = prices.get(ticker)
+                    if df is None or df.empty:
+                        continue
+                    df = df.loc[:date]
+                    if len(df) < 30:
+                        continue
+                    close = df["Close"]
+                    momentum = (close.iloc[-1] / close.iloc[-30]) - 1.0
+                    if momentum > 0.02:
+                        candidates.append(
+                            Candidate(
+                                ticker=ticker,
+                                date=date,
+                                direction="long",
+                                score=momentum,
+                                metadata={
+                                    "contractor": name,
+                                    "momentum_30d": momentum,
+                                    "source": "momentum_fallback",
+                                },
+                            )
+                        )
 
-        # Return top candidates by score
+        # Enrich with OpenBB data
+        openbb_data = data.get("openbb", {})
+        profile = openbb_data.get("profile", {})
+        estimates = openbb_data.get("estimates", {})
+        for c in candidates:
+            if isinstance(profile, dict) and c.ticker in profile:
+                c.metadata["sector"] = profile[c.ticker].get("sector", "")
+            if isinstance(estimates, dict) and c.ticker in estimates:
+                c.metadata["price_target_mean"] = estimates[c.ticker].get("price_target_mean")
+
         candidates.sort(key=lambda c: c.score, reverse=True)
         return candidates[: params.get("max_positions", 3)]
 

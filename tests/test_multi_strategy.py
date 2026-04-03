@@ -285,7 +285,7 @@ class TestMultiStrategyEngine:
         )
 
     def test_engine_has_paper_trade_strategies(self, engine):
-        assert len(engine.paper_trade_strategies) == 7
+        assert len(engine.paper_trade_strategies) == 9
         names = {s.name for s in engine.paper_trade_strategies}
         assert "earnings_call" in names
         assert "insider_activity" in names
