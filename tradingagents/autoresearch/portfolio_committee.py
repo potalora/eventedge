@@ -51,6 +51,7 @@ class PortfolioCommittee:
         strategy_confidence: dict[str, float] | None = None,
         current_positions: list[dict] | None = None,
         total_capital: float = 5000.0,
+        enrichment: dict | None = None,
     ) -> list[TradeRecommendation]:
         """Synthesize all signals into ranked trade recommendations.
 
@@ -72,12 +73,14 @@ class PortfolioCommittee:
         strategy_confidence = strategy_confidence or {}
         current_positions = current_positions or []
 
+        enrichment = enrichment or {}
+
         # Try LLM synthesis if enabled and available
         if self._enabled:
             try:
                 llm_result = self._llm_synthesize(
                     signals, regime_context, strategy_confidence,
-                    current_positions, total_capital,
+                    current_positions, total_capital, enrichment,
                 )
                 if llm_result:
                     return llm_result
@@ -86,7 +89,7 @@ class PortfolioCommittee:
 
         return self._rule_based_synthesize(
             signals, regime_context, strategy_confidence,
-            current_positions, total_capital,
+            current_positions, total_capital, enrichment,
         )
 
     def _rule_based_synthesize(
@@ -96,6 +99,7 @@ class PortfolioCommittee:
         strategy_confidence: dict[str, float],
         current_positions: list[dict],
         total_capital: float,
+        enrichment: dict | None = None,
     ) -> list[TradeRecommendation]:
         """Rule-based signal synthesis fallback.
 
@@ -183,7 +187,21 @@ class PortfolioCommittee:
                 regime_alignment=regime_alignment,
             ))
 
-        # Enforce sector concentration
+        # Enforce sector concentration (use enrichment profiles if available)
+        enrichment = enrichment or {}
+        profiles = enrichment.get("profiles", {})
+        if profiles:
+            sector_alloc: dict[str, float] = defaultdict(float)
+            for rec in recommendations:
+                sector = profiles.get(rec.ticker, {}).get("sector", "Unknown")
+                sector_alloc[sector] += rec.position_size_pct
+
+            for rec in recommendations:
+                sector = profiles.get(rec.ticker, {}).get("sector", "Unknown")
+                if sector_alloc[sector] > self._max_sector:
+                    scale = self._max_sector / sector_alloc[sector]
+                    rec.position_size_pct *= scale
+
         recommendations = self._enforce_sector_limits(recommendations)
 
         # Sort by confidence descending
@@ -227,6 +245,7 @@ class PortfolioCommittee:
         strategy_confidence: dict[str, float],
         current_positions: list[dict],
         total_capital: float,
+        enrichment: dict | None = None,
     ) -> list[TradeRecommendation] | None:
         """Single LLM call for signal synthesis. Returns None on failure."""
         client = self._get_client()
@@ -235,7 +254,7 @@ class PortfolioCommittee:
 
         prompt = self._build_prompt(
             signals, regime_context, strategy_confidence,
-            current_positions, total_capital,
+            current_positions, total_capital, enrichment,
         )
 
         try:
@@ -261,6 +280,7 @@ Keep position_size_pct between 0.01 and 0.10. Keep rationale under 80 chars.""",
         strategy_confidence: dict[str, float],
         current_positions: list[dict],
         total_capital: float,
+        enrichment: dict | None = None,
     ) -> str:
         """Build synthesis prompt for LLM."""
         # Compact signal summary
@@ -278,6 +298,23 @@ Keep position_size_pct between 0.01 and 0.10. Keep rationale under 80 chars.""",
         for p in current_positions[:10]:
             pos_lines.append(f"  {p.get('ticker','?')} {p.get('direction','?')}")
 
+        # Add enrichment context if available
+        enrichment_str = ""
+        enrichment = enrichment or {}
+        profiles = enrichment.get("profiles", {})
+        short_interest = enrichment.get("short_interest", {})
+        factors = enrichment.get("factors", {})
+
+        if profiles:
+            sector_lines = [f"  {t}: {p.get('sector', '?')}" for t, p in list(profiles.items())[:10]]
+            enrichment_str += "\nSector classification:\n" + "\n".join(sector_lines)
+        if short_interest:
+            si_lines = [f"  {t}: {s.get('short_pct_of_float', 0):.1f}% short"
+                        for t, s in list(short_interest.items())[:10]]
+            enrichment_str += "\nShort interest:\n" + "\n".join(si_lines)
+        if factors:
+            enrichment_str += f"\nFama-French factors: {json.dumps(factors, default=str)}"
+
         return f"""Capital: ${total_capital:,.0f}
 Max position: {self._max_position:.0%}
 Max sector: {self._max_sector:.0%}
@@ -291,6 +328,7 @@ Signals:
 
 Current positions:
 {chr(10).join(pos_lines) or '  (none)'}
+{enrichment_str}
 
 Synthesize into ranked trade list. Return JSON array."""
 

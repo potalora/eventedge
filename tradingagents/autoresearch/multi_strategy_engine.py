@@ -151,6 +151,7 @@ class MultiStrategyEngine:
         data: dict | None = None,
         shared_signals: list[dict] | None = None,
         shared_regime: dict | None = None,
+        enrichment: dict | None = None,
     ) -> dict:
         """Paper trading loop: screen → committee → risk gate → execute.
 
@@ -233,6 +234,7 @@ class MultiStrategyEngine:
             strategy_confidence=strategy_confidence,
             current_positions=bridge.get_positions(),
             total_capital=bridge.get_account().portfolio_value,
+            enrichment=enrichment,
         )
 
         # ------------------------------------------------------------------

@@ -171,6 +171,7 @@ def _make_fake_committee(max_per_day: int = 3):
         strategy_confidence=None,
         current_positions=None,
         total_capital=None,
+        **kwargs,
     ):
         recs = []
         seen: set[str] = set()
@@ -421,6 +422,7 @@ class TestThirtyDayFullLifecycle:
             strategy_confidence=None,
             current_positions=None,
             total_capital=None,
+            **kwargs,
         ):
             recs = []
             seen: set[str] = set()
@@ -602,6 +604,7 @@ class TestThirtyDayCohortDivergence:
             strategy_confidence=None,
             current_positions=None,
             total_capital=None,
+            **kwargs,
         ):
             recs = []
             seen: set[str] = set()

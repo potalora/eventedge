@@ -477,7 +477,7 @@ class TestMultiDaySimulation:
         mock_fetch.return_value = {"yfinance": {"prices": prices}}
 
         # Mock committee: approve all signals with moderate sizing
-        def fake_committee(signals, regime_context=None, strategy_confidence=None, current_positions=None, total_capital=None):
+        def fake_committee(signals, regime_context=None, strategy_confidence=None, current_positions=None, total_capital=None, **kwargs):
             from tradingagents.autoresearch.portfolio_committee import TradeRecommendation as Recommendation
             recs = []
             seen = set()
@@ -555,7 +555,7 @@ class TestMultiDaySimulation:
         control_engine._price_cache = prices
         adaptive_engine._price_cache = prices
 
-        def fake_committee(signals, regime_context=None, strategy_confidence=None, current_positions=None, total_capital=None):
+        def fake_committee(signals, regime_context=None, strategy_confidence=None, current_positions=None, total_capital=None, **kwargs):
             from tradingagents.autoresearch.portfolio_committee import TradeRecommendation as Recommendation
             recs = []
             seen = set()

@@ -91,6 +91,9 @@ class CohortOrchestrator:
         )
         logger.info("Shared signals: %d enriched signals", len(shared_signals))
 
+        # Fetch OpenBB enrichment for signal tickers
+        enrichment = self._fetch_openbb_enrichment(shared_signals)
+
         # Run each cohort with shared signals (only confidence + execution differs)
         results: dict[str, Any] = {}
         for cohort in self.cohorts:
@@ -101,6 +104,7 @@ class CohortOrchestrator:
                     trading_date=trading_date,
                     shared_signals=shared_signals,
                     shared_regime=shared_regime,
+                    enrichment=enrichment,
                 )
                 results[name] = result
                 n_signals = len(result.get("signals", []))
@@ -115,6 +119,51 @@ class CohortOrchestrator:
                 results[name] = {"error": True}
 
         return results
+
+    def _fetch_openbb_enrichment(self, signals: list[dict]) -> dict:
+        """Fetch OpenBB data to enrich portfolio committee decisions.
+
+        Returns dict with profiles, short_interest, factors for signal tickers.
+        """
+        enrichment: dict[str, Any] = {}
+
+        tickers = list({s.get("ticker", "") for s in signals if s.get("ticker")})
+        if not tickers:
+            return enrichment
+
+        first_engine = self.cohorts[0]["engine"]
+        registry = getattr(first_engine, "registry", None)
+        if registry is None:
+            return enrichment
+
+        openbb_source = registry.get("openbb")
+        if openbb_source is None or not openbb_source.is_available():
+            return enrichment
+
+        # Fetch profiles for all tickers
+        profiles = {}
+        for ticker in tickers:
+            result = openbb_source.fetch({"method": "equity_profile", "ticker": ticker})
+            if "error" not in result:
+                profiles[ticker] = result
+        if profiles:
+            enrichment["profiles"] = profiles
+
+        # Fetch short interest for all tickers
+        short_interest = {}
+        for ticker in tickers:
+            result = openbb_source.fetch({"method": "equity_short_interest", "ticker": ticker})
+            if "error" not in result:
+                short_interest[ticker] = result
+        if short_interest:
+            enrichment["short_interest"] = short_interest
+
+        # Fetch Fama-French factors (once, not per ticker)
+        factors = openbb_source.fetch({"method": "factors_fama_french"})
+        if "error" not in factors:
+            enrichment["factors"] = factors.get("factors", {})
+
+        return enrichment
 
     def run_learning(self) -> dict[str, Any]:
         """Run learning loop for cohorts that have it enabled.
