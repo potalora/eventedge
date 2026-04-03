@@ -38,6 +38,19 @@ dependencies = [
     "apscheduler>=3.11.0",
 ]
 
+[project.optional-dependencies]
+openbb = [
+    "openbb-core",
+    "openbb-equity",
+    "openbb-derivatives",
+    "openbb-regulators",
+    "openbb-sec",
+    "openbb-yfinance",
+    "openbb-fmp",
+    "openbb-finra",
+    "openbb-famafrench",
+]
+
 [project.scripts]
 tradingagents = "cli.main:app"
 

@@ -15,36 +15,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Fields to extract from each OBBject result (safe getattr with defaults)
-_PROFILE_FIELDS = (
-    "symbol", "name", "sector", "industry", "market_cap", "description",
-)
-_ESTIMATES_FIELDS = (
-    "symbol", "target_high", "target_low", "target_consensus", "target_median",
-)
-_INSIDER_FIELDS = (
-    "symbol", "filing_date", "transaction_date", "owner_name", "owner_title",
-    "transaction_type", "securities_transacted", "price",
-)
-_SHORT_FIELDS = (
-    "settlement_date", "symbol", "current_short_position",
-    "previous_short_position", "average_daily_volume", "days_to_cover",
-)
-_GOVT_TRADE_FIELDS = (
-    "symbol", "date", "transaction_date", "representative", "chamber",
-    "owner", "asset_type", "amount", "type", "asset_description",
-)
-_OPTION_FIELDS = (
-    "underlying_symbol", "contract_symbol", "expiration", "strike",
-    "option_type", "open_interest", "volume", "implied_volatility",
-)
-_LITIGATION_FIELDS = ("published", "title", "summary", "id", "link")
-_FF_FIELDS = ("date", "mkt_rf", "smb", "hml", "rmw", "cma", "rf")
-
-
-def _extract(item: Any, fields: tuple[str, ...]) -> dict[str, Any]:
-    """Safely extract fields from an OBBject result item."""
-    return {f: getattr(item, f, None) for f in fields}
+def _getfield(item: Any, field: str, default: Any = None) -> Any:
+    """Safely get a field from an OBBject result item."""
+    return getattr(item, field, default)
 
 
 class OpenBBSource:
@@ -135,132 +108,231 @@ class OpenBBSource:
     # ------------------------------------------------------------------
 
     def _equity_profile(self, params: dict[str, Any]) -> dict[str, Any]:
-        symbol = params.get("symbol")
-        if not symbol:
-            return {"error": "equity_profile requires 'symbol'"}
+        ticker = params.get("ticker") or params.get("symbol")
+        if not ticker:
+            return {"error": "equity_profile requires 'ticker'"}
 
-        ckey = self._cache_key("equity_profile", params)
+        ckey = f"equity_profile|{ticker}"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
-        resp = obb.equity.profile(symbol=symbol, provider="yfinance")
+        resp = obb.equity.profile(symbol=ticker, provider="yfinance")
         if not resp.results:
-            return {"error": f"No profile data for {symbol}"}
+            return {"error": f"No profile data for {ticker}"}
 
-        result = _extract(resp.results[0], _PROFILE_FIELDS)
+        item = resp.results[0]
+        result = {
+            "sector": _getfield(item, "sector", ""),
+            "industry": _getfield(item, "industry", ""),
+            "market_cap": _getfield(item, "market_cap", 0),
+            "name": _getfield(item, "name", ""),
+            "description": str(_getfield(item, "long_business_summary", "") or
+                               _getfield(item, "description", ""))[:500],
+        }
         self._cache[ckey] = result
         return result
 
     def _equity_estimates(self, params: dict[str, Any]) -> dict[str, Any]:
-        symbol = params.get("symbol")
-        if not symbol:
-            return {"error": "equity_estimates requires 'symbol'"}
+        ticker = params.get("ticker") or params.get("symbol")
+        if not ticker:
+            return {"error": "equity_estimates requires 'ticker'"}
 
-        ckey = self._cache_key("equity_estimates", params)
+        ckey = f"equity_estimates|{ticker}"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
-        resp = obb.equity.estimates.consensus(symbol=symbol, provider="fmp")
+        resp = obb.equity.estimates.consensus(symbol=ticker, provider="fmp")
         if not resp.results:
-            return {"error": f"No estimates for {symbol}"}
+            return {"error": f"No estimates for {ticker}"}
 
-        result = _extract(resp.results[0], _ESTIMATES_FIELDS)
+        item = resp.results[0]
+        result = {
+            "consensus_eps": _getfield(item, "estimated_eps_avg")
+                             or _getfield(item, "target_consensus"),
+            "consensus_revenue": _getfield(item, "estimated_revenue_avg"),
+            "price_target_mean": _getfield(item, "target_consensus")
+                                 or _getfield(item, "price_target_average"),
+            "price_target_high": _getfield(item, "target_high")
+                                 or _getfield(item, "price_target_high"),
+            "price_target_low": _getfield(item, "target_low")
+                                or _getfield(item, "price_target_low"),
+            "num_analysts": _getfield(item, "number_of_analysts", 0)
+                            or _getfield(item, "target_median", 0),
+        }
         self._cache[ckey] = result
         return result
 
     def _equity_insider_trading(self, params: dict[str, Any]) -> dict[str, Any]:
-        symbol = params.get("symbol")
-        if not symbol:
-            return {"error": "equity_insider_trading requires 'symbol'"}
+        ticker = params.get("ticker") or params.get("symbol")
+        if not ticker:
+            return {"error": "equity_insider_trading requires 'ticker'"}
 
-        limit = params.get("limit", 100)
-        ckey = self._cache_key("equity_insider_trading", params)
+        ckey = f"equity_insider_trading|{ticker}"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
         resp = obb.equity.ownership.insider_trading(
-            symbol=symbol, limit=limit, provider="sec"
+            symbol=ticker, limit=100, provider="sec"
         )
-        trades = [_extract(item, _INSIDER_FIELDS) for item in (resp.results or [])]
+        trades = []
+        for item in resp.results or []:
+            shares = _getfield(item, "securities_transacted", 0)
+            price = _getfield(item, "price", 0.0)
+            trades.append({
+                "owner": _getfield(item, "owner_name", ""),
+                "title": _getfield(item, "owner_title", ""),
+                "transaction_type": _getfield(item, "transaction_type", ""),
+                "shares": shares,
+                "price": price,
+                "value": (shares or 0) * (price or 0),
+                "date": str(_getfield(item, "filing_date", "")),
+                "ownership_type": _getfield(item, "owner_type", ""),
+            })
+
         result = {"trades": trades}
         self._cache[ckey] = result
         return result
 
     def _equity_short_interest(self, params: dict[str, Any]) -> dict[str, Any]:
-        symbol = params.get("symbol")
-        if not symbol:
-            return {"error": "equity_short_interest requires 'symbol'"}
+        ticker = params.get("ticker") or params.get("symbol")
+        if not ticker:
+            return {"error": "equity_short_interest requires 'ticker'"}
 
-        ckey = self._cache_key("equity_short_interest", params)
+        ckey = f"equity_short_interest|{ticker}"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
-        resp = obb.equity.shorts.short_interest(symbol=symbol, provider="finra")
-        records = [_extract(item, _SHORT_FIELDS) for item in (resp.results or [])]
-        result = {"records": records}
+        resp = obb.equity.shorts.short_interest(symbol=ticker, provider="finra")
+        if not resp.results:
+            return {"error": f"No short interest data for {ticker}"}
+
+        item = resp.results[0]
+        short_pos = _getfield(item, "current_short_position", 0)
+        avg_vol = _getfield(item, "average_daily_volume", 1)
+        result = {
+            "short_interest": short_pos,
+            "short_pct_of_float": _getfield(item, "short_percent_of_float", 0.0),
+            "days_to_cover": _getfield(item, "days_to_cover", 0.0)
+                             or (short_pos / avg_vol if avg_vol else 0.0),
+            "date": str(_getfield(item, "settlement_date", "")),
+        }
         self._cache[ckey] = result
         return result
 
     def _equity_government_trades(self, params: dict[str, Any]) -> dict[str, Any]:
-        symbol = params.get("symbol")  # optional
-        chamber = params.get("chamber", "all")
-        limit = params.get("limit", 100)
-
-        ckey = self._cache_key("equity_government_trades", params)
+        ckey = "equity_government_trades"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
-        resp = obb.equity.ownership.government_trades(
-            symbol=symbol, chamber=chamber, limit=limit, provider="fmp"
-        )
-        trades = [_extract(item, _GOVT_TRADE_FIELDS) for item in (resp.results or [])]
+        resp = obb.equity.ownership.government_trades(provider="fmp")
+        trades = []
+        for item in resp.results or []:
+            trades.append({
+                "ticker": _getfield(item, "symbol", "")
+                          or _getfield(item, "ticker", ""),
+                "representative": _getfield(item, "representative", ""),
+                "chamber": _getfield(item, "chamber", ""),
+                "transaction_type": _getfield(item, "type", "")
+                                    or _getfield(item, "transaction_type", ""),
+                "amount": _getfield(item, "amount", ""),
+                "transaction_date": str(_getfield(item, "transaction_date", "")
+                                        or _getfield(item, "date", "")),
+                "district": _getfield(item, "district", ""),
+            })
+
         result = {"trades": trades}
         self._cache[ckey] = result
         return result
 
     def _derivatives_options_unusual(self, params: dict[str, Any]) -> dict[str, Any]:
-        symbol = params.get("symbol")
-        if not symbol:
-            return {"error": "derivatives_options_unusual requires 'symbol'"}
+        ticker = params.get("ticker") or params.get("symbol")
+        if not ticker:
+            return {"error": "derivatives_options_unusual requires 'ticker'"}
 
-        ckey = self._cache_key("derivatives_options_unusual", params)
+        ckey = f"derivatives_options_unusual|{ticker}"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
-        resp = obb.derivatives.options.chains(symbol=symbol, provider="yfinance")
-        contracts = [_extract(item, _OPTION_FIELDS) for item in (resp.results or [])]
-        result = {"contracts": contracts}
+        resp = obb.derivatives.options.chains(symbol=ticker, provider="yfinance")
+        unusual = []
+        for item in resp.results or []:
+            volume = _getfield(item, "volume", 0) or 0
+            oi = _getfield(item, "open_interest", 0) or 0
+            unusual.append({
+                "ticker": _getfield(item, "underlying_symbol", ticker),
+                "contract_type": _getfield(item, "option_type", ""),
+                "strike": _getfield(item, "strike", 0.0),
+                "expiration": str(_getfield(item, "expiration", "")),
+                "volume": volume,
+                "open_interest": oi,
+                "vol_oi_ratio": round(volume / max(oi, 1), 2),
+            })
+
+        result = {"unusual": unusual}
         self._cache[ckey] = result
         return result
 
     def _regulators_sec_litigation(self, params: dict[str, Any]) -> dict[str, Any]:
-        ckey = self._cache_key("regulators_sec_litigation", params)
+        ckey = "regulators_sec_litigation"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
         resp = obb.regulators.sec.rss_litigation(provider="sec")
-        releases = [_extract(item, _LITIGATION_FIELDS) for item in (resp.results or [])]
+        releases = []
+        for item in resp.results or []:
+            releases.append({
+                "title": _getfield(item, "title", ""),
+                "date": str(_getfield(item, "published", "")),
+                "url": _getfield(item, "link", ""),
+                "category": _getfield(item, "category", ""),
+            })
+
         result = {"releases": releases}
         self._cache[ckey] = result
         return result
 
     def _factors_fama_french(self, params: dict[str, Any]) -> dict[str, Any]:
-        ckey = self._cache_key("factors_fama_french", params)
+        model = params.get("model", "5")
+        ckey = f"factors_fama_french|{model}"
         if ckey in self._cache:
             return self._cache[ckey]
 
         obb = self._get_obb()
         resp = obb.famafrench.factors(provider="famafrench")
-        factors = [_extract(item, _FF_FIELDS) for item in (resp.results or [])]
-        result = {"factors": factors}
-        if hasattr(resp, "extra") and resp.extra:
-            result["metadata"] = resp.extra.get("results_metadata", {})
+        if not resp.results:
+            return {"factors": {}, "history": {}}
+
+        # Extract latest row and normalize to spec keys
+        latest = resp.results[-1]
+        factor_map = {
+            "Mkt-RF": "mkt_rf", "SMB": "smb", "HML": "hml",
+            "RMW": "rmw", "CMA": "cma", "RF": "rf",
+        }
+        factors = {}
+        for spec_key, obb_key in factor_map.items():
+            val = _getfield(latest, obb_key)
+            if val is not None:
+                factors[spec_key] = float(val)
+
+        # Build trailing 12 months history
+        history = {}
+        for item in resp.results[-12:]:
+            date_str = str(_getfield(item, "date", ""))
+            row = {}
+            for spec_key, obb_key in factor_map.items():
+                val = _getfield(item, obb_key)
+                if val is not None:
+                    row[spec_key] = float(val)
+            if date_str:
+                history[date_str] = row
+
+        result = {"factors": factors, "history": history}
         self._cache[ckey] = result
         return result

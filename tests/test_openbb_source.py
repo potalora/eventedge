@@ -39,8 +39,7 @@ def source():
 @pytest.fixture()
 def mock_obb():
     """Return a deeply mocked obb object matching the SDK structure."""
-    obb = MagicMock()
-    return obb
+    return MagicMock()
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +59,6 @@ class TestProtocol:
 
     def test_is_available_when_openbb_missing(self, source):
         with patch.dict(sys.modules, {"openbb": None}):
-            # importlib.import_module raises for None sentinel
             assert source.is_available() is False
 
     def test_unknown_method_returns_error(self, source):
@@ -73,7 +71,7 @@ class TestProtocol:
 
 
 # ---------------------------------------------------------------------------
-# equity_profile
+# equity_profile — normalized keys: sector, industry, market_cap, name, description
 # ---------------------------------------------------------------------------
 
 class TestEquityProfile:
@@ -84,18 +82,19 @@ class TestEquityProfile:
             "sector": "Technology",
             "industry": "Consumer Electronics",
             "market_cap": 3_000_000_000_000,
-            "description": "Apple designs consumer electronics.",
+            "long_business_summary": "Apple designs consumer electronics.",
         }])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_profile", "ticker": "AAPL"})
 
-        assert result["symbol"] == "AAPL"
         assert result["name"] == "Apple Inc."
         assert result["sector"] == "Technology"
+        assert result["industry"] == "Consumer Electronics"
         assert result["market_cap"] == 3_000_000_000_000
+        assert "Apple designs" in result["description"]
         mock_obb.equity.profile.assert_called_once_with(symbol="AAPL", provider="yfinance")
 
-    def test_equity_profile_missing_symbol(self, source, mock_obb):
+    def test_equity_profile_missing_ticker(self, source, mock_obb):
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "equity_profile"})
         assert "error" in result
@@ -103,40 +102,43 @@ class TestEquityProfile:
     def test_equity_profile_empty_results(self, source, mock_obb):
         mock_obb.equity.profile.return_value = _make_obbject([])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_profile", "ticker": "AAPL"})
         assert "error" in result
 
     def test_equity_profile_api_error(self, source, mock_obb):
         mock_obb.equity.profile.side_effect = Exception("API down")
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_profile", "ticker": "AAPL"})
         assert "error" in result
 
 
 # ---------------------------------------------------------------------------
-# equity_estimates
+# equity_estimates — normalized keys: consensus_eps, consensus_revenue,
+#   price_target_mean, price_target_high, price_target_low, num_analysts
 # ---------------------------------------------------------------------------
 
 class TestEquityEstimates:
     def test_equity_estimates_success(self, source, mock_obb):
         mock_obb.equity.estimates.consensus.return_value = _make_obbject([{
             "symbol": "AAPL",
+            "estimated_eps_avg": 7.12,
+            "estimated_revenue_avg": 410_000_000_000,
+            "target_consensus": 215.0,
             "target_high": 250.0,
             "target_low": 180.0,
-            "target_consensus": 215.0,
-            "target_median": 212.0,
+            "number_of_analysts": 38,
         }])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_estimates", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_estimates", "ticker": "AAPL"})
 
-        assert result["symbol"] == "AAPL"
-        assert result["target_consensus"] == 215.0
-        assert result["target_high"] == 250.0
-        mock_obb.equity.estimates.consensus.assert_called_once_with(
-            symbol="AAPL", provider="fmp"
-        )
+        assert result["consensus_eps"] == 7.12
+        assert result["consensus_revenue"] == 410_000_000_000
+        assert result["price_target_mean"] == 215.0
+        assert result["price_target_high"] == 250.0
+        assert result["price_target_low"] == 180.0
+        assert result["num_analysts"] == 38
 
-    def test_equity_estimates_missing_symbol(self, source, mock_obb):
+    def test_equity_estimates_missing_ticker(self, source, mock_obb):
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "equity_estimates"})
         assert "error" in result
@@ -144,12 +146,13 @@ class TestEquityEstimates:
     def test_equity_estimates_api_error(self, source, mock_obb):
         mock_obb.equity.estimates.consensus.side_effect = Exception("timeout")
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_estimates", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_estimates", "ticker": "AAPL"})
         assert "error" in result
 
 
 # ---------------------------------------------------------------------------
-# equity_insider_trading
+# equity_insider_trading — normalized keys per trade:
+#   owner, title, transaction_type, shares, price, value, date, ownership_type
 # ---------------------------------------------------------------------------
 
 class TestEquityInsiderTrading:
@@ -164,6 +167,7 @@ class TestEquityInsiderTrading:
                 "transaction_type": "S-Sale",
                 "securities_transacted": 50000,
                 "price": 195.5,
+                "owner_type": "officer",
             },
             {
                 "symbol": "AAPL",
@@ -174,38 +178,41 @@ class TestEquityInsiderTrading:
                 "transaction_type": "P-Purchase",
                 "securities_transacted": 10000,
                 "price": 190.0,
+                "owner_type": "officer",
             },
         ])
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({
                 "method": "equity_insider_trading",
-                "symbol": "AAPL",
-                "limit": 50,
+                "ticker": "AAPL",
             })
 
         assert len(result["trades"]) == 2
-        assert result["trades"][0]["owner_name"] == "Tim Cook"
-        mock_obb.equity.ownership.insider_trading.assert_called_once_with(
-            symbol="AAPL", limit=50, provider="sec"
-        )
+        trade = result["trades"][0]
+        assert trade["owner"] == "Tim Cook"
+        assert trade["title"] == "CEO"
+        assert trade["transaction_type"] == "S-Sale"
+        assert trade["shares"] == 50000
+        assert trade["price"] == 195.5
+        assert trade["value"] == 50000 * 195.5
+        assert trade["date"] == "2026-03-15"
+        assert trade["ownership_type"] == "officer"
 
-    def test_insider_trading_missing_symbol(self, source, mock_obb):
+    def test_insider_trading_missing_ticker(self, source, mock_obb):
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "equity_insider_trading"})
         assert "error" in result
 
-    def test_insider_trading_default_limit(self, source, mock_obb):
+    def test_insider_trading_empty(self, source, mock_obb):
         mock_obb.equity.ownership.insider_trading.return_value = _make_obbject([])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_insider_trading", "symbol": "AAPL"})
-        # Should use default limit=100
-        mock_obb.equity.ownership.insider_trading.assert_called_once_with(
-            symbol="AAPL", limit=100, provider="sec"
-        )
+            result = source.fetch({"method": "equity_insider_trading", "ticker": "AAPL"})
+        assert result == {"trades": []}
 
 
 # ---------------------------------------------------------------------------
-# equity_short_interest
+# equity_short_interest — normalized flat dict:
+#   short_interest, short_pct_of_float, days_to_cover, date
 # ---------------------------------------------------------------------------
 
 class TestEquityShortInterest:
@@ -217,20 +224,22 @@ class TestEquityShortInterest:
             "previous_short_position": 115_000_000,
             "average_daily_volume": 80_000_000,
             "days_to_cover": 1.5,
+            "short_percent_of_float": 0.98,
         }])
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({
                 "method": "equity_short_interest",
-                "symbol": "AAPL",
+                "ticker": "AAPL",
             })
 
-        assert result["records"][0]["symbol"] == "AAPL"
-        assert result["records"][0]["current_short_position"] == 120_000_000
-        mock_obb.equity.shorts.short_interest.assert_called_once_with(
-            symbol="AAPL", provider="finra"
-        )
+        assert result["short_interest"] == 120_000_000
+        assert result["short_pct_of_float"] == 0.98
+        assert result["days_to_cover"] == 1.5
+        assert result["date"] == "2026-03-15"
+        # Flat dict, not wrapped in records array
+        assert "records" not in result
 
-    def test_short_interest_missing_symbol(self, source, mock_obb):
+    def test_short_interest_missing_ticker(self, source, mock_obb):
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "equity_short_interest"})
         assert "error" in result
@@ -238,12 +247,13 @@ class TestEquityShortInterest:
     def test_short_interest_api_error(self, source, mock_obb):
         mock_obb.equity.shorts.short_interest.side_effect = Exception("FINRA down")
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_short_interest", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
         assert "error" in result
 
 
 # ---------------------------------------------------------------------------
-# equity_government_trades
+# equity_government_trades — normalized keys per trade:
+#   ticker, representative, chamber, transaction_type, amount, transaction_date, district
 # ---------------------------------------------------------------------------
 
 class TestEquityGovernmentTrades:
@@ -259,47 +269,42 @@ class TestEquityGovernmentTrades:
                 "asset_type": "Stock",
                 "amount": "$1,000,001 - $5,000,000",
                 "type": "purchase",
+                "district": "CA-11",
             },
         ])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({
-                "method": "equity_government_trades",
-                "symbol": "AAPL",
-            })
+            result = source.fetch({"method": "equity_government_trades"})
 
         assert len(result["trades"]) == 1
-        assert result["trades"][0]["representative"] == "Nancy Pelosi"
-        mock_obb.equity.ownership.government_trades.assert_called_once_with(
-            symbol="AAPL", chamber="all", limit=100, provider="fmp"
-        )
+        trade = result["trades"][0]
+        assert trade["ticker"] == "AAPL"
+        assert trade["representative"] == "Nancy Pelosi"
+        assert trade["chamber"] == "house"
+        assert trade["transaction_type"] == "purchase"
+        assert trade["amount"] == "$1,000,001 - $5,000,000"
+        assert trade["transaction_date"] == "2026-03-05"
+        assert trade["district"] == "CA-11"
 
-    def test_government_trades_with_chamber(self, source, mock_obb):
-        mock_obb.equity.ownership.government_trades.return_value = _make_obbject([])
-        with patch.object(source, "_get_obb", return_value=mock_obb):
-            source.fetch({
-                "method": "equity_government_trades",
-                "symbol": "AAPL",
-                "chamber": "senate",
-            })
-        mock_obb.equity.ownership.government_trades.assert_called_once_with(
-            symbol="AAPL", chamber="senate", limit=100, provider="fmp"
-        )
-
-    def test_government_trades_no_symbol(self, source, mock_obb):
-        """Should work without symbol (returns recent trades for all)."""
+    def test_government_trades_empty(self, source, mock_obb):
         mock_obb.equity.ownership.government_trades.return_value = _make_obbject([])
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "equity_government_trades"})
-        # No error — symbol is optional for government_trades
-        assert "trades" in result
+        assert result == {"trades": []}
+
+    def test_government_trades_api_error(self, source, mock_obb):
+        mock_obb.equity.ownership.government_trades.side_effect = Exception("FMP down")
+        with patch.object(source, "_get_obb", return_value=mock_obb):
+            result = source.fetch({"method": "equity_government_trades"})
+        assert "error" in result
 
 
 # ---------------------------------------------------------------------------
-# derivatives_options_unusual
+# derivatives_options_unusual — normalized keys:
+#   unusual: [{ticker, contract_type, strike, expiration, volume, open_interest, vol_oi_ratio}]
 # ---------------------------------------------------------------------------
 
 class TestDerivativesOptionsUnusual:
-    def test_options_chains_success(self, source, mock_obb):
+    def test_options_unusual_success(self, source, mock_obb):
         mock_obb.derivatives.options.chains.return_value = _make_obbject([
             {
                 "underlying_symbol": "AAPL",
@@ -315,16 +320,19 @@ class TestDerivativesOptionsUnusual:
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({
                 "method": "derivatives_options_unusual",
-                "symbol": "AAPL",
+                "ticker": "AAPL",
             })
 
-        assert len(result["contracts"]) == 1
-        assert result["contracts"][0]["strike"] == 200.0
-        mock_obb.derivatives.options.chains.assert_called_once_with(
-            symbol="AAPL", provider="yfinance"
-        )
+        assert len(result["unusual"]) == 1
+        item = result["unusual"][0]
+        assert item["ticker"] == "AAPL"
+        assert item["contract_type"] == "call"
+        assert item["strike"] == 200.0
+        assert item["volume"] == 12000
+        assert item["open_interest"] == 50000
+        assert item["vol_oi_ratio"] == round(12000 / 50000, 2)
 
-    def test_options_missing_symbol(self, source, mock_obb):
+    def test_options_missing_ticker(self, source, mock_obb):
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "derivatives_options_unusual"})
         assert "error" in result
@@ -334,13 +342,14 @@ class TestDerivativesOptionsUnusual:
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({
                 "method": "derivatives_options_unusual",
-                "symbol": "AAPL",
+                "ticker": "AAPL",
             })
         assert "error" in result
 
 
 # ---------------------------------------------------------------------------
-# regulators_sec_litigation
+# regulators_sec_litigation — normalized keys:
+#   releases: [{title, date, url, category}]
 # ---------------------------------------------------------------------------
 
 class TestRegulatorsSecLitigation:
@@ -352,21 +361,18 @@ class TestRegulatorsSecLitigation:
                 "summary": "Fraud complaint filed.",
                 "id": "LR-12345",
                 "link": "https://sec.gov/litigation/12345",
-            },
-            {
-                "published": "2026-03-18T10:00:00",
-                "title": "SEC Charges Company Y",
-                "summary": "Insider trading case.",
-                "id": "LR-12346",
-                "link": "https://sec.gov/litigation/12346",
+                "category": "litigation",
             },
         ])
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "regulators_sec_litigation"})
 
-        assert len(result["releases"]) == 2
-        assert result["releases"][0]["title"] == "SEC Charges Company X"
-        mock_obb.regulators.sec.rss_litigation.assert_called_once_with(provider="sec")
+        assert len(result["releases"]) == 1
+        release = result["releases"][0]
+        assert release["title"] == "SEC Charges Company X"
+        assert release["date"] == "2026-03-20T12:00:00"
+        assert release["url"] == "https://sec.gov/litigation/12345"
+        assert release["category"] == "litigation"
 
     def test_sec_litigation_api_error(self, source, mock_obb):
         mock_obb.regulators.sec.rss_litigation.side_effect = Exception("SEC down")
@@ -376,26 +382,37 @@ class TestRegulatorsSecLitigation:
 
 
 # ---------------------------------------------------------------------------
-# factors_fama_french
+# factors_fama_french — normalized keys:
+#   factors: {"Mkt-RF": float, "SMB": float, ...}, history: dict
 # ---------------------------------------------------------------------------
 
 class TestFactorsFamaFrench:
     def test_fama_french_success(self, source, mock_obb):
-        mock_obb.famafrench.factors.return_value = _make_obbject(
-            [
-                {"date": "2026-03-01", "mkt_rf": 0.01, "smb": 0.002, "hml": -0.001,
-                 "rmw": 0.003, "cma": -0.002, "rf": 0.004},
-                {"date": "2026-02-01", "mkt_rf": -0.02, "smb": 0.001, "hml": 0.003,
-                 "rmw": -0.001, "cma": 0.001, "rf": 0.004},
-            ],
-            extra={"results_metadata": {"dataset": "F-F_Research_Data_5_Factors_2x3"}},
-        )
+        mock_obb.famafrench.factors.return_value = _make_obbject([
+            {"date": "2026-02-01", "mkt_rf": -0.02, "smb": 0.001, "hml": 0.003,
+             "rmw": -0.001, "cma": 0.001, "rf": 0.004},
+            {"date": "2026-03-01", "mkt_rf": 0.01, "smb": 0.002, "hml": -0.001,
+             "rmw": 0.003, "cma": -0.002, "rf": 0.004},
+        ])
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "factors_fama_french"})
 
-        assert len(result["factors"]) == 2
-        assert result["factors"][0]["mkt_rf"] == 0.01
-        mock_obb.famafrench.factors.assert_called_once_with(provider="famafrench")
+        # Latest row extracted with capitalized/hyphenated keys
+        assert result["factors"]["Mkt-RF"] == 0.01
+        assert result["factors"]["SMB"] == 0.002
+        assert result["factors"]["HML"] == -0.001
+        assert result["factors"]["RMW"] == 0.003
+        assert result["factors"]["CMA"] == -0.002
+        assert result["factors"]["RF"] == 0.004
+        # History with trailing months
+        assert "2026-03-01" in result["history"]
+        assert "2026-02-01" in result["history"]
+
+    def test_fama_french_empty(self, source, mock_obb):
+        mock_obb.famafrench.factors.return_value = _make_obbject([])
+        with patch.object(source, "_get_obb", return_value=mock_obb):
+            result = source.fetch({"method": "factors_fama_french"})
+        assert result == {"factors": {}, "history": {}}
 
     def test_fama_french_api_error(self, source, mock_obb):
         mock_obb.famafrench.factors.side_effect = Exception("dataset unavailable")
@@ -410,41 +427,40 @@ class TestFactorsFamaFrench:
 
 class TestCache:
     def test_cache_hit(self, source, mock_obb):
-        """Second call with same params should use cache, not call API."""
         mock_obb.equity.profile.return_value = _make_obbject([{
             "symbol": "AAPL", "name": "Apple", "sector": "Tech",
-            "industry": "CE", "market_cap": 3e12, "description": "desc",
+            "industry": "CE", "market_cap": 3e12,
+            "long_business_summary": "desc",
         }])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            r1 = source.fetch({"method": "equity_profile", "symbol": "AAPL"})
-            r2 = source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            r1 = source.fetch({"method": "equity_profile", "ticker": "AAPL"})
+            r2 = source.fetch({"method": "equity_profile", "ticker": "AAPL"})
 
         assert r1 == r2
-        # Only one actual API call
         assert mock_obb.equity.profile.call_count == 1
 
     def test_cache_different_params(self, source, mock_obb):
-        """Different params should not use cache."""
         mock_obb.equity.profile.return_value = _make_obbject([{
             "symbol": "AAPL", "name": "Apple", "sector": "Tech",
-            "industry": "CE", "market_cap": 3e12, "description": "desc",
+            "industry": "CE", "market_cap": 3e12,
+            "long_business_summary": "desc",
         }])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            source.fetch({"method": "equity_profile", "symbol": "AAPL"})
-            source.fetch({"method": "equity_profile", "symbol": "MSFT"})
+            source.fetch({"method": "equity_profile", "ticker": "AAPL"})
+            source.fetch({"method": "equity_profile", "ticker": "MSFT"})
 
         assert mock_obb.equity.profile.call_count == 2
 
     def test_clear_cache(self, source, mock_obb):
-        """clear_cache() should invalidate all entries."""
         mock_obb.equity.profile.return_value = _make_obbject([{
             "symbol": "AAPL", "name": "Apple", "sector": "Tech",
-            "industry": "CE", "market_cap": 3e12, "description": "desc",
+            "industry": "CE", "market_cap": 3e12,
+            "long_business_summary": "desc",
         }])
         with patch.object(source, "_get_obb", return_value=mock_obb):
-            source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            source.fetch({"method": "equity_profile", "ticker": "AAPL"})
             source.clear_cache()
-            source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            source.fetch({"method": "equity_profile", "ticker": "AAPL"})
 
         assert mock_obb.equity.profile.call_count == 2
 
@@ -455,19 +471,15 @@ class TestCache:
 
 class TestGracefulDegradation:
     def test_import_without_openbb(self):
-        """OpenBBSource should import even if openbb is not installed."""
-        # Temporarily pretend openbb doesn't exist
         saved = sys.modules.get("openbb")
-        sys.modules["openbb"] = None  # sentinel for missing
+        sys.modules["openbb"] = None
         try:
-            # Re-import the module
             if "tradingagents.autoresearch.data_sources.openbb_source" in sys.modules:
                 importlib.reload(
                     sys.modules["tradingagents.autoresearch.data_sources.openbb_source"]
                 )
             else:
                 import tradingagents.autoresearch.data_sources.openbb_source  # noqa: F401
-            # Should not raise
         finally:
             if saved is not None:
                 sys.modules["openbb"] = saved
@@ -475,9 +487,8 @@ class TestGracefulDegradation:
                 sys.modules.pop("openbb", None)
 
     def test_fetch_without_openbb(self, source):
-        """fetch() should return error if OpenBB cannot be imported."""
         with patch.object(source, "_get_obb", side_effect=ImportError("no openbb")):
-            result = source.fetch({"method": "equity_profile", "symbol": "AAPL"})
+            result = source.fetch({"method": "equity_profile", "ticker": "AAPL"})
         assert "error" in result
 
 
@@ -487,7 +498,6 @@ class TestGracefulDegradation:
 
 class TestRegistration:
     def test_openbb_in_default_registry(self):
-        """OpenBBSource should be registered in build_default_registry."""
         from tradingagents.autoresearch.data_sources.registry import build_default_registry
         registry = build_default_registry()
         source = registry.get("openbb")
@@ -495,6 +505,5 @@ class TestRegistration:
         assert source.name == "openbb"
 
     def test_openbb_in_exports(self):
-        """OpenBBSource should be exported from data_sources package."""
         from tradingagents.autoresearch.data_sources import OpenBBSource
         assert OpenBBSource is not None
