@@ -28,7 +28,7 @@ class InsiderActivityStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (15, 90),
+            "hold_days": (20, 45),
             "min_cluster_size": (2, 5),
             "min_sell_threshold": (2, 5),
             "min_conviction": (0.3, 0.8),
@@ -37,8 +37,8 @@ class InsiderActivityStrategy:
 
     def get_default_params(self) -> dict[str, Any]:
         return {
-            "hold_days": 20,
-            "min_cluster_size": 3,
+            "hold_days": 25,
+            "min_cluster_size": 2,
             "min_sell_threshold": 2,
             "min_conviction": 0.5,
             "max_positions": 3,
@@ -167,7 +167,7 @@ class InsiderActivityStrategy:
         data: dict,
     ) -> tuple[bool, str]:
         """Exit on hold period or stop loss (10%)."""
-        hold_days = params.get("hold_days", 45)
+        hold_days = params.get("hold_days", 25)
         if holding_days >= hold_days:
             return True, "hold_period"
 
@@ -185,10 +185,13 @@ filings for two signal types:
 1. Buy clusters: multiple insiders buying the same stock (bullish)
 2. Sell patterns / 10b5-1 red flags: suspicious insider selling (bearish)
 
+Investment horizon: 30 days. Insider signal decay is ~30 days in academic
+literature (Lakonishok & Lee 2001). Target 25-30 day holds.
+
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 15-90
+- hold_days: 20-45 (target ~25-30 days)
 - min_cluster_size: 2-5 (minimum insiders buying for long signal)
 - min_sell_threshold: 2-5 (minimum insider sells for short signal)
 - min_conviction: 0.3-0.8
