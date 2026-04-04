@@ -24,7 +24,16 @@ CONTRACTOR_TICKERS = {
     "kratos": "KTOS",
     "palantir": "PLTR",
     "caci": "CACI",
+    # Defense tech/cloud
+    "snowflake": "SNOW",
+    "mongodb": "MDB",
+    # Defense components
+    "bwx": "BWX",
+    "heico": "HEI",
+    "transdigm": "TDG",
 }
+
+EXPANSION_INDUSTRIES = ["Aerospace & Defense", "Information Technology Services"]
 
 
 class GovtContractsStrategy:
@@ -53,7 +62,7 @@ class GovtContractsStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (15, 60),
+            "hold_days": (20, 45),
             "stop_loss_pct": (0.05, 0.15),
             "profit_target_pct": (0.05, 0.25),
             "max_positions": (2, 5),
@@ -91,7 +100,7 @@ class GovtContractsStrategy:
                         ticker = t
                         break
 
-                if not ticker or amount < 50_000_000:  # $50M minimum
+                if not ticker or amount < 10_000_000:  # $10M minimum
                     continue
 
                 score = min(amount / 1_000_000_000, 1.0)  # Scale by $1B
@@ -109,7 +118,7 @@ class GovtContractsStrategy:
                     )
                 )
         else:
-            # Fallback: momentum-based screening for defense contractors
+            # Fallback: all defense contractors with available price data
             prices = data.get("yfinance", {}).get("prices", {})
             if prices:
                 for name, ticker in CONTRACTOR_TICKERS.items():
@@ -121,20 +130,19 @@ class GovtContractsStrategy:
                         continue
                     close = df["Close"]
                     momentum = (close.iloc[-1] / close.iloc[-30]) - 1.0
-                    if momentum > 0.02:
-                        candidates.append(
-                            Candidate(
-                                ticker=ticker,
-                                date=date,
-                                direction="long",
-                                score=momentum,
-                                metadata={
-                                    "contractor": name,
-                                    "momentum_30d": momentum,
-                                    "source": "momentum_fallback",
-                                },
-                            )
+                    candidates.append(
+                        Candidate(
+                            ticker=ticker,
+                            date=date,
+                            direction="long",
+                            score=max(momentum, 0.1),  # Floor score at 0.1
+                            metadata={
+                                "contractor": name,
+                                "momentum_30d": momentum,
+                                "source": "momentum_fallback",
+                            },
                         )
+                    )
 
         # Enrich with OpenBB data
         openbb_data = data.get("openbb", {})
@@ -190,13 +198,15 @@ class GovtContractsStrategy:
                 )
 
         return f"""You are optimizing a Government Contract Awards strategy that buys
-defense/government contractor stocks showing momentum consistent with large
-contract wins.
+defense/government contractor stocks after large contract announcements.
+
+Investment horizon: 30 days. Government contract repricing takes 30-60 days
+for mid/small-caps. The market underreacts to award announcements.
 
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 15-60 (holding period after entry)
+- hold_days: 20-45 (holding period, target ~30 days)
 - stop_loss_pct: 0.05-0.15 (stop loss percentage)
 - profit_target_pct: 0.05-0.25 (take profit percentage)
 - max_positions: 2-5 (max concurrent positions)
@@ -204,9 +214,18 @@ Parameter ranges:
 Recent backtest results:
 {results_text or '  No results yet.'}
 
-Suggest 3 new parameter combinations to test. Consider:
-- Government repricing takes 30-60 days for small-caps
-- Wider stops needed for volatile small-caps
-- Fewer positions = more concentrated bets
+Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
-Return JSON array of 3 param dicts."""
+    def get_universe(self, openbb_source=None) -> dict[str, str]:
+        """Return contractor universe, optionally expanded via OpenBB."""
+        universe = dict(CONTRACTOR_TICKERS)
+        if openbb_source and openbb_source.is_available():
+            for industry in EXPANSION_INDUSTRIES:
+                result = openbb_source.fetch({
+                    "method": "sector_tickers",
+                    "industry": industry,
+                })
+                tickers = result.get("tickers", [])
+                for t in tickers:
+                    universe[t.lower()] = t
+        return universe
