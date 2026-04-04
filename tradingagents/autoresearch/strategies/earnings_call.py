@@ -29,7 +29,7 @@ class EarningsCallStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (5, 30),
+            "hold_days": (20, 45),
             "min_conviction": (0.3, 0.8),
             "max_positions": (2, 6),
             "analyze_qa_only": (True, False),
@@ -37,7 +37,7 @@ class EarningsCallStrategy:
 
     def get_default_params(self) -> dict[str, Any]:
         return {
-            "hold_days": 7,
+            "hold_days": 20,
             "min_conviction": 0.5,
             "max_positions": 4,
             "analyze_qa_only": False,
@@ -144,7 +144,7 @@ class EarningsCallStrategy:
         params: dict,
         data: dict,
     ) -> tuple[bool, str]:
-        hold_days = params.get("hold_days", 10)
+        hold_days = params.get("hold_days", 20)
         if holding_days >= hold_days:
             return True, "hold_period"
         # Stop loss at 5%
@@ -158,10 +158,14 @@ class EarningsCallStrategy:
         return f"""You are optimizing an Earnings Call analysis strategy that uses LLM
 to detect tone shifts, deception, and guidance revisions in transcripts.
 
+Investment horizon: 30 days. Post-earnings drift is documented over 2-3 weeks.
+Exiting after 7 days leaves money on the table. Target 15-20 day holds to
+capture the full drift while avoiding noise.
+
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 5-30 (post-earnings drift window)
+- hold_days: 20-45 (post-earnings drift window, target ~20 days)
 - min_conviction: 0.3-0.8
 - max_positions: 2-6
 - analyze_qa_only: true/false (Q&A section is more informative per research)
