@@ -47,7 +47,7 @@ class CongressionalTradesStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (20, 60),
+            "hold_days": (20, 45),
             "min_amount_bucket": (1, 4),
             "max_positions": (2, 5),
             "min_members": (1, 3),
@@ -55,8 +55,8 @@ class CongressionalTradesStrategy:
 
     def get_default_params(self) -> dict[str, Any]:
         return {
-            "hold_days": 25,
-            "min_amount_bucket": 2,
+            "hold_days": 28,
+            "min_amount_bucket": 1,
             "max_positions": 3,
             "min_members": 1,
         }
@@ -159,7 +159,7 @@ class CongressionalTradesStrategy:
         data: dict,
     ) -> tuple[bool, str]:
         """Exit on hold period or stop loss."""
-        hold_days = params.get("hold_days", 30)
+        hold_days = params.get("hold_days", 28)
         if holding_days >= hold_days:
             return True, "hold_period"
 
@@ -175,17 +175,15 @@ class CongressionalTradesStrategy:
         return f"""You are optimizing a Congressional Stock Trades strategy that follows
 purchase disclosures from US Congress members.
 
+Investment horizon: 30 days. Congress members often trade ahead of
+legislation by 30-60 days. Target ~28-30 day holds.
+
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 20-60 (holding period after entry)
-- min_amount_bucket: 1-4 (minimum dollar tier, 1=$1K-$15K, 4=$100K-$250K)
-- max_positions: 2-5 (maximum concurrent positions)
+- hold_days: 20-45 (target ~28 days)
+- min_amount_bucket: 1-4 (1=$1K-$15K, 4=$100K-$250K)
+- max_positions: 2-5
 - min_members: 1-3 (minimum unique members buying same stock)
 
-Suggest 3 parameter combinations. Consider:
-- Higher min_amount_bucket = fewer but higher-conviction signals
-- Cluster buys (min_members >= 2) are the strongest signal
-- Congress members often trade ahead of legislation by 30-60 days
-
-Return JSON array of 3 param dicts."""
+Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""
