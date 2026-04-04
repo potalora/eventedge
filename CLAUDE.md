@@ -206,7 +206,7 @@ The generation system allows multiple versions of the codebase to run paper trad
 - `gen_001` — 7-strategy baseline (commit `5f3730d`), started 2026-04-01
 - `gen_002` — 9-strategy OpenBB enrichment (commit `a0a4c7a`), started 2026-04-03
 - `gen_003` — 10-strategy ag enhancement: USDA + Drought Monitor + expanded tickers (commit `b368114`), started 2026-04-04
-- `gen_004` — Gate loosening, universe expansion, 30-day cycle evaluation (commit `<pending>`), started 2026-04-04
+- `gen_004` — Gate loosening, universe expansion, 30-day cycle evaluation (commit `3b71fd1`), started 2026-04-04
 
 **Note:** All strategies now target a 30-day investment horizon. Default `hold_days` / `rebalance_days` are in the 20-30 day range; param space floors are all >= 20 days and ceilings <= 45 days. CycleTracker produces 30-day boundary snapshots aligned to each generation's start date.
 
