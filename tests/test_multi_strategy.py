@@ -74,6 +74,26 @@ class TestStrategyModules:
             assert isinstance(prompt, str), f"{s.name} prompt not str"
             assert len(prompt) > 50, f"{s.name} prompt too short"
 
+    def test_all_strategies_30_day_horizon(self, strategies):
+        """All strategies should have hold_days/rebalance_days defaults in 20-30 range."""
+        for strategy in strategies:
+            params = strategy.get_default_params()
+            hold_key = "hold_days" if "hold_days" in params else "rebalance_days"
+            hold = params.get(hold_key, 30)
+            assert 20 <= hold <= 30, (
+                f"{strategy.name}: {hold_key}={hold} outside 20-30 day range"
+            )
+
+    def test_all_strategies_param_space_floor(self, strategies):
+        """All strategies should have hold_days/rebalance_days floor >= 20 and ceiling <= 45."""
+        for strategy in strategies:
+            space = strategy.get_param_space()
+            hold_key = "hold_days" if "hold_days" in space else "rebalance_days"
+            if hold_key in space:
+                low, high = space[hold_key]
+                assert low >= 20, f"{strategy.name}: {hold_key} floor {low} < 20"
+                assert high <= 45, f"{strategy.name}: {hold_key} ceiling {high} > 45"
+
 
 
 

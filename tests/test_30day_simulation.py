@@ -1052,18 +1052,18 @@ class TestReactivatedStrategies:
             assert c.metadata.get("econ_boost", 0) == 0.0  # No boost without FRED
 
     def test_state_economics_exit_logic(self):
-        """state_economics exit logic: rebalance schedule."""
+        """state_economics exit logic: rebalance schedule (30-day default)."""
         from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
 
         strategy = StateEconomicsStrategy()
         params = strategy.get_default_params()
 
-        # Before rebalance
+        # Before rebalance (default rebalance_days=30)
         should_exit, reason = strategy.check_exit("KRE", 50.0, 55.0, 10, params, {})
         assert should_exit is False
 
-        # At rebalance
-        should_exit, reason = strategy.check_exit("KRE", 50.0, 55.0, 14, params, {})
+        # At rebalance boundary
+        should_exit, reason = strategy.check_exit("KRE", 50.0, 55.0, 30, params, {})
         assert should_exit is True
         assert reason == "rebalance"
 

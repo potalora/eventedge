@@ -18,7 +18,9 @@ def source():
 @pytest.fixture()
 def source_no_key():
     from tradingagents.autoresearch.data_sources.usda_source import USDASource
-    return USDASource(api_key="")
+    # Patch environment so the source cannot fall back to a real key
+    with patch.dict("os.environ", {"USDA_NASS_API_KEY": ""}, clear=False):
+        yield USDASource(api_key="")
 
 
 # ---------------------------------------------------------------------------
