@@ -24,6 +24,7 @@ class RiskGateConfig:
     per_strategy_max: int = 3               # Max 3 positions per strategy
     global_stop_loss_pct: float = 0.08      # 8% stop per position
     long_only: bool = True                  # $5K accounts can't short easily
+    cash_reserve_pct: float = 0.0           # Min cash as % of portfolio (0 = disabled)
 
     @classmethod
     def from_dict(cls, config: dict) -> RiskGateConfig:
@@ -40,6 +41,7 @@ class RiskGateConfig:
             per_strategy_max=rg.get("per_strategy_max", 3),
             global_stop_loss_pct=rg.get("global_stop_loss_pct", 0.08),
             long_only=rg.get("long_only", True),
+            cash_reserve_pct=rg.get("cash_reserve_pct", 0.0),
         )
 
 
@@ -126,6 +128,16 @@ class RiskGate:
         # 8. Buying power check
         if position_value > account.buying_power:
             return False, f"buying_power: need ${position_value:.0f}, have ${account.buying_power:.0f}"
+
+        # 9. Cash reserve check
+        if self.config.cash_reserve_pct > 0:
+            min_cash = account.portfolio_value * self.config.cash_reserve_pct
+            remaining_cash = account.buying_power - position_value
+            if remaining_cash < min_cash:
+                return False, (
+                    f"cash_reserve: ${remaining_cash:.0f} remaining < "
+                    f"${min_cash:.0f} ({self.config.cash_reserve_pct:.0%} reserve)"
+                )
 
         return True, ""
 
