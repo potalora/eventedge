@@ -262,9 +262,10 @@ class PortfolioCommittee:
                 model=self._model_name,
                 max_tokens=1024,
                 system="""You are a portfolio manager synthesizing trading signals from multiple strategies.
+Investment horizon: 30 days. Every position should have a thesis that plays out within 30 days.
 Given signals, regime context, and strategy confidence scores, output a ranked list of trades.
 Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, rationale, contributing_strategies, regime_alignment.
-Keep position_size_pct between 0.01 and 0.10. Keep rationale under 80 chars.""",
+Keep position_size_pct between 0.01 and 0.10. Keep rationale under 80 chars. Prefer signals with catalysts that resolve within 30 days.""",
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.content[0].text.strip()
