@@ -16,6 +16,11 @@ REGIONAL_ETFS = {
     "retail": "XRT",              # SPDR S&P Retail ETF
     "real_estate": "IYR",         # iShares US Real Estate ETF
     "homebuilders": "XHB",        # SPDR S&P Homebuilders ETF
+    "homebuilders_focused": "ITB",  # iShares US Home Construction ETF
+    "broad_reit": "VNQ",          # Vanguard Real Estate ETF
+    "semiconductors": "SOXX",     # iShares Semiconductor ETF
+    "industrials": "XLI",         # Industrial Select Sector SPDR
+    "real_estate_sector": "XLRE", # Real Estate Select Sector SPDR
 }
 
 
@@ -45,16 +50,14 @@ class StateEconomicsStrategy:
         return {
             "lookback_days": (10, 60),
             "top_n": (1, 4),
-            "rebalance_days": (5, 30),
-            "min_return": (-0.05, 0.05),
+            "rebalance_days": (20, 45),
         }
 
     def get_default_params(self) -> dict[str, Any]:
         return {
             "lookback_days": 21,
             "top_n": 2,
-            "rebalance_days": 14,
-            "min_return": 0.0,
+            "rebalance_days": 30,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -66,7 +69,6 @@ class StateEconomicsStrategy:
         prices = data.get("yfinance", {}).get("prices", {})
         lookback = params.get("lookback_days", 21)
         top_n = params.get("top_n", 2)
-        min_return = params.get("min_return", 0.0)
 
         # Compute momentum scores
         etf_scores: list[tuple[str, str, float]] = []
@@ -122,8 +124,7 @@ class StateEconomicsStrategy:
 
         candidates = []
         for name, ticker, combined, momentum, boost in combined_scores[:top_n]:
-            if combined < min_return:
-                continue
+            # No hard min_return gate — let LLM judge context
             metadata = {
                 "regional_sector": name,
                 "trailing_return": momentum,
@@ -159,7 +160,7 @@ class StateEconomicsStrategy:
         data: dict,
     ) -> tuple[bool, str]:
         """Exit on rebalance schedule."""
-        rebalance_days = params.get("rebalance_days", 14)
+        rebalance_days = params.get("rebalance_days", 30)
         if holding_days >= rebalance_days:
             return True, "rebalance"
         return False, ""
@@ -179,24 +180,20 @@ class StateEconomicsStrategy:
                 )
 
         return f"""You are optimizing a State Economics strategy that rotates among
-regional ETFs (KRE, IWN, XRT, IYR, XHB) based on trailing momentum
-as a proxy for state-level economic conditions.
+regional ETFs (KRE, IWN, XRT, IYR, XHB, ITB, VNQ, SOXX, XLI, XLRE)
+based on trailing momentum as a proxy for state-level economic conditions.
+
+Investment horizon: 30 days. Rebalance window aligns with the portfolio
+evaluation cycle. Regional economic divergence is persistent over 1-3 months.
 
 Current parameters: {current}
 
 Parameter ranges:
 - lookback_days: 10-60 (trailing return window)
 - top_n: 1-4 (number of top ETFs to hold)
-- rebalance_days: 5-30 (rebalance frequency)
-- min_return: -0.05 to 0.05 (minimum trailing return threshold)
+- rebalance_days: 20-45 (rebalance frequency, target ~30 days)
 
 Recent backtest results:
 {results_text or '  No results yet.'}
 
-Suggest 3 new parameter combinations. Consider:
-- Regional banks (KRE) are highly sensitive to local economic conditions
-- Homebuilders (XHB) lead the cycle — housing data is forward-looking
-- Shorter lookbacks capture recent economic shifts
-- More concentrated bets (fewer ETFs) amplify the signal
-
-Return JSON array of 3 param dicts."""
+Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
