@@ -5,7 +5,7 @@
 TradingAgents is a multi-agent LLM trading framework built with LangGraph. It has two major systems:
 
 1. **Core Pipeline** — 6-agent LangGraph pipeline (analysts, researchers, trader, risk manager, portfolio manager) that evaluates a single ticker and produces a trade decision.
-2. **Autoresearch** — Autonomous multi-strategy evolution engine: Phase 1 infrastructure exists but is dormant (no backtest strategies registered); Phase 2 is a 2-cohort paper trading trial (Control with fixed confidence vs. Adaptive with journal-derived confidence and weekly learning). 7 event-driven strategies across 8 data sources.
+2. **Autoresearch** — Autonomous multi-strategy evolution engine: Phase 1 infrastructure exists but is dormant (no backtest strategies registered); Phase 2 is a 2-cohort paper trading trial (Control with fixed confidence vs. Adaptive with journal-derived confidence and weekly learning). 9 event-driven strategies across 9 data sources (including OpenBB Platform for sector classification, analyst estimates, short interest, government trades, SEC litigation, and Fama-French factors).
 
 Additionally, the project includes: options analysis, backtesting engine, Alpaca execution, Streamlit dashboard, APScheduler scheduling, and SQLite persistence.
 
@@ -32,6 +32,9 @@ python scripts/run_generations.py pause gen_001             # pause a generation
 python scripts/run_generations.py resume gen_001            # resume a paused generation
 python scripts/run_generations.py retire gen_001            # retire (delete worktree, keep state)
 
+# Daily report (auto-runs after daily_trading.sh, or standalone)
+python scripts/generate_daily_report.py [--date DATE]      # generate markdown report for all gens
+
 # Cohort trial (2 parallel paper portfolios) — single-generation use
 python scripts/run_cohorts.py --date 2026-03-31          # daily trading (LLM on by default)
 python scripts/run_cohorts.py --date 2026-03-31 --no-llm  # without LLM enrichment
@@ -55,9 +58,9 @@ python scripts/run_generation.py --reset                                   # cle
 ```
 CORE PIPELINE (LangGraph)                 AUTORESEARCH
 ─────────────────────────                 ──────────────────────────────
-Fundamental Analyst ──┐                   DataSourceRegistry (8 sources)
+Fundamental Analyst ──┐                   DataSourceRegistry (9 sources)
 Sentiment Analyst  ───┤                            │
-News Analyst       ───┤──► Bull/Bear          StrategyModules (7)
+News Analyst       ───┤──► Bull/Bear          StrategyModules (9)
 Technical Analyst  ───┤    Researchers              │
 Options Analyst    ───┘         │       ┌───── Phase 1: Backtest ─────┐
                            Trader       │  (dormant — no strategies   │
@@ -157,29 +160,52 @@ Strategy research & academic backing: [docs/strategy_research.md](docs/strategy_
 
 The **portfolio committee** is the sole sizing authority. Weight scaling has been removed from `compute_position_size()` and `execute_recommendation()` — the risk gate only enforces hard limits.
 
-### Active Strategies (7 event-driven, paper-trade only)
+### Active Strategies (9 event-driven, paper-trade only)
 
-| Strategy | Class | Data Source |
+| Strategy | Class | Data Sources |
 |----------|-------|-------------|
-| `earnings_call` | `EarningsCallStrategy` | Finnhub earnings transcripts |
-| `insider_activity` | `InsiderActivityStrategy` | EDGAR Form 4 filings |
-| `filing_analysis` | `FilingAnalysisStrategy` | EDGAR 10-K/10-Q changes |
-| `regulatory_pipeline` | `RegulatoryPipelineStrategy` | Regulations.gov proposed rules |
-| `supply_chain` | `SupplyChainStrategy` | Finnhub supply chain disruption |
-| `litigation` | `LitigationStrategy` | CourtListener federal court dockets |
-| `congressional_trades` | `CongressionalTradesStrategy` | Congress stock trades |
+| `earnings_call` | `EarningsCallStrategy` | Finnhub, yfinance, OpenBB (analyst consensus) |
+| `insider_activity` | `InsiderActivityStrategy` | EDGAR Form 4, yfinance, OpenBB (officer titles, sector) |
+| `filing_analysis` | `FilingAnalysisStrategy` | EDGAR 10-K/10-Q, yfinance, OpenBB (analyst estimates, sector) |
+| `regulatory_pipeline` | `RegulatoryPipelineStrategy` | Regulations.gov, yfinance, OpenBB (sector validation) |
+| `supply_chain` | `SupplyChainStrategy` | Finnhub, yfinance, OpenBB (short interest, sector) |
+| `litigation` | `LitigationStrategy` | CourtListener, yfinance, OpenBB (SEC litigation) |
+| `congressional_trades` | `CongressionalTradesStrategy` | Congress/CapitolTrades, yfinance, OpenBB (govt trades API as primary) |
+| `govt_contracts` | `GovtContractsStrategy` | USASpending, yfinance, OpenBB (profile, estimates) |
+| `state_economics` | `StateEconomicsStrategy` | FRED, yfinance, OpenBB (Fama-French factors) |
 
-3 additional strategies exist as code but are NOT registered/active: `govt_contracts`, `state_economics`, `weather_ag` (in `strategies/` for future use).
+1 additional strategy exists as code but is NOT registered/active: `weather_ag` (in `_archive/`, needs NOAA/USDA data).
 
 ### Key Components
 
-- `cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch then dispatches to each cohort's engine. `CohortConfig` and `build_default_cohorts()` define the A/B setup.
+- `cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, then fetches OpenBB enrichment (profiles, short interest, Fama-French factors) for signal tickers, then dispatches to each cohort's engine. `CohortConfig` and `build_default_cohorts()` define the A/B setup.
 - `cohort_comparison.py` — `CohortComparison` with `compare()` and `format_report()` for side-by-side cohort analysis.
-- `portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority).
+- `portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available.
 - Vintage tracking (param sets tagged with vintage ID, trade count, creation date), regime model, separate weight pools (`backtest_weights.json` / `paper_weights.json`), 15% exploration budget for unproven param sets.
 - Future bolt-on: debate validation (not built yet).
 
 Legacy `run_generation.py` still works for single-engine use; for the 2-cohort trial use `scripts/run_cohorts.py`.
+
+### Generation Management
+
+The generation system allows multiple versions of the codebase to run paper trading in parallel, each with isolated state. This enables A/B testing of code changes (e.g., new strategies, enrichment logic, parameter changes) against a baseline.
+
+**How it works:**
+1. `start` — Snapshots current HEAD commit into a detached git worktree (`.worktrees/gen_NNN/`). Creates isolated state directory (`data/generations/gen_NNN/{control,adaptive}/`).
+2. `run-daily` — Iterates all active generations. Each gen runs its frozen codebase in its worktree, writing results to its own state dir. Both cohorts (control + adaptive) share data fetch but execute independently.
+3. `compare` — Reads state dirs across generations and produces a side-by-side comparison of signals, trades, hit rates, Sharpe ratios, and returns.
+4. `retire` — Archives a generation (keeps state, optionally deletes worktree).
+
+**Key files:**
+- `tradingagents/autoresearch/generation_manager.py` — `GenerationManager` class, manifest persistence
+- `tradingagents/autoresearch/generation_comparison.py` — Cross-generation comparison
+- `scripts/run_generations.py` — CLI entry point
+- `scripts/generate_daily_report.py` — Generates daily markdown reports to `docs/reports/`
+- `scripts/daily_trading.sh` — Shell wrapper for cron/launchd (runs daily + generates report)
+
+**Current active generations:**
+- `gen_001` — 7-strategy baseline (commit `5f3730d`), started 2026-04-01
+- `gen_002` — 9-strategy OpenBB enrichment (commit `a0a4c7a`), started 2026-04-03
 
 ### Adding a New Strategy
 
@@ -251,8 +277,11 @@ All configuration lives in `tradingagents/default_config.py`.
 | `autoresearch` | `autoresearch_model` | LLM for all autoresearch calls (Haiku) |
 | `autoresearch` | `total_capital` | Portfolio size for allocation |
 | `autoresearch` | `adaptive_confidence` | `False` = fixed 0.5 (Cohort A), `True` = journal-derived (Cohort B) |
+| `autoresearch` | `fmp_api_key` | FMP API key for OpenBB equity estimates (optional, free tier: 250 calls/day) |
 
 API keys go in `.env` (git-ignored), loaded via `python-dotenv`. See `.env.example` for required keys.
+
+OpenBB is an optional dependency: `pip install -e ".[openbb]"`. All strategies gracefully degrade when OpenBB is unavailable.
 
 ---
 
@@ -299,7 +328,9 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
 - **Run:** `.venv/bin/python -m pytest tests/ -v`
 - **Rules:** Mock LLM calls in unit tests. Never call real APIs in tests. Use `unittest.mock.patch` for external services.
 - **Key test files:**
-  - `tests/test_multi_strategy.py` — 96 tests covering strategies, Darwinian weights, state, engine
+  - `tests/test_multi_strategy.py` — 96 tests covering 9 strategies, Darwinian weights, state, engine
+  - `tests/test_openbb_source.py` — 37 tests for OpenBB data source (all 8 methods, cache, graceful degradation)
+  - `tests/test_30day_simulation.py` — 30-day simulation tests including OpenBB enrichment and reactivated strategies
   - `tests/test_e2e_pipeline.py` — End-to-end integration tests for full trading pipeline
 
 ---
@@ -310,4 +341,6 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
 |----------|-------------|
 | [AUTORESEARCH_ARCHITECTURE_MAP.md](AUTORESEARCH_ARCHITECTURE_MAP.md) | Full autoresearch system architecture |
 | [docs/strategy_research.md](docs/strategy_research.md) | Strategy research notes and academic backing |
+| [docs/superpowers/specs/2026-04-03-openbb-integration-design.md](docs/superpowers/specs/2026-04-03-openbb-integration-design.md) | OpenBB integration design spec |
+| [docs/reports/](docs/reports/) | Daily trading reports (auto-generated) |
 | [docs/archive/](docs/archive/) | Executed design specs for options, backtest, execution, dashboard, autoresearch |
