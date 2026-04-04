@@ -32,7 +32,7 @@ class TradeRecommendation:
 class PortfolioCommittee:
     """Synthesizes signals across strategies into trade recommendations."""
 
-    def __init__(self, config: dict | None = None) -> None:
+    def __init__(self, config: dict | None = None, size_profile: Any = None) -> None:
         self.config = config or {}
         pt_config = self.config.get("autoresearch", {}).get("paper_trade", {})
         self._model_name = pt_config.get(
@@ -40,8 +40,16 @@ class PortfolioCommittee:
             self.config.get("autoresearch", {}).get("autoresearch_model", "claude-haiku-4-5-20251001"),
         )
         self._enabled = pt_config.get("portfolio_committee_enabled", True)
-        self._max_sector = pt_config.get("max_sector_concentration_pct", 0.30)
-        self._max_position = pt_config.get("max_single_position_pct", 0.10)
+
+        # Use size profile if provided, otherwise fall back to config defaults
+        if size_profile is not None:
+            self._max_sector = size_profile.sector_concentration_cap
+            self._max_position = size_profile.max_position_pct
+        else:
+            self._max_sector = pt_config.get("max_sector_concentration_pct", 0.30)
+            self._max_position = pt_config.get("max_single_position_pct", 0.10)
+
+        self._size_profile = size_profile
         self._client = None
 
     def synthesize(
@@ -258,14 +266,29 @@ class PortfolioCommittee:
         )
 
         try:
+            system_parts = [
+                "You are a portfolio manager synthesizing trading signals from multiple strategies.",
+            ]
+            if self._size_profile:
+                system_parts.append(
+                    f"Portfolio: ${self._size_profile.total_capital:,.0f} capital, "
+                    f"max {self._size_profile.max_positions} positions, "
+                    f"max {self._size_profile.max_position_pct:.0%} per position."
+                )
+            else:
+                system_parts.append("Investment horizon: 30 days.")
+            system_parts.append(
+                "Given signals, regime context, and strategy confidence scores, output a ranked list of trades. "
+                "Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, "
+                "rationale, contributing_strategies, regime_alignment. "
+                f"Keep position_size_pct between 0.01 and {self._max_position:.2f}. Keep rationale under 80 chars."
+            )
+            system_prompt = "\n".join(system_parts)
+
             response = client.messages.create(
                 model=self._model_name,
                 max_tokens=1024,
-                system="""You are a portfolio manager synthesizing trading signals from multiple strategies.
-Investment horizon: 30 days. Every position should have a thesis that plays out within 30 days.
-Given signals, regime context, and strategy confidence scores, output a ranked list of trades.
-Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, rationale, contributing_strategies, regime_alignment.
-Keep position_size_pct between 0.01 and 0.10. Keep rationale under 80 chars. Prefer signals with catalysts that resolve within 30 days.""",
+                system=system_prompt,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = response.content[0].text.strip()
