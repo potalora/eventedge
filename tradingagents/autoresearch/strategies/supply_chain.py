@@ -23,6 +23,8 @@ DISRUPTION_KEYWORDS = [
     "supply chain", "shortage", "disruption", "recall", "force majeure",
     "factory shutdown", "port closure", "embargo", "tariff", "sanctions",
     "logistics", "backlog", "inventory shortage", "chip shortage",
+    "port congestion", "inventory", "sanction", "trade restriction",
+    "export ban", "import duty", "raw material",
 ]
 
 
@@ -35,7 +37,7 @@ class SupplyChainStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (10, 45),
+            "hold_days": (20, 45),
             "min_conviction": (0.3, 0.8),
             "max_positions": (2, 6),
             "news_lookback_days": (3, 14),
@@ -44,7 +46,7 @@ class SupplyChainStrategy:
 
     def get_default_params(self) -> dict[str, Any]:
         return {
-            "hold_days": 10,
+            "hold_days": 22,
             "min_conviction": 0.5,
             "max_positions": 4,
             "news_lookback_days": 7,
@@ -123,7 +125,7 @@ class SupplyChainStrategy:
         params: dict,
         data: dict,
     ) -> tuple[bool, str]:
-        hold_days = params.get("hold_days", 20)
+        hold_days = params.get("hold_days", 22)
         if holding_days >= hold_days:
             return True, "hold_period"
         # Take profit at 8%
@@ -137,10 +139,13 @@ class SupplyChainStrategy:
         return f"""You are optimizing a Supply Chain Disruption strategy that detects
 disruption events and maps multi-hop impacts to affected companies.
 
+Investment horizon: 30 days. Supply disruptions take weeks to price across
+the chain. The initial reaction captures only part of the move.
+
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 10-45 (supply chain effects propagate 1-3 weeks)
+- hold_days: 20-45 (target ~22-25 days for disruption propagation)
 - min_conviction: 0.3-0.8
 - max_positions: 2-6
 - news_lookback_days: 3-14
