@@ -45,7 +45,7 @@ class LitigationStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (20, 90),
+            "hold_days": (20, 45),
             "min_conviction": (0.3, 0.8),
             "max_positions": (2, 5),
             "lookback_days": (7, 30),
@@ -53,7 +53,7 @@ class LitigationStrategy:
 
     def get_default_params(self) -> dict[str, Any]:
         return {
-            "hold_days": 15,
+            "hold_days": 25,
             "min_conviction": 0.5,
             "max_positions": 3,
             "lookback_days": 14,
@@ -76,20 +76,25 @@ class LitigationStrategy:
             nature = docket.get("nature_of_suit", "")
             case_name = docket.get("case_name", "")
 
-            # Filter for high-signal case types
-            is_signal = any(s.lower() in nature.lower() for s in SIGNAL_NATURES)
-            if not is_signal and not self._is_class_action(case_name):
+            # Score boost for high-signal case types (was a hard gate)
+            is_high_signal = any(s.lower() in nature.lower() for s in SIGNAL_NATURES)
+            is_class_action = self._is_class_action(case_name)
+
+            # Gate: any case with a resolvable company ticker
+            ticker = self._extract_ticker(case_name)
+            if not ticker and not is_high_signal and not is_class_action:
                 continue
 
-            # Try to extract defendant ticker from case name
-            ticker = self._extract_ticker(case_name)
+            base_score = 0.7 if is_high_signal else 0.5
+            if is_class_action:
+                base_score = max(base_score, 0.6)
 
             candidates.append(
                 Candidate(
                     ticker=ticker,
                     date=date,
                     direction="short",
-                    score=0.6,
+                    score=base_score,
                     metadata={
                         "docket_id": docket.get("docket_id", ""),
                         "case_name": case_name,
@@ -97,6 +102,8 @@ class LitigationStrategy:
                         "date_filed": docket.get("date_filed", ""),
                         "nature_of_suit": nature,
                         "cause": docket.get("cause", ""),
+                        "is_high_signal_nature": is_high_signal,
+                        "is_class_action": is_class_action,
                         "needs_llm_analysis": True,
                         "analysis_type": "litigation",
                     },
@@ -182,7 +189,7 @@ class LitigationStrategy:
         params: dict,
         data: dict,
     ) -> tuple[bool, str]:
-        hold_days = params.get("hold_days", 30)
+        hold_days = params.get("hold_days", 25)
         if holding_days >= hold_days:
             return True, "hold_period"
         return False, ""
@@ -192,10 +199,13 @@ class LitigationStrategy:
         return f"""You are optimizing a Litigation Detection strategy that monitors
 federal court dockets for new lawsuits/investigations against public companies.
 
+Investment horizon: 30 days. Court filing impact + analyst reaction takes
+~1 month. Cases don't resolve in 30 days, but sentiment shift does.
+
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 20-90 (litigation impact unfolds over months)
+- hold_days: 20-45 (target ~25-30 days)
 - min_conviction: 0.3-0.8
 - max_positions: 2-5
 - lookback_days: 7-30
