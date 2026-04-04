@@ -507,3 +507,48 @@ class TestRegistration:
     def test_openbb_in_exports(self):
         from tradingagents.autoresearch.data_sources import OpenBBSource
         assert OpenBBSource is not None
+
+
+# ---------------------------------------------------------------------------
+# sector_tickers
+# ---------------------------------------------------------------------------
+
+class TestSectorTickers:
+    """Tests for the sector_tickers method."""
+
+    def test_sector_tickers_returns_list(self, source):
+        """sector_tickers should return a dict with 'tickers' key."""
+        with patch.object(source, "_get_obb") as mock_obb:
+            mock_result = MagicMock()
+            mock_result.results = [
+                MagicMock(symbol="ADM"),
+                MagicMock(symbol="BG"),
+                MagicMock(symbol="DE"),
+            ]
+            mock_obb.return_value.equity.screener.screen.return_value = mock_result
+
+            result = source.fetch({"method": "sector_tickers", "industry": "Agricultural Products"})
+
+            assert "tickers" in result
+            assert "ADM" in result["tickers"]
+            assert "BG" in result["tickers"]
+
+    def test_sector_tickers_cached(self, source):
+        """Second call should use cache."""
+        with patch.object(source, "_get_obb") as mock_obb:
+            mock_result = MagicMock()
+            mock_result.results = [MagicMock(symbol="ADM")]
+            mock_obb.return_value.equity.screener.screen.return_value = mock_result
+
+            result1 = source.fetch({"method": "sector_tickers", "industry": "Agricultural Products"})
+            result2 = source.fetch({"method": "sector_tickers", "industry": "Agricultural Products"})
+
+            assert result1 == result2
+            # Only one API call
+            assert mock_obb.return_value.equity.screener.screen.call_count == 1
+
+    def test_sector_tickers_unavailable_returns_empty(self, source):
+        """If OpenBB is unavailable, return empty tickers list."""
+        with patch.object(source, "_get_obb", side_effect=ImportError):
+            result = source.fetch({"method": "sector_tickers", "industry": "Agricultural Products"})
+            assert result.get("tickers", []) == [] or "error" in result

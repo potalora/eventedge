@@ -50,6 +50,7 @@ class OpenBBSource:
             "derivatives_options_unusual": self._derivatives_options_unusual,
             "regulators_sec_litigation": self._regulators_sec_litigation,
             "factors_fama_french": self._factors_fama_french,
+            "sector_tickers": self._sector_tickers,
         }
         handler = dispatch.get(method)
         if handler is None:
@@ -336,3 +337,29 @@ class OpenBBSource:
         result = {"factors": factors, "history": history}
         self._cache[ckey] = result
         return result
+
+    def _sector_tickers(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return all tickers in a given industry classification.
+
+        Uses OpenBB equity screener. Results cached for 24h (session-level cache).
+        """
+        industry = params.get("industry", "")
+        if not industry:
+            return {"tickers": []}
+
+        cache_key = self._cache_key("sector_tickers", params)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        obb = self._get_obb()
+        try:
+            result = obb.equity.screener.screen(industry=industry)
+            tickers = [_getfield(item, "symbol", "") for item in (result.results or [])]
+            tickers = [t for t in tickers if t]  # Filter empty
+        except Exception:
+            logger.warning("sector_tickers(%s) failed", industry, exc_info=True)
+            tickers = []
+
+        out = {"tickers": tickers, "industry": industry}
+        self._cache[cache_key] = out
+        return out
