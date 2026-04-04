@@ -121,7 +121,7 @@ def _check_infrastructure_health() -> list[dict]:
     # US Drought Monitor (no API key required — public endpoint)
     try:
         from tradingagents.autoresearch.data_sources.drought_monitor_source import DroughtMonitorSource
-        src = DroughtMonitorSource({})
+        src = DroughtMonitorSource()
         available = src.is_available()
         results.append({
             "name": "Drought Monitor",
