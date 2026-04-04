@@ -13,7 +13,8 @@ def create_portfolio_manager(llm, memory):
         fundamentals_report = state["fundamentals_report"]
         sentiment_report = state["sentiment_report"]
         options_report = state.get("options_report", "")
-        trader_plan = state["investment_plan"]
+        research_plan = state["investment_plan"]
+        trader_plan = state["trader_investment_plan"]
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
@@ -36,7 +37,8 @@ def create_portfolio_manager(llm, memory):
 - **Sell**: Exit position or avoid entry
 
 **Context:**
-- Trader's proposed plan: **{trader_plan}**
+- Research Manager's investment plan: **{research_plan}**
+- Trader's transaction proposal: **{trader_plan}**
 - Options market analysis: **{options_report}**
 - Lessons from past decisions: **{past_memory_str}**
 
