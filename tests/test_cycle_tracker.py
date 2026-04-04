@@ -13,7 +13,7 @@ class TestCycleTracker:
 
     @pytest.fixture
     def tracker(self):
-        from tradingagents.autoresearch.cycle_tracker import CycleTracker
+        from tradingagents.strategies.state.cycle_tracker import CycleTracker
         tmpdir = tempfile.mkdtemp()
         return CycleTracker(gen_start_date="2026-04-01", state_dir=tmpdir)
 

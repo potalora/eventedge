@@ -10,25 +10,25 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Strategy,
     BacktestResults,
     ScreenerResult,
 )
-from tradingagents.autoresearch.screener import MarketScreener
-from tradingagents.autoresearch.strategist import Strategist
-from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
-from tradingagents.autoresearch.walk_forward import (
+from tradingagents.strategies._dormant.screener import MarketScreener
+from tradingagents.strategies._dormant.strategist import Strategist
+from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner
+from tradingagents.strategies._dormant.walk_forward import (
     generate_windows,
     get_test_dates,
 )
-from tradingagents.autoresearch.fitness import (
+from tradingagents.strategies._dormant.fitness import (
     rank_strategies,
     compute_fitness,
     update_analyst_weights,
     meets_paper_criteria,
 )
-from tradingagents.autoresearch.ticker_universe import get_universe
+from tradingagents.strategies._dormant.ticker_universe import get_universe
 
 logger = logging.getLogger(__name__)
 

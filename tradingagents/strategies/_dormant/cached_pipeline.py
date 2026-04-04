@@ -4,7 +4,7 @@ import copy
 import logging
 from typing import Optional
 
-from tradingagents.autoresearch.models import ScreenerResult
+from tradingagents.strategies.state.models import ScreenerResult
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ class CachedPipelineRunner:
     def _get_fast_runner(self):
         """Lazy-init the FastBacktestRunner."""
         if self._fast_runner is None:
-            from tradingagents.autoresearch.fast_backtest import FastBacktestRunner
+            from tradingagents.strategies._dormant.fast_backtest import FastBacktestRunner
             self._fast_runner = FastBacktestRunner(self.db, self.config)
         return self._fast_runner
 

@@ -1,9 +1,9 @@
-"""Tests for tradingagents.autoresearch.models."""
+"""Tests for tradingagents.strategies.state.models."""
 import json
 import pytest
 from datetime import datetime
 
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Filter,
     ScreenerCriteria,
     BacktestResults,

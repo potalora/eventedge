@@ -25,15 +25,15 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from tradingagents.autoresearch.cohort_orchestrator import (
+from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortConfig,
     CohortOrchestrator,
 )
-from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-from tradingagents.autoresearch.paper_trader import PaperTrader
-from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
-from tradingagents.autoresearch.state import StateManager
-from tradingagents.autoresearch.strategies.base import Candidate
+from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+from tradingagents.strategies.trading.paper_trader import PaperTrader
+from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+from tradingagents.strategies.state.state import StateManager
+from tradingagents.strategies.modules.base import Candidate
 
 
 # ---------------------------------------------------------------------------
@@ -458,8 +458,8 @@ class TestMultiDaySimulation:
             },
         }
 
-    @patch("tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data")
-    @patch("tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize")
+    @patch("tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data")
+    @patch("tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize")
     def test_30_day_lifecycle(self, mock_committee, mock_fetch, tmp_path):
         """Run 30 days: open trades, hold, exit, back-fill returns, learn."""
         state_dir = str(tmp_path / "sim30")
@@ -474,7 +474,7 @@ class TestMultiDaySimulation:
 
         # Mock committee: approve all signals with moderate sizing
         def fake_committee(signals, regime_context=None, strategy_confidence=None, current_positions=None, total_capital=None, **kwargs):
-            from tradingagents.autoresearch.portfolio_committee import TradeRecommendation as Recommendation
+            from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation as Recommendation
             recs = []
             seen = set()
             for s in signals[:3]:  # max 3 per day
@@ -530,8 +530,8 @@ class TestMultiDaySimulation:
         assert learn_result["triggered"] is True
         assert "scores" in learn_result
 
-    @patch("tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data")
-    @patch("tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize")
+    @patch("tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data")
+    @patch("tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize")
     def test_cohort_divergence(self, mock_committee, mock_fetch, tmp_path):
         """After enough history, adaptive cohort should have different confidence than control."""
         control_dir = str(tmp_path / "control")
@@ -549,7 +549,7 @@ class TestMultiDaySimulation:
         adaptive_engine._price_cache = prices
 
         def fake_committee(signals, regime_context=None, strategy_confidence=None, current_positions=None, total_capital=None, **kwargs):
-            from tradingagents.autoresearch.portfolio_committee import TradeRecommendation as Recommendation
+            from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation as Recommendation
             recs = []
             seen = set()
             for s in signals[:2]:
@@ -603,7 +603,7 @@ class TestCohortComparison:
 
     def test_comparison_with_data(self, tmp_path):
         """CohortComparison.compare() works with populated state dirs."""
-        from tradingagents.autoresearch.cohort_comparison import CohortComparison
+        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
 
         # Set up two cohort state dirs with trades
         for cohort_name in ("control", "adaptive"):

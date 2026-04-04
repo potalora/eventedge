@@ -32,7 +32,7 @@ def _make_obbject(results: list[dict], extra: dict | None = None):
 @pytest.fixture()
 def source():
     """Return an OpenBBSource instance (no real OpenBB import)."""
-    from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource
+    from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
     return OpenBBSource(fmp_api_key="test-fmp-key")
 
 
@@ -66,7 +66,7 @@ class TestProtocol:
         assert "error" in result
 
     def test_datasource_protocol(self, source):
-        from tradingagents.autoresearch.data_sources.registry import DataSource
+        from tradingagents.strategies.data_sources.registry import DataSource
         assert isinstance(source, DataSource)
 
 
@@ -474,12 +474,12 @@ class TestGracefulDegradation:
         saved = sys.modules.get("openbb")
         sys.modules["openbb"] = None
         try:
-            if "tradingagents.autoresearch.data_sources.openbb_source" in sys.modules:
+            if "tradingagents.strategies.data_sources.openbb_source" in sys.modules:
                 importlib.reload(
-                    sys.modules["tradingagents.autoresearch.data_sources.openbb_source"]
+                    sys.modules["tradingagents.strategies.data_sources.openbb_source"]
                 )
             else:
-                import tradingagents.autoresearch.data_sources.openbb_source  # noqa: F401
+                import tradingagents.strategies.data_sources.openbb_source  # noqa: F401
         finally:
             if saved is not None:
                 sys.modules["openbb"] = saved
@@ -498,14 +498,14 @@ class TestGracefulDegradation:
 
 class TestRegistration:
     def test_openbb_in_default_registry(self):
-        from tradingagents.autoresearch.data_sources.registry import build_default_registry
+        from tradingagents.strategies.data_sources.registry import build_default_registry
         registry = build_default_registry()
         source = registry.get("openbb")
         assert source is not None
         assert source.name == "openbb"
 
     def test_openbb_in_exports(self):
-        from tradingagents.autoresearch.data_sources import OpenBBSource
+        from tradingagents.strategies.data_sources import OpenBBSource
         assert OpenBBSource is not None
 
 

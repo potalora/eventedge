@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from tradingagents.autoresearch.state import StateManager
+from tradingagents.strategies.state.state import StateManager
 
 logger = logging.getLogger(__name__)
 

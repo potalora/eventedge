@@ -80,7 +80,7 @@ class TestDailyScanJob:
 
 
 class TestPaperTradingJob:
-    @patch("tradingagents.autoresearch.cached_pipeline.CachedPipelineRunner")
+    @patch("tradingagents.strategies._dormant.cached_pipeline.CachedPipelineRunner")
     @patch("tradingagents.storage.db.Database")
     def test_paper_trading_job_runs(self, MockDB, MockPipeline):
         mock_db = MagicMock()
@@ -112,7 +112,7 @@ class TestPaperTradingJob:
 
 
 class TestEvolutionJob:
-    @patch("tradingagents.autoresearch.evolution.EvolutionEngine")
+    @patch("tradingagents.strategies._dormant.evolution.EvolutionEngine")
     @patch("tradingagents.storage.db.Database")
     def test_evolution_job_runs(self, MockDB, MockEngine):
         mock_engine = MagicMock()

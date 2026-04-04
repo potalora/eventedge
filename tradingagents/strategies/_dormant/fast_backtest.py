@@ -6,7 +6,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-from tradingagents.autoresearch.models import ScreenerResult
+from tradingagents.strategies.state.models import ScreenerResult
 
 logger = logging.getLogger(__name__)
 

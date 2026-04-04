@@ -13,13 +13,13 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from tradingagents.autoresearch.data_sources.registry import (
+from tradingagents.strategies.data_sources.registry import (
     DataSourceRegistry,
     build_default_registry,
 )
-from tradingagents.autoresearch.state import StateManager
-from tradingagents.autoresearch.strategies import get_paper_trade_strategies
-from tradingagents.autoresearch.strategies.base import Candidate
+from tradingagents.strategies.state.state import StateManager
+from tradingagents.strategies.modules import get_paper_trade_strategies
+from tradingagents.strategies.modules.base import Candidate
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class MultiStrategyEngine:
         # LLM analyzer for paper-trade signal enrichment
         self._analyzer = None
         if use_llm:
-            from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+            from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
             self._analyzer = LLMAnalyzer(self.config)
 
         # Price cache: ticker -> DataFrame
@@ -73,7 +73,7 @@ class MultiStrategyEngine:
         self._adaptive_confidence = adaptive_confidence
 
         # Signal journal (shared across methods)
-        from tradingagents.autoresearch.signal_journal import SignalJournal
+        from tradingagents.strategies.learning.signal_journal import SignalJournal
         self._journal = SignalJournal(self.ar_config.get("state_dir", "data/state"))
 
         # OpenBB availability flag — checked once at startup
@@ -90,7 +90,7 @@ class MultiStrategyEngine:
 
     def set_cycle_tracker(self, gen_start_date: str) -> None:
         """Initialize cycle tracking for this engine's state directory."""
-        from tradingagents.autoresearch.cycle_tracker import CycleTracker
+        from tradingagents.strategies.state.cycle_tracker import CycleTracker
         state_dir = self.ar_config.get("state_dir", "data/state")
         self._cycle_tracker = CycleTracker(gen_start_date, state_dir)
 
@@ -220,10 +220,10 @@ class MultiStrategyEngine:
         # ------------------------------------------------------------------
         # 4. Portfolio committee synthesis → sized recommendations
         # ------------------------------------------------------------------
-        from tradingagents.autoresearch.execution_bridge import ExecutionBridge
-        from tradingagents.autoresearch.paper_trader import PaperTrader
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
-        from tradingagents.autoresearch.signal_journal import JournalEntry
+        from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
+        from tradingagents.strategies.trading.paper_trader import PaperTrader
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.learning.signal_journal import JournalEntry
 
         bridge = ExecutionBridge(self.config)
         bridge.risk_gate.reset_daily(trading_date)
@@ -324,7 +324,7 @@ class MultiStrategyEngine:
             # Track which prompt version generated this signal
             prompt_version = ""
             if self._analyzer:
-                from tradingagents.autoresearch.prompt_optimizer import PromptOptimizer
+                from tradingagents.strategies.learning.prompt_optimizer import PromptOptimizer
                 po = PromptOptimizer(self.ar_config.get("state_dir", "data/state"), self._analyzer)
                 prompt_version = po.get_prompt_version(signal["strategy"])
 
@@ -480,7 +480,7 @@ class MultiStrategyEngine:
         # ------------------------------------------------------------------
         prompt_optimization_result: dict[str, Any] = {}
         if self._analyzer:
-            from tradingagents.autoresearch.prompt_optimizer import PromptOptimizer
+            from tradingagents.strategies.learning.prompt_optimizer import PromptOptimizer
 
             state_dir = self.ar_config.get("state_dir", "data/state")
             optimizer = PromptOptimizer(state_dir, self._analyzer)
@@ -650,7 +650,7 @@ class MultiStrategyEngine:
         self, tickers: list[str], start_date: str, end_date: str,
     ) -> None:
         """Fetch prices for tickers not already in cache."""
-        from tradingagents.autoresearch.data_sources.yfinance_source import YFinanceSource
+        from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
 
         source = self.registry.get("yfinance")
         if not isinstance(source, YFinanceSource):
@@ -804,7 +804,7 @@ class MultiStrategyEngine:
 
     def _fetch_regulations_data(self) -> dict[str, Any]:
         """Fetch regulations.gov data for regulatory pipeline strategy."""
-        from tradingagents.autoresearch.event_monitor import EventMonitor
+        from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         monitor = EventMonitor(self.registry)
         result: dict[str, Any] = {}
@@ -821,7 +821,7 @@ class MultiStrategyEngine:
 
     def _fetch_edgar_events(self) -> dict[str, Any]:
         """Fetch EDGAR events for paper-trade strategies (P3, P4, P7, P8, P9)."""
-        from tradingagents.autoresearch.event_monitor import EventMonitor
+        from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         monitor = EventMonitor(self.registry)
         result: dict[str, Any] = {}
@@ -856,7 +856,7 @@ class MultiStrategyEngine:
 
     def _fetch_courtlistener_data(self) -> dict[str, Any]:
         """Fetch CourtListener data for litigation strategy."""
-        from tradingagents.autoresearch.event_monitor import EventMonitor
+        from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         monitor = EventMonitor(self.registry)
         result: dict[str, Any] = {}
@@ -897,7 +897,7 @@ class MultiStrategyEngine:
             logger.error("Failed to fetch FRED economic indicators", exc_info=True)
 
         # Map friendly names for strategies that use them
-        from tradingagents.autoresearch.data_sources.fred_source import SERIES_MAP
+        from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
         for friendly_name, series_id in SERIES_MAP.items():
             if series_id in result:
                 result[friendly_name] = result[series_id]
@@ -971,7 +971,7 @@ class MultiStrategyEngine:
 
     def _fetch_yfinance_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch all yfinance data needed by strategies."""
-        from tradingagents.autoresearch.data_sources.yfinance_source import YFinanceSource
+        from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
 
         source = self.registry.get("yfinance")
         if not isinstance(source, YFinanceSource):

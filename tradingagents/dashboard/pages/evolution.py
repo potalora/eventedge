@@ -37,7 +37,7 @@ def render(db: Database):
     reflections = db.get_reflections()
 
     if not reflections:
-        st.info("No evolution data yet. Run autoresearch to start evolving strategies.")
+        st.info("No evolution data yet. Run strategies to start evolving strategies.")
         return
 
     # Generation progress

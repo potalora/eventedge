@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tradingagents.autoresearch.signal_journal import SignalJournal
-from tradingagents.autoresearch.state import StateManager
+from tradingagents.strategies.learning.signal_journal import SignalJournal
+from tradingagents.strategies.state.state import StateManager
 
 logger = logging.getLogger(__name__)
 

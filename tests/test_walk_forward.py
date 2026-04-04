@@ -3,7 +3,7 @@
 import pytest
 from datetime import datetime
 
-from tradingagents.autoresearch.walk_forward import (
+from tradingagents.strategies._dormant.walk_forward import (
     WalkForwardWindow,
     generate_windows,
     get_test_dates,

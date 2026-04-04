@@ -1,12 +1,12 @@
-"""Tests for tradingagents.autoresearch.fast_backtest and fast mode integration."""
+"""Tests for tradingagents.strategies._dormant.fast_backtest and fast mode integration."""
 
 import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-from tradingagents.autoresearch.models import ScreenerResult
-from tradingagents.autoresearch.fast_backtest import FastBacktestRunner
-from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
+from tradingagents.strategies.state.models import ScreenerResult
+from tradingagents.strategies._dormant.fast_backtest import FastBacktestRunner
+from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner
 
 
 def _make_screener_result(**overrides) -> ScreenerResult:
@@ -135,7 +135,7 @@ class TestCacheIntegration:
         assert runner._misses == 0
         db.get_pipeline_cache.assert_called_once_with("AAPL", "2026-03-01", "haiku_fast")
 
-    @patch("tradingagents.autoresearch.fast_backtest.FastBacktestRunner._call_llm")
+    @patch("tradingagents.strategies._dormant.fast_backtest.FastBacktestRunner._call_llm")
     def test_cache_miss_calls_llm_and_caches(self, mock_llm):
         db = MagicMock()
         db.get_pipeline_cache.return_value = None
@@ -219,7 +219,7 @@ class TestFastModeToggle:
 
 
 class TestBatchConcurrency:
-    @patch("tradingagents.autoresearch.fast_backtest.FastBacktestRunner._call_llm")
+    @patch("tradingagents.strategies._dormant.fast_backtest.FastBacktestRunner._call_llm")
     def test_batch_sequential(self, mock_llm):
         db = MagicMock()
         db.get_pipeline_cache.return_value = None
@@ -232,7 +232,7 @@ class TestBatchConcurrency:
         assert len(results) == 2
         assert all(r["rating"] == "BUY" for r in results)
 
-    @patch("tradingagents.autoresearch.fast_backtest.FastBacktestRunner._call_llm")
+    @patch("tradingagents.strategies._dormant.fast_backtest.FastBacktestRunner._call_llm")
     def test_batch_concurrent(self, mock_llm):
         db = MagicMock()
         db.get_pipeline_cache.return_value = None
@@ -245,7 +245,7 @@ class TestBatchConcurrency:
         assert len(results) == 3
         assert all(r["rating"] == "SELL" for r in results)
 
-    @patch("tradingagents.autoresearch.fast_backtest.FastBacktestRunner._call_llm")
+    @patch("tradingagents.strategies._dormant.fast_backtest.FastBacktestRunner._call_llm")
     def test_batch_preserves_order(self, mock_llm):
         db = MagicMock()
         db.get_pipeline_cache.return_value = None

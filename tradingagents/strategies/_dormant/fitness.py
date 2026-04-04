@@ -1,5 +1,5 @@
 from typing import Dict, List
-from tradingagents.autoresearch.models import Strategy, BacktestResults
+from tradingagents.strategies.state.models import Strategy, BacktestResults
 from tradingagents.storage.db import Database
 
 

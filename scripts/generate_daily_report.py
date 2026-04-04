@@ -68,7 +68,7 @@ def _check_infrastructure_health() -> list[dict]:
 
     # OpenBB (optional dependency + FMP API key)
     try:
-        from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource
+        from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
         src = OpenBBSource({})
         available = src.is_available()
         results.append({
@@ -81,7 +81,7 @@ def _check_infrastructure_health() -> list[dict]:
 
     # NOAA CDO
     try:
-        from tradingagents.autoresearch.data_sources.noaa_source import NOAASource
+        from tradingagents.strategies.data_sources.noaa_source import NOAASource
         src = NOAASource({})
         available = src.is_available()
         results.append({
@@ -94,7 +94,7 @@ def _check_infrastructure_health() -> list[dict]:
 
     # USDA NASS
     try:
-        from tradingagents.autoresearch.data_sources.usda_source import USDASource
+        from tradingagents.strategies.data_sources.usda_source import USDASource
         src = USDASource({})
         available = src.is_available()
         results.append({
@@ -107,7 +107,7 @@ def _check_infrastructure_health() -> list[dict]:
 
     # FRED
     try:
-        from tradingagents.autoresearch.data_sources.fred_source import FREDSource
+        from tradingagents.strategies.data_sources.fred_source import FREDSource
         src = FREDSource({})
         available = src.is_available()
         results.append({
@@ -120,7 +120,7 @@ def _check_infrastructure_health() -> list[dict]:
 
     # US Drought Monitor (no API key required — public endpoint)
     try:
-        from tradingagents.autoresearch.data_sources.drought_monitor_source import DroughtMonitorSource
+        from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
         src = DroughtMonitorSource()
         available = src.is_available()
         results.append({
@@ -148,7 +148,7 @@ def _generate_report(date: str, gens: list[dict]) -> str:
         start_date = gen.get("start_date")
         if start_date:
             try:
-                from tradingagents.autoresearch.cycle_tracker import CycleTracker
+                from tradingagents.strategies.state.cycle_tracker import CycleTracker
                 ct = CycleTracker(gen_start_date=start_date, state_dir=gen.get("state_dir", ""))
                 cycle = ct.current_cycle(date)
                 remaining = ct.days_remaining(date)
@@ -399,7 +399,7 @@ def main():
     except ImportError:
         pass
 
-    from tradingagents.autoresearch.generation_manager import GenerationManager
+    from tradingagents.strategies.orchestration.generation_manager import GenerationManager
 
     repo = _repo_root()
     manager = GenerationManager(repo)

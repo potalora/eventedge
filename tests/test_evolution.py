@@ -4,12 +4,12 @@ import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 from copy import deepcopy
 
-from tradingagents.autoresearch.evolution import (
+from tradingagents.strategies._dormant.evolution import (
     EvolutionEngine,
     _check_entry_rule,
     _check_exit_rule,
 )
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Strategy,
     BacktestResults,
     ScreenerResult,
@@ -241,11 +241,11 @@ class TestGetProgress:
 class TestEvolutionRun:
     """Tests for the full run() loop with mocked components."""
 
-    @patch("tradingagents.autoresearch.evolution.get_universe")
-    @patch("tradingagents.autoresearch.evolution.generate_windows")
-    @patch("tradingagents.autoresearch.evolution.get_test_dates")
-    @patch("tradingagents.autoresearch.evolution.rank_strategies")
-    @patch("tradingagents.autoresearch.evolution.update_analyst_weights")
+    @patch("tradingagents.strategies._dormant.evolution.get_universe")
+    @patch("tradingagents.strategies._dormant.evolution.generate_windows")
+    @patch("tradingagents.strategies._dormant.evolution.get_test_dates")
+    @patch("tradingagents.strategies._dormant.evolution.rank_strategies")
+    @patch("tradingagents.strategies._dormant.evolution.update_analyst_weights")
     def test_full_loop(self, mock_update_weights, mock_rank, mock_test_dates,
                        mock_gen_windows, mock_universe):
         db = MagicMock()
@@ -264,7 +264,7 @@ class TestEvolutionRun:
             ]
 
             # Mock walk-forward
-            from tradingagents.autoresearch.walk_forward import WalkForwardWindow
+            from tradingagents.strategies._dormant.walk_forward import WalkForwardWindow
             mock_gen_windows.return_value = (
                 [WalkForwardWindow("2023-01-01", "2023-06-01", "2023-06-02", "2023-08-01")],
                 ("2023-10-01", "2023-12-01"),
@@ -309,6 +309,6 @@ class TestEvolutionRun:
 
 
 # Import after definition to avoid circular issues
-from tradingagents.autoresearch.screener import MarketScreener
-from tradingagents.autoresearch.strategist import Strategist
-from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
+from tradingagents.strategies._dormant.screener import MarketScreener
+from tradingagents.strategies._dormant.strategist import Strategist
+from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner

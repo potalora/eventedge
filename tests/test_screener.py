@@ -2,8 +2,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 import pandas as pd
 import numpy as np
-from tradingagents.autoresearch.screener import MarketScreener, _safe_float, _extract_market_cap
-from tradingagents.autoresearch.models import ScreenerCriteria, ScreenerResult, Filter
+from tradingagents.strategies._dormant.screener import MarketScreener, _safe_float, _extract_market_cap
+from tradingagents.strategies.state.models import ScreenerCriteria, ScreenerResult, Filter
 from tradingagents.storage.db import Database
 import tempfile, os
 

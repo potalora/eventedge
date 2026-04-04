@@ -92,7 +92,7 @@ def main():
     except ImportError:
         pass
 
-    from tradingagents.autoresearch.generation_manager import GenerationManager
+    from tradingagents.strategies.orchestration.generation_manager import GenerationManager
 
     repo = _repo_root()
     manager = GenerationManager(repo)
@@ -125,7 +125,7 @@ def main():
             print(f"  {gen_id}: {status}")
 
     elif args.command == "compare":
-        from tradingagents.autoresearch.generation_comparison import (
+        from tradingagents.strategies.orchestration.generation_comparison import (
             GenerationComparison,
             GenerationInfo as ComparisonGenInfo,
         )

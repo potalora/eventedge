@@ -23,22 +23,22 @@ import pytest
 
 from tradingagents.storage.db import Database
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Strategy, BacktestResults, ScreenerResult, ScreenerCriteria, Filter,
 )
-from tradingagents.autoresearch.evolution import EvolutionEngine, _check_entry_rule, _check_exit_rule
-from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
-from tradingagents.autoresearch.strategist import Strategist
-from tradingagents.autoresearch.screener import MarketScreener
-from tradingagents.autoresearch.fitness import (
+from tradingagents.strategies._dormant.evolution import EvolutionEngine, _check_entry_rule, _check_exit_rule
+from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner
+from tradingagents.strategies._dormant.strategist import Strategist
+from tradingagents.strategies._dormant.screener import MarketScreener
+from tradingagents.strategies._dormant.fitness import (
     compute_fitness, rank_strategies, meets_paper_criteria,
     meets_graduation_criteria, check_failure_criteria, update_analyst_weights,
 )
-from tradingagents.autoresearch.walk_forward import (
+from tradingagents.strategies._dormant.walk_forward import (
     generate_windows, get_test_dates, has_regime_diversity,
     cross_ticker_validation_split, WalkForwardWindow,
 )
-from tradingagents.autoresearch.ticker_universe import get_universe, UNIVERSE_PRESETS
+from tradingagents.strategies._dormant.ticker_universe import get_universe, UNIVERSE_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +300,7 @@ class TestFullSimulation:
 
     @patch.object(Strategist, "_call_llm")
     @patch.object(MarketScreener, "run")
-    @patch("tradingagents.autoresearch.evolution.get_universe")
+    @patch("tradingagents.strategies._dormant.evolution.get_universe")
     def test_three_generation_evolution(self, mock_universe, mock_screener,
                                          mock_llm):
         with tempfile.TemporaryDirectory() as tmpdir:

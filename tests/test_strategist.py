@@ -4,8 +4,8 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from tradingagents.autoresearch.strategist import Strategist
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies._dormant.strategist import Strategist
+from tradingagents.strategies.state.models import (
     Strategy,
     ScreenerResult,
     ScreenerCriteria,

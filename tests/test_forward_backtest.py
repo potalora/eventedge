@@ -10,14 +10,14 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Strategy, BacktestResults, ScreenerResult, ScreenerCriteria,
 )
-from tradingagents.autoresearch.screener import MarketScreener
-from tradingagents.autoresearch.evolution import (
+from tradingagents.strategies._dormant.screener import MarketScreener
+from tradingagents.strategies._dormant.evolution import (
     EvolutionEngine, _check_entry_rule,
 )
-from tradingagents.autoresearch.walk_forward import WalkForwardWindow
+from tradingagents.strategies._dormant.walk_forward import WalkForwardWindow
 from tradingagents.storage.db import Database
 from tradingagents.default_config import DEFAULT_CONFIG
 

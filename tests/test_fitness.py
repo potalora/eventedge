@@ -1,8 +1,8 @@
-"""Tests for tradingagents.autoresearch.fitness."""
+"""Tests for tradingagents.strategies._dormant.fitness."""
 import pytest
 from unittest.mock import MagicMock, call
-from tradingagents.autoresearch.models import Strategy, BacktestResults, ScreenerCriteria, Filter
-from tradingagents.autoresearch.fitness import (
+from tradingagents.strategies.state.models import Strategy, BacktestResults, ScreenerCriteria, Filter
+from tradingagents.strategies._dormant.fitness import (
     compute_fitness,
     rank_strategies,
     meets_paper_criteria,

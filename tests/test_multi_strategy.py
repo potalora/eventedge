@@ -22,7 +22,7 @@ class TestStrategyModules:
 
     @pytest.fixture
     def strategies(self):
-        from tradingagents.autoresearch.strategies import get_all_strategies
+        from tradingagents.strategies.modules import get_all_strategies
         return get_all_strategies()
 
     def test_all_strategies_have_required_attributes(self, strategies):
@@ -105,7 +105,7 @@ class TestStrategyModules:
 class TestStateManager:
     @pytest.fixture
     def state(self, tmp_path):
-        from tradingagents.autoresearch.state import StateManager
+        from tradingagents.strategies.state.state import StateManager
         return StateManager(str(tmp_path / "state"))
 
     def test_save_load_generation(self, state):
@@ -167,14 +167,14 @@ class TestStateManager:
 
 class TestDataSourceRegistry:
     def test_build_default_registry(self):
-        from tradingagents.autoresearch.data_sources.registry import build_default_registry
+        from tradingagents.strategies.data_sources.registry import build_default_registry
 
         registry = build_default_registry()
         assert registry.get("yfinance") is not None
         assert "yfinance" in registry.available_sources()
 
     def test_register_and_get(self):
-        from tradingagents.autoresearch.data_sources.registry import DataSourceRegistry
+        from tradingagents.strategies.data_sources.registry import DataSourceRegistry
 
         registry = DataSourceRegistry()
         mock_source = MagicMock()
@@ -186,7 +186,7 @@ class TestDataSourceRegistry:
         assert "test_source" in registry.available_sources()
 
     def test_get_missing_returns_none(self):
-        from tradingagents.autoresearch.data_sources.registry import DataSourceRegistry
+        from tradingagents.strategies.data_sources.registry import DataSourceRegistry
 
         registry = DataSourceRegistry()
         assert registry.get("nonexistent") is None
@@ -200,9 +200,9 @@ class TestDataSourceRegistry:
 class TestMultiStrategyEngine:
     @pytest.fixture
     def engine(self, tmp_path):
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.strategies import get_all_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.modules import get_all_strategies
 
         state = StateManager(str(tmp_path / "state"))
         config = {"autoresearch": {"state_dir": str(tmp_path / "state"), "total_capital": 5000}}
@@ -238,7 +238,7 @@ class TestMultiStrategyEngine:
 class TestPlaybookState:
     @pytest.fixture
     def state(self, tmp_path):
-        from tradingagents.autoresearch.state import StateManager
+        from tradingagents.strategies.state.state import StateManager
         return StateManager(str(tmp_path / "state"))
 
     def test_save_load_playbook(self, state):
@@ -254,7 +254,7 @@ class TestPlaybookState:
 class TestVintageState:
     @pytest.fixture
     def state(self, tmp_path):
-        from tradingagents.autoresearch.state import StateManager
+        from tradingagents.strategies.state.state import StateManager
         return StateManager(str(tmp_path / "state"))
 
     def test_save_load_vintage(self, state):
@@ -296,8 +296,8 @@ class TestVintageState:
 class TestVintageTracking:
     def test_open_trade_with_vintage(self, tmp_path):
         """Trades opened with vintage_id have it in the record."""
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.paper_trader import PaperTrader
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
         trade_id = trader.open_trade(
@@ -312,8 +312,8 @@ class TestVintageTracking:
 
     def test_vintage_performance_no_trades(self, tmp_path):
         """Vintage with no completed trades returns zero metrics."""
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.paper_trader import PaperTrader
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
         perf = trader.get_vintage_performance("nonexistent")
@@ -322,8 +322,8 @@ class TestVintageTracking:
 
     def test_vintage_performance_with_trades(self, tmp_path):
         """Vintage with completed trades returns correct metrics."""
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.paper_trader import PaperTrader
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
         # Open and close two trades
@@ -344,8 +344,8 @@ class TestVintageTracking:
 
     def test_strategy_vintage_summary(self, tmp_path):
         """Strategy summary returns per-vintage breakdown."""
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.paper_trader import PaperTrader
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
         trader.open_trade(
@@ -365,14 +365,14 @@ class TestVintageTracking:
 
 class TestPortfolioCommittee:
     def test_empty_signals_returns_empty(self):
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
         pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
         result = pc.synthesize(signals=[])
         assert result == []
 
     def test_rule_based_aggregation(self):
         """Two strategies agreeing on same ticker should produce a recommendation."""
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
         pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 0.8, "strategy": "earnings"},
@@ -389,7 +389,7 @@ class TestPortfolioCommittee:
 
     def test_single_strategy_needs_high_confidence(self):
         """Single strategy signal filtered out unless high confidence."""
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
         pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 0.5, "strategy": "earnings"},
@@ -404,7 +404,7 @@ class TestPortfolioCommittee:
 
     def test_max_position_enforced(self):
         """Position size should not exceed max_single_position_pct."""
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
         pc = PortfolioCommittee({"autoresearch": {"paper_trade": {
             "portfolio_committee_enabled": False,
             "max_single_position_pct": 0.05,
@@ -419,7 +419,7 @@ class TestPortfolioCommittee:
 
     def test_regime_misalignment_reduces_confidence(self):
         """Crisis regime + long should get lower confidence than neutral."""
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
         pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 0.8, "strategy": "a"},
@@ -435,7 +435,7 @@ class TestPortfolioCommittee:
 
     def test_conflicting_directions_resolved(self):
         """When strategies disagree, majority weighted vote wins."""
-        from tradingagents.autoresearch.portfolio_committee import PortfolioCommittee
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
         pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 0.9, "strategy": "a"},
@@ -460,9 +460,9 @@ class TestTwoPhaseEngine:
 
     def test_learning_loop_not_triggered_without_history(self):
         """Learning loop should not trigger when there's no history."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.strategies import get_all_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.modules import get_all_strategies
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = StateManager(tmpdir)
@@ -482,7 +482,7 @@ class TestSignalJournal:
     """Tests for the signal journal (append-only JSONL log)."""
 
     def test_log_and_read_signals(self):
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
@@ -534,7 +534,7 @@ class TestSignalJournal:
             assert len(aapl) == 2
 
     def test_convergence_detection(self):
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
@@ -568,14 +568,14 @@ class TestSignalJournal:
             assert convergence[0]["count"] == 3
 
     def test_convergence_empty_journal(self):
-        from tradingagents.autoresearch.signal_journal import SignalJournal
+        from tradingagents.strategies.learning.signal_journal import SignalJournal
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
             assert journal.get_convergence_signals("2026-03-30") == []
 
     def test_fill_outcomes(self):
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
@@ -608,7 +608,7 @@ class TestSignalJournal:
             assert abs(entries[0]["return_5d"] - 0.058824) < 0.001
 
     def test_fill_outcomes_no_update_when_recent(self):
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
@@ -633,7 +633,7 @@ class TestLLMAnalyzerRegime:
     """Test regime context integration in LLM analyzer."""
 
     def test_regime_suffix_with_context(self):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
         suffix = LLMAnalyzer._regime_suffix({
             "overall_regime": "stressed",
@@ -647,7 +647,7 @@ class TestLLMAnalyzerRegime:
         assert "450" in suffix
 
     def test_regime_suffix_without_context(self):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
         assert LLMAnalyzer._regime_suffix(None) == ""
         assert LLMAnalyzer._regime_suffix({}) == ""
@@ -660,7 +660,7 @@ class TestLLMAnalyzerRegime:
 
 class TestLLMAnalyzerPrompts:
     def test_get_default_prompt(self):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
         analyzer = LLMAnalyzer()
         prompt = analyzer.get_prompt("earnings_call")
@@ -668,13 +668,13 @@ class TestLLMAnalyzerPrompts:
         assert len(prompt) > 50
 
     def test_get_prompt_unknown_strategy(self):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
         analyzer = LLMAnalyzer()
         assert analyzer.get_prompt("nonexistent") == ""
 
     def test_set_and_get_override(self):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
         analyzer = LLMAnalyzer()
         original = analyzer.get_prompt("litigation")
@@ -694,8 +694,8 @@ class TestLLMAnalyzerPrompts:
 class TestPromptOptimizer:
     @pytest.fixture
     def optimizer_setup(self, tmp_path):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
-        from tradingagents.autoresearch.prompt_optimizer import PromptOptimizer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.prompt_optimizer import PromptOptimizer
 
         analyzer = LLMAnalyzer()
         optimizer = PromptOptimizer(str(tmp_path), analyzer)
@@ -703,7 +703,7 @@ class TestPromptOptimizer:
 
     def test_evaluate_prompts_insufficient_data(self, optimizer_setup):
         """With no journal data, all strategies should have 0 signals."""
-        from tradingagents.autoresearch.signal_journal import SignalJournal
+        from tradingagents.strategies.learning.signal_journal import SignalJournal
 
         optimizer, _, tmp_path = optimizer_setup
         journal = SignalJournal(str(tmp_path))
@@ -751,7 +751,7 @@ class TestPromptOptimizer:
         assert trial["status"] == "active"
 
     def test_commit_revert_restores_baseline(self, optimizer_setup):
-        from tradingagents.autoresearch.llm_analyzer import _DEFAULT_PROMPTS
+        from tradingagents.strategies.learning.llm_analyzer import _DEFAULT_PROMPTS
 
         optimizer, analyzer, _ = optimizer_setup
         original = analyzer.get_prompt("litigation")
@@ -777,7 +777,7 @@ class TestPromptOptimizer:
 
 class TestSignalJournalFailures:
     def test_get_high_conviction_failures(self, tmp_path):
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
         journal = SignalJournal(str(tmp_path))
 
@@ -806,7 +806,7 @@ class TestSignalJournalFailures:
         assert failures[0]["ticker"] == "AAPL"
 
     def test_prompt_version_field_in_journal(self, tmp_path):
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
         journal = SignalJournal(str(tmp_path))
         entry = JournalEntry(
@@ -830,8 +830,8 @@ class TestStrategyConfidence:
 
     def test_insufficient_data_returns_neutral(self, tmp_path):
         """With < 10 outcomes, confidence = 0.5."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
@@ -841,9 +841,9 @@ class TestStrategyConfidence:
 
     def test_all_hits_returns_high_confidence(self, tmp_path):
         """100% hit rate -> 0.9 confidence (capped)."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         journal = SignalJournal(str(tmp_path))
         for i in range(15):
@@ -864,9 +864,9 @@ class TestStrategyConfidence:
 
     def test_all_misses_returns_low_confidence(self, tmp_path):
         """0% hit rate -> 0.2 confidence (floored)."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         journal = SignalJournal(str(tmp_path))
         for i in range(15):
@@ -887,9 +887,9 @@ class TestStrategyConfidence:
 
     def test_50pct_hit_rate_maps_correctly(self, tmp_path):
         """50% hit rate -> should be about 0.55 confidence."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         journal = SignalJournal(str(tmp_path))
         for i in range(20):
@@ -911,8 +911,8 @@ class TestStrategyConfidence:
 
     def test_adaptive_flag_uses_journal(self, tmp_path):
         """Engine with adaptive_confidence=True uses journal."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
@@ -923,8 +923,8 @@ class TestStrategyConfidence:
 
     def test_non_adaptive_flag_uses_fixed(self, tmp_path):
         """Engine with adaptive_confidence=False uses 0.5."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
@@ -944,7 +944,7 @@ class TestRiskGateNoWeights:
 
     def test_basic_sizing(self):
         """Position size from committee pct, no weight."""
-        from tradingagents.autoresearch.risk_gate import RiskGate, RiskGateConfig
+        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
         from tradingagents.execution.paper_broker import PaperBroker
 
         broker = PaperBroker(initial_capital=5000.0)
@@ -955,7 +955,7 @@ class TestRiskGateNoWeights:
 
     def test_caps_at_max_position_pct(self):
         """Position capped at 15% of portfolio."""
-        from tradingagents.autoresearch.risk_gate import RiskGate, RiskGateConfig
+        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
         from tradingagents.execution.paper_broker import PaperBroker
 
         broker = PaperBroker(initial_capital=5000.0)
@@ -965,7 +965,7 @@ class TestRiskGateNoWeights:
         assert shares == 15
 
     def test_zero_price_returns_zero(self):
-        from tradingagents.autoresearch.risk_gate import RiskGate, RiskGateConfig
+        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
         from tradingagents.execution.paper_broker import PaperBroker
 
         broker = PaperBroker(initial_capital=5000.0)
@@ -974,7 +974,7 @@ class TestRiskGateNoWeights:
 
     def test_min_position_enforced(self):
         """Tiny positions below $100 min are rejected."""
-        from tradingagents.autoresearch.risk_gate import RiskGate, RiskGateConfig
+        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
         from tradingagents.execution.paper_broker import PaperBroker
 
         broker = PaperBroker(initial_capital=5000.0)
@@ -996,7 +996,7 @@ class TestExecutionBridgeNoWeights:
         """execute_recommendation no longer takes strategy_weight."""
         import inspect
 
-        from tradingagents.autoresearch.execution_bridge import ExecutionBridge
+        from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 
         sig = inspect.signature(ExecutionBridge.execute_recommendation)
         params = list(sig.parameters.keys())
@@ -1017,7 +1017,7 @@ class TestCohortOrchestrator:
 
     def test_build_default_cohorts(self):
         """build_default_cohorts returns 2 cohorts."""
-        from tradingagents.autoresearch.cohort_orchestrator import build_default_cohorts
+        from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
         assert len(cohorts) == 2
@@ -1030,7 +1030,7 @@ class TestCohortOrchestrator:
 
     def test_separate_state_dirs(self):
         """Each cohort gets its own state directory."""
-        from tradingagents.autoresearch.cohort_orchestrator import build_default_cohorts
+        from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
         assert cohorts[0].state_dir != cohorts[1].state_dir
@@ -1039,7 +1039,7 @@ class TestCohortOrchestrator:
 
     def test_orchestrator_creates_engines(self, tmp_path):
         """Orchestrator creates one engine per cohort."""
-        from tradingagents.autoresearch.cohort_orchestrator import CohortConfig, CohortOrchestrator
+        from tradingagents.strategies.orchestration.cohort_orchestrator import CohortConfig, CohortOrchestrator
 
         configs = [
             CohortConfig(name="a", state_dir=str(tmp_path / "a"), use_llm=False),
@@ -1061,7 +1061,7 @@ class TestCohortComparison:
 
     def test_empty_comparison(self, tmp_path):
         """Comparison with empty journals returns zeros."""
-        from tradingagents.autoresearch.cohort_comparison import CohortComparison
+        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
 
         dirs = {
             "control": str(tmp_path / "control"),
@@ -1078,7 +1078,7 @@ class TestCohortComparison:
 
     def test_format_report_returns_string(self, tmp_path):
         """format_report returns a non-empty string."""
-        from tradingagents.autoresearch.cohort_comparison import CohortComparison
+        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
 
         dirs = {
             "control": str(tmp_path / "control"),
@@ -1102,7 +1102,7 @@ class TestEdgarDataFlow:
 
     def test_form4_prompt_includes_field_descriptions(self):
         """LLM prompt for Form 4 analysis includes transaction_code explanations."""
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
         analyzer = LLMAnalyzer.__new__(LLMAnalyzer)
         # Mock _call_llm to capture the prompt
@@ -1129,7 +1129,7 @@ class TestEdgarDataFlow:
 
     def test_event_monitor_fetches_prior_text(self):
         """poll_edgar_filings fetches prior filing text for 10-K/10-Q."""
-        from tradingagents.autoresearch.event_monitor import EventMonitor
+        from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         mock_source = MagicMock()
         mock_source.is_available.return_value = True
@@ -1167,7 +1167,7 @@ class TestEdgarDataFlow:
 
     def test_event_monitor_no_prior_when_no_cik(self):
         """No prior text fetched when filing has no CIK."""
-        from tradingagents.autoresearch.event_monitor import EventMonitor
+        from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         mock_source = MagicMock()
         mock_source.is_available.return_value = True
@@ -1194,7 +1194,7 @@ class TestEdgarDataFlow:
 
     def test_event_monitor_proxy_no_prior_text(self):
         """DEF 14A filings get proxy_text but no prior_text."""
-        from tradingagents.autoresearch.event_monitor import EventMonitor
+        from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         mock_source = MagicMock()
         mock_source.is_available.return_value = True

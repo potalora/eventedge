@@ -170,7 +170,7 @@ class LitigationStrategy:
 
         # Resolve via SEC company_tickers.json
         try:
-            from tradingagents.autoresearch.data_sources.edgar_source import EDGARSource
+            from tradingagents.strategies.data_sources.edgar_source import EDGARSource
             source = EDGARSource()
             ticker = source.name_to_ticker(defendant)
             if ticker:

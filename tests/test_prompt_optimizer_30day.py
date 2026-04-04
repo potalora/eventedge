@@ -24,14 +24,14 @@ from unittest.mock import patch
 
 import pytest
 
-from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
-from tradingagents.autoresearch.prompt_optimizer import (
+from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
+from tradingagents.strategies.learning.prompt_optimizer import (
     LLM_STRATEGIES,
     MIN_SIGNALS_FOR_EVAL,
     TRIAL_DAYS,
     PromptOptimizer,
 )
-from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
+from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 
 BASE_DATE = datetime(2026, 4, 1)
 
@@ -782,7 +782,7 @@ class TestFullThirtyDayOptimizationLoop:
             if decision == "keep":
                 strat = all_trials[tid]["strategy"]
                 current = analyzer.get_prompt(strat)
-                from tradingagents.autoresearch.llm_analyzer import _DEFAULT_PROMPTS
+                from tradingagents.strategies.learning.llm_analyzer import _DEFAULT_PROMPTS
                 default = _DEFAULT_PROMPTS.get(strat, "")
                 assert current != default, (
                     f"Kept trial for {strat} but prompt is still default"

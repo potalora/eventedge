@@ -21,7 +21,7 @@ def render(db: Database):
         strategies = db.get_strategies_by_status(status_filter)
 
     if not strategies:
-        st.info("No strategies found. Run autoresearch to generate strategies.")
+        st.info("No strategies found. Run strategies to generate strategies.")
         return
 
     # Build table data

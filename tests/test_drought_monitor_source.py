@@ -11,7 +11,7 @@ import pytest
 
 @pytest.fixture()
 def source():
-    from tradingagents.autoresearch.data_sources.drought_monitor_source import DroughtMonitorSource
+    from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
     return DroughtMonitorSource()
 
 
@@ -34,7 +34,7 @@ class TestProtocol:
         assert "error" in result
 
     def test_datasource_protocol(self, source):
-        from tradingagents.autoresearch.data_sources.registry import DataSource
+        from tradingagents.strategies.data_sources.registry import DataSource
         assert isinstance(source, DataSource)
 
 

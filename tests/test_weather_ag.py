@@ -10,12 +10,12 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from tradingagents.autoresearch.strategies.weather_ag import (
+from tradingagents.strategies.modules.weather_ag import (
     WeatherAgStrategy,
     AG_TICKERS_FULL,
     AG_TICKERS_WINTER,
 )
-from tradingagents.autoresearch.strategies.base import Candidate
+from tradingagents.strategies.modules.base import Candidate
 
 
 @pytest.fixture()
@@ -362,11 +362,11 @@ class TestCropDecline:
 
 class TestLLMAnalyzerIntegration:
     def test_ag_weather_prompt_exists(self):
-        from tradingagents.autoresearch.llm_analyzer import _DEFAULT_PROMPTS
+        from tradingagents.strategies.learning.llm_analyzer import _DEFAULT_PROMPTS
         assert "ag_weather" in _DEFAULT_PROMPTS
 
     def test_analyze_ag_weather_returns_dict(self):
-        from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
         analyzer = LLMAnalyzer()
         mock_response = '{"direction": "long", "score": 0.7, "reasoning": "Drought conditions severe"}'
         with patch.object(analyzer, "_call_llm", return_value=mock_response):

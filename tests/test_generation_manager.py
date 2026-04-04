@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tradingagents.autoresearch.generation_manager import GenerationManager
+from tradingagents.strategies.orchestration.generation_manager import GenerationManager
 
 
 # ------------------------------------------------------------------
@@ -202,7 +202,7 @@ class TestGenerationDailyRun:
         info = manager.start_generation("env test")
 
         # Mock subprocess.run at module level, but only for non-git calls
-        import tradingagents.autoresearch.generation_manager as gm_mod
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
         original_run = subprocess.run
         captured_calls = []
@@ -317,7 +317,7 @@ class TestMultipleGenerations:
 class TestGenerationComparison:
     def test_compare_empty_gens(self, tmp_path):
         """Comparison with gens that have no state returns empty metrics."""
-        from tradingagents.autoresearch.generation_comparison import (
+        from tradingagents.strategies.orchestration.generation_comparison import (
             GenerationComparison,
             GenerationInfo,
         )
@@ -342,7 +342,7 @@ class TestGenerationComparison:
 
     def test_compare_with_synthetic_data(self, tmp_path):
         """Create state dirs with paper_trades.json and signal_journal.jsonl."""
-        from tradingagents.autoresearch.generation_comparison import (
+        from tradingagents.strategies.orchestration.generation_comparison import (
             GenerationComparison,
             GenerationInfo,
         )

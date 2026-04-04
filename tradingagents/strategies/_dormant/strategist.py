@@ -4,7 +4,7 @@ import json
 import logging
 from typing import Optional
 
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Strategy,
     ScreenerCriteria,
     ScreenerResult,

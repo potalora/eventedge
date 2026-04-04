@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any
 
-from tradingagents.autoresearch.risk_gate import RiskGate, RiskGateConfig
+from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
 from tradingagents.execution.base_broker import AccountInfo, BaseBroker, OrderResult
 
 logger = logging.getLogger(__name__)

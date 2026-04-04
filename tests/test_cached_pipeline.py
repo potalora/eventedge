@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 from copy import deepcopy
 
-from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
+from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner
 from tradingagents.default_config import DEFAULT_CONFIG
 
 

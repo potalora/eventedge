@@ -35,9 +35,9 @@ class CohortOrchestrator:
             base_config: Base config dict (DEFAULT_CONFIG with env vars applied).
                          Per-cohort state_dir overrides are applied automatically.
         """
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.state.state import StateManager
+        from tradingagents.strategies.modules import get_paper_trade_strategies
 
         self.cohorts: list[dict[str, Any]] = []
         strategies = get_paper_trade_strategies()

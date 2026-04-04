@@ -29,7 +29,7 @@ class TestAutoresearchCommand:
         MockDB.return_value = MagicMock()
 
         # We need to patch at the point of import inside the function
-        with patch("tradingagents.autoresearch.evolution.EvolutionEngine", MockEngine):
+        with patch("tradingagents.strategies._dormant.evolution.EvolutionEngine", MockEngine):
             with patch("tradingagents.storage.db.Database", MockDB):
                 result = runner.invoke(app, ["autoresearch", "--generations", "2", "--budget", "10.0"])
 

@@ -11,13 +11,13 @@ import pytest
 
 @pytest.fixture()
 def source():
-    from tradingagents.autoresearch.data_sources.usda_source import USDASource
+    from tradingagents.strategies.data_sources.usda_source import USDASource
     return USDASource(api_key="test-key-123")
 
 
 @pytest.fixture()
 def source_no_key():
-    from tradingagents.autoresearch.data_sources.usda_source import USDASource
+    from tradingagents.strategies.data_sources.usda_source import USDASource
     # Patch environment so the source cannot fall back to a real key
     with patch.dict("os.environ", {"USDA_NASS_API_KEY": ""}, clear=False):
         yield USDASource(api_key="")
@@ -45,7 +45,7 @@ class TestProtocol:
         assert "error" in result
 
     def test_datasource_protocol(self, source):
-        from tradingagents.autoresearch.data_sources.registry import DataSource
+        from tradingagents.strategies.data_sources.registry import DataSource
         assert isinstance(source, DataSource)
 
 

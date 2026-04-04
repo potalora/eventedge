@@ -1,6 +1,6 @@
 import pytest
 
-from tradingagents.autoresearch.ticker_universe import (
+from tradingagents.strategies._dormant.ticker_universe import (
     UNIVERSE_PRESETS,
     SMALL_CAP_WATCHLIST,
     get_universe,

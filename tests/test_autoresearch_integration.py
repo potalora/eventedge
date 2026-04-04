@@ -10,18 +10,18 @@ from copy import deepcopy
 
 from tradingagents.storage.db import Database
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.autoresearch.models import (
+from tradingagents.strategies.state.models import (
     Strategy, BacktestResults, ScreenerResult, ScreenerCriteria,
 )
-from tradingagents.autoresearch.evolution import EvolutionEngine
-from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
-from tradingagents.autoresearch.strategist import Strategist
-from tradingagents.autoresearch.screener import MarketScreener
-from tradingagents.autoresearch.fitness import (
+from tradingagents.strategies._dormant.evolution import EvolutionEngine
+from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner
+from tradingagents.strategies._dormant.strategist import Strategist
+from tradingagents.strategies._dormant.screener import MarketScreener
+from tradingagents.strategies._dormant.fitness import (
     compute_fitness, rank_strategies, meets_paper_criteria,
     update_analyst_weights,
 )
-from tradingagents.autoresearch.walk_forward import generate_windows
+from tradingagents.strategies._dormant.walk_forward import generate_windows
 
 
 def _make_config():
@@ -138,7 +138,7 @@ class TestFullEvolutionLoop:
 
     @patch.object(Strategist, "_call_llm")
     @patch.object(MarketScreener, "run")
-    @patch("tradingagents.autoresearch.evolution.get_universe")
+    @patch("tradingagents.strategies._dormant.evolution.get_universe")
     def test_two_generations(self, mock_universe, mock_screener_run,
                               mock_llm):
         with tempfile.TemporaryDirectory() as tmpdir:

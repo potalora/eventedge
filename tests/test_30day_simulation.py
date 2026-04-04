@@ -21,20 +21,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tradingagents.autoresearch.cohort_comparison import CohortComparison
-from tradingagents.autoresearch.cohort_orchestrator import (
+from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortConfig,
     CohortOrchestrator,
 )
-from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-from tradingagents.autoresearch.paper_trader import PaperTrader
-from tradingagents.autoresearch.portfolio_committee import (
+from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+from tradingagents.strategies.trading.paper_trader import PaperTrader
+from tradingagents.strategies.trading.portfolio_committee import (
     PortfolioCommittee,
     TradeRecommendation,
 )
-from tradingagents.autoresearch.signal_journal import JournalEntry, SignalJournal
-from tradingagents.autoresearch.state import StateManager
-from tradingagents.autoresearch.strategies.base import Candidate
+from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+from tradingagents.strategies.state.state import StateManager
+from tradingagents.strategies.modules.base import Candidate
 from tradingagents.execution.paper_broker import PaperBroker
 
 
@@ -343,10 +343,10 @@ class TestIdempotencyDoubleRun:
     """Running the same date twice must not duplicate signals or trades."""
 
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
     )
     @patch(
-        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
     )
     def test_double_run_no_duplicates(self, mock_committee, mock_fetch, tmp_path):
         state_dir = str(tmp_path / "idem")
@@ -391,13 +391,13 @@ class TestThirtyDayFullLifecycle:
     """Full 30-day simulation with synthetic data."""
 
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
     )
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
     )
     @patch(
-        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
     )
     def test_30_day_full_lifecycle(
         self, mock_committee, mock_fetch_prices, mock_fetch_data, tmp_path
@@ -513,7 +513,7 @@ class TestThirtyDayFullLifecycle:
 
         # Capital conservation: cash + positions_value ~ initial capital
         # (not exact due to realized PnL, but should be in the same ballpark)
-        from tradingagents.autoresearch.execution_bridge import ExecutionBridge
+        from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 
         bridge = ExecutionBridge(_base_config(state_dir))
         open_trades = state.load_paper_trades(status="open")
@@ -538,16 +538,16 @@ class TestThirtyDayCohortDivergence:
     """Run 30 days through CohortOrchestrator with 2 cohorts."""
 
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
     )
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
     )
     @patch(
-        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
     )
     @patch(
-        "tradingagents.autoresearch.strategies.get_paper_trade_strategies"
+        "tradingagents.strategies.modules.get_paper_trade_strategies"
     )
     def test_cohort_divergence_30_days(
         self,
@@ -708,16 +708,16 @@ class TestOpenBBEnrichment:
     """Verify OpenBB enrichment works across 30-day simulation."""
 
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
     )
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
     )
     @patch(
-        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
     )
     @patch(
-        "tradingagents.autoresearch.strategies.get_paper_trade_strategies"
+        "tradingagents.strategies.modules.get_paper_trade_strategies"
     )
     def test_enrichment_30_days_with_openbb(
         self,
@@ -819,16 +819,16 @@ class TestOpenBBEnrichment:
         assert len(adaptive_trades) > 0, "Adaptive should have trades with enrichment"
 
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
     )
     @patch(
-        "tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
+        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
     )
     @patch(
-        "tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize"
+        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
     )
     @patch(
-        "tradingagents.autoresearch.strategies.get_paper_trade_strategies"
+        "tradingagents.strategies.modules.get_paper_trade_strategies"
     )
     def test_graceful_degradation_without_openbb(
         self,
@@ -910,7 +910,7 @@ class TestReactivatedStrategies:
 
     def test_govt_contracts_with_usaspending_data(self):
         """govt_contracts screen() produces candidates from contract data."""
-        from tradingagents.autoresearch.strategies.govt_contracts import GovtContractsStrategy
+        from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
 
         strategy = GovtContractsStrategy()
         assert strategy.track == "paper_trade"
@@ -941,7 +941,7 @@ class TestReactivatedStrategies:
 
     def test_govt_contracts_momentum_fallback(self):
         """govt_contracts falls back to momentum when no contract data."""
-        from tradingagents.autoresearch.strategies.govt_contracts import GovtContractsStrategy
+        from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
 
         strategy = GovtContractsStrategy()
 
@@ -970,7 +970,7 @@ class TestReactivatedStrategies:
 
     def test_govt_contracts_exit_logic(self):
         """govt_contracts exit logic works correctly."""
-        from tradingagents.autoresearch.strategies.govt_contracts import GovtContractsStrategy
+        from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
 
         strategy = GovtContractsStrategy()
         params = strategy.get_default_params()
@@ -996,7 +996,7 @@ class TestReactivatedStrategies:
 
     def test_state_economics_with_fred_data(self):
         """state_economics screen() combines FRED indicators with momentum."""
-        from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
+        from tradingagents.strategies.modules.state_economics import StateEconomicsStrategy
 
         strategy = StateEconomicsStrategy()
         assert strategy.track == "paper_trade"
@@ -1032,7 +1032,7 @@ class TestReactivatedStrategies:
 
     def test_state_economics_momentum_only_fallback(self):
         """state_economics falls back to pure momentum when no FRED data."""
-        from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
+        from tradingagents.strategies.modules.state_economics import StateEconomicsStrategy
 
         strategy = StateEconomicsStrategy()
 
@@ -1053,7 +1053,7 @@ class TestReactivatedStrategies:
 
     def test_state_economics_exit_logic(self):
         """state_economics exit logic: rebalance schedule (30-day default)."""
-        from tradingagents.autoresearch.strategies.state_economics import StateEconomicsStrategy
+        from tradingagents.strategies.modules.state_economics import StateEconomicsStrategy
 
         strategy = StateEconomicsStrategy()
         params = strategy.get_default_params()
@@ -1069,7 +1069,7 @@ class TestReactivatedStrategies:
 
     def test_ten_strategies_registered(self):
         """Verify 10 strategies are registered."""
-        from tradingagents.autoresearch.strategies import get_paper_trade_strategies
+        from tradingagents.strategies.modules import get_paper_trade_strategies
         strategies = get_paper_trade_strategies()
         assert len(strategies) == 10
         names = [s.name for s in strategies]

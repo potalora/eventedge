@@ -47,9 +47,9 @@ def paper_trading_job(config: dict, alert_manager: AlertManager) -> List[Dict[st
     - Records paper trades
     """
     from tradingagents.storage.db import Database
-    from tradingagents.autoresearch.evolution import EvolutionEngine
-    from tradingagents.autoresearch.models import Strategy
-    from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
+    from tradingagents.strategies._dormant.evolution import EvolutionEngine
+    from tradingagents.strategies.state.models import Strategy
+    from tradingagents.strategies._dormant.cached_pipeline import CachedPipelineRunner
     import os
 
     db_path = os.path.join(config.get("results_dir", "./results"), "tradingagents.db")
@@ -97,7 +97,7 @@ def paper_trading_job(config: dict, alert_manager: AlertManager) -> List[Dict[st
 def evolution_job(config: dict, alert_manager: AlertManager) -> dict:
     """Weekly evolution run — discovers and refines strategies."""
     from tradingagents.storage.db import Database
-    from tradingagents.autoresearch.evolution import EvolutionEngine
+    from tradingagents.strategies._dormant.evolution import EvolutionEngine
     import os
 
     db_path = os.path.join(config.get("results_dir", "./results"), "tradingagents.db")

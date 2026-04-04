@@ -5,7 +5,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from tradingagents.autoresearch.models import ScreenerCriteria, ScreenerResult, Filter
+from tradingagents.strategies.state.models import ScreenerCriteria, ScreenerResult, Filter
 logger = logging.getLogger(__name__)
 
 # Minimum data points needed for reliable technicals
@@ -378,7 +378,7 @@ class MarketScreener:
         5. Return filtered results
         """
         if universe is None:
-            from tradingagents.autoresearch.ticker_universe import get_universe
+            from tradingagents.strategies._dormant.ticker_universe import get_universe
             universe = get_universe(self.config)
 
         # Use batch fetch for speed (1 bulk download instead of N sequential calls)

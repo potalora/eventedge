@@ -13,10 +13,10 @@ import copy
 import logging
 from typing import Any
 
-from tradingagents.autoresearch.darwinian import update_weights
-from tradingagents.autoresearch.llm_analyzer import LLMAnalyzer
-from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-from tradingagents.autoresearch.state import StateManager
+from tradingagents.strategies._dormant.darwinian import update_weights
+from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
+from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+from tradingagents.strategies.state.state import StateManager
 
 logger = logging.getLogger(__name__)
 
