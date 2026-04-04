@@ -35,20 +35,6 @@ python scripts/run_generations.py retire gen_001            # retire (delete wor
 # Daily report (auto-runs after daily_trading.sh, or standalone)
 python scripts/generate_daily_report.py [--date DATE]      # generate markdown report for all gens
 
-# Cohort trial (2 parallel paper portfolios) — single-generation use
-python scripts/run_cohorts.py --date 2026-03-31          # daily trading (LLM on by default)
-python scripts/run_cohorts.py --date 2026-03-31 --no-llm  # without LLM enrichment
-python scripts/run_cohorts.py --learning                   # weekly learning (adaptive only)
-python scripts/run_cohorts.py --compare                    # compare cohort performance
-python scripts/run_cohorts.py --reset                      # reset all cohort state
-
-# Autoresearch — single engine (legacy, single-engine)
-python scripts/run_generation.py                                          # paper trading (default)
-python scripts/run_generation.py --phase paper                             # daily/weekly trading loop
-python scripts/run_generation.py --phase learning                          # monthly/quarterly learning loop
-python scripts/run_generation.py --use-llm                                 # with LLM enrichment
-python scripts/run_generation.py --reset                                   # clear state and run fresh
-
 # Dashboard
 .venv/bin/python -m streamlit run tradingagents/dashboard/app.py
 ```
@@ -177,13 +163,11 @@ The **portfolio committee** is the sole sizing authority — the risk gate only 
 
 ### Key Components
 
-- `cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, then fetches OpenBB enrichment (profiles, short interest, Fama-French factors) for signal tickers, then dispatches to each cohort's engine. `CohortConfig` and `build_default_cohorts()` define the A/B setup.
-- `cohort_comparison.py` — `CohortComparison` with `compare()` and `format_report()` for side-by-side cohort analysis.
-- `portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available.
+- `strategies/orchestration/cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, then fetches OpenBB enrichment (profiles, short interest, Fama-French factors) for signal tickers, then dispatches to each cohort's engine. `CohortConfig` and `build_default_cohorts()` define the A/B setup.
+- `strategies/orchestration/cohort_comparison.py` — `CohortComparison` with `compare()` and `format_report()` for side-by-side cohort analysis.
+- `strategies/trading/portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available.
 - Vintage tracking (param sets tagged with vintage ID, trade count, creation date), regime model, 15% exploration budget for unproven param sets.
 - Future bolt-on: debate validation (not built yet).
-
-Legacy `run_generation.py` still works for single-engine use; for the 2-cohort trial use `scripts/run_cohorts.py`.
 
 ### Generation Management
 
@@ -196,8 +180,8 @@ The generation system allows multiple versions of the codebase to run paper trad
 4. `retire` — Archives a generation (keeps state, optionally deletes worktree).
 
 **Key files:**
-- `tradingagents/autoresearch/generation_manager.py` — `GenerationManager` class, manifest persistence
-- `tradingagents/autoresearch/generation_comparison.py` — Cross-generation comparison
+- `tradingagents/strategies/orchestration/generation_manager.py` — `GenerationManager` class, manifest persistence
+- `tradingagents/strategies/orchestration/generation_comparison.py` — Cross-generation comparison
 - `scripts/run_generations.py` — CLI entry point
 - `scripts/generate_daily_report.py` — Generates daily markdown reports to `docs/reports/`
 - `scripts/daily_trading.sh` — Shell wrapper for cron/launchd (runs daily + generates report)
@@ -212,8 +196,8 @@ The generation system allows multiple versions of the codebase to run paper trad
 
 ### Adding a New Strategy
 
-1. Create `tradingagents/autoresearch/strategies/my_strategy.py`
-2. Implement the `StrategyModule` protocol from `strategies/base.py`:
+1. Create `tradingagents/strategies/modules/my_strategy.py`
+2. Implement the `StrategyModule` protocol from `modules/base.py`:
    - `name: str` — unique identifier (e.g. `"my_strategy"`)
    - `track: str` — `"backtest"` or `"paper_trade"`
    - `data_sources: list[str]` — registry source names needed (e.g. `["yfinance", "fred"]`)
@@ -222,14 +206,14 @@ The generation system allows multiple versions of the codebase to run paper trad
    - `screen(data, date, params) -> list[Candidate]` — screen for entry signals
    - `check_exit(ticker, entry_price, current_price, holding_days, params, data) -> (bool, str)` — exit logic
    - `build_propose_prompt(context) -> str` — LLM prompt for parameter evolution
-3. Register in `strategies/__init__.py`:
+3. Register in `modules/__init__.py`:
    - Add import
    - Add to `__all__`
    - Add instance to `get_backtest_strategies()` or `get_paper_trade_strategies()`
 
 ### Adding a New Data Source
 
-1. Create `tradingagents/autoresearch/data_sources/my_source.py`
+1. Create `tradingagents/strategies/data_sources/my_source.py`
 2. Implement the `DataSource` protocol from `data_sources/registry.py`:
    - `name: str` — registry key (e.g. `"my_source"`)
    - `requires_api_key: bool`

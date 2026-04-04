@@ -76,11 +76,11 @@ The autoresearch system autonomously discovers, evolves, and paper-trades strate
 
 ### Two-Phase Flow
 
-The system operates in two distinct phases. Legacy `run_generation()` still works (with deprecation warning) for backwards compatibility.
+The system operates in two distinct phases.
 
 ### Phase 1: Backtest Evolution (`--phase backtest`)
 
-Phase 1 infrastructure is fully built but currently dormant. The 2 backtest strategies (govt_contracts, state_economics) are archived in `strategies/_archive/` and not registered in `get_all_strategies()`. To activate Phase 1, re-register backtest strategies in `strategies/__init__.py`.
+Phase 1 infrastructure is fully built but currently dormant. The 2 backtest strategies (govt_contracts, state_economics) are archived in `_dormant/` and not registered in `get_all_strategies()`. To activate Phase 1, re-register backtest strategies in `modules/__init__.py`.
 
 When active, Phase 1 runs N generations offline (typically 50+) to produce an optimized playbook:
 
@@ -123,9 +123,7 @@ After N generations, outputs: optimized params per strategy, regime model, strat
 
 ### Phase 2: 2-Cohort Paper Trading Trial
 
-Uses the playbook for live trading via `CohortOrchestrator` (`cohort_orchestrator.py`), which runs a shared data fetch then dispatches to two parallel cohorts with separate state directories.
-
-For single-engine use, `run_generation.py --phase paper` / `--phase learning` still works. For the 2-cohort trial, use `scripts/run_cohorts.py`.
+Uses the playbook for live trading via `CohortOrchestrator` (`orchestration/cohort_orchestrator.py`), which runs a shared data fetch then dispatches to two parallel cohorts with separate state directories.
 
 #### Cohort A -- Control (`data/state/control/`)
 
@@ -146,9 +144,9 @@ For single-engine use, `run_generation.py --phase paper` / `--phase learning` st
 3. Vintage tracking (param sets tagged with vintage ID, trade count, creation date)
 4. 15% exploration budget for unproven param sets
 
-#### Cohort Comparison (`cohort_comparison.py`)
+#### Cohort Comparison (`orchestration/cohort_comparison.py`)
 
-`CohortComparison.compare()` produces side-by-side metrics; `format_report()` renders a human-readable summary. Run via `scripts/run_cohorts.py --compare`.
+`CohortComparison.compare()` produces side-by-side metrics; `format_report()` renders a human-readable summary.
 
 #### Future: Debate Validation
 
@@ -162,7 +160,7 @@ Generation results (scores, trades, weights, signals) saved to `data/state/gen_N
 
 ## Component Reference
 
-### MultiStrategyEngine (`multi_strategy_engine.py`)
+### MultiStrategyEngine (`orchestration/multi_strategy_engine.py`)
 
 Core orchestrator. Key methods:
 
@@ -177,7 +175,7 @@ Core orchestrator. Key methods:
 
 Constructor accepts: `config`, `strategies` (list), `registry` (DataSourceRegistry), `state_manager`, `on_event` (callback for progress reporting).
 
-### StateManager (`state.py`)
+### StateManager (`state/state.py`)
 
 JSON-file-based persistence with **atomic writes** (write to temp file, then `os.rename`).
 
@@ -191,7 +189,7 @@ JSON-file-based persistence with **atomic writes** (write to temp file, then `os
 | `save/load_vintages()` | `vintages.json` |
 | `reset()` | Clears all state files |
 
-### PaperTrader (`paper_trader.py`)
+### PaperTrader (`trading/paper_trader.py`)
 
 Records paper trades from paper-trade strategies and tracks P&L against real prices.
 
@@ -202,7 +200,7 @@ Records paper trades from paper-trade strategies and tracks P&L against real pri
 | `close_trade()` | Record trade exit with P&L |
 | `get_performance()` | Win rate, avg PnL, Sharpe for completed trades |
 
-### PortfolioCommittee (`portfolio_committee.py`)
+### PortfolioCommittee (`trading/portfolio_committee.py`)
 
 Synthesizes signals across multiple strategies into unified position recommendations during Phase 2's trading loop.
 
@@ -213,7 +211,7 @@ Synthesizes signals across multiple strategies into unified position recommendat
 
 The committee is the **sole sizing authority** -- weight scaling has been removed from `compute_position_size()` and `execute_recommendation()`. The risk gate only enforces hard limits. Falls back to rule-based synthesis if LLM call fails.
 
-### CohortOrchestrator (`cohort_orchestrator.py`)
+### CohortOrchestrator (`orchestration/cohort_orchestrator.py`)
 
 Top-level entry point for the 2-cohort paper trading trial.
 
@@ -224,7 +222,7 @@ Top-level entry point for the 2-cohort paper trading trial.
 
 `CohortConfig` defines per-cohort settings (`adaptive_confidence`, `state_dir`, `enable_learning`). `build_default_cohorts()` returns the standard A/B setup.
 
-### CohortComparison (`cohort_comparison.py`)
+### CohortComparison (`orchestration/cohort_comparison.py`)
 
 Side-by-side comparison of cohort performance.
 
@@ -233,7 +231,7 @@ Side-by-side comparison of cohort performance.
 | `compare()` | Compute comparative metrics across cohorts |
 | `format_report()` | Render human-readable comparison report |
 
-### SignalJournal (`signal_journal.py`)
+### SignalJournal (`learning/signal_journal.py`)
 
 Append-only JSONL signal log at `{state_dir}/signal_journal.jsonl`. Records every signal (traded or not) and back-fills outcome data (5d/10d/30d returns) on subsequent runs.
 
@@ -249,7 +247,7 @@ Append-only JSONL signal log at `{state_dir}/signal_journal.jsonl`. Records ever
 
 Used by Cohort B for journal-derived `strategy_confidence` (hit rates per strategy).
 
-### PromptOptimizer (`prompt_optimizer.py`)
+### PromptOptimizer (`learning/prompt_optimizer.py`)
 
 Atlas-GIC-inspired prompt evolution loop. LLM analyzer prompts are the trainable parameters; signal journal outcomes are the loss function. Active for Cohort B only.
 
@@ -268,7 +266,7 @@ Optimizes prompts for 6 LLM-using strategies: `earnings_call`, `insider_activity
 
 Trial flow: evaluate -> identify worst -> propose modification -> trial for 5 days -> keep if hit rate improves by >=2pp, else revert.
 
-### LLMAnalyzer (`llm_analyzer.py`)
+### LLMAnalyzer (`learning/llm_analyzer.py`)
 
 All calls use Haiku (`claude-haiku-4-5-20251001`, ~$0.001/call). Returns structured JSON. Prompts can be overridden at runtime by the PromptOptimizer.
 
@@ -308,7 +306,7 @@ Classifies market conditions using three inputs: VIX level, credit spreads (HY-I
 | **Normal** | Baseline conditions | Standard allocation |
 | **Benign** | Low VIX, tight spreads | Favor momentum/risk-on strategies |
 
-### EventMonitor (`event_monitor.py`)
+### EventMonitor (`learning/event_monitor.py`)
 
 Polls data sources for actionable events. Each poll returns structured event dicts.
 
@@ -350,13 +348,13 @@ Polls data sources for actionable events. Each poll returns structured event dic
 | drought_monitor | `drought_monitor_source.py` | No | -- | None |
 | openbb | `openbb_source.py` | Yes (free) | `fmp_api_key` | 250 calls/day |
 
-API keys are set in `.env` and loaded via `python-dotenv`. `run_generation.py` populates the config from environment variables before building the registry.
+API keys are set in `.env` and loaded via `python-dotenv`. `run_generations.py` populates the config from environment variables before building the registry.
 
 ---
 
 ## Strategy Framework
 
-### StrategyModule Protocol (`strategies/base.py`)
+### StrategyModule Protocol (`modules/base.py`)
 
 ```python
 class StrategyModule(Protocol):
@@ -386,18 +384,18 @@ class StrategyModule(Protocol):
 | litigation | `LitigationStrategy` | `litigation.py` | courtlistener, yfinance | Federal court docket monitoring |
 | congressional_trades | `CongressionalTradesStrategy` | `congressional_trades.py` | congress, yfinance | Congressional stock transaction tracking |
 
-All 7 strategies are registered in `strategies/__init__.py` via `get_paper_trade_strategies()` and `get_all_strategies()`.
+All 7 strategies are registered in `modules/__init__.py` via `get_paper_trade_strategies()` and `get_all_strategies()`.
 
 See [docs/strategy_research.md](docs/strategy_research.md) for academic backing and detailed signal logic.
 
 ### Archived Backtest Strategies (3)
 
-Phase 1 is dormant. Two backtest strategies exist as code in `strategies/_archive/` but are not registered or active:
+Phase 1 is dormant. Two backtest strategies exist as code in `_dormant/` but are not registered or active:
 
 | Strategy | Class | File | Data Sources | Signal |
 |----------|-------|------|-------------|--------|
-| govt_contracts | `GovtContractsStrategy` | `_archive/govt_contracts.py` | yfinance, usaspending | Defense contractor momentum proxy |
-| state_economics | `StateEconomicsStrategy` | `_archive/state_economics.py` | yfinance | Regional ETF rotation |
+| govt_contracts | `GovtContractsStrategy` | `_dormant/govt_contracts.py` | yfinance, usaspending | Defense contractor momentum proxy |
+| state_economics | `StateEconomicsStrategy` | `_dormant/state_economics.py` | yfinance | Regional ETF rotation |
 
 The remaining 7 originally planned backtest strategies (B1-B4, B6-B8 from the design spec: factor_momentum, cross_asset_momentum, vix_mean_reversion, pead, activist_13d, credit_spread, economic_surprise) were never implemented.
 
@@ -405,9 +403,9 @@ The remaining 7 originally planned backtest strategies (B1-B4, B6-B8 from the de
 
 ## Archived Components
 
-### AutoresearchLoop (`autoresearch_loop.py`)
+### AutoresearchLoop (`_dormant/autoresearch_loop.py`)
 
-Evolution wrapper using the Atlas-GIC **keep/revert mutation pattern**. This module exists in the main `autoresearch/` directory but is not used by the active 2-cohort trial. It wraps `MultiStrategyEngine` for single-engine LLM-driven parameter evolution:
+Evolution wrapper using the Atlas-GIC **keep/revert mutation pattern**. This module exists in the `_dormant/` directory and is not used by the active 2-cohort trial. It wraps `MultiStrategyEngine` for single-engine LLM-driven parameter evolution:
 
 1. `identify_weakest()` -- find lowest-weight strategy
 2. `_propose_mutation()` -- LLM suggests one targeted parameter change
@@ -417,7 +415,7 @@ Evolution wrapper using the Atlas-GIC **keep/revert mutation pattern**. This mod
 
 Superseded by `CohortOrchestrator` + `PromptOptimizer` for the 2-cohort trial. May be reactivated if Phase 1 backtest evolution is resumed.
 
-### CachedPipelineRunner (`cached_pipeline.py`)
+### CachedPipelineRunner (`_dormant/cached_pipeline.py`)
 
 Cache-first wrapper around `TradingAgentsGraph.propagate()`. Runs the full core pipeline with a SQLite cache layer. Superseded by the multi-strategy engine for autoresearch use cases.
 
@@ -445,66 +443,34 @@ All autoresearch config lives in `default_config.py["autoresearch"]`:
 
 ## CLI
 
-### 2-Cohort Trial (`scripts/run_cohorts.py`)
+### Generation Management (`scripts/run_generations.py`)
+
+Primary entry point for running multiple code versions in parallel. See the Generation Management section in CLAUDE.md for full usage.
 
 ```
-python scripts/run_cohorts.py [OPTIONS]
-
-Options:
-  --date YYYY-MM-DD     Trading date (default: today)
-  --no-llm              Disable LLM enrichment (on by default)
-  --learning            Run weekly learning loop (Adaptive cohort only)
-  --compare             Compare cohort performance side-by-side
-  --reset               Clear all cohort state
-  --block-tickers X,Y   Comma-separated tickers to exclude (compliance)
+python scripts/run_generations.py start "Description"       # snapshot current code
+python scripts/run_generations.py run-daily [--date DATE]   # run all active generations
+python scripts/run_generations.py run-learning              # learning loop for all active gens
+python scripts/run_generations.py compare [--gens g1,g2]    # compare across generations
+python scripts/run_generations.py list                      # list all generations
 ```
-
-### Single Engine (`scripts/run_generation.py`)
-
-```
-python scripts/run_generation.py [OPTIONS]
-
-Two-Phase Options:
-  --phase PHASE           Phase to run: backtest | paper | learning | full
-  --backtest-generations N  Number of backtest generations (Phase 1, default: 50)
-
-Legacy Options (no --phase flag, deprecated):
-  --generation N          Run specific generation number
-  --num-generations N     Number of generations (default: 1)
-  --strategies FILTER     all | backtest_only | paper_only | name1,name2,...
-  --evolve                Enable LLM mutation/reflection (AutoresearchLoop)
-  --use-llm               Use LLM for param proposals (costs ~$0.01/gen)
-
-Common Options:
-  --start-date YYYY-MM-DD  Backtest start date (default: 2 years ago)
-  --end-date YYYY-MM-DD    Backtest end date (default: today)
-  --reset                 Clear all state before running
-```
-
-Phase commands:
-- `--phase backtest` -- Run Phase 1 offline backtest evolution (N generations)
-- `--phase paper` -- Run Phase 2 trading loop (daily/weekly signal execution)
-- `--phase learning` -- Run Phase 2 learning loop (evaluate round-trips, adjust weights)
-- `--phase full` -- Run Phase 1 then Phase 2 sequentially
-
-The script loads `.env` via `python-dotenv` and populates API keys from environment variables into the config before creating the `MultiStrategyEngine`.
 
 ---
 
 ## Legacy Single-Strategy System
 
-The following files implement the **original** single-strategy autoresearch system. `evolution.py`, `screener.py`, and `fitness.py` are still used by `MultiStrategyEngine`. The remaining files are superseded:
+The following files implement the **original** single-strategy autoresearch system. `evolution.py`, `screener.py`, and `fitness.py` are still used by `MultiStrategyEngine`. The remaining files are in `_dormant/`:
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `evolution.py` | **Active** (used by MultiStrategyEngine) | Single-strategy evolution loop (screener -> strategist -> backtest -> rank) |
-| `screener.py` | **Active** (used by MultiStrategyEngine) | Market screening with 30+ technical indicators |
-| `fitness.py` | **Active** (used by MultiStrategyEngine) | Sharpe-based fitness scoring and ranking |
-| `strategist.py` | Legacy | LLM-based strategy proposal + CRO adversarial review |
-| `fast_backtest.py` | Legacy | Single-LLM-call backtest alternative |
-| `cached_pipeline.py` | **Superseded** | Cache wrapper around TradingAgentsGraph pipeline |
-| `autoresearch_loop.py` | **Superseded** | Atlas-GIC keep/revert mutation wrapper (see Archived Components) |
-| `walk_forward.py` | Legacy | Walk-forward window generation |
-| `ticker_universe.py` | Legacy | Predefined ticker universes |
+| `_dormant/evolution.py` | **Active** (used by MultiStrategyEngine) | Single-strategy evolution loop (screener -> strategist -> backtest -> rank) |
+| `_dormant/screener.py` | **Active** (used by MultiStrategyEngine) | Market screening with 30+ technical indicators |
+| `_dormant/fitness.py` | **Active** (used by MultiStrategyEngine) | Sharpe-based fitness scoring and ranking |
+| `_dormant/strategist.py` | Legacy | LLM-based strategy proposal + CRO adversarial review |
+| `_dormant/fast_backtest.py` | Legacy | Single-LLM-call backtest alternative |
+| `_dormant/cached_pipeline.py` | **Superseded** | Cache wrapper around TradingAgentsGraph pipeline |
+| `_dormant/autoresearch_loop.py` | **Superseded** | Atlas-GIC keep/revert mutation wrapper (see Archived Components) |
+| `_dormant/walk_forward.py` | Legacy | Walk-forward window generation |
+| `_dormant/ticker_universe.py` | Legacy | Predefined ticker universes |
 
 See `docs/superpowers/specs/2026-03-29-autoresearch-design.md` for the original design spec.

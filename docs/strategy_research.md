@@ -6,7 +6,7 @@
 
 **Active (7 paper-trade strategies):** earnings_call, insider_activity, filing_analysis, regulatory_pipeline, supply_chain, litigation, congressional_trades
 
-**Archived (3 backtest strategies, code exists in `strategies/_archive/`):** govt_contracts (B5), state_economics (B10), weather_ag (B9)
+**Archived (3 backtest strategies, code exists in `strategies/_dormant/`):** govt_contracts (B5), state_economics (B10), weather_ag (B9)
 
 **Research only (not implemented):** B1-B4, B6-B8, P7-P9. Academic references below are preserved for future strategy development.
 

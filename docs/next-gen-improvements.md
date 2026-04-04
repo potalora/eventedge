@@ -37,7 +37,7 @@ Current problem: Each strategy operates on a narrow, hardcoded ticker universe. 
 - `weather_ag` expanded from 10 to 16 curated tickers (added food/bev: PEP, KO, GIS, MDLZ; fertilizer: MOS, NTR) with matching winter subset.
 
 **Cycle evaluation infrastructure (`CycleTracker`):**
-- New `tradingagents/autoresearch/cycle_tracker.py` tracks performance in 30-day cycles aligned to each generation's start date.
+- New `tradingagents/strategies/state/cycle_tracker.py` tracks performance in 30-day cycles aligned to each generation's start date.
 - `MultiStrategyEngine.set_cycle_tracker(gen_start_date)` initializes tracking; `update_daily()` called after each trading day.
 - At cycle boundaries (`is_boundary()`), `snapshot_cycle()` persists a full evaluation to `data/state/cycles/cycle_NNN.json` including realized PnL, unrealized PnL, capital utilization, and per-strategy breakdown.
 - Daily report now shows "Cycle N, Day X of 30" context for each generation in the header.
