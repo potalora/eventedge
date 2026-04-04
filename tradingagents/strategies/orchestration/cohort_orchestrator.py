@@ -1,6 +1,7 @@
-"""Parallel paper portfolio runner for a 2-cohort paper trading trial.
+"""Parallel paper portfolio runner for a 16-cohort horizon x size matrix.
 
-Runs 2 independent $5K paper portfolios with shared data fetching.
+Runs paper portfolios across 4 investment horizons x 4 portfolio sizes
+with shared data fetching.
 """
 
 from __future__ import annotations
@@ -14,19 +15,105 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Lookup tables
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PortfolioSizeProfile:
+    """Position-sizing and concentration parameters for a portfolio tier."""
+
+    name: str                          # "5k", "10k", "50k", "100k"
+    total_capital: float               # e.g. 5000.0
+    max_position_pct: float            # max single-position weight
+    min_position_value: float          # floor for position value
+    max_positions: int                 # max concurrent positions
+    sector_concentration_cap: float    # max weight in one sector
+    cash_reserve_pct: float            # cash held back from allocation
+
+
+SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
+    "5k": PortfolioSizeProfile(
+        name="5k",
+        total_capital=5_000.0,
+        max_position_pct=0.25,
+        min_position_value=500.0,
+        max_positions=5,
+        sector_concentration_cap=0.50,
+        cash_reserve_pct=0.10,
+    ),
+    "10k": PortfolioSizeProfile(
+        name="10k",
+        total_capital=10_000.0,
+        max_position_pct=0.20,
+        min_position_value=1_000.0,
+        max_positions=8,
+        sector_concentration_cap=0.40,
+        cash_reserve_pct=0.10,
+    ),
+    "50k": PortfolioSizeProfile(
+        name="50k",
+        total_capital=50_000.0,
+        max_position_pct=0.10,
+        min_position_value=2_500.0,
+        max_positions=15,
+        sector_concentration_cap=0.30,
+        cash_reserve_pct=0.15,
+    ),
+    "100k": PortfolioSizeProfile(
+        name="100k",
+        total_capital=100_000.0,
+        max_position_pct=0.08,
+        min_position_value=5_000.0,
+        max_positions=20,
+        sector_concentration_cap=0.25,
+        cash_reserve_pct=0.15,
+    ),
+}
+
+HORIZON_PARAMS: dict[str, dict] = {
+    "30d": {
+        "hold_days_default": 25,
+        "hold_days_range": (20, 45),
+        "signal_decay_window": (5, 10),
+    },
+    "3m": {
+        "hold_days_default": 90,
+        "hold_days_range": (60, 120),
+        "signal_decay_window": (15, 30),
+    },
+    "6m": {
+        "hold_days_default": 180,
+        "hold_days_range": (120, 210),
+        "signal_decay_window": (30, 60),
+    },
+    "1y": {
+        "hold_days_default": 300,
+        "hold_days_range": (250, 365),
+        "signal_decay_window": (60, 120),
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Cohort configuration
+# ---------------------------------------------------------------------------
+
 @dataclass
 class CohortConfig:
     """Configuration for a single cohort."""
 
-    name: str                           # "control" or "adaptive"
+    name: str                           # "horizon_30d_size_5k"
     state_dir: str                      # Unique per cohort
-    adaptive_confidence: bool = False   # False for control, True for adaptive
-    learning_enabled: bool = False      # False for control, True for adaptive
-    use_llm: bool = True               # LLM enrichment for both
+    horizon: str                        # "30d", "3m", "6m", "1y"
+    size_profile: str                   # "5k", "10k", "50k", "100k"
+    use_llm: bool = True
+    adaptive_confidence: bool = False   # dormant
+    learning_enabled: bool = False      # dormant
 
 
 class CohortOrchestrator:
-    """Run 2 paper portfolios in parallel with shared data fetch."""
+    """Run paper portfolios in parallel with shared data fetch."""
 
     def __init__(self, cohort_configs: list[CohortConfig], base_config: dict):
         """
@@ -211,27 +298,26 @@ class CohortOrchestrator:
 
 
 def build_default_cohorts(base_config: dict) -> list[CohortConfig]:
-    """Build the standard 2-cohort configuration.
+    """Build the 16-cohort horizon x size matrix.
 
-    Cohort A (control): Fixed confidence (0.5), no learning.
-    Cohort B (adaptive): Journal-derived confidence, prompt optimization, weekly learning.
+    Produces one cohort for each combination of 4 horizons x 4 portfolio sizes.
+    All cohorts start with adaptive_confidence=False and learning_enabled=False.
     """
     base_state_dir = base_config.get("autoresearch", {}).get(
         "state_dir", "data/state"
     )
-    return [
-        CohortConfig(
-            name="control",
-            state_dir=f"{base_state_dir}/control",
-            adaptive_confidence=False,
-            learning_enabled=False,
-            use_llm=True,
-        ),
-        CohortConfig(
-            name="adaptive",
-            state_dir=f"{base_state_dir}/adaptive",
-            adaptive_confidence=True,
-            learning_enabled=True,
-            use_llm=True,
-        ),
-    ]
+    horizons = ["30d", "3m", "6m", "1y"]
+    sizes = ["5k", "10k", "50k", "100k"]
+    cohorts: list[CohortConfig] = []
+    for h in horizons:
+        for s in sizes:
+            name = f"horizon_{h}_size_{s}"
+            cohorts.append(
+                CohortConfig(
+                    name=name,
+                    state_dir=f"{base_state_dir}/{name}",
+                    horizon=h,
+                    size_profile=s,
+                )
+            )
+    return cohorts
