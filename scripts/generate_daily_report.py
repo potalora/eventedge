@@ -177,11 +177,20 @@ def _generate_report(date: str, gens: list[dict]) -> str:
     if regimes:
         lines.append("| Date | Overall | VIX | Credit | Yield Curve |")
         lines.append("|------|---------|-----|--------|-------------|")
-        for r in regimes[-5:]:
+        # Deduplicate by date (multiple snapshots per day from re-runs)
+        seen_dates = set()
+        unique_regimes = []
+        for r in regimes:
+            ts = r.get("timestamp", "")
+            dt = ts[:10] if ts else r.get("date", "?")
+            if dt not in seen_dates:
+                seen_dates.add(dt)
+                unique_regimes.append((dt, r))
+        for dt, r in unique_regimes[-5:]:
             lines.append(
-                f"| {r.get('date', '?')} | {r.get('overall_regime', '?')} "
+                f"| {dt} | {r.get('overall_regime', '?')} "
                 f"| {r.get('vix_regime', '?')} | {r.get('credit_regime', '?')} "
-                f"| {r.get('yield_curve_regime', '?')} |"
+                f"| {r.get('yield_regime', r.get('yield_curve_regime', '?'))} |"
             )
     else:
         lines.append("No regime data available.")

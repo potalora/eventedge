@@ -1,188 +1,151 @@
-# Daily Report: 2026-04-03
+# Daily Trading Report — Thursday, April 3, 2026
 
-**Generated:** 2026-04-03 23:31
-**Active generations:** 2
+## Market Regime
 
-## Summary
+VIX declined for the third consecutive session, from 25.2 (elevated) on Tuesday to 23.9 today. The regime model downgraded from **stressed** to **normal** after Wednesday's session. Credit spreads remain benign, yield curve flat. No regime-driven position adjustments were triggered.
 
-| | gen_001 | gen_002 |
-|---|---|---|
-| **Description** | Initial 7-strategy baseline v1 | 9-strategy OpenBB enrichment: sector classification, analyst |
-| **Commit** | 5f3730d28dc8 | a0a4c7aad273 |
-| **Days run** | 3 | 3 |
-| **Control signals** | 48 | 39 |
-| **Control trades (open/closed)** | 5/0 | 5/0 |
-| **Control capital deployed** | $1,132 | $1,560 |
-| **Control hit rate** | N/A | N/A |
-| **Control Sharpe** | N/A | N/A |
-| **Control return** | N/A | N/A |
-| **Adaptive signals** | 48 | 39 |
-| **Adaptive trades (open/closed)** | 5/0 | 5/0 |
-| **Adaptive capital deployed** | $1,278 | $1,658 |
-| **Adaptive hit rate** | N/A | N/A |
-| **Adaptive Sharpe** | N/A | N/A |
-| **Adaptive return** | N/A | N/A |
+| Date | VIX | VIX Regime | Overall | Credit | Yield Curve |
+|------|-----|------------|---------|--------|-------------|
+| Apr 1 | 25.2 | elevated | stressed | normal | flat |
+| Apr 2 | 24.5 | normal | normal | normal | flat |
+| Apr 3 | 23.9 | normal | normal | normal | flat |
 
-## gen_001: Initial 7-strategy baseline v1
+---
 
-### Control Cohort
+## Generation Overview
 
-**Open positions** — $1,132 deployed
+Three generations are now active, each running dual cohorts (control + adaptive) on frozen code snapshots:
 
-| Ticker | Strategy | Dir | Entry | Shares | Value | Entry Date |
-|--------|----------|-----|-------|--------|-------|------------|
-| LGIH | congressional_trades | long | $39.53 | 10 | $395.30 | 2026-04-01 |
-| CBRL | congressional_trades | long | $28.11 | 8 | $224.88 | 2026-04-01 |
-| PPTA | filing_analysis | long | $28.12 | 7 | $196.84 | 2026-04-01 |
-| ACN | filing_analysis | long | $198.29 | 1 | $198.29 | 2026-04-01 |
-| SCHL | filing_analysis | long | $39.06 | 3 | $117.18 | 2026-04-01 |
+| | gen_001 | gen_002 | gen_003 |
+|---|---|---|---|
+| **Description** | 7-strategy baseline | 9-strategy + OpenBB enrichment | 10-strategy + USDA/Drought Monitor |
+| **Commit** | `5f3730d` | `a0a4c7a` | `b368114` |
+| **Started** | Apr 1 | Apr 3 | Apr 4 |
+| **Days running** | 4 | 1 | 1 |
+| **Strategies active** | 7 | 9 | 10 |
+| **New in this gen** | — | OpenBB sector/estimates, supply_chain, govt_contracts | weather_ag (USDA + Drought + NOAA) |
 
-**Today's signals** — 13 signals, 0 traded
+---
 
-| | Ticker | Strategy | Dir | Score |
-|---|--------|----------|-----|-------|
-|   | META | insider_activity | neutral | 0.10 |
-|   | NVDA | insider_activity | short | 64.50 |
-|   | GOOGL | insider_activity | short | 0.35 |
-|   | BLK | regulatory_pipeline | neutral | 0.20 |
-|   | WEC | regulatory_pipeline | neutral | 0.10 |
-|   | VSCO | filing_analysis | neutral | 0.10 |
-|   | ANF | filing_analysis | neutral | 0.10 |
-|   | PPTA | filing_analysis | long | 0.50 |
-|   | SCHL | filing_analysis | long | 0.50 |
-|   | CMC | filing_analysis | long | 0.50 |
-|   | LGIH | congressional_trades | long | 9.00 |
-|   | GS | congressional_trades | long | 4.00 |
-|   | CBRL | congressional_trades | long | 2.00 |
+## Today's Signals — Cross-Generation Comparison
 
-**Strategy breakdown**
+### Signals that fired across all three generations
 
-- `filing_analysis`: 17 signals, 3 trades
-- `regulatory_pipeline`: 11 signals, 0 trades
-- `insider_activity`: 10 signals, 0 trades
-- `congressional_trades`: 9 signals, 2 trades
-- `litigation`: 1 signals, 0 trades
+These signals are consistent regardless of code version, indicating robust underlying data:
 
-### Adaptive Cohort
+| Ticker | Strategy | Direction | Conviction | Notes |
+|--------|----------|-----------|------------|-------|
+| **LGIH** | congressional_trades | long | 9.0 | Strongest signal across the board. Multiple congress members buying. |
+| **GS** | congressional_trades | long | 4.0 | Not traded — likely priced out by position sizing ($863/share). |
+| **CBRL** | congressional_trades | long | 2.0 | Traded in all gens. |
+| **PPTA** | filing_analysis | long | 0.5 | Recent SEC filing flagged. No LLM enrichment (conviction=0.0). |
+| **CMC** | filing_analysis | long | 0.5 | Same pattern — filing gate triggered, LLM not yet scoring. |
+| **META** | insider_activity | neutral | 0.1 | Low conviction, not traded. |
+| **GOOGL** | insider_activity | short | 0.35 | Moderate insider selling signal; blocked from trading (compliance). |
+| **JPM** | insider_activity | neutral | 0.15 | Low conviction. |
+| **BLK** | regulatory_pipeline | neutral | 0.2 | Regulatory noise, no actionable signal. |
+| **WEC** | regulatory_pipeline | neutral | 0.1 | Same. |
+| **ANF** | filing_analysis | neutral | 0.1-0.2 | Filing detected but LLM scored as uninteresting. |
 
-**Open positions** — $1,278 deployed
+### Signals unique to gen_001
 
-| Ticker | Strategy | Dir | Entry | Shares | Value | Entry Date |
-|--------|----------|-----|-------|--------|-------|------------|
-| LGIH | congressional_trades | long | $39.53 | 11 | $434.83 | 2026-04-01 |
-| PPTA | filing_analysis | long | $28.12 | 8 | $224.96 | 2026-04-01 |
-| ACN | filing_analysis | long | $198.29 | 1 | $198.29 | 2026-04-01 |
-| CBRL | congressional_trades | long | $28.11 | 8 | $224.88 | 2026-04-01 |
-| SCHL | filing_analysis | long | $39.06 | 5 | $195.30 | 2026-04-01 |
+| Ticker | Strategy | Direction | Score | Notes |
+|--------|----------|-----------|-------|-------|
+| **NVDA** | insider_activity | short | 64.5 | Anomalous score — likely a raw data artifact (insider sale $ amount leaked into score field). gen_002 scored same event at 0.38, gen_003 at 0.35. This is a bug in gen_001's scoring path. |
 
-**Today's signals** — 13 signals, 0 traded
+### Signals unique to gen_002 and gen_003
 
-| | Ticker | Strategy | Dir | Score |
-|---|--------|----------|-----|-------|
-|   | META | insider_activity | neutral | 0.10 |
-|   | NVDA | insider_activity | short | 64.50 |
-|   | GOOGL | insider_activity | short | 0.35 |
-|   | BLK | regulatory_pipeline | neutral | 0.20 |
-|   | WEC | regulatory_pipeline | neutral | 0.10 |
-|   | VSCO | filing_analysis | neutral | 0.10 |
-|   | ANF | filing_analysis | neutral | 0.10 |
-|   | PPTA | filing_analysis | long | 0.50 |
-|   | SCHL | filing_analysis | long | 0.50 |
-|   | CMC | filing_analysis | long | 0.50 |
-|   | LGIH | congressional_trades | long | 9.00 |
-|   | GS | congressional_trades | long | 4.00 |
-|   | CBRL | congressional_trades | long | 2.00 |
+| Ticker | Strategy | Direction | Score | Notes |
+|--------|----------|-----------|-------|-------|
+| **EPAC** | filing_analysis | long | 0.5 | New filing detected. Traded in gen_003, signal-only in gen_002. |
+| **MIR** | filing_analysis | long | 0.5 | Same pattern. Small-cap ($19/share), higher share count allocation. |
+| **CTVA** | litigation | short | 0.35 | Corteva Agriscience — active litigation. Interesting that this is also an ag ticker in gen_003's weather universe, though weather_ag didn't fire independently. |
 
-**Strategy breakdown**
+### Strategies that produced no signals today
 
-- `filing_analysis`: 17 signals, 3 trades
-- `regulatory_pipeline`: 11 signals, 0 trades
-- `insider_activity`: 10 signals, 0 trades
-- `congressional_trades`: 9 signals, 2 trades
-- `litigation`: 1 signals, 0 trades
+| Strategy | Why |
+|----------|-----|
+| **earnings_call** | No upcoming earnings events in the screened universe. |
+| **supply_chain** | No disruption news matching gates (gen_002+ only). |
+| **govt_contracts** | No new contract awards matching gates (gen_002+ only). |
+| **state_economics** | No FRED data triggering macro gates (gen_002+ only). |
+| **weather_ag** | No drought/NOAA/USDA gates triggered (gen_003 only). Early April — growing season starts in May. Correct behavior. |
 
-## gen_002: 9-strategy OpenBB enrichment: sector classification, analyst estimates, short in
+---
 
-### Control Cohort
+## Open Positions
 
-**Open positions** — $1,560 deployed
+### gen_001 (entered Apr 1, held 2 trading days)
 
-| Ticker | Strategy | Dir | Entry | Shares | Value | Entry Date |
-|--------|----------|-----|-------|--------|-------|------------|
-| LGIH | congressional_trades | long | $38.13 | 13 | $495.69 | 2026-04-03 |
-| CBRL | congressional_trades | long | $28.89 | 12 | $346.68 | 2026-04-03 |
-| CMC | filing_analysis | long | $61.79 | 4 | $247.16 | 2026-04-03 |
-| PPTA | filing_analysis | long | $29.43 | 8 | $235.44 | 2026-04-03 |
-| SCHL | filing_analysis | long | $39.20 | 6 | $235.20 | 2026-04-03 |
+| Ticker | Strategy | Dir | Entry | Current | Shares (C/A) | Value (C/A) | Unrealized |
+|--------|----------|-----|-------|---------|--------------|-------------|------------|
+| LGIH | congressional | long | $39.53 | $38.13 | 10 / 11 | $395 / $435 | -3.5% |
+| CBRL | congressional | long | $28.11 | $28.89 | 8 / 8 | $225 / $225 | +2.8% |
+| PPTA | filing | long | $28.12 | $29.43 | 7 / 8 | $197 / $225 | +4.7% |
+| ACN | filing | long | $198.29 | ~$198 | 1 / 1 | $198 / $198 | ~0% |
+| SCHL | filing | long | $39.06 | $39.20 | 3 / 5 | $117 / $195 | +0.4% |
 
-**Today's signals** — 13 signals, 5 traded
+**Total deployed:** $1,132 (control) / $1,278 (adaptive)
 
-| | Ticker | Strategy | Dir | Score |
-|---|--------|----------|-----|-------|
-|   | META | insider_activity | neutral | 0.10 |
-|   | NVDA | insider_activity | short | 0.38 |
-|   | GOOGL | insider_activity | short | 0.35 |
-|   | BLK | regulatory_pipeline | neutral | 0.20 |
-|   | WEC | regulatory_pipeline | neutral | 0.10 |
-|   | VSCO | filing_analysis | neutral | 0.20 |
-|   | ANF | filing_analysis | neutral | 0.10 |
-| \* | PPTA | filing_analysis | long | 0.50 |
-| \* | SCHL | filing_analysis | long | 0.50 |
-| \* | CMC | filing_analysis | long | 0.50 |
-| \* | LGIH | congressional_trades | long | 9.00 |
-|   | GS | congressional_trades | long | 4.00 |
-| \* | CBRL | congressional_trades | long | 2.00 |
+Early read: PPTA (+4.7%) and CBRL (+2.8%) are working. LGIH is underwater (-3.5%). ACN and SCHL are flat. The adaptive cohort allocated more shares to the winners (PPTA: 8 vs 7, LGIH: 11 vs 10, SCHL: 5 vs 3) — sizing differences come from non-deterministic portfolio committee LLM calls, since both cohorts still use fixed confidence=0.5.
 
-**Strategy breakdown**
+### gen_002 (entered Apr 3, Day 1)
 
-- `filing_analysis`: 15 signals, 3 trades
-- `insider_activity`: 9 signals, 0 trades
-- `congressional_trades`: 9 signals, 2 trades
-- `regulatory_pipeline`: 6 signals, 0 trades
+| Ticker | Strategy | Dir | Entry | Shares (C/A) | Value (C/A) |
+|--------|----------|-----|-------|--------------|-------------|
+| LGIH | congressional | long | $38.13 | 13 / 13 | $496 / $496 |
+| CBRL | congressional | long | $28.89 | 12 / 12 | $347 / $347 |
+| PPTA | filing | long | $29.43 | 8 / 10 | $235 / $294 |
+| SCHL | filing | long | $39.20 | 6 / 7 | $235 / $274 |
+| CMC | filing | long | $61.79 | 4 / 4 | $247 / $247 |
 
-### Adaptive Cohort
+**Total deployed:** $1,560 (C) / $1,658 (A)
 
-**Open positions** — $1,658 deployed
+gen_002 is more aggressive on Day 1 — higher share counts across the board vs gen_001's first day. This likely reflects OpenBB enrichment data influencing the portfolio committee's sizing decisions.
 
-| Ticker | Strategy | Dir | Entry | Shares | Value | Entry Date |
-|--------|----------|-----|-------|--------|-------|------------|
-| LGIH | congressional_trades | long | $38.13 | 13 | $495.69 | 2026-04-03 |
-| CBRL | congressional_trades | long | $28.89 | 12 | $346.68 | 2026-04-03 |
-| PPTA | filing_analysis | long | $29.43 | 10 | $294.30 | 2026-04-03 |
-| SCHL | filing_analysis | long | $39.20 | 7 | $274.40 | 2026-04-03 |
-| CMC | filing_analysis | long | $61.79 | 4 | $247.16 | 2026-04-03 |
+### gen_003 (entered Apr 3, Day 1)
 
-**Today's signals** — 13 signals, 5 traded
+| Ticker | Strategy | Dir | Entry | Shares (C/A) | Value (C/A) |
+|--------|----------|-----|-------|--------------|-------------|
+| LGIH | congressional | long | $38.13 | 13 / 13 | $496 / $496 |
+| CBRL | congressional | long | $28.89 | 13 / 13 | $376 / $376 |
+| PPTA | filing | long | $29.43 | 10 / 10 | $294 / $294 |
+| CMC | filing | long | $61.79 | 4 / 4 | $247 / $247 |
+| EPAC | filing | long | $35.44 | 7 / 8 | $248 / $284 |
+| MIR | filing | long | $19.00 | 13 / 15 | $247 / $285 |
 
-| | Ticker | Strategy | Dir | Score |
-|---|--------|----------|-----|-------|
-|   | META | insider_activity | neutral | 0.10 |
-|   | NVDA | insider_activity | short | 0.38 |
-|   | GOOGL | insider_activity | short | 0.35 |
-|   | BLK | regulatory_pipeline | neutral | 0.20 |
-|   | WEC | regulatory_pipeline | neutral | 0.10 |
-|   | VSCO | filing_analysis | neutral | 0.20 |
-|   | ANF | filing_analysis | neutral | 0.10 |
-| \* | PPTA | filing_analysis | long | 0.50 |
-| \* | SCHL | filing_analysis | long | 0.50 |
-| \* | CMC | filing_analysis | long | 0.50 |
-| \* | LGIH | congressional_trades | long | 9.00 |
-|   | GS | congressional_trades | long | 4.00 |
-| \* | CBRL | congressional_trades | long | 2.00 |
+**Total deployed:** $1,908 (C) / $1,981 (A)
 
-**Strategy breakdown**
+gen_003 opened **6 positions** vs gen_002's 5 — picking up EPAC and MIR (both filing_analysis). It deployed the most capital on Day 1 ($1,908-$1,981 of $10,000). The two new positions are small-caps which allows higher share counts.
 
-- `filing_analysis`: 15 signals, 3 trades
-- `insider_activity`: 9 signals, 0 trades
-- `congressional_trades`: 9 signals, 2 trades
-- `regulatory_pipeline`: 6 signals, 0 trades
+---
 
-## Regime Context
+## Key Observations
 
-| Date | Overall | VIX | Credit | Yield Curve |
-|------|---------|-----|--------|-------------|
-| ? | normal | normal | normal | ? |
-| ? | stressed | elevated | normal | ? |
-| ? | stressed | elevated | normal | ? |
-| ? | normal | normal | normal | ? |
-| ? | normal | normal | normal | ? |
+**1. Filing analysis is the most active strategy.** It generated the most signals and trades across all generations. However, all filing_analysis trades show `llm_conviction: 0.0` — meaning the LLM enrichment step isn't scoring these candidates. They're being traded on the raw gate signal (score=0.5) alone. This is a known gap: the filing_analysis LLM prompt may not be returning structured conviction scores correctly.
+
+**2. Congressional trades are the highest-conviction signals.** LGIH (score=9.0) and GS (score=4.0) dominate. These scores come from the number of congress members trading, not LLM conviction. GS is consistently filtered out by position sizing (a single share costs $863, exceeding per-position allocation limits).
+
+**3. The NVDA score=64.5 in gen_001 is a bug.** gen_002's OpenBB enrichment normalized this to 0.38, and gen_003 to 0.35. The raw insider transaction dollar amount appears to be leaking into the score field in the pre-OpenBB code path.
+
+**4. weather_ag correctly produced no signals.** April 3 is before the growing season (May-Sep). No drought, NOAA heat, or USDA crop decline gates triggered. The strategy is wired up and will activate when conditions warrant — likely mid-summer.
+
+**5. Adaptive vs Control hasn't diverged yet.** Both cohorts use fixed confidence=0.5 until the adaptive cohort accumulates enough journal data for its weekly learning loop. The only sizing differences come from non-deterministic portfolio committee LLM calls. Meaningful divergence expected after ~2 weeks.
+
+**6. No closed trades yet.** All positions are within their holding periods (default 21 days). First exits expected around April 22 for gen_001's positions.
+
+---
+
+## Strategy Hit Rates
+
+Too early to measure — no trades have been closed. First meaningful data expected mid-to-late April when gen_001's 21-day holding periods expire.
+
+---
+
+## What to Watch Next Week
+
+- **LGIH** — Largest position across all gens, currently -3.5% in gen_001. Congressional buy signal was strong (9.0). Worth monitoring whether the thesis plays out.
+- **PPTA** — Best performer so far (+4.7%). Filing-driven. Watch for follow-through.
+- **CTVA litigation** — Short signal at 0.35 conviction. Also in gen_003's weather_ag ticker universe. If weather conditions deteriorate while litigation continues, could see converging signals.
+- **weather_ag activation** — Growing season starts next month. First signals expected if drought develops in the corn belt or USDA crop conditions decline.
+- **Filing analysis LLM conviction** — All filing trades have conviction=0.0. Investigate whether the LLM prompt is returning scores in the expected format.

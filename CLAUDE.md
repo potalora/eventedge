@@ -205,6 +205,7 @@ The generation system allows multiple versions of the codebase to run paper trad
 **Current active generations:**
 - `gen_001` — 7-strategy baseline (commit `5f3730d`), started 2026-04-01
 - `gen_002` — 9-strategy OpenBB enrichment (commit `a0a4c7a`), started 2026-04-03
+- `gen_003` — 10-strategy ag enhancement: USDA + Drought Monitor + expanded tickers (commit `b368114`), started 2026-04-04
 
 ### Adding a New Strategy
 
@@ -323,6 +324,9 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
 - **Key test files:**
   - `tests/test_multi_strategy.py` — tests covering 10 strategies, state, engine
   - `tests/test_openbb_source.py` — 37 tests for OpenBB data source (all 8 methods, cache, graceful degradation)
+  - `tests/test_weather_ag.py` — 36 tests for weather_ag strategy (gates, tickers, seasons, LLM metadata, crop decline)
+  - `tests/test_usda_source.py` — 14 tests for USDA NASS data source
+  - `tests/test_drought_monitor_source.py` — 13 tests for US Drought Monitor data source
   - `tests/test_30day_simulation.py` — 30-day simulation tests including OpenBB enrichment and reactivated strategies
   - `tests/test_e2e_pipeline.py` — End-to-end integration tests for full trading pipeline
 
@@ -335,5 +339,6 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
 | [AUTORESEARCH_ARCHITECTURE_MAP.md](AUTORESEARCH_ARCHITECTURE_MAP.md) | Full autoresearch system architecture |
 | [docs/strategy_research.md](docs/strategy_research.md) | Strategy research notes and academic backing |
 | [docs/superpowers/specs/2026-04-03-openbb-integration-design.md](docs/superpowers/specs/2026-04-03-openbb-integration-design.md) | OpenBB integration design spec |
-| [docs/reports/](docs/reports/) | Daily trading reports (auto-generated) |
+| [docs/next-gen-improvements.md](docs/next-gen-improvements.md) | Follow-on improvements for gen_004 (loosen gates, expand universes) |
+| [docs/reports/](docs/reports/) | Daily trading reports |
 | [docs/archive/](docs/archive/) | Executed design specs for options, backtest, execution, dashboard, autoresearch |
