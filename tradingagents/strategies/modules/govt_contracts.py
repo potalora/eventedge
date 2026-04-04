@@ -60,17 +60,21 @@ class GovtContractsStrategy:
     track = "paper_trade"
     data_sources = ["yfinance", "usaspending", "openbb"]
 
-    def get_param_space(self) -> dict[str, tuple]:
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": (20, 45),
+            "hold_days": hp["hold_days_range"],
             "stop_loss_pct": (0.05, 0.15),
             "profit_target_pct": (0.05, 0.25),
             "max_positions": (2, 5),
         }
 
-    def get_default_params(self) -> dict[str, Any]:
+    def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": 30,
+            "hold_days": hp["hold_days_default"],
             "stop_loss_pct": 0.08,
             "profit_target_pct": 0.15,
             "max_positions": 3,

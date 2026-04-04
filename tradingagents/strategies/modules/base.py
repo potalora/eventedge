@@ -110,14 +110,21 @@ class StrategyModule(Protocol):
     track: str  # "backtest" or "paper_trade"
     data_sources: list[str]
 
-    def get_param_space(self) -> dict[str, tuple]:
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         """Return evolvable parameters and their (min, max) ranges.
         For bool params: (True, False). For categorical: tuple of options.
+
+        Args:
+            horizon: Investment horizon ("30d", "3m", "6m", "1y").
         """
         ...
 
-    def get_default_params(self) -> dict[str, Any]:
-        """Return sensible default parameters."""
+    def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
+        """Return sensible default parameters.
+
+        Args:
+            horizon: Investment horizon ("30d", "3m", "6m", "1y").
+        """
         ...
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:

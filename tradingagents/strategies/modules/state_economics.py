@@ -46,18 +46,22 @@ class StateEconomicsStrategy:
     track = "paper_trade"
     data_sources = ["yfinance", "fred", "openbb"]
 
-    def get_param_space(self) -> dict[str, tuple]:
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "lookback_days": (10, 60),
             "top_n": (1, 4),
-            "rebalance_days": (20, 45),
+            "rebalance_days": hp["hold_days_range"],
         }
 
-    def get_default_params(self) -> dict[str, Any]:
+    def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "lookback_days": 21,
             "top_n": 2,
-            "rebalance_days": 30,
+            "rebalance_days": hp["hold_days_default"],
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:

@@ -24,17 +24,21 @@ class RegulatoryPipelineStrategy:
     track = "paper_trade"
     data_sources = ["regulations", "yfinance", "openbb"]
 
-    def get_param_space(self) -> dict[str, tuple]:
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": (20, 45),
+            "hold_days": hp["hold_days_range"],
             "min_conviction": (0.3, 0.8),
             "max_positions": (2, 5),
             "days_lookback": (7, 30),
         }
 
-    def get_default_params(self) -> dict[str, Any]:
+    def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": 30,
+            "hold_days": hp["hold_days_default"],
             "min_conviction": 0.5,
             "max_positions": 3,
             "days_lookback": 14,

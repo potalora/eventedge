@@ -45,17 +45,21 @@ class CongressionalTradesStrategy:
     track = "paper_trade"
     data_sources = ["congress", "yfinance", "openbb"]
 
-    def get_param_space(self) -> dict[str, tuple]:
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": (20, 45),
+            "hold_days": hp["hold_days_range"],
             "min_amount_bucket": (1, 4),
             "max_positions": (2, 5),
             "min_members": (1, 3),
         }
 
-    def get_default_params(self) -> dict[str, Any]:
+    def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": 28,
+            "hold_days": hp["hold_days_default"],
             "min_amount_bucket": 1,
             "max_positions": 3,
             "min_members": 1,

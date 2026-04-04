@@ -42,9 +42,11 @@ class FilingAnalysisStrategy:
     track = "paper_trade"
     data_sources = ["edgar", "yfinance", "openbb"]
 
-    def get_param_space(self) -> dict[str, tuple]:
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": (20, 45),
+            "hold_days": hp["hold_days_range"],
             "min_conviction": (0.3, 0.7),
             "max_positions": (3, 8),
             "forms_to_analyze": (
@@ -53,9 +55,11 @@ class FilingAnalysisStrategy:
             ),
         }
 
-    def get_default_params(self) -> dict[str, Any]:
+    def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
-            "hold_days": 25,
+            "hold_days": hp["hold_days_default"],
             "min_conviction": 0.5,
             "max_positions": 5,
             "forms_to_analyze": ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
