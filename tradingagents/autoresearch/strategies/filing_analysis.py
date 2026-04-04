@@ -44,18 +44,21 @@ class FilingAnalysisStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (15, 60),
+            "hold_days": (20, 45),
             "min_conviction": (0.3, 0.7),
             "max_positions": (3, 8),
-            "forms_to_analyze": (["10-K", "10-Q"], ["10-K", "10-Q", "DEF 14A"]),
+            "forms_to_analyze": (
+                ["10-K", "10-Q"],
+                ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
+            ),
         }
 
     def get_default_params(self) -> dict[str, Any]:
         return {
-            "hold_days": 15,
+            "hold_days": 25,
             "min_conviction": 0.5,
             "max_positions": 5,
-            "forms_to_analyze": ["10-K", "10-Q", "DEF 14A"],
+            "forms_to_analyze": ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -139,6 +142,51 @@ class FilingAnalysisStrategy:
                     )
                 )
 
+            # 8-K → material event announcement
+            elif form_type == "8-K" and form_type in forms_to_analyze:
+                event_text = filing.get("current_text", "")
+                has_text = bool(event_text.strip())
+                candidates.append(
+                    Candidate(
+                        ticker=ticker,
+                        date=date,
+                        direction="long",  # LLM will determine
+                        score=0.6,  # 8-Ks are time-sensitive
+                        metadata={
+                            "form_type": form_type,
+                            "entity_name": entity_name,
+                            "file_date": filing.get("file_date", ""),
+                            "file_url": filing.get("file_url", ""),
+                            "current_text": event_text[:5000],
+                            "needs_llm_analysis": has_text,
+                            "analysis_type": "material_event",
+                        },
+                    )
+                )
+
+            # SC 13D/13G → activist or large passive stake
+            elif form_type in ("SC 13D", "SC 13G") and form_type in forms_to_analyze:
+                stake_text = filing.get("current_text", "")
+                has_text = bool(stake_text.strip())
+                is_activist = form_type == "SC 13D"
+                candidates.append(
+                    Candidate(
+                        ticker=ticker,
+                        date=date,
+                        direction="long",  # Activist stakes are typically bullish
+                        score=0.7 if is_activist else 0.4,
+                        metadata={
+                            "form_type": form_type,
+                            "entity_name": entity_name,
+                            "file_date": filing.get("file_date", ""),
+                            "file_url": filing.get("file_url", ""),
+                            "current_text": stake_text[:5000],
+                            "needs_llm_analysis": has_text,
+                            "analysis_type": "activist_stake" if is_activist else "passive_stake",
+                        },
+                    )
+                )
+
         # Deduplicate by ticker (keep highest score)
         by_ticker: dict[str, Candidate] = {}
         for c in candidates:
@@ -184,7 +232,7 @@ class FilingAnalysisStrategy:
         data: dict,
     ) -> tuple[bool, str]:
         """Exit on hold period."""
-        hold_days = params.get("hold_days", 30)
+        hold_days = params.get("hold_days", 25)
         if holding_days >= hold_days:
             return True, "hold_period"
         return False, ""
@@ -192,17 +240,18 @@ class FilingAnalysisStrategy:
     def build_propose_prompt(self, context: dict) -> str:
         current = context.get("current_params", self.get_default_params())
         return f"""You are optimizing a unified Filing Analysis strategy that processes
-three types of EDGAR filings:
-1. 10-K/10-Q: detect material changes in financial statements (Lazy Prices)
-2. DEF 14A: analyze executive compensation shifts
-3. Known employer filings: flag as potential layoff risk (WARN Act proxy)
+EDGAR filings: 10-K/10-Q (material changes), DEF 14A (exec comp),
+8-K (material events), SC 13D (activist stakes), SC 13G (large passive stakes).
+
+Investment horizon: 30 days. Filing implications unfold over weeks as
+analysts digest. SC 13D activist stakes are well-documented alpha sources.
 
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 15-60
+- hold_days: 20-45 (target ~25-30 days)
 - min_conviction: 0.3-0.7
 - max_positions: 3-8
-- forms_to_analyze: subset of ["10-K", "10-Q", "DEF 14A"]
+- forms_to_analyze: subset of ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"]
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""
