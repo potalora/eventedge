@@ -1,6 +1,6 @@
 """JSON-file-based state manager for autoresearch.
 
-Stores strategy weights, paper trades, generation results, and leaderboards
+Stores paper trades, generation results, and leaderboards
 as JSON files. SQLite is still used for historical strategy DB, but runtime
 state uses simple JSON for simplicity and debuggability.
 """
@@ -50,41 +50,6 @@ class StateManager:
     def __init__(self, state_dir: str = "data/state"):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-
-    # --- Weights ---
-
-    @property
-    def _weights_path(self) -> Path:
-        return self.state_dir / "weights.json"
-
-    @property
-    def _weight_history_path(self) -> Path:
-        return self.state_dir / "weight_history.json"
-
-    def save_weights(self, weights: dict[str, float]) -> None:
-        """Save current strategy weights."""
-        _atomic_write(self._weights_path, weights)
-        logger.info("Saved weights for %d strategies", len(weights))
-
-    def load_weights(self) -> dict[str, float]:
-        """Load strategy weights. Returns empty dict if no file."""
-        return _load_json(self._weights_path, {})
-
-    def save_weight_history(self, generation: int, weights: dict[str, float]) -> None:
-        """Append weights snapshot to history file."""
-        history = self.load_weight_history()
-        history.append(
-            {
-                "generation": generation,
-                "timestamp": datetime.now().isoformat(),
-                "weights": weights,
-            }
-        )
-        _atomic_write(self._weight_history_path, history)
-
-    def load_weight_history(self) -> list[dict]:
-        """Load full weight history."""
-        return _load_json(self._weight_history_path, [])
 
     # --- Generation Results ---
 
@@ -276,34 +241,6 @@ class StateManager:
         if not snapshots:
             return None
         return snapshots[-1]
-
-    # --- Separate Weight Pools ---
-
-    @property
-    def _backtest_weights_path(self) -> Path:
-        return self.state_dir / "backtest_weights.json"
-
-    @property
-    def _paper_weights_path(self) -> Path:
-        return self.state_dir / "paper_weights.json"
-
-    def save_backtest_weights(self, weights: dict[str, float]) -> None:
-        """Save backtest track weights."""
-        _atomic_write(self._backtest_weights_path, weights)
-        logger.info("Saved backtest weights for %d strategies", len(weights))
-
-    def load_backtest_weights(self) -> dict[str, float]:
-        """Load backtest track weights. Returns empty dict if no file."""
-        return _load_json(self._backtest_weights_path, {})
-
-    def save_paper_weights(self, weights: dict[str, float]) -> None:
-        """Save paper trade track weights."""
-        _atomic_write(self._paper_weights_path, weights)
-        logger.info("Saved paper weights for %d strategies", len(weights))
-
-    def load_paper_weights(self) -> dict[str, float]:
-        """Load paper trade track weights. Returns empty dict if no file."""
-        return _load_json(self._paper_weights_path, {})
 
     # --- Learning Loop ---
 

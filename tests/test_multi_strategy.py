@@ -1,6 +1,6 @@
 """Tests for the multi-strategy autoresearch system.
 
-Covers: paper-trade strategies, darwinian weights, state manager, data sources, engine.
+Covers: paper-trade strategies, state manager, data sources, engine.
 """
 from __future__ import annotations
 
@@ -78,81 +78,6 @@ class TestStrategyModules:
 
 
 # ---------------------------------------------------------------------------
-# Darwinian weight tests
-# ---------------------------------------------------------------------------
-
-
-class TestDarwinianWeights:
-    def test_initialize_weights(self):
-        from tradingagents.autoresearch.darwinian import initialize_weights
-
-        w = initialize_weights(["a", "b", "c"])
-        assert w == {"a": 1.0, "b": 1.0, "c": 1.0}
-
-    def test_update_weights_top_bottom_quartile(self):
-        from tradingagents.autoresearch.darwinian import update_weights
-
-        weights = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0}
-        scores = {"a": 10.0, "b": 5.0, "c": 3.0, "d": 0.0}
-
-        updated = update_weights(weights, scores)
-
-        assert updated["a"] > 1.0, "Top quartile should increase"
-        assert updated["d"] < 1.0, "Bottom quartile should decrease"
-        assert updated["b"] == 1.0, "Middle should stay"
-        assert updated["c"] == 1.0, "Middle should stay"
-
-    def test_update_weights_respects_bounds(self):
-        from tradingagents.autoresearch.darwinian import WEIGHT_MAX, WEIGHT_MIN, update_weights
-
-        weights = {"a": WEIGHT_MAX, "b": WEIGHT_MIN}
-        scores = {"a": 10.0, "b": 0.0}
-
-        updated = update_weights(weights, scores)
-        assert updated["a"] <= WEIGHT_MAX
-        assert updated["b"] >= WEIGHT_MIN
-
-    def test_update_weights_identical_scores_unchanged(self):
-        from tradingagents.autoresearch.darwinian import update_weights
-
-        weights = {"a": 1.0, "b": 1.2, "c": 0.8}
-        scores = {"a": 5.0, "b": 5.0, "c": 5.0}
-
-        updated = update_weights(weights, scores)
-        assert updated == weights
-
-    def test_update_weights_empty_scores(self):
-        from tradingagents.autoresearch.darwinian import update_weights
-
-        weights = {"a": 1.0}
-        updated = update_weights(weights, {})
-        assert updated == weights
-
-    def test_get_allocation(self):
-        from tradingagents.autoresearch.darwinian import get_allocation
-
-        weights = {"a": 2.0, "b": 1.0, "c": 1.0}
-        alloc = get_allocation(weights, 10000)
-
-        assert abs(alloc["a"] - 5000) < 0.01
-        assert abs(alloc["b"] - 2500) < 0.01
-        assert abs(sum(alloc.values()) - 10000) < 0.01
-
-    def test_get_quartile_summary(self):
-        from tradingagents.autoresearch.darwinian import get_quartile_summary
-
-        weights = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0}
-        scores = {"a": 10.0, "b": 5.0, "c": 3.0, "d": 0.0}
-
-        summary = get_quartile_summary(weights, scores)
-        assert "top" in summary
-        assert "middle" in summary
-        assert "bottom" in summary
-        assert any(e["name"] == "a" for e in summary["top"])
-        assert any(e["name"] == "d" for e in summary["bottom"])
-
-
-# ---------------------------------------------------------------------------
 # State manager tests
 # ---------------------------------------------------------------------------
 
@@ -162,15 +87,6 @@ class TestStateManager:
     def state(self, tmp_path):
         from tradingagents.autoresearch.state import StateManager
         return StateManager(str(tmp_path / "state"))
-
-    def test_save_load_weights(self, state):
-        weights = {"a": 1.05, "b": 0.95}
-        state.save_weights(weights)
-        loaded = state.load_weights()
-        assert loaded == weights
-
-    def test_load_weights_default_empty(self, state):
-        assert state.load_weights() == {}
 
     def test_save_load_generation(self, state):
         results = {"scores": {"a": 1.5}, "gen": 1}
@@ -206,13 +122,6 @@ class TestStateManager:
         assert updated[0]["status"] == "closed"
         assert updated[0]["pnl"] == 50.0
 
-    def test_weight_history(self, state):
-        state.save_weight_history(1, {"a": 1.0, "b": 1.0})
-        state.save_weight_history(2, {"a": 1.05, "b": 0.95})
-        history = state.load_weight_history()
-        assert len(history) == 2
-        assert history[1]["weights"]["a"] == 1.05
-
     def test_leaderboard(self, state):
         lb = [{"name": "strat_a", "score": 1.5}]
         state.save_leaderboard(lb)
@@ -226,9 +135,9 @@ class TestStateManager:
         assert reflections[0]["generation"] == 1
 
     def test_reset(self, state):
-        state.save_weights({"a": 1.0})
+        state.save_paper_trade({"strategy": "test", "ticker": "SPY"})
         state.reset()
-        assert state.load_weights() == {}
+        assert state.load_paper_trades() == []
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +194,7 @@ class TestMultiStrategyEngine:
         )
 
     def test_engine_has_paper_trade_strategies(self, engine):
-        assert len(engine.paper_trade_strategies) == 9
+        assert len(engine.paper_trade_strategies) == 10
         names = {s.name for s in engine.paper_trade_strategies}
         assert "earnings_call" in names
         assert "insider_activity" in names
@@ -357,109 +266,6 @@ class TestVintageState:
         updated = state.load_vintages()
         assert updated[0]["completed_trade_count"] == 5
         assert updated[0]["status"] == "active"
-
-
-class TestSeparateWeightPools:
-    @pytest.fixture
-    def state(self, tmp_path):
-        from tradingagents.autoresearch.state import StateManager
-        return StateManager(str(tmp_path / "state"))
-
-    def test_backtest_weights_independent(self, state):
-        state.save_backtest_weights({"b1": 1.2, "b2": 0.8})
-        state.save_paper_weights({"p1": 1.5})
-
-        bt = state.load_backtest_weights()
-        assert bt == {"b1": 1.2, "b2": 0.8}
-        # Paper weights unaffected
-        assert state.load_paper_weights() == {"p1": 1.5}
-
-    def test_paper_weights_independent(self, state):
-        state.save_paper_weights({"p1": 1.1, "p2": 0.9})
-        assert state.load_backtest_weights() == {}
-        assert state.load_paper_weights() == {"p1": 1.1, "p2": 0.9}
-
-
-# ---------------------------------------------------------------------------
-# Conservative Darwinian weight tests
-# ---------------------------------------------------------------------------
-
-
-class TestDarwinianConservative:
-    def test_conservative_ignores_low_trade_count(self):
-        """Strategies below MIN_TRADES should not be adjusted."""
-        from tradingagents.autoresearch.darwinian import update_weights_conservative
-
-        weights = {"a": 1.0, "b": 1.0, "c": 1.0}
-        scores = {"a": 0.9, "b": 0.5, "c": 0.1}
-        trade_counts = {"a": 5, "b": 5, "c": 5}  # All below 20
-        result = update_weights_conservative(weights, scores, trade_counts)
-        assert result == weights  # Unchanged
-
-    def test_conservative_adjusts_above_threshold(self):
-        """Strategies above MIN_TRADES get adjusted."""
-        from tradingagents.autoresearch.darwinian import update_weights_conservative
-
-        weights = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0}
-        scores = {"a": 0.9, "b": 0.7, "c": 0.3, "d": 0.1}
-        trade_counts = {"a": 50, "b": 50, "c": 50, "d": 50}
-        result = update_weights_conservative(weights, scores, trade_counts)
-        assert result["a"] > 1.0  # Top quartile increased
-        assert result["d"] < 1.0  # Bottom quartile decreased
-
-    def test_conservative_smaller_than_aggressive(self):
-        """Conservative multipliers produce smaller changes."""
-        from tradingagents.autoresearch.darwinian import update_weights, update_weights_conservative
-
-        weights = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0}
-        scores = {"a": 0.9, "b": 0.7, "c": 0.3, "d": 0.1}
-        trade_counts = {"a": 100, "b": 100, "c": 100, "d": 100}
-        conservative = update_weights_conservative(weights, scores, trade_counts)
-        aggressive = update_weights(weights, scores)
-        # Conservative change should be smaller
-        assert abs(conservative["a"] - 1.0) < abs(aggressive["a"] - 1.0)
-
-    def test_confidence_at_zero_below_min(self):
-        from tradingagents.autoresearch.darwinian import compute_confidence
-
-        assert compute_confidence(0) == 0.0
-        assert compute_confidence(19) == 0.0
-
-    def test_confidence_at_min_is_zero(self):
-        from tradingagents.autoresearch.darwinian import compute_confidence
-
-        assert compute_confidence(20, min_trades=20) == 0.0
-
-    def test_confidence_ramps_linearly(self):
-        from tradingagents.autoresearch.darwinian import compute_confidence
-
-        c1 = compute_confidence(60, min_trades=20, full_confidence_trades=100)
-        c2 = compute_confidence(80, min_trades=20, full_confidence_trades=100)
-        assert 0.0 < c1 < c2 <= 1.0
-
-    def test_confidence_at_full_is_one(self):
-        from tradingagents.autoresearch.darwinian import compute_confidence
-
-        assert compute_confidence(100, min_trades=20, full_confidence_trades=100) == 1.0
-
-    def test_confidence_caps_above_full(self):
-        from tradingagents.autoresearch.darwinian import compute_confidence
-
-        assert compute_confidence(200, full_confidence_trades=100) == 1.0
-
-    def test_confidence_weighted_adjustment_at_zero(self):
-        """At confidence=0, multiplier should be 1.0 (no change)."""
-        from tradingagents.autoresearch.darwinian import confidence_weighted_adjustment
-
-        assert confidence_weighted_adjustment(1.05, 0.0) == 1.0
-        assert confidence_weighted_adjustment(0.95, 0.0) == 1.0
-
-    def test_confidence_weighted_adjustment_at_one(self):
-        """At confidence=1, multiplier should be unchanged."""
-        from tradingagents.autoresearch.darwinian import confidence_weighted_adjustment
-
-        assert abs(confidence_weighted_adjustment(1.05, 1.0) - 1.05) < 1e-10
-        assert abs(confidence_weighted_adjustment(0.95, 1.0) - 0.95) < 1e-10
 
 
 # ---------------------------------------------------------------------------
@@ -632,30 +438,8 @@ class TestPortfolioCommittee:
 class TestTwoPhaseEngine:
     """Integration tests for the two-phase architecture."""
 
-    def test_paper_trade_phase_no_weight_change(self):
-        """run_paper_trade_phase should NOT modify any weights."""
-        from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.autoresearch.state import StateManager
-        from tradingagents.autoresearch.strategies import get_all_strategies
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = StateManager(tmpdir)
-            config = {"autoresearch": {"state_dir": tmpdir, "total_capital": 5000, "paper_trade": {"portfolio_committee_enabled": False}}}
-            engine = MultiStrategyEngine(config=config, strategies=get_all_strategies(), state_manager=state)
-
-            # Save initial weights
-            state.save_paper_weights({"test": 1.0})
-
-            with patch.object(engine, "_fetch_all_data", return_value={
-                "yfinance": {"prices": {}, "vix": pd.DataFrame(), "earnings": {}},
-            }):
-                result = engine.run_paper_trade_phase(trading_date="2024-06-01")
-
-            # Paper weights should NOT have changed
-            assert state.load_paper_weights() == {"test": 1.0}
-
-    def test_learning_loop_respects_min_trades(self):
-        """Learning loop should not adjust weights when trades < MIN_TRADES."""
+    def test_learning_loop_not_triggered_without_history(self):
+        """Learning loop should not trigger when there's no history."""
         from tradingagents.autoresearch.multi_strategy_engine import MultiStrategyEngine
         from tradingagents.autoresearch.state import StateManager
         from tradingagents.autoresearch.strategies import get_all_strategies

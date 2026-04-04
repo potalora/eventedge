@@ -126,7 +126,7 @@ class TestForwardPriceFetch:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(os.path.join(tmpdir, "test.db"))
-            screener = MarketScreener(db, _make_config())
+            screener = MarketScreener(_make_config())
             result = screener.fetch_forward_prices(
                 ["AAPL", "MSFT"], "2024-01-15", "2024-03-15"
             )
@@ -146,7 +146,7 @@ class TestForwardPriceFetch:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(os.path.join(tmpdir, "test.db"))
-            screener = MarketScreener(db, _make_config())
+            screener = MarketScreener(_make_config())
             result = screener.fetch_forward_prices(
                 ["AAPL", "MISSING"], "2024-01-15", "2024-03-15"
             )
@@ -162,7 +162,7 @@ class TestForwardPriceFetch:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(os.path.join(tmpdir, "test.db"))
-            screener = MarketScreener(db, _make_config())
+            screener = MarketScreener(_make_config())
             result = screener.fetch_forward_prices(
                 ["AAPL"], "2024-01-15", "2024-03-15"
             )
@@ -177,7 +177,7 @@ class TestForwardPriceFetch:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(os.path.join(tmpdir, "test.db"))
-            screener = MarketScreener(db, _make_config())
+            screener = MarketScreener(_make_config())
             result = screener.fetch_forward_prices(
                 ["AAPL"], "2024-01-15", "2024-03-15"
             )

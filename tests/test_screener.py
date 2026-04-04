@@ -21,7 +21,7 @@ def tmp_db():
 @pytest.fixture
 def screener(tmp_db):
     config = {"autoresearch": {"universe": "small_cap"}}
-    return MarketScreener(tmp_db, config)
+    return MarketScreener(config)
 
 
 class TestClassifyRegime:

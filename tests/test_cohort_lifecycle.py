@@ -343,11 +343,7 @@ class TestLearningLoop:
 
         result = engine.run_learning_loop()
         assert result["triggered"] is True
-
-        # Weights should be saved
-        weights = state.load_paper_weights()
-        assert weights is not None
-        assert "fake_strat" in weights
+        assert "fake_strat" in result["scores"]
 
     def test_learning_loop_fallback_pnl(self, tmp_path):
         """Learning loop computes PnL on-the-fly for trades missing the pnl field."""
@@ -532,10 +528,7 @@ class TestMultiDaySimulation:
         state.save_learning_loop_state({"last_run": "2020-01-01T00:00:00"})
         learn_result = engine.run_learning_loop()
         assert learn_result["triggered"] is True
-
-        # Verify weights were updated
-        weights = state.load_paper_weights()
-        assert weights is not None
+        assert "scores" in learn_result
 
     @patch("tradingagents.autoresearch.multi_strategy_engine.MultiStrategyEngine._fetch_all_data")
     @patch("tradingagents.autoresearch.portfolio_committee.PortfolioCommittee.synthesize")

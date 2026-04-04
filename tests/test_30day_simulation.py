@@ -1067,11 +1067,12 @@ class TestReactivatedStrategies:
         assert should_exit is True
         assert reason == "rebalance"
 
-    def test_nine_strategies_registered(self):
-        """Verify 9 strategies are registered after reactivation."""
+    def test_ten_strategies_registered(self):
+        """Verify 10 strategies are registered."""
         from tradingagents.autoresearch.strategies import get_paper_trade_strategies
         strategies = get_paper_trade_strategies()
-        assert len(strategies) == 9
+        assert len(strategies) == 10
         names = [s.name for s in strategies]
         assert "govt_contracts" in names
         assert "state_economics" in names
+        assert "weather_ag" in names

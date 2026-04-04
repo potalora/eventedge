@@ -21,8 +21,6 @@ from tradingagents.autoresearch.cached_pipeline import CachedPipelineRunner
 from tradingagents.autoresearch.walk_forward import (
     generate_windows,
     get_test_dates,
-    has_regime_diversity,
-    cross_ticker_validation_split,
 )
 from tradingagents.autoresearch.fitness import (
     rank_strategies,
@@ -163,7 +161,7 @@ class EvolutionEngine:
         self.db = db
         self.config = config
         self.ar_config = config.get("autoresearch", {})
-        self.screener = MarketScreener(db, config)
+        self.screener = MarketScreener(config)
         self.strategist = Strategist(db, config)
         self.pipeline = CachedPipelineRunner(db, config)
 

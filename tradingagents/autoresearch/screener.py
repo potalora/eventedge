@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 
 from tradingagents.autoresearch.models import ScreenerCriteria, ScreenerResult, Filter
-from tradingagents.storage.db import Database
-
 logger = logging.getLogger(__name__)
 
 # Minimum data points needed for reliable technicals
@@ -15,8 +13,7 @@ _MIN_ROWS_FOR_TECHNICALS = 30
 
 
 class MarketScreener:
-    def __init__(self, db: Database, config: dict):
-        self.db = db
+    def __init__(self, config: dict):
         self.config = config
 
     def classify_regime(self, vix: float, yield_curve_slope: float, hy_spread: float) -> str:

@@ -210,56 +210,6 @@ class EventMonitor:
             return []
         return source.get_recent_trades(days_back=days_back)
 
-    def poll_recent_earnings(
-        self, days_back: int = 7,
-    ) -> list[dict]:
-        """Poll Finnhub for companies that recently reported earnings.
-
-        Returns list of dicts with {symbol, date, epsActual, epsEstimate, ...}.
-        """
-        source = self.registry.get("finnhub")
-        if source is None or not source.is_available():
-            return []
-
-        date_to = datetime.now().strftime("%Y-%m-%d")
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        results = source.fetch_recent_earnings(date_from, date_to)
-        self._last_poll["finnhub_earnings"] = datetime.now().isoformat()
-        logger.info("Finnhub earnings poll: %d reported", len(results))
-        return results
-
-    def poll_company_news(
-        self, symbols: list[str], days_back: int = 7,
-    ) -> list[dict]:
-        """Poll Finnhub for company news (used by supply chain strategy)."""
-        source = self.registry.get("finnhub")
-        if source is None or not source.is_available():
-            return []
-
-        date_to = datetime.now().strftime("%Y-%m-%d")
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-
-        all_news = []
-        for symbol in symbols:
-            news = source.fetch_company_news(symbol, date_from, date_to)
-            for article in news:
-                article["symbol"] = symbol
-            all_news.extend(news)
-        return all_news
-
-    def poll_supply_chains(self, symbols: list[str]) -> dict[str, list[str]]:
-        """Poll Finnhub for peer/supply chain relationships."""
-        source = self.registry.get("finnhub")
-        if source is None or not source.is_available():
-            return {}
-
-        chains: dict[str, list[str]] = {}
-        for symbol in symbols:
-            peers = source.fetch_supply_chain(symbol)
-            if peers:
-                chains[symbol] = [p["ticker"] for p in peers]
-        return chains
-
     def poll_proposed_rules(
         self, agencies: list[str] | None = None, days_back: int = 14,
     ) -> list[dict]:
