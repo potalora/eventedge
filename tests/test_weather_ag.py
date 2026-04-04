@@ -109,8 +109,8 @@ class TestProtocol:
 # ---------------------------------------------------------------------------
 
 class TestTickerUniverse:
-    def test_full_universe_has_10_tickers(self):
-        assert len(AG_TICKERS_FULL) == 10
+    def test_full_universe_has_expected_tickers(self):
+        assert len(AG_TICKERS_FULL) >= 16
 
     def test_full_includes_etfs_and_stocks(self):
         assert "DBA" in AG_TICKERS_FULL.values()
@@ -172,7 +172,7 @@ class TestGateLogic:
         data = _make_data(
             flat_price_data,
             noaa={"heat_stress_days": 0, "precip_deficit_pct": 0, "frost_events": 0},
-            drought={"composite_score": 0.3, "states": {}},
+            drought={"composite_score": 0.1, "states": {}},
             usda={"crop_progress": {"CORN": []}},
         )
         result = strategy.screen(data, "2025-05-20", strategy.get_default_params())
@@ -383,3 +383,41 @@ class TestLLMAnalyzerIntegration:
             )
         assert result["direction"] == "long"
         assert result["score"] == 0.7
+
+
+# ---------------------------------------------------------------------------
+# Gen 004: loosened gates, expanded universe, 30-day horizon
+# ---------------------------------------------------------------------------
+
+class TestGen004:
+    def test_default_params_aligned_to_30d_horizon(self):
+        strategy = WeatherAgStrategy()
+        params = strategy.get_default_params()
+        assert 20 <= params["hold_days"] <= 30, "hold_days should target ~25 days"
+        assert params["drought_min_score"] == 0.3, "drought gate should be loose"
+        assert params["heat_stress_threshold"] == 2, "heat gate should be loose"
+        assert params["precip_deficit_threshold"] == -10, "precip gate should be loose"
+
+    def test_expanded_ticker_universe(self):
+        """Verify curated expansion adds food/bev and fertilizer names."""
+        tickers = set(AG_TICKERS_FULL.values())
+        # Food/beverage
+        assert "PEP" in tickers
+        assert "KO" in tickers
+        assert "GIS" in tickers
+        assert "MDLZ" in tickers
+        # Fertilizer
+        assert "MOS" in tickers
+        assert "NTR" in tickers
+        assert len(tickers) >= 16, f"Expected >=16 curated tickers, got {len(tickers)}"
+
+    def test_winter_subset_expanded(self):
+        """Winter subset should include food/bev names."""
+        assert "pep" in AG_TICKERS_WINTER
+        assert "ko" in AG_TICKERS_WINTER
+
+    def test_param_space_hold_days_floor(self):
+        """Hold days range should have 20-day floor for 30-day horizon."""
+        strategy = WeatherAgStrategy()
+        space = strategy.get_param_space()
+        assert space["hold_days"][0] >= 20, "hold_days floor should be >= 20"

@@ -36,10 +36,26 @@ AG_TICKERS_FULL = {
     "ctva": "CTVA",  # Corteva Agriscience
     "de": "DE",      # Deere & Company
     "fmc": "FMC",    # FMC Corporation
+    # Food/beverage — weather-sensitive demand
+    "pep": "PEP",    # PepsiCo
+    "ko": "KO",      # Coca-Cola
+    "gis": "GIS",    # General Mills
+    "mdlz": "MDLZ",  # Mondelez International
+    # Fertilizer/crop chemicals — input cost sensitivity
+    "mos": "MOS",    # Mosaic Company
+    "ntr": "NTR",    # Nutrien
 }
 
-# Winter subset (Oct-Mar): skip corn/soy-specific instruments
-AG_TICKERS_WINTER = {"weat", "dba", "moo", "adm", "bg"}
+# Winter subset (Oct-Mar): skip corn/soy-specific + seasonal-only instruments
+AG_TICKERS_WINTER = {"weat", "dba", "moo", "adm", "bg", "pep", "ko", "gis", "mdlz"}
+
+# Industries for dynamic OpenBB expansion
+AG_EXPANSION_INDUSTRIES = [
+    "Agricultural Products",
+    "Packaged Foods",
+    "Farm & Heavy Construction Machinery",
+    "Agricultural Inputs",
+]
 
 
 class WeatherAgStrategy:
@@ -52,23 +68,23 @@ class WeatherAgStrategy:
     def get_param_space(self) -> dict[str, tuple]:
         return {
             "lookback_days": (10, 60),
-            "hold_days": (10, 45),
+            "hold_days": (20, 45),
             "min_return": (-0.05, 0.05),
-            "heat_stress_threshold": (3, 15),
-            "precip_deficit_threshold": (-50, -15),
-            "drought_min_score": (0.5, 2.0),
+            "heat_stress_threshold": (2, 15),
+            "precip_deficit_threshold": (-50, -10),
+            "drought_min_score": (0.3, 2.0),
             "crop_decline_threshold": (1, 5),
         }
 
     def get_default_params(self) -> dict[str, Any]:
         return {
             "lookback_days": 21,
-            "hold_days": 21,
+            "hold_days": 25,
             "min_return": 0.0,
-            "heat_stress_threshold": 5,
-            "precip_deficit_threshold": -25,
-            "drought_min_score": 1.0,
-            "crop_decline_threshold": 2,
+            "heat_stress_threshold": 2,
+            "precip_deficit_threshold": -10,
+            "drought_min_score": 0.3,
+            "crop_decline_threshold": 1,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -130,7 +146,7 @@ class WeatherAgStrategy:
                 gate_triggered = True
                 gate_reasons.append(f"frost={frost_events}")
 
-        # Momentum gate: any ag ticker trailing return > 5%
+        # Momentum gate: any ag ticker trailing return > 2%
         ag_returns: list[tuple[str, str, float]] = []
         for name, ticker in eligible_tickers.items():
             df = prices.get(ticker)
@@ -142,7 +158,7 @@ class WeatherAgStrategy:
             close = df["Close"]
             trailing_return = (close.iloc[-1] / close.iloc[-lookback]) - 1.0
             ag_returns.append((name, ticker, trailing_return))
-            if trailing_return > 0.05:
+            if trailing_return > 0.02:
                 gate_triggered = True
                 gate_reasons.append(f"momentum_{ticker}={trailing_return:.1%}")
 
@@ -194,7 +210,7 @@ class WeatherAgStrategy:
         data: dict,
     ) -> tuple[bool, str]:
         """Exit on hold period."""
-        hold_days = params.get("hold_days", 21)
+        hold_days = params.get("hold_days", 25)
         if holding_days >= hold_days:
             return True, "hold_period"
         return False, ""
@@ -217,27 +233,40 @@ class WeatherAgStrategy:
 ETFs and agribusiness stocks based on NOAA weather anomalies, USDA crop
 condition declines, and US Drought Monitor data.
 
+Investment horizon: 30 days. Every signal must answer "why will this move
+price within 30 days?" Crop/weather impacts take 3-4 weeks to flow into
+commodity prices and earnings expectations.
+
 Current parameters: {current}
 
 Parameter ranges:
 - lookback_days: 10-60 (momentum window)
-- hold_days: 10-45 (holding period)
+- hold_days: 20-45 (holding period, target ~25-30 days)
 - min_return: -0.05 to 0.05 (minimum momentum for fallback)
-- heat_stress_threshold: 3-15 (min heat days to trigger)
-- precip_deficit_threshold: -50 to -15 (% below normal precipitation)
-- drought_min_score: 0.5-2.0 (min composite drought score to trigger)
+- heat_stress_threshold: 2-15 (min heat days to trigger)
+- precip_deficit_threshold: -50 to -10 (% below normal precipitation)
+- drought_min_score: 0.3-2.0 (min composite drought score to trigger)
 - crop_decline_threshold: 1-5 (min weekly Good+Excellent decline in pp)
 
 Recent results:
 {results_text or '  No results yet.'}
 
-Suggest 3 new parameter combinations. Consider:
-- Drought Monitor composite score >= 1.0 means moderate drought across region
-- USDA crop condition declines > 2pp week-over-week signal real damage
-- Heat stress above 95F during June-August is the strongest weather signal
-- Precipitation deficit > 25% drives sustained price moves
+Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
-Return JSON array of 3 param dicts."""
+    def get_universe(self, openbb_source=None) -> dict[str, str]:
+        """Return eligible ticker universe, optionally expanded via OpenBB."""
+        universe = dict(AG_TICKERS_FULL)
+        if openbb_source and openbb_source.is_available():
+            for industry in AG_EXPANSION_INDUSTRIES:
+                result = openbb_source.fetch({
+                    "method": "sector_tickers",
+                    "industry": industry,
+                })
+                tickers = result.get("tickers", [])
+                for t in tickers:
+                    universe[t.lower()] = t
+        blocked = set()  # Populated from config at engine level
+        return {k: v for k, v in universe.items() if v not in blocked}
 
     @staticmethod
     def _check_crop_decline(usda_data: dict) -> float:
