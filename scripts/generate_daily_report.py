@@ -142,6 +142,29 @@ def _generate_report(date: str, gens: list[dict]) -> str:
     lines.append(f"**Active generations:** {len(gens)}")
     lines.append("")
 
+    # --- Cycle context (if generation has start date) ---
+    cycle_lines: list[str] = []
+    for gen in gens:
+        start_date = gen.get("start_date")
+        if start_date:
+            try:
+                from tradingagents.autoresearch.cycle_tracker import CycleTracker
+                ct = CycleTracker(gen_start_date=start_date, state_dir=gen.get("state_dir", ""))
+                cycle = ct.current_cycle(date)
+                remaining = ct.days_remaining(date)
+                day_of_cycle = 30 - remaining + 1
+                cycle_lines.append(
+                    f"**{gen.get('gen_id', '?')}:** Cycle {cycle}, Day {day_of_cycle} of 30 ({remaining} days remaining)"
+                )
+            except Exception:
+                pass
+    if cycle_lines:
+        lines.append("## Cycle Context")
+        lines.append("")
+        for cl in cycle_lines:
+            lines.append(cl)
+        lines.append("")
+
     # --- Infrastructure health ---
     lines.append("## Infrastructure Health")
     lines.append("")
@@ -358,6 +381,8 @@ def _collect_generation_data(gen_info: dict, date: str) -> dict:
         "days_run": len(days),
         "cohorts": cohorts,
         "regimes": regimes,
+        "start_date": gen_info.get("start_date", ""),
+        "state_dir": state_dir,
     }
 
 
@@ -394,6 +419,7 @@ def main():
                 "state_dir": g.state_dir,
                 "description": g.description,
                 "git_commit": g.git_commit,
+                "start_date": g.created_at[:10] if hasattr(g, "created_at") and g.created_at else "",
             },
             date,
         )

@@ -82,8 +82,17 @@ class MultiStrategyEngine:
             self._openbb_source.is_available() if self._openbb_source else False
         )
 
+        # Cycle tracking (observation-only)
+        self._cycle_tracker = None  # Initialized when gen_start_date is known
+
     def _emit(self, kind: str, **data: Any) -> None:
         self._on_event(kind, **data)
+
+    def set_cycle_tracker(self, gen_start_date: str) -> None:
+        """Initialize cycle tracking for this engine's state directory."""
+        from tradingagents.autoresearch.cycle_tracker import CycleTracker
+        state_dir = self.ar_config.get("state_dir", "data/state")
+        self._cycle_tracker = CycleTracker(gen_start_date, state_dir)
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -405,6 +414,18 @@ class MultiStrategyEngine:
             if should_exit:
                 trader.close_trade(trade["trade_id"], exit_price=current_price, exit_date=trading_date, exit_reason=reason)
                 trades_closed.append(trade["trade_id"])
+
+        # Update cycle tracker
+        if self._cycle_tracker:
+            account = bridge.get_account()
+            portfolio_value = account.portfolio_value if hasattr(account, 'portfolio_value') else self.ar_config.get("total_capital", 10000)
+            open_positions = self.state.load_paper_trades(status="open")
+            self._cycle_tracker.update_daily(trading_date, open_positions, portfolio_value)
+            if self._cycle_tracker.is_boundary(trading_date):
+                cycle_num = self._cycle_tracker.current_cycle(trading_date)
+                closed = self.state.load_paper_trades(status="closed")
+                self._cycle_tracker.snapshot_cycle(cycle_num, open_positions, closed, portfolio_value)
+                logger.info("Cycle %d boundary — snapshot generated", cycle_num)
 
         return {
             "signals": deduped_signals,
