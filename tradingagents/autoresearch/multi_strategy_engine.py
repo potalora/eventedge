@@ -76,6 +76,12 @@ class MultiStrategyEngine:
         from tradingagents.autoresearch.signal_journal import SignalJournal
         self._journal = SignalJournal(self.ar_config.get("state_dir", "data/state"))
 
+        # OpenBB availability flag — checked once at startup
+        self._openbb_source = self.registry.get("openbb")
+        self._openbb_available = (
+            self._openbb_source.is_available() if self._openbb_source else False
+        )
+
     def _emit(self, kind: str, **data: Any) -> None:
         self._on_event(kind, **data)
 
@@ -324,6 +330,7 @@ class MultiStrategyEngine:
                 traded=was_traded,
                 entry_price=price,
                 prompt_version=prompt_version,
+                openbb_available=self._openbb_available,
             ))
 
         if journal_entries:

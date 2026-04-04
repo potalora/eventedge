@@ -59,12 +59,97 @@ def _capital_deployed(trades: list[dict]) -> float:
     return sum(t.get("position_value", 0) for t in trades if t.get("status") == "open")
 
 
+def _check_infrastructure_health() -> list[dict]:
+    """Check availability of all external data sources used by autoresearch.
+
+    Returns a list of dicts: {name, status, note}.
+    """
+    results = []
+
+    # OpenBB (optional dependency + FMP API key)
+    try:
+        from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource
+        src = OpenBBSource({})
+        available = src.is_available()
+        results.append({
+            "name": "OpenBB",
+            "status": "OK" if available else "DEGRADED",
+            "note": "Sector enforcement + enrichment" if available else "Not installed or FMP_API_KEY missing — sector enforcement disabled",
+        })
+    except Exception as exc:
+        results.append({"name": "OpenBB", "status": "ERROR", "note": str(exc)[:80]})
+
+    # NOAA CDO
+    try:
+        from tradingagents.autoresearch.data_sources.noaa_source import NOAASource
+        src = NOAASource({})
+        available = src.is_available()
+        results.append({
+            "name": "NOAA CDO",
+            "status": "OK" if available else "DEGRADED",
+            "note": "Weather anomaly data" if available else "NOAA_CDO_TOKEN missing — weather_ag falls back to momentum",
+        })
+    except Exception as exc:
+        results.append({"name": "NOAA CDO", "status": "ERROR", "note": str(exc)[:80]})
+
+    # USDA NASS
+    try:
+        from tradingagents.autoresearch.data_sources.usda_source import USDASource
+        src = USDASource({})
+        available = src.is_available()
+        results.append({
+            "name": "USDA NASS",
+            "status": "OK" if available else "DEGRADED",
+            "note": "Crop condition data" if available else "USDA_NASS_API_KEY missing — crop gate skipped",
+        })
+    except Exception as exc:
+        results.append({"name": "USDA NASS", "status": "ERROR", "note": str(exc)[:80]})
+
+    # FRED
+    try:
+        from tradingagents.autoresearch.data_sources.fred_source import FREDSource
+        src = FREDSource({})
+        available = src.is_available()
+        results.append({
+            "name": "FRED",
+            "status": "OK" if available else "DEGRADED",
+            "note": "Macro / Fama-French factors" if available else "FRED_API_KEY missing",
+        })
+    except Exception as exc:
+        results.append({"name": "FRED", "status": "ERROR", "note": str(exc)[:80]})
+
+    # US Drought Monitor (no API key required — public endpoint)
+    try:
+        from tradingagents.autoresearch.data_sources.drought_monitor_source import DroughtMonitorSource
+        src = DroughtMonitorSource({})
+        available = src.is_available()
+        results.append({
+            "name": "Drought Monitor",
+            "status": "OK" if available else "DEGRADED",
+            "note": "Drought severity data" if available else "HTTP dependency unavailable",
+        })
+    except Exception as exc:
+        results.append({"name": "Drought Monitor", "status": "ERROR", "note": str(exc)[:80]})
+
+    return results
+
+
 def _generate_report(date: str, gens: list[dict]) -> str:
     lines: list[str] = []
     lines.append(f"# Daily Report: {date}")
     lines.append("")
     lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"**Active generations:** {len(gens)}")
+    lines.append("")
+
+    # --- Infrastructure health ---
+    lines.append("## Infrastructure Health")
+    lines.append("")
+    lines.append("| Source | Status | Note |")
+    lines.append("|--------|--------|------|")
+    for h in _check_infrastructure_health():
+        status_icon = "OK" if h["status"] == "OK" else ("DEGRADED" if h["status"] == "DEGRADED" else "ERROR")
+        lines.append(f"| {h['name']} | {status_icon} | {h['note']} |")
     lines.append("")
 
     # --- Summary table ---

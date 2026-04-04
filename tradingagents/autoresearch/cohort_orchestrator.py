@@ -62,6 +62,21 @@ class CohortOrchestrator:
 
         self._base_config = base_config
 
+        # OpenBB availability check — warn loudly if unavailable
+        first_engine = self.cohorts[0]["engine"] if self.cohorts else None
+        openbb_source = (
+            first_engine.registry.get("openbb") if first_engine else None
+        )
+        if openbb_source is not None and openbb_source.is_available():
+            self.openbb_degraded = False
+            logger.info("OpenBB: available — sector enforcement and enrichment active")
+        else:
+            self.openbb_degraded = True
+            logger.warning(
+                "OpenBB: UNAVAILABLE — sector enforcement disabled, enrichment skipped. "
+                "Install with: pip install -e '[.openbb]' and set FMP_API_KEY"
+            )
+
     def run_daily(self, trading_date: str | None = None) -> dict[str, Any]:
         """Run all cohorts for a trading day with shared data fetch.
 

@@ -35,6 +35,7 @@ class JournalEntry:
     return_10d: float | None = None
     return_30d: float | None = None
     prompt_version: str = ""
+    openbb_available: bool = True
     metadata: dict = field(default_factory=dict)
 
 
