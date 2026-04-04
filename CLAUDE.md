@@ -5,7 +5,7 @@
 TradingAgents is a multi-agent LLM trading framework built with LangGraph. It has two major systems:
 
 1. **Core Pipeline** — 6-agent LangGraph pipeline (analysts, researchers, trader, risk manager, portfolio manager) that evaluates a single ticker and produces a trade decision.
-2. **Autoresearch** — Autonomous multi-strategy evolution engine: Phase 1 infrastructure exists but is dormant (no backtest strategies registered); Phase 2 is a 2-cohort paper trading trial (Control with fixed confidence vs. Adaptive with journal-derived confidence and weekly learning). 9 event-driven strategies across 9 data sources (including OpenBB Platform for sector classification, analyst estimates, short interest, government trades, SEC litigation, and Fama-French factors).
+2. **Autoresearch** — Autonomous multi-strategy evolution engine: Phase 1 infrastructure exists but is dormant (no backtest strategies registered); Phase 2 is a 2-cohort paper trading trial (Control with fixed confidence vs. Adaptive with journal-derived confidence and weekly learning). 10 event-driven strategies across 12 data sources (including OpenBB Platform for sector classification, analyst estimates, short interest, government trades, SEC litigation, and Fama-French factors; NOAA CDO for agricultural weather anomalies; USDA NASS for crop conditions; US Drought Monitor for drought severity).
 
 Additionally, the project includes: options analysis, backtesting engine, Alpaca execution, Streamlit dashboard, APScheduler scheduling, and SQLite persistence.
 
@@ -151,16 +151,16 @@ Strategy research & academic backing: [docs/strategy_research.md](docs/strategy_
 
 ### Architecture
 
-**Phase 1 — Backtest Evolution** (offline, fast): Infrastructure exists but is dormant — no backtest strategies are currently registered. The system runs Phase 2 (paper trading) only. When activated, Phase 1 would run N generations of backtest strategies with aggressive Darwinian weights (x1.05/x0.95), producing a "playbook" with optimized params, regime model (VIX/credit/yield curve), and strategy reliability scores.
+**Phase 1 — Backtest Evolution** (offline, fast): Infrastructure exists but is dormant — no backtest strategies are currently registered. The system runs Phase 2 (paper trading) only.
 
 **Phase 2 — 2-Cohort Paper Trading Trial** (live, ongoing): A/B test of two parallel paper portfolios sharing the same data fetch but using separate state directories (`data/state/control/`, `data/state/adaptive/`):
 
 - **Cohort A (Control):** Fixed `strategy_confidence=0.5`, no learning loop. Baseline for comparison.
-- **Cohort B (Adaptive):** Journal-derived `strategy_confidence` from hit rates, prompt optimization, weekly learning loop with conservative weight adjustment (x1.02/x0.98, >= 20 completed trades).
+- **Cohort B (Adaptive):** Journal-derived `strategy_confidence` from hit rates, prompt optimization, weekly learning loop.
 
-The **portfolio committee** is the sole sizing authority. Weight scaling has been removed from `compute_position_size()` and `execute_recommendation()` — the risk gate only enforces hard limits.
+The **portfolio committee** is the sole sizing authority — the risk gate only enforces hard limits.
 
-### Active Strategies (9 event-driven, paper-trade only)
+### Active Strategies (10 event-driven, paper-trade only)
 
 | Strategy | Class | Data Sources |
 |----------|-------|-------------|
@@ -173,15 +173,14 @@ The **portfolio committee** is the sole sizing authority. Weight scaling has bee
 | `congressional_trades` | `CongressionalTradesStrategy` | Congress/CapitolTrades, yfinance, OpenBB (govt trades API as primary) |
 | `govt_contracts` | `GovtContractsStrategy` | USASpending, yfinance, OpenBB (profile, estimates) |
 | `state_economics` | `StateEconomicsStrategy` | FRED, yfinance, OpenBB (Fama-French factors) |
-
-1 additional strategy exists as code but is NOT registered/active: `weather_ag` (in `_archive/`, needs NOAA/USDA data).
+| `weather_ag` | `WeatherAgStrategy` | NOAA CDO, USDA NASS, Drought Monitor, yfinance, OpenBB (weather + crop conditions + drought + ag momentum) |
 
 ### Key Components
 
 - `cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, then fetches OpenBB enrichment (profiles, short interest, Fama-French factors) for signal tickers, then dispatches to each cohort's engine. `CohortConfig` and `build_default_cohorts()` define the A/B setup.
 - `cohort_comparison.py` — `CohortComparison` with `compare()` and `format_report()` for side-by-side cohort analysis.
 - `portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available.
-- Vintage tracking (param sets tagged with vintage ID, trade count, creation date), regime model, separate weight pools (`backtest_weights.json` / `paper_weights.json`), 15% exploration budget for unproven param sets.
+- Vintage tracking (param sets tagged with vintage ID, trade count, creation date), regime model, 15% exploration budget for unproven param sets.
 - Future bolt-on: debate validation (not built yet).
 
 Legacy `run_generation.py` still works for single-engine use; for the 2-cohort trial use `scripts/run_cohorts.py`.
@@ -236,14 +235,6 @@ The generation system allows multiple versions of the codebase to run paper trad
 4. Add to `data_sources/__init__.py` exports
 5. Add API key to `default_config.py` autoresearch section and `.env.example`
 
-### Darwinian Weight System
-
-Strategies have weights in `[0.3, 2.5]` (default `1.0`). Dual-mode weight adjustment:
-- **Backtest phase** (aggressive): Top quartile `*= 1.05`, bottom quartile `*= 0.95`
-- **Paper-trade phase** (conservative): Top quartile `*= 1.02`, bottom quartile `*= 0.98`, requires >= 20 completed trades
-
-Separate weight pools: `backtest_weights.json` and `paper_weights.json`. Weights determine capital allocation. Config keys: `weight_min`, `weight_max`, `weight_up_factor`, `weight_down_factor`, `paper_weight_up_factor`, `paper_weight_down_factor`, `paper_min_trades`.
-
 ---
 
 ## Extension Modules
@@ -278,10 +269,12 @@ All configuration lives in `tradingagents/default_config.py`.
 | `autoresearch` | `total_capital` | Portfolio size for allocation |
 | `autoresearch` | `adaptive_confidence` | `False` = fixed 0.5 (Cohort A), `True` = journal-derived (Cohort B) |
 | `autoresearch` | `fmp_api_key` | FMP API key for OpenBB equity estimates (optional, free tier: 250 calls/day) |
+| `autoresearch` | `noaa_cdo_token` | NOAA Climate Data Online token for weather_ag strategy (free from ncdc.noaa.gov) |
+| `autoresearch` | `usda_nass_api_key` | USDA NASS API key for crop condition data (free from quickstats.nass.usda.gov) |
 
 API keys go in `.env` (git-ignored), loaded via `python-dotenv`. See `.env.example` for required keys.
 
-OpenBB is an optional dependency: `pip install -e ".[openbb]"`. All strategies gracefully degrade when OpenBB is unavailable.
+OpenBB is an optional dependency: `pip install -e ".[openbb]"`. All strategies gracefully degrade when OpenBB is unavailable. NOAA weather data gracefully degrades to momentum-only when the token is unavailable.
 
 ---
 
@@ -328,7 +321,7 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
 - **Run:** `.venv/bin/python -m pytest tests/ -v`
 - **Rules:** Mock LLM calls in unit tests. Never call real APIs in tests. Use `unittest.mock.patch` for external services.
 - **Key test files:**
-  - `tests/test_multi_strategy.py` — 96 tests covering 9 strategies, Darwinian weights, state, engine
+  - `tests/test_multi_strategy.py` — tests covering 10 strategies, state, engine
   - `tests/test_openbb_source.py` — 37 tests for OpenBB data source (all 8 methods, cache, graceful degradation)
   - `tests/test_30day_simulation.py` — 30-day simulation tests including OpenBB enrichment and reactivated strategies
   - `tests/test_e2e_pipeline.py` — End-to-end integration tests for full trading pipeline

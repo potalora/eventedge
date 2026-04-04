@@ -103,11 +103,6 @@ DEFAULT_CONFIG = {
         "state_dir": "data/state",
         "total_capital": 5000,
         "proposals_per_strategy": 3,
-        # Darwinian weights
-        "weight_min": 0.3,
-        "weight_max": 2.5,
-        "weight_up_factor": 1.05,
-        "weight_down_factor": 0.95,
         # LLM for autoresearch
         "autoresearch_model": "claude-sonnet-4-6",
         # Tickers to exclude from trading (compliance, conflict of interest)
@@ -118,6 +113,8 @@ DEFAULT_CONFIG = {
         "finnhub_api_key": "",
         "regulations_api_key": "",
         "courtlistener_token": "",
+        "noaa_cdo_token": "",
+        "usda_nass_api_key": "",
         "edgar_user_agent": "TradingAgents research@example.com",
         # Risk gate (hard portfolio controls)
         "risk_gate": {
@@ -133,8 +130,6 @@ DEFAULT_CONFIG = {
         # Paper trade settings
         "paper_trade": {
             "min_trades_for_evaluation": 20,
-            "weight_up_factor": 1.02,
-            "weight_down_factor": 0.98,
             "exploration_budget_pct": 0.15,
             "max_vintage_age_days": 540,
             "learning_loop_calendar_days": 30,

@@ -82,6 +82,15 @@ Keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
 defendant_ticker (ticker symbol or ""), case_type (string),
 severity ("low"/"medium"/"high"/"critical"), rationale (1 sentence).
 Keep ALL string values under 80 characters.""",
+    "ag_weather": """You are analyzing agricultural supply disruption risk.
+Assess whether weather, drought, and crop condition data support a long position
+in agricultural instruments. Consider:
+1. Are conditions actually damaging crops, or just concerning?
+2. Has the market already priced in the disruption (check momentum)?
+3. Is this ticker directly exposed to the affected commodities?
+Return ONLY compact JSON. No explanation outside JSON.
+Keys: direction ("long"/"neutral"), score (0.0-1.0), reasoning (1-2 sentences).
+Keep ALL string values under 100 characters.""",
 }
 
 
@@ -472,6 +481,73 @@ Nature of Suit: {nature_of_suit}
 Cause: {cause}
 
 Identify the defendant, assess severity, and return JSON.""" + self._regime_suffix(regime_context)
+
+        result = self._call_llm(system, user)
+        return _parse_json_response(result) if result else {}
+
+    # ------------------------------------------------------------------
+    # Agricultural weather analysis (ag_weather)
+    # ------------------------------------------------------------------
+
+    def analyze_ag_weather(
+        self,
+        ticker: str,
+        commodity_name: str,
+        ag_context: dict,
+        trailing_return: float = 0.0,
+        hold_days: int = 21,
+        regime_context: dict | None = None,
+    ) -> dict[str, Any]:
+        """Analyze agricultural supply disruption risk for a ticker.
+
+        Returns dict with: direction ("long"/"neutral"), score (0-1), reasoning.
+        """
+        system = self.get_prompt("ag_weather")
+
+        noaa = ag_context.get("noaa_data", {})
+        drought_score = ag_context.get("drought_score", 0.0)
+        drought_states = ag_context.get("drought_states", {})
+        usda = ag_context.get("usda_data", {})
+
+        # Format USDA crop progress for prompt
+        crop_lines = []
+        crop_progress = usda.get("crop_progress", {}) if isinstance(usda, dict) else {}
+        for commodity, weeks in crop_progress.items():
+            if not isinstance(weeks, list) or not weeks:
+                continue
+            latest = weeks[-1]
+            ge = latest.get("good_pct", 0) + latest.get("excellent_pct", 0)
+            change = ""
+            if len(weeks) >= 2:
+                prior = weeks[-2]
+                prior_ge = prior.get("good_pct", 0) + prior.get("excellent_pct", 0)
+                change = f" (change: {ge - prior_ge:+d}pp)"
+            crop_lines.append(f"- {commodity}: {ge}% Good/Excellent{change}")
+
+        # Count states in severe+ drought
+        severe_states = [s for s, d in drought_states.items()
+                        if isinstance(d, dict) and d.get("D2", 0) + d.get("D3", 0) + d.get("D4", 0) > 20]
+
+        user = f"""Analyzing {ticker} ({commodity_name}).
+
+WEATHER (NOAA, last 30 days):
+- Heat stress days (>95F): {noaa.get('heat_stress_days', 'N/A')}
+- Precipitation deficit: {noaa.get('precip_deficit_pct', 'N/A')}%
+- Frost events: {noaa.get('frost_events', 'N/A')}
+- Temp anomaly: {noaa.get('avg_temp_anomaly_f', 'N/A')}F
+
+DROUGHT (US Drought Monitor):
+- Composite score: {drought_score}/4.0
+- States in severe+ drought: {', '.join(severe_states) if severe_states else 'none'}
+
+CROP CONDITIONS (USDA):
+{chr(10).join(crop_lines) if crop_lines else '- No data available'}
+
+PRICE ACTION:
+- Trailing return: {trailing_return:.1%}
+
+Assess probability that ag supply disruption drives {ticker} higher over {hold_days} days.
+Return JSON.""" + self._regime_suffix(regime_context)
 
         result = self._call_llm(system, user)
         return _parse_json_response(result) if result else {}

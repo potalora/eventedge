@@ -2,7 +2,7 @@
 
 ## Overview
 
-The autoresearch system autonomously discovers, evolves, and paper-trades strategies. Phase 1 infrastructure exists for offline backtest evolution but is currently dormant (no active backtest strategies). Phase 2 is a **2-cohort paper trading trial**: Cohort A (Control) uses fixed confidence and no learning; Cohort B (Adaptive) uses journal-derived confidence, prompt optimization, and weekly learning. The system runs **7 active strategy modules** (with 3 additional backtest strategies archived for future use) across **8 data sources**, with dual-mode Darwinian weight allocation. The portfolio committee is the sole sizing authority (weight scaling removed from `compute_position_size()` and `execute_recommendation()`).
+The autoresearch system autonomously discovers, evolves, and paper-trades strategies. Phase 1 infrastructure exists for offline backtest evolution but is currently dormant (no active backtest strategies). Phase 2 is a **2-cohort paper trading trial**: Cohort A (Control) uses fixed confidence and no learning; Cohort B (Adaptive) uses journal-derived confidence, prompt optimization, and weekly learning. The system runs **10 active strategy modules** across **12 data sources**. The portfolio committee is the sole sizing authority.
 
 **Performance:** ~48 seconds/generation, ~$0.03 LLM cost, <1GB peak memory on M4 MacBook Air.
 
@@ -32,8 +32,6 @@ The autoresearch system autonomously discovers, evolves, and paper-trades strate
                     |                                     |
                     |  MultiStrategyEngine                |
                     |    +-> DataSourceRegistry (8 src)   |
-                    |    +-> Scoring -> DarwinianWeights  |
-                    |    |     aggressive: x1.05 / x0.95  |
                     |    +-> RegimeModel                  |
                     |          VIX + credit + yield curve  |
                     +----------------+--------------------+
@@ -57,7 +55,6 @@ The autoresearch system autonomously discovers, evolves, and paper-trades strate
                     |  |  Journal-derived confidence     |   |
                     |  |  Prompt optimization            |   |
                     |  |  Weekly learning loop           |   |
-                    |  |  Conservative wts x1.02/x0.98  |   |
                     |  |  State: data/state/adaptive/    |   |
                     |  +--------------------------------+   |
                     |                                       |
@@ -70,7 +67,7 @@ The autoresearch system autonomously discovers, evolves, and paper-trades strate
                     +----------------+---------------------+
                                      |
                            StateManager (JSON)
-                 backtest_weights / paper_weights / vintages
+                      paper_trades / vintages
 ```
 
 ---
@@ -83,7 +80,7 @@ The system operates in two distinct phases. Legacy `run_generation()` still work
 
 ### Phase 1: Backtest Evolution (`--phase backtest`)
 
-Phase 1 infrastructure is fully built but currently dormant. The 3 backtest strategies (govt_contracts, weather_ag, state_economics) are archived in `strategies/_archive/` and not registered in `get_all_strategies()`. To activate Phase 1, re-register backtest strategies in `strategies/__init__.py`.
+Phase 1 infrastructure is fully built but currently dormant. The 2 backtest strategies (govt_contracts, state_economics) are archived in `strategies/_archive/` and not registered in `get_all_strategies()`. To activate Phase 1, re-register backtest strategies in `strategies/__init__.py`.
 
 When active, Phase 1 runs N generations offline (typically 50+) to produce an optimized playbook:
 
@@ -101,6 +98,9 @@ The engine collects `data_sources` from all active strategies, then fetches from
 | congress | Congressional stock transaction disclosures (S3 bulk data) | congressional_trades |
 | usaspending | Large government contract awards | (archived: govt_contracts) |
 | fred | Federal Reserve economic data (rates, spreads) | Regime model |
+| noaa | Temperature/precipitation anomalies (Corn Belt GHCND) | weather_ag |
+| usda | Weekly crop condition ratings (NASS QuickStats) | weather_ag |
+| drought_monitor | Drought severity by state (USDM) | weather_ag |
 
 #### 2. Run Backtest Strategies
 
@@ -109,13 +109,7 @@ For each backtest strategy:
 2. Walk through trading days: `screen()` for entries, `check_exit()` for exits
 3. Compute stats: Sharpe ratio, total return, max drawdown, win rate, profit factor
 
-#### 3. Score and Update Darwinian Weights (Aggressive)
-
-- Fitness score per strategy = best Sharpe across parameter sets tested
-- `update_weights()` applies aggressive quartile-based scaling (x1.05/x0.95)
-- Updated weights saved to `data/state/backtest_weights.json`
-
-#### 4. Regime Model Classification
+#### 3. Regime Model Classification
 
 Classifies current market regime using VIX level, credit spreads, and yield curve:
 - **Crisis** -- VIX > 30, inverted yield curve
@@ -123,7 +117,7 @@ Classifies current market regime using VIX level, credit spreads, and yield curv
 - **Normal** -- baseline conditions
 - **Benign** -- low VIX, tight spreads
 
-#### 5. Produce Playbook
+#### 4. Produce Playbook
 
 After N generations, outputs: optimized params per strategy, regime model, strategy reliability scores. This playbook feeds Phase 2.
 
@@ -183,37 +177,14 @@ Core orchestrator. Key methods:
 
 Constructor accepts: `config`, `strategies` (list), `registry` (DataSourceRegistry), `state_manager`, `on_event` (callback for progress reporting).
 
-### Darwinian Weight System (`darwinian.py`)
-
-Dual-mode weight adjustment with separate weight pools per phase:
-
-```
-WEIGHT_MIN = 0.3    WEIGHT_MAX = 2.5    WEIGHT_DEFAULT = 1.0
-
-Backtest mode (aggressive):   WEIGHT_UP = 1.05   WEIGHT_DOWN = 0.95
-Paper-trade mode (conservative): WEIGHT_UP = 1.02   WEIGHT_DOWN = 0.98
-                                  (requires >= 20 completed trades)
-```
-
-| Function | Purpose |
-|----------|---------|
-| `initialize_weights(names)` | Set all weights to 1.0 |
-| `update_weights(weights, scores, mode)` | Quartile-based scaling (aggressive or conservative) |
-| `get_allocation(weights, capital)` | Convert weights to dollar amounts |
-| `get_quartile_summary(weights, scores)` | Summary dict for reporting |
-
-Weight files: `backtest_weights.json` (Phase 1) and `paper_weights.json` (Phase 2).
-
 ### StateManager (`state.py`)
 
 JSON-file-based persistence with **atomic writes** (write to temp file, then `os.rename`).
 
 | Method | File(s) |
 |--------|---------|
-| `save/load_weights(pool)` | `backtest_weights.json`, `paper_weights.json` |
 | `save/load_generation()` | `gen_001.json`, `gen_002.json`, ... |
 | `save_paper_trade()` | `paper_trades/*.json` |
-| `save/load_weight_history()` | `weight_history.json` |
 | `save_leaderboard()` | `leaderboard.json` |
 | `save_reflection()` | `reflections.json` |
 | `save/load_playbook()` | `playbook.json` |
@@ -347,9 +318,6 @@ Polls data sources for actionable events. Each poll returns structured event dic
 | `poll_13d_filings()` | EDGAR | (archived: govt_contracts) |
 | `poll_form4_filings()` | EDGAR | insider_activity |
 | `poll_large_contracts()` | USAspending | (archived: govt_contracts) |
-| `poll_recent_earnings()` | Finnhub | earnings_call |
-| `poll_company_news()` | Finnhub | supply_chain |
-| `poll_supply_chains()` | Finnhub | supply_chain |
 | `poll_proposed_rules()` | Regulations.gov | regulatory_pipeline |
 | `poll_court_dockets()` | CourtListener | litigation |
 | `poll_congressional_trades()` | Congress (S3) | congressional_trades |
@@ -363,7 +331,7 @@ Polls data sources for actionable events. Each poll returns structured event dic
 
 `DataSource` protocol requires: `name`, `requires_api_key`, `fetch(params)`, `is_available()`.
 
-`build_default_registry(config)` creates a registry with all 8 sources pre-registered.
+`build_default_registry(config)` creates a registry with all 12 sources pre-registered (including OpenBB, NOAA, USDA, Drought Monitor).
 
 ### Source Reference
 
@@ -377,6 +345,10 @@ Polls data sources for actionable events. Each poll returns structured event dic
 | finnhub | `finnhub_source.py` | Yes (free) | `finnhub_api_key` | 60 calls/min |
 | regulations | `regulations_source.py` | Yes (free) | `regulations_api_key` | 1,000 req/hr |
 | courtlistener | `courtlistener_source.py` | Yes (free) | `courtlistener_token` | 5,000 req/hr |
+| noaa | `noaa_source.py` | Yes (free) | `noaa_cdo_token` | 5 req/sec |
+| usda | `usda_source.py` | Yes (free) | `usda_nass_api_key` | 50k records/req |
+| drought_monitor | `drought_monitor_source.py` | No | -- | None |
+| openbb | `openbb_source.py` | Yes (free) | `fmp_api_key` | 250 calls/day |
 
 API keys are set in `.env` and loaded via `python-dotenv`. `run_generation.py` populates the config from environment variables before building the registry.
 
@@ -420,12 +392,11 @@ See [docs/strategy_research.md](docs/strategy_research.md) for academic backing 
 
 ### Archived Backtest Strategies (3)
 
-Phase 1 is dormant. Three backtest strategies exist as code in `strategies/_archive/` but are not registered or active:
+Phase 1 is dormant. Two backtest strategies exist as code in `strategies/_archive/` but are not registered or active:
 
 | Strategy | Class | File | Data Sources | Signal |
 |----------|-------|------|-------------|--------|
 | govt_contracts | `GovtContractsStrategy` | `_archive/govt_contracts.py` | yfinance, usaspending | Defense contractor momentum proxy |
-| weather_ag | `WeatherAgStrategy` | `_archive/weather_ag.py` | yfinance | Seasonal ag ETF momentum (Apr-Sep) |
 | state_economics | `StateEconomicsStrategy` | `_archive/state_economics.py` | yfinance | Regional ETF rotation |
 
 The remaining 7 originally planned backtest strategies (B1-B4, B6-B8 from the design spec: factor_momentum, cross_asset_momentum, vix_mean_reversion, pead, activist_13d, credit_spread, economic_surprise) were never implemented.
@@ -461,13 +432,6 @@ All autoresearch config lives in `default_config.py["autoresearch"]`:
 | `state_dir` | str | `"data/state"` | JSON state directory |
 | `total_capital` | int | `5000` | Portfolio size for allocation |
 | `proposals_per_strategy` | int | `3` | Param sets tested per strategy per generation |
-| `weight_min` | float | `0.3` | Darwinian weight floor |
-| `weight_max` | float | `2.5` | Darwinian weight ceiling |
-| `weight_up_factor` | float | `1.05` | Backtest top quartile multiplier |
-| `weight_down_factor` | float | `0.95` | Backtest bottom quartile multiplier |
-| `paper_weight_up_factor` | float | `1.02` | Paper-trade top quartile multiplier |
-| `paper_weight_down_factor` | float | `0.98` | Paper-trade bottom quartile multiplier |
-| `paper_min_trades` | int | `20` | Min completed trades before paper weight adjustment |
 | `exploration_budget` | float | `0.15` | Fraction of capital for unproven param sets |
 | `adaptive_confidence` | bool | `False` | `False` = fixed 0.5 (Control), `True` = journal-derived (Adaptive) |
 | `autoresearch_model` | str | `"claude-haiku-4-5-20251001"` | LLM for all autoresearch calls |

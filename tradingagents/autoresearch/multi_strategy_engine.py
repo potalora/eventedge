@@ -2,7 +2,7 @@
 
 Screens event-driven strategies for signals, synthesizes through a
 portfolio committee, gates through risk controls, and executes via
-PaperBroker or AlpacaBroker. Weights evolve from realized outcomes.
+PaperBroker or AlpacaBroker.
 """
 from __future__ import annotations
 
@@ -13,10 +13,6 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from tradingagents.autoresearch.darwinian import (
-    initialize_weights,
-    update_weights_conservative,
-)
 from tradingagents.autoresearch.data_sources.registry import (
     DataSourceRegistry,
     build_default_registry,
@@ -323,7 +319,7 @@ class MultiStrategyEngine:
                 ticker=signal["ticker"],
                 direction=signal["direction"],
                 score=signal["score"],
-                llm_conviction=llm_analysis.get("conviction", 0.0),
+                llm_conviction=llm_analysis.get("conviction", llm_analysis.get("score", 0.0)),
                 regime=regime_label,
                 traded=was_traded,
                 entry_price=price,
@@ -413,16 +409,9 @@ class MultiStrategyEngine:
         }
 
     def run_learning_loop(self) -> dict:
-        """Phase 2 learning loop: Evaluate completed trades, update paper weights."""
+        """Phase 2 learning loop: Evaluate strategy performance and optimize prompts."""
         if not self._should_trigger_learning_loop():
             return {"triggered": False, "strategies_evaluated": 0}
-
-        pt_config = self.ar_config.get("paper_trade", {})
-        min_trades = pt_config.get("min_trades_for_evaluation", 20)
-
-        pw = self.state.load_paper_weights() or initialize_weights(
-            [s.name for s in self.paper_trade_strategies]
-        )
 
         scores: dict[str, float] = {}
         trade_counts: dict[str, int] = {}
@@ -457,9 +446,6 @@ class MultiStrategyEngine:
                 scores[strategy.name] = pnls[0]
             else:
                 scores[strategy.name] = 0.0
-
-        pw = update_weights_conservative(pw, scores, trade_counts, min_trades=min_trades)
-        self.state.save_paper_weights(pw)
 
         # ------------------------------------------------------------------
         # Prompt optimization (Atlas-GIC inspired)
@@ -512,7 +498,6 @@ class MultiStrategyEngine:
             "strategies_evaluated": len(scores),
             "scores": scores,
             "trade_counts": trade_counts,
-            "paper_weights": dict(pw),
             "prompt_optimization": prompt_optimization_result,
         }
 
@@ -694,6 +679,12 @@ class MultiStrategyEngine:
             api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
             api_fetches["congress"] = (self._fetch_congress_data, ())
+        if "noaa" in needed_sources and "noaa" in available:
+            api_fetches["noaa"] = (self._fetch_noaa_data, (end_date,))
+        if "usda" in needed_sources and "usda" in available:
+            api_fetches["usda"] = (self._fetch_usda_data, (end_date,))
+        if "drought_monitor" in needed_sources and "drought_monitor" in available:
+            api_fetches["drought_monitor"] = (self._fetch_drought_data, (end_date,))
 
         # Also fetch EDGAR events for paper-trade strategies
         if "edgar" in needed_sources and "edgar" in available:
@@ -902,6 +893,54 @@ class MultiStrategyEngine:
 
         return result
 
+    def _fetch_noaa_data(self, trading_date: str) -> dict[str, Any]:
+        """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
+        source = self.registry.get("noaa")
+        if source is None:
+            return {}
+
+        try:
+            return source.fetch_ag_weather_summary(trading_date, lookback_days=30)
+        except Exception:
+            logger.error("Failed to fetch NOAA weather data", exc_info=True)
+            return {}
+
+    def _fetch_usda_data(self, trading_date: str) -> dict[str, Any]:
+        """Fetch USDA crop condition data for corn, soybeans, and wheat."""
+        source = self.registry.get("usda")
+        if source is None:
+            return {}
+
+        try:
+            from datetime import datetime
+            year = datetime.strptime(trading_date, "%Y-%m-%d").year
+            crop_progress = {}
+            for commodity in ("CORN", "SOYBEANS", "WHEAT"):
+                weeks = source.fetch_crop_progress(commodity, year)
+                if weeks:
+                    crop_progress[commodity] = weeks
+            return {"crop_progress": crop_progress}
+        except Exception:
+            logger.error("Failed to fetch USDA data", exc_info=True)
+            return {}
+
+    def _fetch_drought_data(self, trading_date: str) -> dict[str, Any]:
+        """Fetch Drought Monitor severity and composite score."""
+        source = self.registry.get("drought_monitor")
+        if source is None:
+            return {}
+
+        try:
+            from datetime import datetime, timedelta
+            end = trading_date
+            start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+            severity = source.fetch_drought_severity(start=start, end=end)
+            composite = source.fetch_composite_score(date=trading_date)
+            return {"composite_score": composite, "states": severity}
+        except Exception:
+            logger.error("Failed to fetch Drought Monitor data", exc_info=True)
+            return {}
+
     def _fetch_yfinance_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch all yfinance data needed by strategies."""
         from tradingagents.autoresearch.data_sources.yfinance_source import YFinanceSource
@@ -914,7 +953,8 @@ class MultiStrategyEngine:
         result: dict[str, Any] = {}
 
         # Core market tickers for regime model and general context
-        core_tickers = ["SPY", "SHY", "TLT"]
+        # Includes ag ETFs for weather_ag strategy
+        core_tickers = ["SPY", "SHY", "TLT", "DBA", "WEAT", "CORN", "MOO", "SOYB", "ADM", "BG", "CTVA", "DE", "FMC"]
 
         logger.info("Fetching prices for %d core tickers", len(core_tickers))
         prices_df = source.fetch_prices(core_tickers, start_date, end_date)
@@ -1018,13 +1058,27 @@ class MultiStrategyEngine:
                         c.ticker,
                         regime_context=regime_context,
                     )
+                elif analysis_type == "ag_weather":
+                    llm_result = self._analyzer.analyze_ag_weather(
+                        ticker=c.ticker,
+                        commodity_name=c.metadata.get("commodity", c.ticker),
+                        ag_context={
+                            "drought_score": c.metadata.get("drought_score", 0),
+                            "drought_states": c.metadata.get("drought_states", {}),
+                            "noaa_data": c.metadata.get("noaa_data", {}),
+                            "usda_data": c.metadata.get("usda_data", {}),
+                        },
+                        trailing_return=c.metadata.get("trailing_return", 0),
+                        hold_days=21,
+                        regime_context=regime_context,
+                    )
             except Exception:
                 logger.error("LLM analysis failed for %s/%s", strategy_name, c.ticker, exc_info=True)
 
             if llm_result:
                 # Update candidate with LLM results
                 c.direction = llm_result.get("direction", c.direction)
-                c.score = llm_result.get("conviction", c.score)
+                c.score = llm_result.get("conviction", llm_result.get("score", c.score))
                 c.metadata["llm_analysis"] = llm_result
                 # Resolve ticker if LLM provided one
                 if not c.ticker and llm_result.get("defendant_ticker"):

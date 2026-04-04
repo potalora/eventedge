@@ -119,6 +119,15 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     registry.register(RegulationsSource(api_key=config.get("regulations_api_key")))
     registry.register(CourtListenerSource(token=config.get("courtlistener_token")))
 
+    from tradingagents.autoresearch.data_sources.noaa_source import NOAASource
+    registry.register(NOAASource(token=config.get("noaa_cdo_token")))
+
+    from tradingagents.autoresearch.data_sources.usda_source import USDASource
+    registry.register(USDASource(api_key=config.get("usda_nass_api_key")))
+
+    from tradingagents.autoresearch.data_sources.drought_monitor_source import DroughtMonitorSource
+    registry.register(DroughtMonitorSource())
+
     # OpenBB Platform (optional — graceful skip if not installed)
     try:
         from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource

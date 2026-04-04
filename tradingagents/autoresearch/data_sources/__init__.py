@@ -14,6 +14,8 @@ from tradingagents.autoresearch.data_sources.finnhub_source import FinnhubSource
 from tradingagents.autoresearch.data_sources.regulations_source import RegulationsSource
 from tradingagents.autoresearch.data_sources.courtlistener_source import CourtListenerSource
 from tradingagents.autoresearch.data_sources.openbb_source import OpenBBSource
+from tradingagents.autoresearch.data_sources.usda_source import USDASource
+from tradingagents.autoresearch.data_sources.drought_monitor_source import DroughtMonitorSource
 
 __all__ = [
     "DataSource",
@@ -28,4 +30,6 @@ __all__ = [
     "RegulationsSource",
     "CourtListenerSource",
     "OpenBBSource",
+    "USDASource",
+    "DroughtMonitorSource",
 ]
