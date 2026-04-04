@@ -26,13 +26,9 @@ class RegulatoryPipelineStrategy:
 
     def get_param_space(self) -> dict[str, tuple]:
         return {
-            "hold_days": (20, 90),
+            "hold_days": (20, 45),
             "min_conviction": (0.3, 0.8),
             "max_positions": (2, 5),
-            "agencies": (
-                ["SEC", "EPA", "FDA"],
-                ["SEC", "EPA", "FDA", "DOL", "FTC", "CFPB"],
-            ),
             "days_lookback": (7, 30),
         }
 
@@ -41,7 +37,6 @@ class RegulatoryPipelineStrategy:
             "hold_days": 30,
             "min_conviction": 0.5,
             "max_positions": 3,
-            "agencies": ["SEC", "EPA", "FDA", "FTC"],
             "days_lookback": 14,
         }
 
@@ -57,13 +52,11 @@ class RegulatoryPipelineStrategy:
         if not rules:
             return []
 
-        agencies = set(params.get("agencies", ["SEC", "EPA", "FDA", "FTC"]))
         candidates = []
 
         for rule in rules:
             agency = rule.get("agency_id", "")
-            if agency not in agencies:
-                continue
+            # No agency filter — all agencies can move sectors
 
             candidates.append(
                 Candidate(
@@ -104,7 +97,7 @@ class RegulatoryPipelineStrategy:
         params: dict,
         data: dict,
     ) -> tuple[bool, str]:
-        hold_days = params.get("hold_days", 45)
+        hold_days = params.get("hold_days", 30)
         if holding_days >= hold_days:
             return True, "hold_period"
         return False, ""
@@ -114,13 +107,15 @@ class RegulatoryPipelineStrategy:
         return f"""You are optimizing a Regulatory Pipeline strategy that maps
 proposed federal regulations to affected publicly traded companies.
 
+Investment horizon: 30 days. Regulatory impact unfolds slowly but
+comment period closing creates a catalyst window.
+
 Current parameters: {current}
 
 Parameter ranges:
-- hold_days: 20-90 (regulatory impact unfolds slowly)
+- hold_days: 20-45 (target ~30 days)
 - min_conviction: 0.3-0.8
 - max_positions: 2-5
-- agencies: subset of [SEC, EPA, FDA, DOL, FTC, CFPB]
 - days_lookback: 7-30
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""
