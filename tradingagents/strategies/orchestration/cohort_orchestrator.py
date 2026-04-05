@@ -132,6 +132,9 @@ class CohortOrchestrator:
         for cfg in cohort_configs:
             cohort_config = copy.deepcopy(base_config)
             cohort_config.setdefault("autoresearch", {})["state_dir"] = cfg.state_dir
+            profile = SIZE_PROFILES.get(cfg.size_profile)
+            if profile:
+                cohort_config.setdefault("autoresearch", {})["total_capital"] = profile.total_capital
 
             state = StateManager(cfg.state_dir)
             engine = MultiStrategyEngine(
@@ -145,6 +148,7 @@ class CohortOrchestrator:
                 "config": cfg,
                 "engine": engine,
                 "state": state,
+                "size_profile": SIZE_PROFILES.get(cfg.size_profile),
             })
 
         self._base_config = base_config
@@ -164,15 +168,20 @@ class CohortOrchestrator:
                 "Install with: pip install -e '[.openbb]' and set FMP_API_KEY"
             )
 
+    def _screen_for_horizon(
+        self, data: dict, trading_date: str, horizon: str,
+    ) -> tuple[list[dict], dict]:
+        """Screen all strategies with horizon-specific params."""
+        first_engine = self.cohorts[0]["engine"]
+        return first_engine.screen_and_enrich(trading_date, data, horizon=horizon)
+
     def run_daily(self, trading_date: str | None = None) -> dict[str, Any]:
-        """Run all cohorts for a trading day with shared data fetch.
+        """Run all cohorts with shared data fetch and per-horizon screening.
 
-        1. Fetch data ONCE using first engine.
-        2. Run each cohort with shared data.
-        3. Log comparison summary.
-
-        Returns:
-            {cohort_name: result_dict}
+        1. Fetch data ONCE.
+        2. Screen once per horizon (4 passes).
+        3. OpenBB enrichment once (deduped tickers across horizons).
+        4. Dispatch to all 16 cohorts.
         """
         if not trading_date:
             trading_date = datetime.now().strftime("%Y-%m-%d")
@@ -187,26 +196,36 @@ class CohortOrchestrator:
         shared_data = first_engine._fetch_all_data(lookback_start, trading_date)
         logger.info("Shared data fetched: %s", list(shared_data.keys()))
 
-        # Screen + LLM enrich once (shared across cohorts)
-        shared_signals, shared_regime = first_engine.screen_and_enrich(
-            trading_date, shared_data,
-        )
-        logger.info("Shared signals: %d enriched signals", len(shared_signals))
+        # Screen once per horizon (4 passes, cached)
+        horizons = sorted({c["config"].horizon for c in self.cohorts})
+        horizon_signals: dict[str, tuple[list[dict], dict]] = {}
+        for horizon in horizons:
+            signals, regime = self._screen_for_horizon(shared_data, trading_date, horizon)
+            horizon_signals[horizon] = (signals, regime)
+            logger.info("Horizon %s: %d signals", horizon, len(signals))
 
-        # Fetch OpenBB enrichment for signal tickers
-        enrichment = self._fetch_openbb_enrichment(shared_signals)
+        # OpenBB enrichment once (dedupe tickers across all horizons)
+        all_signals = []
+        for signals, _ in horizon_signals.values():
+            all_signals.extend(signals)
+        enrichment = self._fetch_openbb_enrichment(all_signals)
 
-        # Run each cohort with shared signals (only confidence + execution differs)
+        # Dispatch to all cohorts
         results: dict[str, Any] = {}
         for cohort in self.cohorts:
-            name = cohort["config"].name
+            cfg = cohort["config"]
+            name = cfg.name
             logger.info("--- Running cohort: %s ---", name)
+
+            signals, regime = horizon_signals[cfg.horizon]
+
             try:
                 result = cohort["engine"].run_paper_trade_phase(
                     trading_date=trading_date,
-                    shared_signals=shared_signals,
-                    shared_regime=shared_regime,
+                    shared_signals=signals,
+                    shared_regime=regime,
                     enrichment=enrichment,
+                    size_profile=cohort.get("size_profile"),
                 )
                 results[name] = result
                 n_signals = len(result.get("signals", []))

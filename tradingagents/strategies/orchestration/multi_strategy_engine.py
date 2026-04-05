@@ -102,6 +102,7 @@ class MultiStrategyEngine:
         self,
         trading_date: str,
         data: dict,
+        horizon: str = "30d",
     ) -> tuple[list[dict], dict]:
         """Run strategy screening and LLM enrichment (steps 1-2).
 
@@ -114,7 +115,7 @@ class MultiStrategyEngine:
         all_signals: list[dict] = []
         for strategy in self.paper_trade_strategies:
             self._emit("strategy_start", name=strategy.name, track="paper_trade")
-            params = strategy.get_default_params()
+            params = strategy.get_default_params(horizon=horizon)
             candidates = strategy.screen(data, trading_date, params)
             if candidates:
                 candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model)
@@ -163,6 +164,7 @@ class MultiStrategyEngine:
         shared_signals: list[dict] | None = None,
         shared_regime: dict | None = None,
         enrichment: dict | None = None,
+        size_profile: Any = None,
     ) -> dict:
         """Paper trading loop: screen → committee → risk gate → execute.
 
@@ -226,6 +228,12 @@ class MultiStrategyEngine:
         from tradingagents.strategies.learning.signal_journal import JournalEntry
 
         bridge = ExecutionBridge(self.config)
+        if size_profile is not None:
+            bridge.risk_gate.config.max_positions = size_profile.max_positions
+            bridge.risk_gate.config.max_position_pct = size_profile.max_position_pct
+            bridge.risk_gate.config.min_position_value = size_profile.min_position_value
+            bridge.risk_gate.config.total_capital = size_profile.total_capital
+            bridge.risk_gate.config.cash_reserve_pct = size_profile.cash_reserve_pct
         bridge.risk_gate.reset_daily(trading_date)
         bridge.risk_gate.update_high_water_mark()
 
@@ -238,7 +246,7 @@ class MultiStrategyEngine:
                 bridge.broker.cash, len(bridge.broker.positions),
             )
 
-        committee = PortfolioCommittee(self.config)
+        committee = PortfolioCommittee(self.config, size_profile=size_profile)
         recommendations = committee.synthesize(
             signals=deduped_signals,
             regime_context=regime_model,

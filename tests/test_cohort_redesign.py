@@ -241,3 +241,47 @@ class TestPortfolioCommitteeSizeAware:
         )
         for rec in recs:
             assert rec.position_size_pct <= profile.max_position_pct
+
+
+class TestOrchestratorHorizonScreening:
+    """Test that the orchestrator screens once per horizon, not once per cohort."""
+
+    def test_screen_for_horizon_uses_horizon_params(self):
+        """Verify _screen_for_horizon passes horizon to strategy.get_default_params."""
+        from unittest.mock import MagicMock, patch
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            CohortConfig, CohortOrchestrator,
+        )
+
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strat"
+        mock_strategy.get_default_params.return_value = {"hold_days": 90}
+        mock_strategy.screen.return_value = []
+
+        configs = [
+            CohortConfig(
+                name="horizon_3m_size_5k", state_dir="/tmp/test/horizon_3m_size_5k",
+                horizon="3m", size_profile="5k",
+            ),
+        ]
+
+        with patch("tradingagents.strategies.modules.get_paper_trade_strategies",
+                    return_value=[mock_strategy]):
+            with patch("tradingagents.strategies.orchestration.multi_strategy_engine.build_default_registry"):
+                orch = CohortOrchestrator(configs, {"autoresearch": {"state_dir": "/tmp/test"}})
+
+        # Call the horizon screening method directly
+        orch._screen_for_horizon({}, "2026-01-15", "3m")
+        mock_strategy.get_default_params.assert_called_with(horizon="3m")
+
+    def test_orchestrator_groups_cohorts_by_horizon(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            build_default_cohorts, HORIZON_PARAMS,
+        )
+        cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
+        horizons_seen = {c.horizon for c in cohorts}
+        assert horizons_seen == set(HORIZON_PARAMS.keys())
+
+        for h in HORIZON_PARAMS:
+            count = sum(1 for c in cohorts if c.horizon == h)
+            assert count == 4, f"Horizon {h} has {count} cohorts, expected 4"
