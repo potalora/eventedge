@@ -288,7 +288,8 @@ class MultiStrategyEngine:
                 current_price = float(ticker_prices["Close"].iloc[-1])
             except (KeyError, IndexError):
                 continue
-            if current_price <= 0:
+            import math
+            if not (current_price > 0) or math.isnan(current_price):
                 continue
 
             primary_strategy = rec.contributing_strategies[0] if rec.contributing_strategies else ""
@@ -328,7 +329,9 @@ class MultiStrategyEngine:
             price = 0.0
             if ticker_prices is not None and not ticker_prices.empty:
                 try:
-                    price = float(ticker_prices["Close"].iloc[-1])
+                    p = float(ticker_prices["Close"].iloc[-1])
+                    if not math.isnan(p):
+                        price = p
                 except (KeyError, IndexError):
                     pass
 

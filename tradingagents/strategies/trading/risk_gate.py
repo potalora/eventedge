@@ -226,7 +226,8 @@ class RiskGate:
         Returns:
             Number of whole shares (0 if position too small).
         """
-        if current_price <= 0:
+        import math
+        if not (current_price > 0) or math.isnan(current_price):
             return 0
 
         account = self.broker.get_account()
@@ -241,6 +242,10 @@ class RiskGate:
 
         # Cap at available buying power
         allocation = min(allocation, account.buying_power)
+
+        # Guard against NaN propagation
+        if math.isnan(allocation):
+            return 0
 
         # Convert to whole shares
         shares = int(allocation / current_price)
