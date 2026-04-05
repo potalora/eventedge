@@ -336,7 +336,7 @@ class GenerationManager:
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=2700,
             )
             elapsed = time.monotonic() - start
 
