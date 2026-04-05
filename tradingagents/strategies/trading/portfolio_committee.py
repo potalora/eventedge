@@ -178,7 +178,7 @@ class PortfolioCommittee:
                     (strategy_confidence.get(s.get("strategy", ""), 0.5) for s in sigs),
                     default=0.0,
                 )
-                if max_conf < 0.8:
+                if max_conf < 0.4:
                     continue
 
             # Regime alignment

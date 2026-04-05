@@ -139,7 +139,7 @@ class GovtContractsStrategy:
                             ticker=ticker,
                             date=date,
                             direction="long",
-                            score=max(momentum, 0.1),  # Floor score at 0.1
+                            score=max(momentum, 0.01),  # Floor score at 1%
                             metadata={
                                 "contractor": name,
                                 "momentum_30d": momentum,

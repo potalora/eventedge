@@ -92,7 +92,7 @@ class StateEconomicsStrategy:
 
         # Enrich with FRED economic indicator context
         fred_data = data.get("fred", {})
-        fred_indicators = fred_data.get("data", {})
+        fred_indicators = fred_data
         econ_boost = {}
         if fred_indicators:
             # Check if unemployment is declining (bullish for regionals)

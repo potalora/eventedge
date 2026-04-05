@@ -1020,10 +1020,8 @@ class TestReactivatedStrategies:
         data = {
             "yfinance": {"prices": prices},
             "fred": {
-                "data": {
-                    "UNRATE": {"2026-01": 4.2, "2026-02": 4.0},  # Declining = bullish
-                    "ICSA": {"2026-02-15": 220000, "2026-02-22": 210000},  # Declining = bullish
-                }
+                "UNRATE": {"2026-01": 4.2, "2026-02": 4.0},  # Declining = bullish
+                "ICSA": {"2026-02-15": 220000, "2026-02-22": 210000},  # Declining = bullish
             },
         }
 

@@ -1018,7 +1018,14 @@ class MultiStrategyEngine:
 
         # Core market tickers for regime model and general context
         # Includes ag ETFs for weather_ag strategy
-        core_tickers = ["SPY", "SHY", "TLT", "DBA", "WEAT", "CORN", "MOO", "SOYB", "ADM", "BG", "CTVA", "DE", "FMC"]
+        core_tickers = [
+            # Market + regime model
+            "SPY", "SHY", "TLT",
+            # Ag ETFs for weather_ag
+            "DBA", "WEAT", "CORN", "MOO", "SOYB", "ADM", "BG", "CTVA", "DE", "FMC",
+            # Regional ETFs for state_economics
+            "KRE", "IWN", "XRT", "IYR", "XHB", "ITB", "VNQ", "SOXX", "XLI", "XLRE",
+        ]
 
         logger.info("Fetching prices for %d core tickers", len(core_tickers))
         prices_df = source.fetch_prices(core_tickers, start_date, end_date)
