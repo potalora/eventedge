@@ -1016,34 +1016,32 @@ class TestCohortOrchestrator:
     """Test cohort orchestrator initialization and config."""
 
     def test_build_default_cohorts(self):
-        """build_default_cohorts returns 2 cohorts."""
+        """build_default_cohorts returns 16 cohorts (4 horizons x 4 sizes)."""
         from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
-        assert len(cohorts) == 2
-        assert cohorts[0].name == "control"
-        assert cohorts[1].name == "adaptive"
-        assert cohorts[0].adaptive_confidence is False
-        assert cohorts[1].adaptive_confidence is True
-        assert cohorts[0].learning_enabled is False
-        assert cohorts[1].learning_enabled is True
+        assert len(cohorts) == 16
+        assert cohorts[0].name == "horizon_30d_size_5k"
+        # All cohorts have adaptive/learning dormant
+        for c in cohorts:
+            assert c.adaptive_confidence is False
+            assert c.learning_enabled is False
 
     def test_separate_state_dirs(self):
         """Each cohort gets its own state directory."""
         from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
-        assert cohorts[0].state_dir != cohorts[1].state_dir
-        assert "control" in cohorts[0].state_dir
-        assert "adaptive" in cohorts[1].state_dir
+        dirs = [c.state_dir for c in cohorts]
+        assert len(dirs) == len(set(dirs))
 
     def test_orchestrator_creates_engines(self, tmp_path):
         """Orchestrator creates one engine per cohort."""
         from tradingagents.strategies.orchestration.cohort_orchestrator import CohortConfig, CohortOrchestrator
 
         configs = [
-            CohortConfig(name="a", state_dir=str(tmp_path / "a"), use_llm=False),
-            CohortConfig(name="b", state_dir=str(tmp_path / "b"), adaptive_confidence=True, use_llm=False),
+            CohortConfig(name="a", state_dir=str(tmp_path / "a"), horizon="30d", size_profile="5k", use_llm=False),
+            CohortConfig(name="b", state_dir=str(tmp_path / "b"), horizon="3m", size_profile="10k", use_llm=False),
         ]
         orch = CohortOrchestrator(configs, {"autoresearch": {"state_dir": str(tmp_path)}})
         assert len(orch.cohorts) == 2

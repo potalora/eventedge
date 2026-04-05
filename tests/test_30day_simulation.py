@@ -86,10 +86,10 @@ class FakeStrategy:
         self.name = name
         self._hold_days = hold_days
 
-    def get_param_space(self):
+    def get_param_space(self, horizon: str = "30d"):
         return {"hold_days": (3, 30)}
 
-    def get_default_params(self):
+    def get_default_params(self, horizon: str = "30d"):
         return {"hold_days": self._hold_days}
 
     def screen(self, data, date, params):
@@ -573,6 +573,8 @@ class TestThirtyDayCohortDivergence:
             CohortConfig(
                 name="control",
                 state_dir=control_dir,
+                horizon="30d",
+                size_profile="5k",
                 adaptive_confidence=False,
                 learning_enabled=False,
                 use_llm=False,
@@ -580,6 +582,8 @@ class TestThirtyDayCohortDivergence:
             CohortConfig(
                 name="adaptive",
                 state_dir=adaptive_dir,
+                horizon="30d",
+                size_profile="5k",
                 adaptive_confidence=True,
                 learning_enabled=True,
                 use_llm=False,
@@ -739,8 +743,8 @@ class TestOpenBBEnrichment:
         adaptive_dir = str(tmp_path / "adaptive")
 
         cohort_configs = [
-            CohortConfig(name="control", state_dir=control_dir, adaptive_confidence=False, learning_enabled=False, use_llm=False),
-            CohortConfig(name="adaptive", state_dir=adaptive_dir, adaptive_confidence=True, learning_enabled=True, use_llm=False),
+            CohortConfig(name="control", state_dir=control_dir, horizon="30d", size_profile="5k", adaptive_confidence=False, learning_enabled=False, use_llm=False),
+            CohortConfig(name="adaptive", state_dir=adaptive_dir, horizon="30d", size_profile="5k", adaptive_confidence=True, learning_enabled=True, use_llm=False),
         ]
 
         base_config = {
@@ -764,7 +768,7 @@ class TestOpenBBEnrichment:
                 if s["ticker"] not in seen:
                     recs.append(TradeRecommendation(
                         ticker=s["ticker"], direction=s["direction"],
-                        position_size_pct=0.08, confidence=0.6,
+                        position_size_pct=0.12, confidence=0.6,
                         rationale="enrichment test",
                         contributing_strategies=[s["strategy"]],
                     ))
@@ -850,8 +854,8 @@ class TestOpenBBEnrichment:
         adaptive_dir = str(tmp_path / "adaptive")
 
         cohort_configs = [
-            CohortConfig(name="control", state_dir=control_dir, adaptive_confidence=False, learning_enabled=False, use_llm=False),
-            CohortConfig(name="adaptive", state_dir=adaptive_dir, adaptive_confidence=True, learning_enabled=True, use_llm=False),
+            CohortConfig(name="control", state_dir=control_dir, horizon="30d", size_profile="5k", adaptive_confidence=False, learning_enabled=False, use_llm=False),
+            CohortConfig(name="adaptive", state_dir=adaptive_dir, horizon="30d", size_profile="5k", adaptive_confidence=True, learning_enabled=True, use_llm=False),
         ]
 
         base_config = {
@@ -874,7 +878,7 @@ class TestOpenBBEnrichment:
                 if s["ticker"] not in seen:
                     recs.append(TradeRecommendation(
                         ticker=s["ticker"], direction=s["direction"],
-                        position_size_pct=0.08, confidence=0.6,
+                        position_size_pct=0.12, confidence=0.6,
                         rationale="degradation test",
                         contributing_strategies=[s["strategy"]],
                     ))

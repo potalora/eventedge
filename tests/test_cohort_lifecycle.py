@@ -63,10 +63,10 @@ class FakeStrategy:
     def __init__(self, hold_days: int = 10):
         self._hold_days = hold_days
 
-    def get_param_space(self):
+    def get_param_space(self, horizon: str = "30d"):
         return {"hold_days": (5, 30)}
 
-    def get_default_params(self):
+    def get_default_params(self, horizon: str = "30d"):
         return {"hold_days": self._hold_days}
 
     def screen(self, data, date, params):
