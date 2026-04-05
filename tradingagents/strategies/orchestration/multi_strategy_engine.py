@@ -715,7 +715,7 @@ class MultiStrategyEngine:
 
         api_fetches: dict[str, tuple] = {}
         if "finnhub" in needed_sources and "finnhub" in available:
-            api_fetches["finnhub"] = (self._fetch_finnhub_data, ())
+            api_fetches["finnhub"] = (self._fetch_finnhub_data, (end_date,))
         if "regulations" in needed_sources and "regulations" in available:
             api_fetches["regulations"] = (self._fetch_regulations_data, ())
         if "courtlistener" in needed_sources and "courtlistener" in available:
@@ -723,7 +723,7 @@ class MultiStrategyEngine:
         if "fred" in needed_sources and "fred" in available:
             api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
-            api_fetches["congress"] = (self._fetch_congress_data, ())
+            api_fetches["congress"] = (self._fetch_congress_data, (end_date,))
         if "noaa" in needed_sources and "noaa" in available:
             api_fetches["noaa"] = (self._fetch_noaa_data, (end_date,))
         if "usda" in needed_sources and "usda" in available:
@@ -752,7 +752,7 @@ class MultiStrategyEngine:
         self._emit("phase", phase="data_fetch", status="done")
         return data
 
-    def _fetch_finnhub_data(self) -> dict[str, Any]:
+    def _fetch_finnhub_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch Finnhub data for earnings calls and supply chain strategies."""
         source = self.registry.get("finnhub")
         if source is None:
@@ -761,8 +761,8 @@ class MultiStrategyEngine:
         result: dict[str, Any] = {}
 
         # Earnings calendar: who reported recently? (P1/P2)
-        date_to = datetime.now().strftime("%Y-%m-%d")
-        date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        date_to = trading_date
+        date_from = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
         earnings = source.fetch_recent_earnings(date_from, date_to)
         if earnings:
             # Collect news around earnings dates for top reporters (proxy for transcripts)
@@ -922,7 +922,7 @@ class MultiStrategyEngine:
         logger.info("FRED fetch: %d series loaded", len(result))
         return result
 
-    def _fetch_congress_data(self) -> dict[str, Any]:
+    def _fetch_congress_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch recent congressional stock trades."""
         source = self.registry.get("congress")
         if source is None:
@@ -930,7 +930,7 @@ class MultiStrategyEngine:
 
         result: dict[str, Any] = {}
         try:
-            trades = source.get_recent_trades(days_back=30)
+            trades = source.get_recent_trades(days_back=30, as_of=trading_date)
             result["recent_trades"] = trades
             logger.info("Congress fetch: %d recent trades", len(trades))
         except Exception:

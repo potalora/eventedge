@@ -184,3 +184,55 @@ class TestMinPositionValue:
     def test_10k_unchanged(self):
         from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
         assert SIZE_PROFILES["10k"].min_position_value == 1_000.0
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Trading date consistency
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta
+
+
+class TestFinnhubDateConsistency:
+    """Finnhub fetch should use trading_date, not datetime.now()."""
+
+    def test_finnhub_uses_trading_date(self):
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        import inspect
+        sig = inspect.signature(MultiStrategyEngine._fetch_finnhub_data)
+        assert "trading_date" in sig.parameters
+
+
+class TestCongressDateConsistency:
+    """Congress source should accept an as_of parameter."""
+
+    def test_get_recent_trades_accepts_as_of(self):
+        from tradingagents.strategies.data_sources.congress_source import CongressSource
+        import inspect
+        sig = inspect.signature(CongressSource.get_recent_trades)
+        assert "as_of" in sig.parameters
+
+    def test_get_recent_trades_uses_as_of(self):
+        from tradingagents.strategies.data_sources.congress_source import CongressSource
+
+        source = CongressSource()
+        source._cache["all_trades"] = [
+            {"tradeDate": "2026-03-15", "ticker": "AAPL", "type": "purchase",
+             "transaction_date": "2026-03-15"},
+            {"tradeDate": "2026-02-01", "ticker": "MSFT", "type": "purchase",
+             "transaction_date": "2026-02-01"},
+        ]
+        recent = source.get_recent_trades(days_back=30, as_of="2026-04-03")
+        tickers = [t["ticker"] for t in recent]
+        assert "AAPL" in tickers
+        assert "MSFT" not in tickers
+
+
+class TestUSASpendingDateConsistency:
+    """USASpending should accept as_of parameter."""
+
+    def test_get_recent_large_contracts_accepts_as_of(self):
+        from tradingagents.strategies.data_sources.usaspending_source import USASpendingSource
+        import inspect
+        sig = inspect.signature(USASpendingSource.get_recent_large_contracts)
+        assert "as_of" in sig.parameters

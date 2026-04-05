@@ -144,22 +144,25 @@ class USASpendingSource:
         self,
         min_amount: float = 100_000_000,
         days_back: int = 30,
+        as_of: str | None = None,
     ) -> list[dict[str, Any]]:
         """Find recent large federal contract awards.
 
         Args:
             min_amount: Minimum award amount in USD (default $100M).
             days_back: How many days back to search.
+            as_of: Reference date string (YYYY-MM-DD). Defaults to today if None.
 
         Returns:
             List of contract dicts (same format as search_contracts).
         """
-        cache_key = f"recent_large|{min_amount}|{days_back}"
+        cache_key = f"recent_large|{min_amount}|{days_back}|{as_of}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        date_to = datetime.now().strftime("%Y-%m-%d")
+        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now()
+        date_from = (ref_date - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = ref_date.strftime("%Y-%m-%d")
 
         results = self.search_contracts(
             date_from=date_from,

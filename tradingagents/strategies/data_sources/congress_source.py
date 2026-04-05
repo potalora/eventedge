@@ -208,20 +208,22 @@ class CongressSource:
         logger.info("Loaded %d congressional trades from CapitolTrades", len(all_trades))
         return all_trades
 
-    def get_recent_trades(self, days_back: int = 30) -> list[dict[str, Any]]:
-        """Filter trades to only those within *days_back* days of today.
+    def get_recent_trades(self, days_back: int = 30, as_of: str | None = None) -> list[dict[str, Any]]:
+        """Filter trades to only those within *days_back* days of *as_of* (or today).
 
         Args:
-            days_back: Number of days to look back from today.
+            days_back: Number of days to look back from the reference date.
+            as_of: Reference date string (YYYY-MM-DD). Defaults to today if None.
 
         Returns:
             Filtered list of trade records.
         """
-        cache_key = f"recent|{days_back}"
+        cache_key = f"recent|{days_back}|{as_of}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        cutoff = datetime.now() - timedelta(days=days_back)
+        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now()
+        cutoff = ref_date - timedelta(days=days_back)
         all_trades = self.fetch_all_trades()
 
         recent: list[dict[str, Any]] = []
