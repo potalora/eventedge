@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -277,8 +278,7 @@ class PortfolioCommittee:
         enrichment: dict | None = None,
     ) -> list[TradeRecommendation] | None:
         """Single LLM call for signal synthesis. Returns None on failure."""
-        client = self._get_client()
-        if client is None:
+        if self._get_client() is None:
             return None
 
         prompt = self._build_prompt(
@@ -306,13 +306,7 @@ class PortfolioCommittee:
             )
             system_prompt = "\n".join(system_parts)
 
-            response = client.messages.create(
-                model=self._model_name,
-                max_tokens=1024,
-                system=system_prompt,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text.strip()
+            text = self._call_llm(system=system_prompt, prompt=prompt, max_tokens=1024)
             return self._parse_llm_response(text)
         except Exception:
             logger.warning("LLM synthesis call failed", exc_info=True)
@@ -465,8 +459,7 @@ Synthesize into ranked trade list. Return JSON array."""
         trading_date: str,
     ) -> list[dict]:
         """Ask LLM which positions to overlay with covered calls."""
-        client = self._get_client()
-        if client is None:
+        if self._get_client() is None:
             return []
 
         pos_lines = []
@@ -494,13 +487,11 @@ Return ONLY a JSON array of objects with keys: ticker, strike_offset_pct (e.g. 0
 expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if no good candidates."""
 
         try:
-            response = client.messages.create(
-                model=self._model_name,
-                max_tokens=512,
+            text = self._call_llm(
                 system="You are a portfolio manager specializing in options overlays. Be conservative.",
-                messages=[{"role": "user", "content": prompt}],
+                prompt=prompt,
+                max_tokens=512,
             )
-            text = response.content[0].text.strip()
             if text.startswith("```"):
                 lines = text.split("\n")
                 lines = [l for l in lines if not l.strip().startswith("```")]
@@ -520,3 +511,36 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
             except (ImportError, Exception):
                 return None
         return self._client
+
+    def _call_llm(self, *, system: str, prompt: str, max_tokens: int = 1024):
+        """Call LLM with retry + exponential backoff for rate limits.
+
+        Returns the response text, or raises on non-retryable failure.
+        """
+        client = self._get_client()
+        if client is None:
+            raise RuntimeError("No LLM client")
+
+        max_retries = 4
+        base_delay = 2.0
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.messages.create(
+                    model=self._model_name,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return response.content[0].text.strip()
+            except Exception as exc:
+                is_rate_limit = "rate" in str(exc).lower() or "429" in str(exc)
+                is_overloaded = "overloaded" in str(exc).lower() or "529" in str(exc)
+                if (is_rate_limit or is_overloaded) and attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.info(
+                        "LLM rate limited (attempt %d/%d), retrying in %.1fs",
+                        attempt + 1, max_retries, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
