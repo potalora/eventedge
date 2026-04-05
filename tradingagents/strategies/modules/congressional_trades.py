@@ -66,9 +66,9 @@ class CongressionalTradesStrategy:
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
-        """Screen congressional trade disclosures for purchase clusters."""
+        """Screen congressional trade disclosures for purchase and sale clusters."""
         congress_data = data.get("congress", {})
-        trades = congress_data.get("recent_trades", [])
+        trades = congress_data.get("recent_trades", congress_data.get("trades", []))
 
         # Try OpenBB government trades first (stable API), fall back to CapitolTrades
         openbb_data = data.get("openbb", {})
@@ -122,6 +122,31 @@ class CongressionalTradesStrategy:
                 "date": trade.get("transaction_date", ""),
             })
 
+        # Group sales by ticker
+        ticker_sells: dict[str, list[dict]] = defaultdict(list)
+
+        for trade in trades:
+            tx_type = (trade.get("transaction_type") or "").lower()
+            if tx_type not in ("sell", "sale") and "sale" not in tx_type:
+                continue
+
+            ticker = (trade.get("ticker") or "").upper().strip()
+            if not ticker or ticker == "--":
+                continue
+
+            amount = trade.get("amount", "")
+            tier = BUCKET_TIER.get(amount, 0)
+            if tier < min_bucket:
+                continue
+
+            ticker_sells[ticker].append({
+                "member": trade.get("representative") or trade.get("senator", "Unknown"),
+                "chamber": trade.get("chamber", "unknown"),
+                "amount": amount,
+                "tier": tier,
+                "date": trade.get("transaction_date", ""),
+            })
+
         # Build candidates from tickers with enough unique members
         candidates = []
         for ticker, buys in ticker_buys.items():
@@ -150,8 +175,34 @@ class CongressionalTradesStrategy:
                 )
             )
 
+        for ticker, sells in ticker_sells.items():
+            unique_members = {s["member"] for s in sells}
+            if len(unique_members) < min_members:
+                continue
+
+            # Score: sum of tiers * cluster multiplier
+            total_tier = sum(s["tier"] for s in sells)
+            cluster_bonus = len(unique_members)
+            score = total_tier * cluster_bonus
+
+            candidates.append(
+                Candidate(
+                    ticker=ticker,
+                    date=date,
+                    direction="short",
+                    score=float(score),
+                    metadata={
+                        "num_members": len(unique_members),
+                        "num_trades": len(sells),
+                        "members": list(unique_members)[:5],
+                        "max_tier": max(s["tier"] for s in sells),
+                        "needs_llm_analysis": False,
+                    },
+                )
+            )
+
         candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[:max_positions]
+        return candidates[:max_positions * 2]
 
     def check_exit(
         self,
