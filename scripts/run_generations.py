@@ -107,7 +107,13 @@ def main():
         print(f"  Description: {gen.description}")
 
     elif args.command == "run-daily":
-        results = manager.run_daily(args.date)
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        trading_date = resolve_trading_date(args.date)
+        if args.date and trading_date != args.date:
+            logger.info("Resolved %s to trading day %s", args.date, trading_date)
+        elif not args.date:
+            logger.info("Using trading date: %s", trading_date)
+        results = manager.run_daily(trading_date)
         for gen_id, result in results.items():
             status = "OK" if result["success"] else "FAILED"
             elapsed = result.get("elapsed_s", 0)

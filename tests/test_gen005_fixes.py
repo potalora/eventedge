@@ -250,3 +250,74 @@ class TestUSASpendingFetch:
         import inspect
         sig = inspect.signature(MultiStrategyEngine._fetch_usaspending_data)
         assert "trading_date" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# Task 7: resolve_trading_date() utility
+# ---------------------------------------------------------------------------
+
+class TestResolveTradingDate:
+    """resolve_trading_date should roll back to last trading day.
+
+    Note: 2026-04-03 is Good Friday — NYSE is closed. The preceding trading
+    day is Thursday 2026-04-02. Tests are written accordingly.
+    """
+
+    def test_weekday_unchanged(self):
+        """A normal trading Friday (not a holiday) stays unchanged."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        # 2026-04-10 is a Friday and not a holiday
+        assert resolve_trading_date("2026-04-10") == "2026-04-10"
+
+    def test_thursday_unchanged(self):
+        """Thursday that is not a holiday stays unchanged."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        # 2026-04-02 is Thursday (the day before Good Friday)
+        assert resolve_trading_date("2026-04-02") == "2026-04-02"
+
+    def test_good_friday_rolls_back(self):
+        """2026-04-03 is Good Friday (NYSE closed) → rolls back to Thursday 2026-04-02."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        assert resolve_trading_date("2026-04-03") == "2026-04-02"
+
+    def test_saturday_rolls_to_thursday(self):
+        """Saturday 2026-04-04 → Friday 2026-04-03 is a holiday → Thursday 2026-04-02."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        assert resolve_trading_date("2026-04-04") == "2026-04-02"
+
+    def test_sunday_rolls_to_thursday(self):
+        """Sunday 2026-04-05 → Friday 2026-04-03 is a holiday → Thursday 2026-04-02."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        assert resolve_trading_date("2026-04-05") == "2026-04-02"
+
+    def test_monday_unchanged(self):
+        """Monday that is not a holiday stays unchanged."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        assert resolve_trading_date("2026-04-06") == "2026-04-06"
+
+    def test_no_date_returns_valid_weekday(self):
+        """None returns today resolved to a trading day (Mon-Fri, not a holiday)."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        result = resolve_trading_date(None)
+        assert len(result) == 10
+        day = datetime.strptime(result, "%Y-%m-%d").weekday()
+        assert day < 5  # Monday-Friday
+
+    def test_us_holiday_new_year_rolls_back(self):
+        """2026-01-01 (Thursday, New Year's Day) → 2025-12-31 (Wednesday)."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        result = resolve_trading_date("2026-01-01")
+        assert result == "2025-12-31"
+
+    def test_normal_friday_april_10(self):
+        """2026-04-10 is a Friday with no holiday — passes through unchanged."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        assert resolve_trading_date("2026-04-10") == "2026-04-10"
+
+    def test_returns_string(self):
+        """Result must be a YYYY-MM-DD string."""
+        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
+        result = resolve_trading_date("2026-04-06")
+        assert isinstance(result, str)
+        assert len(result) == 10
+        assert result[4] == "-" and result[7] == "-"
