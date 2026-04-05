@@ -50,15 +50,14 @@ class GenerationManager:
         self._worktrees_dir = (self._repo_root / ".worktrees").resolve()
         self._manifest_path = self._generations_dir / "manifest.json"
 
-        # Resolve the venv python to an absolute path
-        # Walk up from sys.executable in case we're already in a venv
-        venv_python = Path(sys.executable).resolve()
-        # If running inside a .venv, use that python; otherwise try repo .venv
+        # Use the venv python WITHOUT resolving symlinks — resolve() follows
+        # the symlink chain to the base interpreter, which loses the venv
+        # context (site-packages, installed packages like openbb).
         repo_venv = self._repo_root / ".venv" / "bin" / "python"
         if repo_venv.exists():
-            self._venv_python = repo_venv.resolve()
+            self._venv_python = repo_venv.absolute()
         else:
-            self._venv_python = venv_python
+            self._venv_python = Path(sys.executable).absolute()
 
         # Ensure directories exist
         self._generations_dir.mkdir(parents=True, exist_ok=True)
