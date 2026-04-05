@@ -114,28 +114,40 @@ class ExecutionBridge:
             return None
 
         # 3. Submit order
-        side = "buy" if direction == "long" else "sell"
-        result = self.broker.submit_stock_order(
-            symbol=ticker, side=side, qty=shares, price=current_price,
-        )
+        if direction == "short":
+            result = self.broker.submit_short_sell(
+                symbol=ticker, qty=shares, price=current_price,
+            )
+        else:
+            result = self.broker.submit_stock_order(
+                symbol=ticker, side="buy", qty=shares, price=current_price,
+            )
 
         if result.status == "filled":
             logger.info(
                 "Executed: %s %d shares of %s @ $%.2f ($%.0f)",
-                side.upper(), shares, ticker, current_price, position_value,
+                direction.upper(), shares, ticker, current_price, position_value,
             )
         else:
             logger.warning(
                 "Order rejected by broker: %s %s — %s",
-                ticker, side, result.message,
+                ticker, direction, result.message,
             )
 
         return result
 
     def close_position(
-        self, ticker: str, shares: int, current_price: float,
+        self, ticker: str, shares: int, current_price: float, direction: str = "long",
     ) -> OrderResult:
-        """Close a position (sell shares)."""
+        """Close a position.
+
+        For long positions, submits a sell order.
+        For short positions, submits a cover (buy-to-cover) order.
+        """
+        if direction == "short":
+            return self.broker.submit_cover(
+                symbol=ticker, qty=shares, price=current_price,
+            )
         return self.broker.submit_stock_order(
             symbol=ticker, side="sell", qty=shares, price=current_price,
         )
