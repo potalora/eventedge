@@ -10,10 +10,19 @@ Usage:
 """
 from __future__ import annotations
 
+# Generation isolation: when run via GenerationManager with PYTHONPATH set to a
+# worktree, the editable install's finder would still resolve `tradingagents` to
+# the main repo. Inserting the worktree at sys.path[0] before any project imports
+# ensures the frozen worktree code is loaded instead.
+import os
+import sys
+_worktree = os.environ.get("PYTHONPATH", "")
+if _worktree and _worktree != sys.path[0]:
+    sys.path.insert(0, _worktree)
+
 import argparse
 import json
 import logging
-import os
 import time
 from datetime import datetime
 
