@@ -180,6 +180,82 @@ class CohortComparison:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Slice & dice helpers
+    # ------------------------------------------------------------------
+
+    def compare_by_horizon(self, size: str) -> dict:
+        """Compare cohorts across horizons for a fixed portfolio size.
+
+        Args:
+            size: Size profile key (e.g., "5k", "10k").
+
+        Returns:
+            Same structure as compare(), filtered to matching cohorts.
+        """
+        matching = {
+            name for name in self._dirs
+            if f"_size_{size}" in name
+        }
+        return self._filtered_compare(matching)
+
+    def compare_by_size(self, horizon: str) -> dict:
+        """Compare cohorts across sizes for a fixed horizon.
+
+        Args:
+            horizon: Horizon key (e.g., "30d", "3m").
+
+        Returns:
+            Same structure as compare(), filtered to matching cohorts.
+        """
+        matching = {
+            name for name in self._dirs
+            if f"horizon_{horizon}_" in name
+        }
+        return self._filtered_compare(matching)
+
+    def heatmap(self, metric: str = "sharpe") -> dict[str, dict[str, float | None]]:
+        """Return horizon x size matrix of a single metric.
+
+        Args:
+            metric: Key from per-cohort metrics (e.g., "sharpe", "hit_rate_5d",
+                    "win_rate", "avg_pnl").
+
+        Returns:
+            {horizon: {size: metric_value}} e.g. {"30d": {"5k": 1.2, "10k": 0.8}}
+        """
+        data = self.compare()
+        result: dict[str, dict[str, float | None]] = {}
+
+        for name, metrics in data["cohorts"].items():
+            # Parse horizon and size from name: "horizon_30d_size_5k"
+            parts = name.split("_")
+            if len(parts) >= 4 and parts[0] == "horizon" and parts[2] == "size":
+                horizon = parts[1]
+                size = parts[3]
+                result.setdefault(horizon, {})[size] = metrics.get(metric)
+
+        return result
+
+    def _filtered_compare(self, names: set[str]) -> dict:
+        """Run compare() and filter to only the named cohorts."""
+        full = self.compare()
+        filtered_cohorts = {
+            k: v for k, v in full["cohorts"].items() if k in names
+        }
+        filtered_strategies = {}
+        for strat, cohort_data in full["per_strategy"].items():
+            filtered = {k: v for k, v in cohort_data.items() if k in names}
+            if filtered:
+                filtered_strategies[strat] = filtered
+
+        return {
+            "cohorts": filtered_cohorts,
+            "per_strategy": filtered_strategies,
+            "confidence_evolution": full.get("confidence_evolution", {}),
+            "prompt_trials": full.get("prompt_trials", {}),
+        }
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

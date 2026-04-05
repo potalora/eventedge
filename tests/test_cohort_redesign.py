@@ -285,3 +285,50 @@ class TestOrchestratorHorizonScreening:
         for h in HORIZON_PARAMS:
             count = sum(1 for c in cohorts if c.horizon == h)
             assert count == 4, f"Horizon {h} has {count} cohorts, expected 4"
+
+
+class TestCohortComparisonMatrix:
+    """Test compare_by_horizon, compare_by_size, and heatmap methods."""
+
+    @pytest.fixture
+    def comparison(self, tmp_path):
+        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+
+        dirs = {}
+        for h in ["30d", "3m"]:
+            for s in ["5k", "10k"]:
+                name = f"horizon_{h}_size_{s}"
+                d = tmp_path / name
+                d.mkdir()
+                (d / "signal_journal.jsonl").write_text("")
+                (d / "paper_trades.json").write_text("[]")
+                dirs[name] = str(d)
+
+        return CohortComparison(dirs)
+
+    def test_compare_returns_all_cohorts(self, comparison):
+        result = comparison.compare()
+        assert len(result["cohorts"]) == 4
+
+    def test_compare_by_horizon_filters_by_size(self, comparison):
+        result = comparison.compare_by_horizon("5k")
+        assert set(result["cohorts"].keys()) == {"horizon_30d_size_5k", "horizon_3m_size_5k"}
+
+    def test_compare_by_size_filters_by_horizon(self, comparison):
+        result = comparison.compare_by_size("30d")
+        assert set(result["cohorts"].keys()) == {"horizon_30d_size_5k", "horizon_30d_size_10k"}
+
+    def test_heatmap_returns_matrix(self, comparison):
+        result = comparison.heatmap(metric="sharpe")
+        assert "30d" in result
+        assert "3m" in result
+        assert "5k" in result["30d"]
+        assert "10k" in result["30d"]
+
+    def test_compare_by_horizon_invalid_size_returns_empty(self, comparison):
+        result = comparison.compare_by_horizon("999k")
+        assert len(result["cohorts"]) == 0
+
+    def test_compare_by_size_invalid_horizon_returns_empty(self, comparison):
+        result = comparison.compare_by_size("99y")
+        assert len(result["cohorts"]) == 0
