@@ -42,3 +42,11 @@ class BaseBroker(ABC):
     @abstractmethod
     def cancel_order(self, order_id: str) -> bool:
         pass
+
+    def submit_short_sell(self, symbol: str, qty: int, price: float,
+                          stop_loss: float = 0.0, **kwargs) -> OrderResult:
+        raise NotImplementedError("Short selling not supported by this broker")
+
+    def submit_cover(self, symbol: str, qty: int, price: float,
+                     **kwargs) -> OrderResult:
+        raise NotImplementedError("Short covering not supported by this broker")
