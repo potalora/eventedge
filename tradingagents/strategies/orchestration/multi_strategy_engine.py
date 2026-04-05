@@ -188,7 +188,7 @@ class MultiStrategyEngine:
         if not trading_date:
             trading_date = datetime.now().strftime("%Y-%m-%d")
 
-        lookback_start = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+        lookback_start = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
 
         # Use shared signals if provided (from orchestrator), otherwise run locally
         if shared_signals is not None:

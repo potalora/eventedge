@@ -223,7 +223,7 @@ class CohortOrchestrator:
         # Fetch data once
         first_engine = self.cohorts[0]["engine"]
         lookback_start = (
-            datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)
+            datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=90)
         ).strftime("%Y-%m-%d")
         shared_data = first_engine._fetch_all_data(lookback_start, trading_date)
         logger.info("Shared data fetched: %s", list(shared_data.keys()))
