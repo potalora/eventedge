@@ -96,26 +96,28 @@ class StateEconomicsStrategy:
         econ_boost = {}
         if fred_indicators:
             # Check if unemployment is declining (bullish for regionals)
-            unemployment = fred_indicators.get("UNRATE", {})
-            if unemployment:
-                values = sorted(unemployment.items())
-                if len(values) >= 2:
-                    recent = values[-1][1]
-                    prior = values[-2][1]
-                    if recent < prior:  # Declining unemployment
-                        econ_boost["KRE"] = 0.02  # Boost regional banks
-                        econ_boost["XRT"] = 0.01  # Boost retail
-                        econ_boost["XHB"] = 0.01  # Boost homebuilders
+            unemployment = fred_indicators.get("UNRATE")
+            if unemployment is not None and len(unemployment) >= 2:
+                if isinstance(unemployment, pd.Series):
+                    recent, prior = unemployment.iloc[-1], unemployment.iloc[-2]
+                else:
+                    values = sorted(unemployment.items())
+                    recent, prior = values[-1][1], values[-2][1]
+                if recent < prior:  # Declining unemployment
+                    econ_boost["KRE"] = 0.02  # Boost regional banks
+                    econ_boost["XRT"] = 0.01  # Boost retail
+                    econ_boost["XHB"] = 0.01  # Boost homebuilders
 
             # Check initial claims (leading indicator)
-            claims = fred_indicators.get("ICSA", {})
-            if claims:
-                values = sorted(claims.items())
-                if len(values) >= 2:
-                    recent = values[-1][1]
-                    prior = values[-2][1]
-                    if recent < prior:  # Declining claims = bullish
-                        econ_boost["IWN"] = 0.02  # Small-cap value benefits most
+            claims = fred_indicators.get("ICSA")
+            if claims is not None and len(claims) >= 2:
+                if isinstance(claims, pd.Series):
+                    recent, prior = claims.iloc[-1], claims.iloc[-2]
+                else:
+                    values = sorted(claims.items())
+                    recent, prior = values[-1][1], values[-2][1]
+                if recent < prior:  # Declining claims = bullish
+                    econ_boost["IWN"] = 0.02  # Small-cap value benefits most
 
         # Combine momentum + economic boost
         combined_scores = []
