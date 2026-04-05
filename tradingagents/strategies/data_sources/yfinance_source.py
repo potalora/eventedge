@@ -10,6 +10,16 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def normalize_ticker(ticker: str) -> str:
+    """Normalize ticker for yfinance compatibility (e.g. BRK/B → BRK-B)."""
+    return ticker.replace("/", "-")
+
+
+def normalize_tickers(tickers: list[str]) -> list[str]:
+    """Normalize a list of tickers for yfinance compatibility."""
+    return [normalize_ticker(t) for t in tickers]
+
+
 class YFinanceSource:
     """Data source backed by the yfinance library.
 
@@ -86,17 +96,23 @@ class YFinanceSource:
         import yfinance as yf
 
         try:
-            df = yf.download(tickers, start=start, end=end, progress=False)
+            yf_tickers = normalize_tickers(tickers)
+            df = yf.download(yf_tickers, start=start, end=end, progress=False)
             if df.empty:
                 logger.warning("yfinance returned empty DataFrame for %s", tickers)
                 return df
 
-            # yfinance quirk: single ticker returns flat columns, not MultiIndex.
-            # Normalize to always have (Price, Ticker) MultiIndex.
-            if len(tickers) == 1 and not isinstance(df.columns, pd.MultiIndex):
-                df.columns = pd.MultiIndex.from_product(
-                    [df.columns, tickers]
+            # Remap normalized ticker names back to original names so callers
+            # can continue using original ticker symbols (e.g. BRK/B).
+            if isinstance(df.columns, pd.MultiIndex):
+                reverse_map = dict(zip(yf_tickers, tickers))
+                new_cols = pd.MultiIndex.from_tuples(
+                    [(price_col, reverse_map.get(tk, tk)) for price_col, tk in df.columns],
+                    names=df.columns.names,
                 )
+                df.columns = new_cols
+            elif len(tickers) == 1:
+                df.columns = pd.MultiIndex.from_product([df.columns, tickers])
 
             # Drop NaN-only rows
             df = df.dropna(how="all")
@@ -189,7 +205,7 @@ class YFinanceSource:
         results: dict[str, list[dict[str, Any]]] = {}
         for ticker in tickers:
             try:
-                tk = yf.Ticker(ticker)
+                tk = yf.Ticker(normalize_ticker(ticker))
                 cal = tk.get_earnings_dates(limit=8)
                 if cal is None or cal.empty:
                     results[ticker] = []
