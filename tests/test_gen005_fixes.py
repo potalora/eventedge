@@ -160,3 +160,27 @@ class TestDroughtMonitorRetry:
             )
             assert result == {}
             assert mock_get.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 4: 50k/100k min_position_value tuning
+# ---------------------------------------------------------------------------
+
+class TestMinPositionValue:
+    """50k/100k min_position_value should be lowered for day-1 signals."""
+
+    def test_50k_min_position_value(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+        assert SIZE_PROFILES["50k"].min_position_value == 1_000.0
+
+    def test_100k_min_position_value(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+        assert SIZE_PROFILES["100k"].min_position_value == 2_000.0
+
+    def test_5k_unchanged(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+        assert SIZE_PROFILES["5k"].min_position_value == 500.0
+
+    def test_10k_unchanged(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+        assert SIZE_PROFILES["10k"].min_position_value == 1_000.0
