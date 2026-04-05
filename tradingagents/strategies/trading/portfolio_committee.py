@@ -131,6 +131,14 @@ class PortfolioCommittee:
             if ticker:
                 ticker_signals[ticker].append(sig)
 
+        # Filter short signals for ineligible cohorts
+        if self._size_profile and not getattr(self._size_profile, 'short_eligible', True):
+            ticker_signals = {
+                t: [s for s in sigs if s.get("direction") != "short"]
+                for t, sigs in ticker_signals.items()
+            }
+            ticker_signals = {t: sigs for t, sigs in ticker_signals.items() if sigs}
+
         recommendations: list[TradeRecommendation] = []
 
         for ticker, sigs in ticker_signals.items():
@@ -215,6 +223,15 @@ class PortfolioCommittee:
                     rec.position_size_pct *= scale
 
         recommendations = self._enforce_sector_limits(recommendations)
+
+        # Cap short exposure
+        if self._size_profile and getattr(self._size_profile, 'max_short_exposure_pct', 0) > 0:
+            short_recs = [r for r in recommendations if r.direction == "short"]
+            total_short = sum(r.position_size_pct for r in short_recs)
+            if total_short > self._size_profile.max_short_exposure_pct:
+                scale = self._size_profile.max_short_exposure_pct / total_short
+                for r in short_recs:
+                    r.position_size_pct *= scale
 
         # Sort by confidence descending
         recommendations.sort(key=lambda r: r.confidence, reverse=True)
