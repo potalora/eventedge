@@ -61,6 +61,8 @@ Options Analyst    ───┘         │       ┌───── Phase 1: Ba
 CohortOrchestrator ── Shared Data Fetch ──┤  4 sizes: 5k, 10k, 50k, 100k  │
           │                               │  = 16 independent portfolios   │
      4 horizon screens                    │  Adaptive/learning: dormant    │
+                                          │  50k+/3m+: shorts eligible     │
+                                          │  10k+: covered calls eligible  │
                                           └────────────────────────────────┘
                                               StateManager (JSON)
 
@@ -136,7 +138,7 @@ Strategy research & academic backing: [docs/strategy_research.md](docs/strategy_
 
 **Phase 1 — Backtest Evolution** (offline, fast): Infrastructure exists but is dormant — no backtest strategies are currently registered. The system runs Phase 2 (paper trading) only.
 
-**Phase 2 — 16-Cohort Paper Trading Matrix** (live, ongoing): Horizon × size matrix with 4 investment horizons (30d, 3m, 6m, 1y) × 4 portfolio sizes ($5k, $10k, $50k, $100k) = 16 independent paper portfolios. All share data fetch; screening runs once per horizon (4 passes). Each cohort has its own `PortfolioSizeProfile` controlling position sizing, concentration limits, and cash reserves. Adaptive confidence and learning infrastructure is dormant but preserved.
+**Phase 2 — 16-Cohort Paper Trading Matrix** (live, ongoing): Horizon × size matrix with 4 investment horizons (30d, 3m, 6m, 1y) × 4 portfolio sizes ($5k, $10k, $50k, $100k) = 16 independent paper portfolios. All share data fetch; screening runs once per horizon (4 passes). Each cohort has its own `PortfolioSizeProfile` controlling position sizing, concentration limits, and cash reserves. Adaptive confidence and learning infrastructure is dormant but preserved. 50k+/3m+ cohorts support short equity; 10k+ cohorts support covered call overlays.
 
 ### Active Strategies (10 event-driven, paper-trade only)
 
@@ -161,7 +163,7 @@ Reports are not script-generated. Ask Claude to generate reports by reading stat
 
 - `strategies/orchestration/cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, screens per horizon (4 passes), then dispatches to 16 cohorts with size-appropriate configs. `CohortConfig`, `PortfolioSizeProfile`, `SIZE_PROFILES`, `HORIZON_PARAMS`, and `build_default_cohorts()` define the matrix.
 - `strategies/orchestration/cohort_comparison.py` — `CohortComparison` with `compare()`, `compare_by_horizon()`, `compare_by_size()`, and `heatmap()` for matrix analysis.
-- `strategies/trading/portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available.
+- `strategies/trading/portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available. Performs vehicle selection (long equity / short equity / covered call) based on cohort eligibility flags and signal direction. Applies short book limits and covered call overlay for eligible cohorts.
 - Vintage tracking (param sets tagged with vintage ID, trade count, creation date), regime model, 15% exploration budget for unproven param sets.
 - Future bolt-on: debate validation (not built yet).
 
@@ -249,12 +251,16 @@ All configuration lives in `tradingagents/default_config.py`.
 | `execution` | `broker` | `"alpaca"` |
 | `scheduler` | `scan_time` | Daily scan time (US/Eastern) |
 | `autoresearch` | `state_dir` | JSON state directory (default: `data/state`) |
-| `autoresearch` | `autoresearch_model` | LLM for all autoresearch calls (Haiku) |
+| `autoresearch` | `autoresearch_model` | LLM for all autoresearch calls (Sonnet) |
 | `autoresearch` | `total_capital` | Portfolio size for allocation |
 | `autoresearch` | `adaptive_confidence` | `False` = fixed 0.5 (Cohort A), `True` = journal-derived (Cohort B) |
 | `autoresearch` | `fmp_api_key` | FMP API key for OpenBB equity estimates (optional, free tier: 250 calls/day) |
 | `autoresearch` | `noaa_cdo_token` | NOAA Climate Data Online token for weather_ag strategy (free from ncdc.noaa.gov) |
 | `autoresearch` | `usda_nass_api_key` | USDA NASS API key for crop condition data (free from quickstats.nass.usda.gov) |
+| `autoresearch.short_selling` | `borrow_cost_tiers` | Borrow cost tiers (cheap/normal/expensive/HTB) used for risk gate rejection |
+| `autoresearch.short_selling` | `rejection_threshold` | Max allowed borrow cost tier before short is rejected |
+| `options` | `covered_call_delta` | Target delta for covered call strike selection (default: 0.30) |
+| `options` | `covered_call_min_premium_pct` | Minimum premium as % of stock price to place covered call (default: 0.005) |
 
 API keys go in `.env` (git-ignored), loaded via `python-dotenv`. See `.env.example` for required keys.
 
@@ -267,7 +273,7 @@ OpenBB is an optional dependency: `pip install -e ".[openbb]"`. All strategies g
 - **Primary:** Anthropic Claude
 - `deep_think_llm`: `claude-sonnet-4-20250514`
 - `quick_think_llm`: `claude-haiku-4-5-20251001`
-- **Autoresearch:** Haiku for all LLM calls (~$0.03/generation, ~$0.001/call)
+- **Autoresearch:** Sonnet for all LLM calls (~$0.03/generation, ~$0.001/call)
 - Multi-provider support: OpenAI, Google, Anthropic, xAI, Ollama
 
 ---
@@ -312,6 +318,17 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
   - `tests/test_drought_monitor_source.py` — 13 tests for US Drought Monitor data source
   - `tests/test_30day_simulation.py` — 30-day simulation tests including OpenBB enrichment and reactivated strategies
   - `tests/test_e2e_pipeline.py` — End-to-end integration tests for full trading pipeline
+  - `tests/test_option_spec.py` — OptionSpec dataclass and Candidate vehicle field
+  - `tests/test_eligibility.py` — PortfolioSizeProfile eligibility flags (long-only, covered calls, shorts)
+  - `tests/test_short_risk_gates.py` — Short-specific risk gates (earnings blackout, borrow cost, margin utilization)
+  - `tests/test_paper_broker_shorts.py` — PaperBroker short position lifecycle (submit_short_sell, submit_cover, margin, borrow cost)
+  - `tests/test_congressional_shorts.py` — Congressional trades sale cluster short signals
+  - `tests/test_execution_bridge_shorts.py` — ExecutionBridge short routing
+  - `tests/test_trade_rec_vehicle.py` — TradeRecommendation vehicle field
+  - `tests/test_committee_vehicle.py` — Committee vehicle selection logic
+  - `tests/test_covered_call_overlay.py` — Covered call overlay generation
+  - `tests/test_eligibility_wiring.py` — Eligibility wiring and config integration
+  - `tests/test_integration_shorts.py` — Integration tests for short/options pipelines
 
 ---
 
@@ -325,3 +342,4 @@ Check upstream with: `git fetch upstream && git log upstream/main --oneline -20`
 | [docs/next-gen-improvements.md](docs/next-gen-improvements.md) | Follow-on improvements for gen_004 (loosen gates, expand universes) |
 | [docs/reports/](docs/reports/) | Daily trading reports |
 | [docs/archive/](docs/archive/) | Executed design specs for options, backtest, execution, dashboard, autoresearch |
+| [docs/superpowers/specs/2026-04-04-options-shorting-wave1-design.md](docs/superpowers/specs/2026-04-04-options-shorting-wave1-design.md) | Options & shorting Wave 1 design spec |
