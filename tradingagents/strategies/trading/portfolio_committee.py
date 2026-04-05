@@ -14,6 +14,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from tradingagents.strategies.modules.base import OptionSpec
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +29,8 @@ class TradeRecommendation:
     rationale: str
     contributing_strategies: list[str] = field(default_factory=list)
     regime_alignment: str = "neutral"       # "aligned"/"neutral"/"misaligned"
+    vehicle: str = "equity"                 # "equity" or "option"
+    option_spec: OptionSpec | None = None   # Populated when vehicle == "option"
 
 
 class PortfolioCommittee:
