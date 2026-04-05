@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -31,6 +31,17 @@ class PortfolioSizeProfile:
     sector_concentration_cap: float    # max weight in one sector
     cash_reserve_pct: float            # cash held back from allocation
 
+    # Short selling eligibility
+    short_eligible: bool = False
+    max_short_exposure_pct: float = 0.0   # max total short exposure as % of capital
+    max_single_short_pct: float = 0.05    # max single short position as % of capital
+    margin_cash_buffer_pct: float = 0.0   # cash buffer required for margin
+    max_correlated_shorts: int = 0        # max simultaneous correlated short positions
+
+    # Options eligibility
+    options_eligible: list[str] = field(default_factory=list)  # e.g. ["covered_call"]
+    max_options_premium_pct: float = 0.0  # max options premium spend as % of capital
+
 
 SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
     "5k": PortfolioSizeProfile(
@@ -50,6 +61,9 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=8,
         sector_concentration_cap=0.40,
         cash_reserve_pct=0.10,
+        # Options: covered calls only, no short selling
+        options_eligible=["covered_call"],
+        max_options_premium_pct=0.05,
     ),
     "50k": PortfolioSizeProfile(
         name="50k",
@@ -59,6 +73,15 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=15,
         sector_concentration_cap=0.30,
         cash_reserve_pct=0.15,
+        # Short selling eligible
+        short_eligible=True,
+        max_short_exposure_pct=0.15,
+        max_single_short_pct=0.05,
+        margin_cash_buffer_pct=0.20,
+        max_correlated_shorts=2,
+        # Options: covered calls
+        options_eligible=["covered_call"],
+        max_options_premium_pct=0.05,
     ),
     "100k": PortfolioSizeProfile(
         name="100k",
@@ -68,6 +91,15 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=20,
         sector_concentration_cap=0.25,
         cash_reserve_pct=0.15,
+        # Short selling eligible
+        short_eligible=True,
+        max_short_exposure_pct=0.20,
+        max_single_short_pct=0.05,
+        margin_cash_buffer_pct=0.15,
+        max_correlated_shorts=4,
+        # Options: covered calls
+        options_eligible=["covered_call"],
+        max_options_premium_pct=0.08,
     ),
 }
 
