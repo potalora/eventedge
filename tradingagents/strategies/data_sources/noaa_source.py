@@ -218,30 +218,53 @@ class NOAASource:
         self._cache.clear()
 
     def _api_get(self, endpoint: str, params: dict) -> dict | None:
-        """Make a rate-limited GET request to the NOAA CDO API."""
-        # Rate limit: 5 req/sec
-        elapsed = time.time() - self._last_request_time
-        if elapsed < 0.22:
-            time.sleep(0.22 - elapsed)
-
+        """Make a rate-limited GET request to the NOAA CDO API with retry."""
         url = f"{BASE_URL}{endpoint}"
         headers = {"token": self._token}
+        max_retries = 3
+        base_delay = 5.0
 
-        try:
-            self._last_request_time = time.time()
-            resp = requests.get(url, headers=headers, params=params, timeout=30)
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code == 429:
-                logger.warning("NOAA rate limit hit, waiting 1s")
-                time.sleep(1.0)
+        for attempt in range(max_retries + 1):
+            # Rate limit: 5 req/sec
+            elapsed = time.time() - self._last_request_time
+            if elapsed < 0.22:
+                time.sleep(0.22 - elapsed)
+
+            try:
+                self._last_request_time = time.time()
+                resp = requests.get(url, headers=headers, params=params, timeout=60)
+                if resp.status_code == 200:
+                    return resp.json()
+                elif resp.status_code == 429:
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning("NOAA rate limit (attempt %d/%d), retrying in %.0fs", attempt + 1, max_retries, delay)
+                        time.sleep(delay)
+                        continue
+                    return None
+                elif resp.status_code >= 500:
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning("NOAA %s returned %d (attempt %d/%d), retrying in %.0fs", endpoint, resp.status_code, attempt + 1, max_retries, delay)
+                        time.sleep(delay)
+                        continue
+                    logger.warning("NOAA API %s returned %d after %d retries", endpoint, resp.status_code, max_retries)
+                    return None
+                else:
+                    logger.warning("NOAA API %s returned %d", endpoint, resp.status_code)
+                    return None
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning("NOAA request failed (attempt %d/%d): %s, retrying in %.0fs", attempt + 1, max_retries, exc, delay)
+                    time.sleep(delay)
+                    continue
+                logger.error("NOAA API request failed after %d retries", max_retries, exc_info=True)
                 return None
-            else:
-                logger.warning("NOAA API %s returned %d", endpoint, resp.status_code)
+            except requests.RequestException:
+                logger.error("NOAA API request failed", exc_info=True)
                 return None
-        except requests.RequestException:
-            logger.error("NOAA API request failed", exc_info=True)
-            return None
+        return None
 
     def _dispatch_ag_summary(self, params: dict[str, Any]) -> dict[str, Any]:
         date = params.get("date", datetime.now().strftime("%Y-%m-%d"))
