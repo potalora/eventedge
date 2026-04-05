@@ -7,6 +7,7 @@ PaperBroker or AlpacaBroker.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -288,7 +289,6 @@ class MultiStrategyEngine:
                 current_price = float(ticker_prices["Close"].iloc[-1])
             except (KeyError, IndexError):
                 continue
-            import math
             if not (current_price > 0) or math.isnan(current_price):
                 continue
 
