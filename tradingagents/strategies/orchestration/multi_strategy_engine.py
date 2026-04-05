@@ -1025,6 +1025,9 @@ class MultiStrategyEngine:
             "DBA", "WEAT", "CORN", "MOO", "SOYB", "ADM", "BG", "CTVA", "DE", "FMC",
             # Regional ETFs for state_economics
             "KRE", "IWN", "XRT", "IYR", "XHB", "ITB", "VNQ", "SOXX", "XLI", "XLRE",
+            # Defense contractors for govt_contracts (momentum fallback)
+            "LMT", "RTX", "NOC", "GD", "BA", "LHX", "LDOS", "SAIC", "BAH",
+            "PLTR", "KTOS", "CACI", "HEI", "TDG",
         ]
 
         logger.info("Fetching prices for %d core tickers", len(core_tickers))
