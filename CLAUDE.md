@@ -56,15 +56,12 @@ Options Analyst    ───┘         │       ┌───── Phase 1: Ba
                       Portfolio Manager          Playbook (params,
                               │                   regime, scores)
                         Trade Decision              │
-                                          ┌── Cohort A (Control) ──┐
-                                          │  Fixed confidence 0.5  │
-CohortOrchestrator ── Shared Data Fetch ──┤  No learning           │
-                                          │                        │
-                                          ├── Cohort B (Adaptive) ─┤
-                                          │  Journal confidence     │
-                                          │  Prompt optimization    │
-                                          │  Weekly learning loop   │
-                                          └────────────────────────┘
+                                          ┌── 16 Cohorts (Horizon × Size) ─┐
+                                          │  4 horizons: 30d, 3m, 6m, 1y  │
+CohortOrchestrator ── Shared Data Fetch ──┤  4 sizes: 5k, 10k, 50k, 100k  │
+          │                               │  = 16 independent portfolios   │
+     4 horizon screens                    │  Adaptive/learning: dormant    │
+                                          └────────────────────────────────┘
                                               StateManager (JSON)
 
 GENERATION MANAGEMENT
@@ -139,12 +136,7 @@ Strategy research & academic backing: [docs/strategy_research.md](docs/strategy_
 
 **Phase 1 — Backtest Evolution** (offline, fast): Infrastructure exists but is dormant — no backtest strategies are currently registered. The system runs Phase 2 (paper trading) only.
 
-**Phase 2 — 2-Cohort Paper Trading Trial** (live, ongoing): A/B test of two parallel paper portfolios sharing the same data fetch but using separate state directories (`data/state/control/`, `data/state/adaptive/`):
-
-- **Cohort A (Control):** Fixed `strategy_confidence=0.5`, no learning loop. Baseline for comparison.
-- **Cohort B (Adaptive):** Journal-derived `strategy_confidence` from hit rates, prompt optimization, weekly learning loop.
-
-The **portfolio committee** is the sole sizing authority — the risk gate only enforces hard limits.
+**Phase 2 — 16-Cohort Paper Trading Matrix** (live, ongoing): Horizon × size matrix with 4 investment horizons (30d, 3m, 6m, 1y) × 4 portfolio sizes ($5k, $10k, $50k, $100k) = 16 independent paper portfolios. All share data fetch; screening runs once per horizon (4 passes). Each cohort has its own `PortfolioSizeProfile` controlling position sizing, concentration limits, and cash reserves. Adaptive confidence and learning infrastructure is dormant but preserved.
 
 ### Active Strategies (10 event-driven, paper-trade only)
 
@@ -161,10 +153,14 @@ The **portfolio committee** is the sole sizing authority — the risk gate only 
 | `state_economics` | `StateEconomicsStrategy` | FRED, yfinance, OpenBB (Fama-French factors) |
 | `weather_ag` | `WeatherAgStrategy` | NOAA CDO, USDA NASS, Drought Monitor, yfinance, OpenBB (weather + crop conditions + drought + ag momentum) |
 
+### Report Generation
+
+Reports are not script-generated. Ask Claude to generate reports by reading state directories and calling `CohortComparison` methods (`compare()`, `compare_by_horizon()`, `compare_by_size()`, `heatmap()`).
+
 ### Key Components
 
-- `strategies/orchestration/cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, then fetches OpenBB enrichment (profiles, short interest, Fama-French factors) for signal tickers, then dispatches to each cohort's engine. `CohortConfig` and `build_default_cohorts()` define the A/B setup.
-- `strategies/orchestration/cohort_comparison.py` — `CohortComparison` with `compare()` and `format_report()` for side-by-side cohort analysis.
+- `strategies/orchestration/cohort_orchestrator.py` — `CohortOrchestrator` runs shared data fetch, screens per horizon (4 passes), then dispatches to 16 cohorts with size-appropriate configs. `CohortConfig`, `PortfolioSizeProfile`, `SIZE_PROFILES`, `HORIZON_PARAMS`, and `build_default_cohorts()` define the matrix.
+- `strategies/orchestration/cohort_comparison.py` — `CohortComparison` with `compare()`, `compare_by_horizon()`, `compare_by_size()`, and `heatmap()` for matrix analysis.
 - `strategies/trading/portfolio_committee.py` — LLM + rule-based signal synthesis (sole sizing authority). Accepts `enrichment` dict with sector profiles, short interest, and factor data. Enforces sector concentration limits (default 30%) when sector data is available.
 - Vintage tracking (param sets tagged with vintage ID, trade count, creation date), regime model, 15% exploration budget for unproven param sets.
 - Future bolt-on: debate validation (not built yet).

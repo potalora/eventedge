@@ -332,3 +332,50 @@ class TestCohortComparisonMatrix:
     def test_compare_by_size_invalid_horizon_returns_empty(self, comparison):
         result = comparison.compare_by_size("99y")
         assert len(result["cohorts"]) == 0
+
+
+class TestIntegration:
+    """End-to-end integration test for the 16-cohort matrix."""
+
+    def test_build_cohorts_and_comparison_roundtrip(self, tmp_path):
+        from pathlib import Path
+        from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
+        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+
+        cohorts = build_default_cohorts({"autoresearch": {"state_dir": str(tmp_path)}})
+        assert len(cohorts) == 16
+
+        dirs = {}
+        for c in cohorts:
+            p = Path(c.state_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            (p / "signal_journal.jsonl").write_text("")
+            (p / "paper_trades.json").write_text("[]")
+            dirs[c.name] = c.state_dir
+
+        comp = CohortComparison(dirs)
+        result = comp.compare()
+        assert len(result["cohorts"]) == 16
+
+        hm = comp.heatmap("sharpe")
+        assert len(hm) == 4
+        for horizon_data in hm.values():
+            assert len(horizon_data) == 4
+
+        by_h = comp.compare_by_horizon("10k")
+        assert len(by_h["cohorts"]) == 4
+
+        by_s = comp.compare_by_size("6m")
+        assert len(by_s["cohorts"]) == 4
+
+    def test_all_strategies_produce_consistent_params_across_horizons(self):
+        from tradingagents.strategies.modules import get_all_strategies
+
+        for s in get_all_strategies():
+            keys_30d = set(s.get_default_params(horizon="30d").keys())
+            for h in ["3m", "6m", "1y"]:
+                keys_h = set(s.get_default_params(horizon=h).keys())
+                assert keys_30d == keys_h, (
+                    f"{s.name}: param keys differ between 30d and {h}: "
+                    f"30d={keys_30d}, {h}={keys_h}"
+                )
