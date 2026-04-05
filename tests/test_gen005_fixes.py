@@ -236,3 +236,17 @@ class TestUSASpendingDateConsistency:
         import inspect
         sig = inspect.signature(USASpendingSource.get_recent_large_contracts)
         assert "as_of" in sig.parameters
+
+
+class TestUSASpendingFetch:
+    """Engine should fetch USASpending data for govt_contracts strategy."""
+
+    def test_usaspending_fetch_method_exists(self):
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        assert hasattr(MultiStrategyEngine, "_fetch_usaspending_data")
+
+    def test_fetch_usaspending_data_signature(self):
+        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        import inspect
+        sig = inspect.signature(MultiStrategyEngine._fetch_usaspending_data)
+        assert "trading_date" in sig.parameters

@@ -734,6 +734,8 @@ class MultiStrategyEngine:
         # Also fetch EDGAR events for paper-trade strategies
         if "edgar" in needed_sources and "edgar" in available:
             api_fetches["edgar"] = (self._fetch_edgar_events, ())
+        if "usaspending" in needed_sources and "usaspending" in available:
+            api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
 
         if api_fetches:
             with ThreadPoolExecutor(max_workers=4) as pool:
@@ -937,6 +939,23 @@ class MultiStrategyEngine:
             logger.error("Failed to fetch congressional trades", exc_info=True)
 
         return result
+
+    def _fetch_usaspending_data(self, trading_date: str) -> dict[str, Any]:
+        """Fetch recent large federal contract awards."""
+        source = self.registry.get("usaspending")
+        if source is None:
+            return {}
+
+        try:
+            contracts = source.get_recent_large_contracts(
+                min_amount=50_000_000, days_back=30, as_of=trading_date,
+            )
+            result = {"contracts": contracts}
+            logger.info("USASpending fetch: %d large contracts", len(contracts))
+            return {"data": result}
+        except Exception:
+            logger.error("Failed to fetch USASpending data", exc_info=True)
+            return {}
 
     def _fetch_noaa_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
