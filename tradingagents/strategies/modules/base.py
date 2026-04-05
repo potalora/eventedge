@@ -5,15 +5,27 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
+class OptionSpec:
+    """Specification for an options-based trade vehicle."""
+
+    strategy: str  # "covered_call", "protective_put", "put_spread", "call_spread", "leaps"
+    expiry_target_days: int  # Target days to expiration
+    strike_offset_pct: float  # Strike offset from current price as fraction (e.g. 0.05 = 5% OTM)
+    max_premium_pct: float  # Max acceptable premium as fraction of underlying price
+
+
+@dataclass
 class Candidate:
     """A screened candidate for potential trade entry."""
 
     ticker: str
     date: str
-    direction: str  # "long" or "short"
+    direction: str = "long"  # "long" or "short"
     score: float = 0.0  # Higher = stronger signal
     confidence: float = 0.0
     metadata: dict = field(default_factory=dict)  # Strategy-specific data
+    vehicle: str = "equity"  # "equity" or "option"
+    option_spec: OptionSpec | None = None  # Populated when vehicle == "option"
 
 
 @dataclass
