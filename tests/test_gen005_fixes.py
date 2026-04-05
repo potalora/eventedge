@@ -111,3 +111,52 @@ class TestNOAARetry:
             source._api_get("/data", {"datasetid": "GHCND"})
             _, kwargs = mock_get.call_args
             assert kwargs["timeout"] == 60
+
+
+class TestUSDARetry:
+    """USDA NASS should retry on timeout/5xx."""
+
+    @patch("time.sleep")
+    def test_retry_on_timeout(self, mock_sleep):
+        from tradingagents.strategies.data_sources.usda_source import USDASource
+
+        source = USDASource(api_key="test-key")
+        with patch("requests.get") as mock_get:
+            mock_get.side_effect = [
+                requests.exceptions.Timeout("timeout"),
+                MagicMock(status_code=200, json=lambda: {"data": []}),
+            ]
+            result = source.fetch_crop_progress("CORN", 2026)
+            assert result == []
+            assert mock_get.call_count == 2
+
+    @patch("time.sleep")
+    def test_max_retries_exhausted(self, mock_sleep):
+        from tradingagents.strategies.data_sources.usda_source import USDASource
+
+        source = USDASource(api_key="test-key")
+        with patch("requests.get") as mock_get:
+            mock_get.side_effect = requests.exceptions.Timeout("timeout")
+            result = source.fetch_crop_progress("CORN", 2026)
+            assert result == []
+            assert mock_get.call_count == 4  # 1 initial + 3 retries
+
+
+class TestDroughtMonitorRetry:
+    """Drought Monitor should retry on timeout/5xx."""
+
+    @patch("time.sleep")
+    def test_retry_on_timeout(self, mock_sleep):
+        from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
+
+        source = DroughtMonitorSource()
+        with patch("requests.get") as mock_get:
+            mock_get.side_effect = [
+                requests.exceptions.Timeout("timeout"),
+                MagicMock(status_code=200, json=lambda: []),
+            ]
+            result = source.fetch_drought_severity(
+                start="2026-03-27", end="2026-04-03"
+            )
+            assert result == {}
+            assert mock_get.call_count == 2

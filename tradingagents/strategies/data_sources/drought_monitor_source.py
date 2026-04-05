@@ -8,6 +8,7 @@ API docs: https://droughtmonitor.unl.edu/DmData/DataDownload/WebServiceInfo.aspx
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -82,19 +83,49 @@ class DroughtMonitorSource:
             "statisticsType": 1,  # State-level
         }
 
-        try:
-            resp = requests.get(
-                BASE_URL,
-                params=params,
-                headers={"Accept": "application/json"},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                logger.warning("Drought Monitor returned %d", resp.status_code)
+        max_retries = 3
+        base_delay = 5.0
+        data = None
+        for attempt in range(max_retries + 1):
+            try:
+                resp = requests.get(
+                    BASE_URL,
+                    params=params,
+                    headers={"Accept": "application/json"},
+                    timeout=60,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    break
+                elif resp.status_code >= 500:
+                    if attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "Drought Monitor returned %d (attempt %d/%d), retrying in %.0fs",
+                            resp.status_code, attempt + 1, max_retries, delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.warning("Drought Monitor returned %d after %d retries", resp.status_code, max_retries)
+                    return {}
+                else:
+                    logger.warning("Drought Monitor returned %d", resp.status_code)
+                    return {}
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "Drought Monitor request failed (attempt %d/%d): %s, retrying in %.0fs",
+                        attempt + 1, max_retries, exc, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.error("Drought Monitor request failed after %d retries", max_retries, exc_info=True)
                 return {}
-            data = resp.json()
-        except requests.RequestException:
-            logger.error("Drought Monitor request failed", exc_info=True)
+            except requests.RequestException:
+                logger.error("Drought Monitor request failed", exc_info=True)
+                return {}
+        if data is None:
             return {}
 
         result: dict[str, dict[str, float]] = {}
