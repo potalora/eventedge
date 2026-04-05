@@ -11,6 +11,23 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_BORROW_TIERS = [(5, 0.005), (15, 0.02), (30, 0.05)]
+
+
+def _estimate_borrow_cost(si_pct: float) -> float:
+    """Estimate annualised borrow cost from short-interest percentage.
+
+    Args:
+        si_pct: Short interest as % of float (e.g. 25.0 = 25%).
+
+    Returns:
+        Annualised borrow cost fraction (e.g. 0.05 = 5%).
+    """
+    for threshold, cost in _BORROW_TIERS:
+        if si_pct < threshold:
+            return cost
+    return 0.10
+
 
 @dataclass
 class RiskGateConfig:
@@ -25,6 +42,13 @@ class RiskGateConfig:
     global_stop_loss_pct: float = 0.08      # 8% stop per position
     long_only: bool = True                  # $5K accounts can't short easily
     cash_reserve_pct: float = 0.0           # Min cash as % of portfolio (0 = disabled)
+    # Short-specific gates (0 = disabled)
+    earnings_blackout_days: int = 0         # Block shorts within N days of earnings
+    max_borrow_cost_pct: float = 0.0        # Max annualised borrow cost (0 = disabled)
+    max_margin_utilization_pct: float = 0.0 # Max margin as % of total capital (0 = disabled)
+    short_squeeze_stop_pct: float = 0.15    # Stop-loss % for short squeeze protection
+    short_squeeze_window_days: int = 5      # Days to look back for squeeze detection
+    premium_decay_floor_pct: float = 0.20   # Options premium decay floor
 
     @classmethod
     def from_dict(cls, config: dict) -> RiskGateConfig:
@@ -42,6 +66,12 @@ class RiskGateConfig:
             global_stop_loss_pct=rg.get("global_stop_loss_pct", 0.08),
             long_only=rg.get("long_only", True),
             cash_reserve_pct=rg.get("cash_reserve_pct", 0.0),
+            earnings_blackout_days=rg.get("earnings_blackout_days", 0),
+            max_borrow_cost_pct=rg.get("max_borrow_cost_pct", 0.0),
+            max_margin_utilization_pct=rg.get("max_margin_utilization_pct", 0.0),
+            short_squeeze_stop_pct=rg.get("short_squeeze_stop_pct", 0.15),
+            short_squeeze_window_days=rg.get("short_squeeze_window_days", 5),
+            premium_decay_floor_pct=rg.get("premium_decay_floor_pct", 0.20),
         )
 
 
@@ -65,6 +95,7 @@ class RiskGate:
         self._high_water_mark: float = config.total_capital
         self._daily_losses: float = 0.0
         self._daily_date: str = ""
+        self._margin_used: float = 0.0
 
     def check(
         self,
@@ -73,6 +104,8 @@ class RiskGate:
         position_value: float,
         strategy: str,
         open_trades: list[dict] | None = None,
+        earnings_dates: dict[str, int] | None = None,
+        short_interest: dict[str, float] | None = None,
     ) -> tuple[bool, str]:
         """Run all gates. Returns (passed, rejection_reason).
 
@@ -82,6 +115,8 @@ class RiskGate:
             position_value: Dollar value of proposed position.
             strategy: Strategy name (for per-strategy limit).
             open_trades: List of open trade dicts (from PaperTrader state).
+            earnings_dates: Optional mapping of ticker -> days until next earnings.
+            short_interest: Optional mapping of ticker -> short interest % of float.
         """
         open_trades = open_trades or []
 
@@ -138,6 +173,39 @@ class RiskGate:
                     f"cash_reserve: ${remaining_cash:.0f} remaining < "
                     f"${min_cash:.0f} ({self.config.cash_reserve_pct:.0%} reserve)"
                 )
+
+        # Short-specific gates (10-12)
+        if direction == "short":
+            # 10. Earnings blackout — avoid shorting near earnings surprises
+            if self.config.earnings_blackout_days > 0 and earnings_dates:
+                days_to_earnings = earnings_dates.get(ticker)
+                if days_to_earnings is not None and days_to_earnings <= self.config.earnings_blackout_days:
+                    return False, (
+                        f"earnings_blackout: {ticker} earnings in {days_to_earnings}d "
+                        f"(blackout={self.config.earnings_blackout_days}d)"
+                    )
+
+            # 11. Borrow cost gate — avoid hard-to-borrow names
+            if self.config.max_borrow_cost_pct > 0 and short_interest:
+                si = short_interest.get(ticker)
+                if si is not None:
+                    estimated_cost = _estimate_borrow_cost(si)
+                    if estimated_cost > self.config.max_borrow_cost_pct:
+                        return False, (
+                            f"borrow_cost: {ticker} estimated borrow cost "
+                            f"{estimated_cost:.1%} > max {self.config.max_borrow_cost_pct:.1%} "
+                            f"(SI={si:.1f}%)"
+                        )
+
+            # 12. Margin utilization gate
+            if self.config.max_margin_utilization_pct > 0:
+                utilization = self._margin_used / self.config.total_capital if self.config.total_capital > 0 else 0.0
+                if utilization >= self.config.max_margin_utilization_pct:
+                    return False, (
+                        f"margin_utilization: {utilization:.1%} >= "
+                        f"{self.config.max_margin_utilization_pct:.1%} limit "
+                        f"(${self._margin_used:.0f}/${self.config.total_capital:.0f})"
+                    )
 
         return True, ""
 
