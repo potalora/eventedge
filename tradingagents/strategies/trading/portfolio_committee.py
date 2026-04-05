@@ -416,6 +416,101 @@ Synthesize into ranked trade list. Return JSON array."""
 
         return recommendations if recommendations else None
 
+    def generate_covered_call_overlays(
+        self,
+        current_positions: list[dict],
+        iv_data: dict[str, dict],
+        earnings_dates: dict[str, int],
+        trading_date: str,
+    ) -> list[TradeRecommendation]:
+        """Identify existing long positions suitable for covered call overlay."""
+        if not self._size_profile or "covered_call" not in getattr(self._size_profile, 'options_eligible', []):
+            return []
+
+        longs = [p for p in current_positions if p.get("direction") == "long"]
+        if not longs:
+            return []
+
+        candidates = self._llm_covered_call_overlay(longs, iv_data, earnings_dates, trading_date)
+        if not candidates:
+            return []
+
+        overlays = []
+        for c in candidates:
+            ticker = c.get("ticker", "")
+            if not ticker:
+                continue
+            spec = OptionSpec(
+                strategy="covered_call",
+                expiry_target_days=c.get("expiry_days", 30),
+                strike_offset_pct=c.get("strike_offset_pct", 0.05),
+                max_premium_pct=getattr(self._size_profile, 'max_options_premium_pct', 0.05),
+            )
+            overlays.append(TradeRecommendation(
+                ticker=ticker,
+                direction="long",
+                position_size_pct=0.0,
+                confidence=0.7,
+                rationale=c.get("rationale", "covered call overlay"),
+                vehicle="option",
+                option_spec=spec,
+            ))
+        return overlays
+
+    def _llm_covered_call_overlay(
+        self,
+        positions: list[dict],
+        iv_data: dict[str, dict],
+        earnings_dates: dict[str, int],
+        trading_date: str,
+    ) -> list[dict]:
+        """Ask LLM which positions to overlay with covered calls."""
+        client = self._get_client()
+        if client is None:
+            return []
+
+        pos_lines = []
+        for p in positions[:10]:
+            ticker = p.get("ticker", "?")
+            iv = iv_data.get(ticker, {})
+            earnings_days = earnings_dates.get(ticker, "unknown")
+            pos_lines.append(
+                f"  {ticker}: entry=${p.get('entry_price', 0):.0f}, "
+                f"shares={p.get('shares', 0)}, "
+                f"IV={iv.get('iv', 'N/A')}, IV_rank={iv.get('iv_rank', 'N/A')}, "
+                f"earnings_in={earnings_days} days"
+            )
+
+        prompt = f"""Date: {trading_date}
+
+Current long positions:
+{chr(10).join(pos_lines)}
+
+Which positions are good candidates for covered call overlays?
+Consider: IV rank (higher = better for selling calls), upcoming earnings (avoid if <10 days),
+days held (prefer >14 days), and overall conditions.
+
+Return ONLY a JSON array of objects with keys: ticker, strike_offset_pct (e.g. 0.05 for 5% OTM),
+expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if no good candidates."""
+
+        try:
+            response = client.messages.create(
+                model=self._model_name,
+                max_tokens=512,
+                system="You are a portfolio manager specializing in options overlays. Be conservative.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                text = "\n".join(lines)
+            data = json.loads(text)
+            return data if isinstance(data, list) else []
+        except Exception:
+            logger.warning("Covered call overlay LLM call failed", exc_info=True)
+            return []
+
     def _get_client(self):
         """Lazy-init Anthropic client."""
         if self._client is None:
