@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
             "bear_put_spread", "straddle", "strangle",
         ],
         "default_expiry_range_days": 45,
+        "covered_call_min_hold_days": 14,
+        "covered_call_default_dte": 30,
+        "covered_call_strike_offset": 0.05,
     },
     # Backtesting configuration
     "backtest": {
@@ -137,6 +140,12 @@ DEFAULT_CONFIG = {
             "portfolio_committee_enabled": True,
             "max_sector_concentration_pct": 0.30,
             "max_single_position_pct": 0.10,
+        },
+        # Short selling settings
+        "short_selling": {
+            "borrow_cost_tiers": {5: 0.005, 15: 0.02, 30: 0.05},
+            "borrow_cost_reject_above": 0.05,
+            "hard_to_borrow_si_pct": 30,
         },
     },
 }

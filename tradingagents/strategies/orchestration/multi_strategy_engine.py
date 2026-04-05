@@ -234,6 +234,12 @@ class MultiStrategyEngine:
             bridge.risk_gate.config.min_position_value = size_profile.min_position_value
             bridge.risk_gate.config.total_capital = size_profile.total_capital
             bridge.risk_gate.config.cash_reserve_pct = size_profile.cash_reserve_pct
+            # Wire short/options eligibility from size profile
+            if size_profile.short_eligible:
+                bridge.risk_gate.config.long_only = False
+                bridge.risk_gate.config.earnings_blackout_days = 5
+                bridge.risk_gate.config.max_borrow_cost_pct = 0.05
+                bridge.risk_gate.config.max_margin_utilization_pct = 0.70
         bridge.risk_gate.reset_daily(trading_date)
         bridge.risk_gate.update_high_water_mark()
 
