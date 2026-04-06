@@ -341,6 +341,24 @@ class CohortOrchestrator:
         if "error" not in factors:
             enrichment["factors"] = factors.get("factors", {})
 
+        # Fetch commodity futures curves for commodity signals
+        from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
+        commodity_tickers = [t for t in tickers if t in ETF_TO_FUTURES_UNDERLYING]
+        if commodity_tickers:
+            curves = {}
+            for ticker in commodity_tickers:
+                underlying = ETF_TO_FUTURES_UNDERLYING.get(ticker)
+                if underlying is None:
+                    continue
+                result = openbb_source.fetch({
+                    "method": "commodity_futures_curve",
+                    "symbol": underlying,
+                })
+                if "error" not in result:
+                    curves[underlying] = result
+            if curves:
+                enrichment["commodity_futures_curves"] = curves
+
         return enrichment
 
     def run_learning(self) -> dict[str, Any]:
