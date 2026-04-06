@@ -189,7 +189,7 @@ class PortfolioCommittee:
             # Confidence: based on strategy count, consensus, and regime
             confidence = min(1.0, consensus_score * (1.0 if regime_alignment == "aligned"
                                                       else 0.7 if regime_alignment == "neutral"
-                                                      else 0.4))
+                                                      else 0.6))
 
             # Size: proportional to confidence, capped
             position_size = min(confidence * self._max_position, self._max_position)

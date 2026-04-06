@@ -177,13 +177,13 @@ class TestMinPositionValue:
         from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
         assert SIZE_PROFILES["100k"].min_position_value == 2_000.0
 
-    def test_5k_unchanged(self):
+    def test_5k_low_min(self):
         from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
-        assert SIZE_PROFILES["5k"].min_position_value == 500.0
+        assert SIZE_PROFILES["5k"].min_position_value == 100.0
 
-    def test_10k_unchanged(self):
+    def test_10k_low_min(self):
         from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
-        assert SIZE_PROFILES["10k"].min_position_value == 1_000.0
+        assert SIZE_PROFILES["10k"].min_position_value == 250.0
 
 
 # ---------------------------------------------------------------------------

@@ -290,25 +290,25 @@ class TestIntegrationShortPipeline:
         assert profile_100k.max_correlated_shorts > profile_50k.max_correlated_shorts
 
     def test_short_trade_rejected_when_position_too_small(self):
-        """Short position below min_position_value should be rejected by risk gate."""
+        """Short position rejected when floor exceeds max_position_pct cap."""
         config = {
             "execution": {"mode": "paper"},
             "autoresearch": {
                 "total_capital": 50_000,
                 "risk_gate": {
                     "long_only": False,
-                    "min_position_value": 2_500,
+                    "min_position_value": 10_000,
+                    "max_position_pct": 0.01,  # $500 cap, below $10k floor
                 },
             },
         }
         bridge = ExecutionBridge(config)
 
-        # Very small position_size_pct so value < min_position_value
+        # Floor ($10k) exceeds max_position cap ($500), so trade is rejected
         result = bridge.execute_recommendation(
             ticker="AAPL", direction="short", position_size_pct=0.001,
             confidence=0.80, strategy="litigation", current_price=150.0,
         )
-        # Should be None because position is too small
         assert result is None
 
     def test_multi_signal_short_aggregation(self):

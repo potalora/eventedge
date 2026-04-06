@@ -978,8 +978,10 @@ class TestRiskGateNoWeights:
         from tradingagents.execution.paper_broker import PaperBroker
 
         broker = PaperBroker(initial_capital=5000.0)
-        gate = RiskGate(RiskGateConfig(), broker)
-        # 1% of $5000 = $50, but at $60/share = 0 shares (can't afford 1 share above min)
+        config = RiskGateConfig(min_position_value=1000.0, max_position_pct=0.01)
+        gate = RiskGate(config, broker)
+        # 1% of $5000 = $50. Floor wants $1000 but max_position_pct cap = $50.
+        # Floor exceeds cap → rejected.
         shares = gate.compute_position_size(0.01, 60.0)
         assert shares == 0
 

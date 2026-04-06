@@ -250,9 +250,14 @@ class RiskGate:
         # Convert to whole shares
         shares = int(allocation / current_price)
 
-        # Check minimum position value
+        # Floor: if committee approved the signal but sizing fell below
+        # min_position_value, bump up to the minimum instead of dropping.
         if shares * current_price < self.config.min_position_value:
-            return 0
+            min_shares = math.ceil(self.config.min_position_value / current_price)
+            if min_shares * current_price <= min(max_value, account.buying_power):
+                shares = min_shares
+            else:
+                return 0
 
         return shares
 
