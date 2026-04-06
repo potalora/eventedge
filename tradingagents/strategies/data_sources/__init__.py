@@ -16,6 +16,7 @@ from tradingagents.strategies.data_sources.courtlistener_source import CourtList
 from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
 from tradingagents.strategies.data_sources.usda_source import USDASource
 from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
+from tradingagents.strategies.data_sources.cftc_source import CFTCSource
 
 __all__ = [
     "DataSource",
@@ -32,4 +33,5 @@ __all__ = [
     "OpenBBSource",
     "USDASource",
     "DroughtMonitorSource",
+    "CFTCSource",
 ]

@@ -136,4 +136,12 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     except ImportError:
         logger.info("openbb not installed — OpenBBSource skipped")
 
+    # CFTC COT data (optional — graceful skip if cot_reports not installed)
+    try:
+        from tradingagents.strategies.data_sources.cftc_source import CFTCSource
+
+        registry.register(CFTCSource())
+    except ImportError:
+        logger.info("cot_reports not installed — CFTCSource skipped")
+
     return registry
