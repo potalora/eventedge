@@ -736,6 +736,8 @@ class MultiStrategyEngine:
             api_fetches["edgar"] = (self._fetch_edgar_events, ())
         if "usaspending" in needed_sources and "usaspending" in available:
             api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
+        if "cftc" in needed_sources and "cftc" in available:
+            api_fetches["cftc"] = (self._fetch_cftc_data, ())
 
         if api_fetches:
             with ThreadPoolExecutor(max_workers=4) as pool:
@@ -1004,6 +1006,18 @@ class MultiStrategyEngine:
         except Exception:
             logger.error("Failed to fetch Drought Monitor data", exc_info=True)
             return {}
+
+    def _fetch_cftc_data(self) -> dict[str, Any]:
+        """Fetch CFTC COT positioning data for commodity strategy."""
+        source = self.registry.get("cftc")
+        if source is None:
+            return {}
+
+        return source.fetch({
+            "method": "cot_positioning",
+            "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
+            "lookback_weeks": 52,
+        })
 
     def _fetch_yfinance_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch all yfinance data needed by strategies."""
