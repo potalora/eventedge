@@ -94,7 +94,7 @@ class GovtContractsStrategy:
 
         if contracts:
             for contract in contracts:
-                recipient = (contract.get("recipient", "") or "").lower()
+                recipient = (contract.get("recipient_name", "") or contract.get("recipient", "") or "").lower()
                 amount = contract.get("amount", 0) or 0
 
                 # Resolve recipient to ticker
