@@ -91,6 +91,16 @@ in agricultural instruments. Consider:
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"neutral"), score (0.0-1.0), reasoning (1-2 sentences).
 Keep ALL string values under 100 characters.""",
+    "commodity_macro": """You are analyzing commodity positioning and macro data
+for a non-agricultural commodity trade signal.
+Assess whether CFTC COT positioning extremes, macro regime, and catalysts
+support the proposed direction. Consider:
+1. Is speculative positioning truly extreme, or could it extend further?
+2. Does the macro regime (real rates, CPI, VIX) support or contradict?
+3. Are there regulatory or supply chain catalysts that could accelerate the move?
+Return ONLY compact JSON. No explanation outside JSON.
+Keys: direction ("long"/"short"/"neutral"), score (0.0-1.0), reasoning (1-2 sentences).
+Keep ALL string values under 100 characters.""",
 }
 
 
