@@ -225,6 +225,19 @@ class PortfolioCommittee:
 
         recommendations = self._enforce_sector_limits(recommendations)
 
+        # Enforce commodity allocation cap
+        if self._size_profile and getattr(self._size_profile, 'commodity_eligible', False):
+            from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
+            max_commodity = getattr(self._size_profile, 'max_commodity_allocation_pct', 0.10)
+            commodity_alloc = sum(
+                r.position_size_pct for r in recommendations if r.ticker in COMMODITY_ETFS
+            )
+            if commodity_alloc > max_commodity and commodity_alloc > 0:
+                scale = max_commodity / commodity_alloc
+                for r in recommendations:
+                    if r.ticker in COMMODITY_ETFS:
+                        r.position_size_pct *= scale
+
         # Cap short exposure
         if self._size_profile and getattr(self._size_profile, 'max_short_exposure_pct', 0) > 0:
             short_recs = [r for r in recommendations if r.direction == "short"]
@@ -239,18 +252,24 @@ class PortfolioCommittee:
 
         return recommendations
 
-    def _assess_regime_alignment(self, direction: str, regime_context: dict) -> str:
+    def _assess_regime_alignment(self, direction: str, regime_context: dict, ticker: str = "") -> str:
         """Assess whether a trade direction aligns with current regime.
 
         - Crisis regime + long equity = misaligned
         - Crisis regime + short/defensive = aligned
+        - Crisis regime + long GLD/SLV = aligned (safe haven)
         - Normal regime = neutral for all
         - Benign regime + long equity = aligned
         """
         overall = regime_context.get("overall_regime", "normal")
 
         if overall in ("crisis", "stressed"):
-            return "aligned" if direction == "short" else "misaligned"
+            if direction == "short":
+                return "aligned"
+            # Safe-haven commodities are aligned long in crisis
+            if ticker in ("GLD", "SLV") and direction == "long":
+                return "aligned"
+            return "misaligned"
         elif overall == "benign":
             return "aligned" if direction == "long" else "misaligned"
         return "neutral"
@@ -353,6 +372,18 @@ class PortfolioCommittee:
             enrichment_str += "\nShort interest:\n" + "\n".join(si_lines)
         if factors:
             enrichment_str += f"\nFama-French factors: {json.dumps(factors, default=str)}"
+
+        # Commodity context (if commodity signals present)
+        from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
+        commodity_tickers = [s for s in signals if s.get("ticker", "") in COMMODITY_ETFS]
+        if commodity_tickers:
+            commodity_lines = []
+            for s in commodity_tickers:
+                meta = s.get("metadata", {})
+                ticker = s.get("ticker", "?")
+                pctl = meta.get("cot_percentile", "N/A")
+                commodity_lines.append(f"  {ticker}: COT speculative percentile={pctl}")
+            enrichment_str += "\nCommodity context:\n" + "\n".join(commodity_lines)
 
         return f"""Capital: ${total_capital:,.0f}
 Max position: {self._max_position:.0%}
@@ -467,6 +498,10 @@ Synthesize into ranked trade list. Return JSON array."""
             ticker = p.get("ticker", "?")
             iv = iv_data.get(ticker, {})
             earnings_days = earnings_dates.get(ticker, "unknown")
+            # Commodity ETFs have no earnings risk
+            from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
+            if ticker in COMMODITY_ETFS:
+                earnings_days = 999
             pos_lines.append(
                 f"  {ticker}: entry=${p.get('entry_price', 0):.0f}, "
                 f"shares={p.get('shares', 0)}, "
