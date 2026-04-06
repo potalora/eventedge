@@ -80,12 +80,18 @@ class CommodityMacroStrategy:
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
+        if not hp.get("commodity_eligible", False):
+            eligible = []
+        else:
+            eligible = hp.get("commodity_instruments_override", list(COMMODITY_ETFS))
         return {
             "cot_extreme_pct": 85,
             "cot_lookback_weeks": 52,
             "hold_days": hp["hold_days_default"],
             "macro_veto_enabled": True,
             "catalyst_boost": 0.15,
+            "eligible_instruments": eligible,
+            "commodity_eligible": hp.get("commodity_eligible", False),
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:

@@ -132,21 +132,18 @@ HORIZON_PARAMS: dict[str, dict] = {
         "hold_days_range": (60, 120),
         "signal_decay_window": (15, 30),
         "commodity_eligible": True,
-        "commodity_signal_decay_window": (7, 21),
     },
     "6m": {
         "hold_days_default": 180,
         "hold_days_range": (120, 210),
         "signal_decay_window": (30, 60),
         "commodity_eligible": True,
-        "commodity_signal_decay_window": (14, 45),
     },
     "1y": {
         "hold_days_default": 300,
         "hold_days_range": (250, 365),
         "signal_decay_window": (60, 120),
         "commodity_eligible": True,
-        "commodity_signal_decay_window": (30, 90),
         "commodity_instruments_override": ["GLD", "SLV"],
     },
 }

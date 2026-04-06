@@ -183,7 +183,7 @@ class PortfolioCommittee:
 
             # Regime alignment
             regime_alignment = self._assess_regime_alignment(
-                direction, regime_context,
+                direction, regime_context, ticker=ticker,
             )
 
             # Confidence: based on strategy count, consensus, and regime

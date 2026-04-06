@@ -182,18 +182,40 @@ class TestCommodityMacroStrategy:
             "finnhub": {},
         }
         params_30d = strategy.get_default_params("30d")
-        params_30d["commodity_eligible"] = False
-        params_30d["eligible_instruments"] = []
         assert strategy.screen(data, "2026-04-01", params_30d) == []
 
         params_3m = strategy.get_default_params("3m")
-        params_3m["eligible_instruments"] = ["GLD", "SLV", "PDBC"]
         assert len(strategy.screen(data, "2026-04-01", params_3m)) > 0
 
         params_1y = strategy.get_default_params("1y")
-        params_1y["eligible_instruments"] = ["GLD", "SLV"]
         for c in strategy.screen(data, "2026-04-01", params_1y):
             assert c.ticker in ("GLD", "SLV")
+
+    def test_default_params_include_eligible_instruments(self):
+        """get_default_params populates eligible_instruments from horizon config."""
+        from tradingagents.strategies.modules.commodity_macro import CommodityMacroStrategy, COMMODITY_ETFS
+        strategy = CommodityMacroStrategy()
+        params_30d = strategy.get_default_params("30d")
+        assert params_30d["eligible_instruments"] == []
+        params_3m = strategy.get_default_params("3m")
+        assert len(params_3m["eligible_instruments"]) > 0
+        assert set(params_3m["eligible_instruments"]) == COMMODITY_ETFS
+        params_1y = strategy.get_default_params("1y")
+        assert set(params_1y["eligible_instruments"]) == {"GLD", "SLV"}
+
+    def test_screen_works_with_default_params(self):
+        """screen() produces candidates using only get_default_params (no manual injection)."""
+        from tradingagents.strategies.modules.commodity_macro import CommodityMacroStrategy
+        strategy = CommodityMacroStrategy()
+        data = {
+            "cftc": self._make_cot_data(gold_pctl=0.90, gold_dir="short"),
+            "fred": self._make_fred_data(),
+            "regulations": {},
+            "finnhub": {},
+        }
+        params = strategy.get_default_params("3m")
+        candidates = strategy.screen(data, "2026-04-01", params)
+        assert len(candidates) > 0, "screen() should produce candidates with default params"
 
     def test_futures_to_etf_map(self):
         """All map entries resolve, no dangling keys."""
