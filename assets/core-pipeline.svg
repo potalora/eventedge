@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 520" font-family="'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="100%" style="stop-color:#161b22"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="800" height="520" rx="12" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="400" y="36" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="bold">Core Pipeline</text>
+  <text x="400" y="54" text-anchor="middle" fill="#7d8590" font-size="11">ticker + date in, trade decision out</text>
+
+  <!-- Analyst boxes -->
+  <g transform="translate(40, 80)">
+    <rect width="130" height="36" rx="6" fill="#1a2332" stroke="#2f81f7" stroke-width="1.5"/>
+    <text x="65" y="22" text-anchor="middle" fill="#79c0ff" font-size="11">Fundamentals</text>
+  </g>
+  <g transform="translate(40, 128)">
+    <rect width="130" height="36" rx="6" fill="#1a2332" stroke="#2f81f7" stroke-width="1.5"/>
+    <text x="65" y="22" text-anchor="middle" fill="#79c0ff" font-size="11">Sentiment</text>
+  </g>
+  <g transform="translate(40, 176)">
+    <rect width="130" height="36" rx="6" fill="#1a2332" stroke="#2f81f7" stroke-width="1.5"/>
+    <text x="65" y="22" text-anchor="middle" fill="#79c0ff" font-size="11">News</text>
+  </g>
+  <g transform="translate(40, 224)">
+    <rect width="130" height="36" rx="6" fill="#1a2332" stroke="#2f81f7" stroke-width="1.5"/>
+    <text x="65" y="22" text-anchor="middle" fill="#79c0ff" font-size="11">Technical</text>
+  </g>
+  <g transform="translate(40, 272)">
+    <rect width="130" height="36" rx="6" fill="#1a2332" stroke="#2f81f7" stroke-width="1.5"/>
+    <text x="65" y="22" text-anchor="middle" fill="#79c0ff" font-size="11">Options</text>
+  </g>
+
+  <!-- Label -->
+  <text x="105" y="330" text-anchor="middle" fill="#7d8590" font-size="10">5 analyst agents</text>
+
+  <!-- Arrows from analysts to merge point -->
+  <line x1="170" y1="98" x2="240" y2="190" stroke="#2f81f7" stroke-width="1" opacity="0.6"/>
+  <line x1="170" y1="146" x2="240" y2="190" stroke="#2f81f7" stroke-width="1" opacity="0.6"/>
+  <line x1="170" y1="194" x2="240" y2="194" stroke="#2f81f7" stroke-width="1" opacity="0.6"/>
+  <line x1="170" y1="242" x2="240" y2="194" stroke="#2f81f7" stroke-width="1" opacity="0.6"/>
+  <line x1="170" y1="290" x2="240" y2="198" stroke="#2f81f7" stroke-width="1" opacity="0.6"/>
+
+  <!-- Researcher boxes -->
+  <g transform="translate(250, 140)">
+    <rect width="120" height="36" rx="6" fill="#1a2332" stroke="#3fb950" stroke-width="1.5"/>
+    <text x="60" y="22" text-anchor="middle" fill="#7ee787" font-size="11">Bull Researcher</text>
+  </g>
+  <g transform="translate(250, 220)">
+    <rect width="120" height="36" rx="6" fill="#1a2332" stroke="#f85149" stroke-width="1.5"/>
+    <text x="60" y="22" text-anchor="middle" fill="#ff7b72" font-size="11">Bear Researcher</text>
+  </g>
+
+  <!-- Debate arrows -->
+  <path d="M 380 165 C 400 165, 400 240, 380 240" stroke="#7d8590" stroke-width="1" fill="none" stroke-dasharray="4,3"/>
+  <path d="M 376 240 C 396 240, 396 165, 376 165" stroke="#7d8590" stroke-width="1" fill="none" stroke-dasharray="4,3"/>
+  <text x="405" y="206" fill="#7d8590" font-size="9" font-style="italic">debate</text>
+
+  <!-- Arrow to trader -->
+  <line x1="370" y1="160" x2="470" y2="190" stroke="#3fb950" stroke-width="1" opacity="0.6"/>
+  <line x1="370" y1="238" x2="470" y2="198" stroke="#f85149" stroke-width="1" opacity="0.6"/>
+
+  <!-- Trader -->
+  <g transform="translate(480, 176)">
+    <rect width="110" height="36" rx="6" fill="#1a2332" stroke="#d2a8ff" stroke-width="1.5"/>
+    <text x="55" y="22" text-anchor="middle" fill="#d2a8ff" font-size="11">Trader</text>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="535" y1="212" x2="535" y2="260" stroke="#d2a8ff" stroke-width="1" opacity="0.6"/>
+  <polygon points="535,265 530,258 540,258" fill="#d2a8ff" opacity="0.6"/>
+
+  <!-- Risk Manager -->
+  <g transform="translate(480, 270)">
+    <rect width="110" height="36" rx="6" fill="#1a2332" stroke="#f0883e" stroke-width="1.5"/>
+    <text x="55" y="22" text-anchor="middle" fill="#f0883e" font-size="11">Risk Manager</text>
+  </g>
+
+  <!-- Arrow down -->
+  <line x1="535" y1="306" x2="535" y2="348" stroke="#f0883e" stroke-width="1" opacity="0.6"/>
+  <polygon points="535,353 530,346 540,346" fill="#f0883e" opacity="0.6"/>
+
+  <!-- Portfolio Manager -->
+  <g transform="translate(470, 358)">
+    <rect width="130" height="36" rx="6" fill="#1a2332" stroke="#f0883e" stroke-width="1.5"/>
+    <text x="65" y="22" text-anchor="middle" fill="#f0883e" font-size="11">Portfolio Mgr</text>
+  </g>
+
+  <!-- Arrow down to decision -->
+  <line x1="535" y1="394" x2="535" y2="430" stroke="#f0883e" stroke-width="1" opacity="0.6"/>
+  <polygon points="535,435 530,428 540,428" fill="#f0883e" opacity="0.6"/>
+
+  <!-- Decision -->
+  <g transform="translate(470, 440)">
+    <rect width="130" height="40" rx="8" fill="#1f2a1f" stroke="#3fb950" stroke-width="2"/>
+    <text x="65" y="16" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold">BUY / HOLD</text>
+    <text x="65" y="32" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold">/ SELL</text>
+  </g>
+
+  <!-- Data sources label -->
+  <g transform="translate(620, 80)">
+    <rect width="150" height="220" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+    <text x="75" y="22" text-anchor="middle" fill="#7d8590" font-size="10" font-weight="bold">DATA SOURCES</text>
+    <line x1="15" y1="32" x2="135" y2="32" stroke="#30363d" stroke-width="1"/>
+    <text x="75" y="52" text-anchor="middle" fill="#8b949e" font-size="10">yfinance</text>
+    <text x="75" y="72" text-anchor="middle" fill="#8b949e" font-size="10">Alpha Vantage</text>
+    <text x="75" y="92" text-anchor="middle" fill="#8b949e" font-size="10">Finnhub</text>
+    <text x="75" y="112" text-anchor="middle" fill="#8b949e" font-size="10">SEC EDGAR</text>
+    <text x="75" y="132" text-anchor="middle" fill="#8b949e" font-size="10">OpenBB</text>
+    <text x="75" y="152" text-anchor="middle" fill="#8b949e" font-size="10">Reddit / News</text>
+    <text x="75" y="178" text-anchor="middle" fill="#484f58" font-size="9">prices, filings,</text>
+    <text x="75" y="192" text-anchor="middle" fill="#484f58" font-size="9">sentiment, options,</text>
+    <text x="75" y="206" text-anchor="middle" fill="#484f58" font-size="9">fundamentals</text>
+  </g>
+
+  <!-- Dashed arrow from data to analysts -->
+  <line x1="620" y1="190" x2="175" y2="190" stroke="#30363d" stroke-width="1" stroke-dasharray="6,4" opacity="0.4"/>
+</svg>

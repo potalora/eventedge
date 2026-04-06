@@ -8,10 +8,14 @@ There are two main pieces:
 
 **The core pipeline** simulates a small trading firm. Six AI agents — a fundamentals analyst, sentiment analyst, news analyst, technical analyst, options analyst, and a pair of bull/bear researchers — each look at a stock from their angle. They debate, then a trader agent makes a call. A risk manager and portfolio manager review it before anything happens. You give it a ticker and a date, it gives you a buy/hold/sell decision with reasoning.
 
+<p align="center">
+  <img src="assets/core-pipeline.svg" style="width: 100%; height: auto;">
+</p>
+
 **The autoresearch system** is the bigger experiment. It runs 10 event-driven strategies every day across 16 paper portfolios (4 time horizons × 4 portfolio sizes), tracks what works, and learns from the results. Each strategy looks at a specific kind of market signal — not price charts, but things like SEC filings, insider trades, and congressional trading disclosures. A portfolio committee (also LLM-powered) synthesizes the signals and sizes positions.
 
 <p align="center">
-  <img src="assets/schema.png" style="width: 100%; height: auto;">
+  <img src="assets/autoresearch.svg" style="width: 100%; height: auto;">
 </p>
 
 ## The 10 strategies
@@ -34,6 +38,10 @@ Data comes from about a dozen sources: yfinance, Finnhub, SEC EDGAR, OpenBB, FRE
 ## How it runs
 
 Daily cron job on a MacBook Air (16GB M4). The generation management system lets me A/B test different code versions in parallel using git worktrees — each generation gets its own frozen copy of the code and independent state. LLM costs run about $0.03/day per generation using Claude Sonnet and Haiku.
+
+<p align="center">
+  <img src="assets/daily-cycle.svg" style="width: 100%; height: auto;">
+</p>
 
 The 16 portfolios vary in size ($5k to $100k) and time horizon (30 days to 1 year). Bigger portfolios unlock more instruments: $10k+ can write covered calls, $50k+ can short stocks with margin and borrow cost gates.
 
