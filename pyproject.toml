@@ -50,6 +50,9 @@ openbb = [
     "openbb-finra",
     "openbb-famafrench",
 ]
+commodities = [
+    "cot_reports",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
