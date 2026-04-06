@@ -13,14 +13,20 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Column names in the cot_reports library output (disaggregated report)
+COL_MARKET = "Market_and_Exchange_Names"
+COL_DATE = "Report_Date_as_YYYY-MM-DD"
+COL_MM_LONG = "M_Money_Positions_Long_All"
+COL_MM_SHORT = "M_Money_Positions_Short_All"
+
 # Contract name strings from CFTC disaggregated reports.
 # Validated against live data in test_commodity_macro_live.py.
 COMMODITY_CODES = {
-    "gold": "GOLD - COMEX",
-    "silver": "SILVER - COMEX",
-    "crude_oil": "CRUDE OIL, LIGHT SWEET - NEW YORK MERCANTILE EXCHANGE",
-    "nat_gas": "NATURAL GAS - NEW YORK MERCANTILE EXCHANGE",
-    "copper": "COPPER-GRADE #1 - COMEX",
+    "gold": "GOLD - COMMODITY EXCHANGE INC.",
+    "silver": "SILVER - COMMODITY EXCHANGE INC.",
+    "crude_oil": "WTI-PHYSICAL - NEW YORK MERCANTILE EXCHANGE",
+    "nat_gas": "HENRY HUB - NEW YORK MERCANTILE EXCHANGE",
+    "copper": "COPPER- #1 - COMMODITY EXCHANGE INC.",
 }
 
 
@@ -63,18 +69,19 @@ class CFTCSource:
 
         import cot_reports as cot
 
-        report_funcs = {
-            "legacy_futures": cot.cot_year,
-            "disaggregated_futures": cot.cot_year,
-            "traders_in_financial_futures": cot.cot_year,
+        # Map our friendly names to cot_reports library's expected strings
+        cot_type_map = {
+            "legacy_futures": "legacy_fut",
+            "disaggregated_futures": "disaggregated_fut",
+            "traders_in_financial_futures": "traders_in_financial_futures_fut",
         }
-        func = report_funcs.get(report_type)
-        if func is None:
+        cot_type = cot_type_map.get(report_type)
+        if cot_type is None:
             raise ValueError(f"Unknown report type: {report_type}")
 
         from datetime import datetime
         year = datetime.now().year
-        df = func(year, cot_report_type=report_type)
+        df = cot.cot_year(year, cot_report_type=cot_type)
 
         self._cache[report_type] = df
         return df
@@ -97,16 +104,14 @@ class CFTCSource:
                 logger.warning("Unknown commodity: %s", commodity)
                 continue
 
-            mask = df["Market and Exchange Names"].str.contains(code, na=False)
+            mask = df[COL_MARKET].str.contains(code, na=False)
             commodity_df = df[mask].copy()
 
             if commodity_df.empty:
                 logger.warning("No COT data for %s (%s)", commodity, code)
                 continue
 
-            commodity_df["date"] = pd.to_datetime(
-                commodity_df["As of Date in Form YYYY-MM-DD"]
-            )
+            commodity_df["date"] = pd.to_datetime(commodity_df[COL_DATE])
             commodity_df = commodity_df.sort_values("date")
             commodity_df = commodity_df.tail(lookback_weeks)
 
@@ -115,8 +120,8 @@ class CFTCSource:
                 continue
 
             commodity_df["net_spec"] = (
-                commodity_df["M_Money_Positions_Long_All"].astype(float)
-                - commodity_df["M_Money_Positions_Short_All"].astype(float)
+                commodity_df[COL_MM_LONG].astype(float)
+                - commodity_df[COL_MM_SHORT].astype(float)
             )
 
             latest = commodity_df.iloc[-1]

@@ -57,6 +57,11 @@ commodities = [
 [project.scripts]
 tradingagents = "cli.main:app"
 
+[tool.pytest.ini_options]
+markers = [
+    "live: marks tests that hit real APIs (deselect with '-m \"not live\"')",
+]
+
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]
 

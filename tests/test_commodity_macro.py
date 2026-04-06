@@ -25,13 +25,17 @@ class TestCFTCSource:
         gold_longs = np.linspace(100_000, 200_000, n_weeks)
         gold_shorts = np.full(n_weeks, 50_000)
 
+        from tradingagents.strategies.data_sources.cftc_source import (
+            COL_MARKET, COL_DATE, COL_MM_LONG, COL_MM_SHORT, COMMODITY_CODES,
+        )
+
         rows = []
         for i in range(n_weeks):
             rows.append({
-                "Market and Exchange Names": "GOLD - COMEX",
-                "As of Date in Form YYYY-MM-DD": dates[i].strftime("%Y-%m-%d"),
-                "M_Money_Positions_Long_All": gold_longs[i],
-                "M_Money_Positions_Short_All": gold_shorts[i],
+                COL_MARKET: COMMODITY_CODES["gold"],
+                COL_DATE: dates[i].strftime("%Y-%m-%d"),
+                COL_MM_LONG: gold_longs[i],
+                COL_MM_SHORT: gold_shorts[i],
             })
 
         mock_df = pd.DataFrame(rows)
@@ -225,3 +229,74 @@ class TestCommodityMacroStrategy:
         should_exit, reason = strategy.check_exit("GLD", 200.0, 210.0, 10, params, data)
         assert should_exit is True
         assert reason == "cot_normalized"
+
+
+class TestFREDCommoditySeries:
+    """Test that FRED commodity series are registered."""
+
+    def test_commodity_series_in_map(self):
+        from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
+
+        assert "wti_spot" in SERIES_MAP
+        assert SERIES_MAP["wti_spot"] == "DCOILWTICO"
+        assert "gold_spot" in SERIES_MAP
+        assert SERIES_MAP["gold_spot"] == "GOLDAMGBD228NLBM"
+        assert "copper_spot" in SERIES_MAP
+        assert SERIES_MAP["copper_spot"] == "PCOPPUSDM"
+
+
+class TestCohortIntegration:
+    """Integration tests for commodity cohort configuration."""
+
+    def test_30d_cohort_excludes_commodities(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS["30d"]
+        assert hp.get("commodity_eligible") is False
+
+    def test_5k_cohort_excludes_commodities(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+        profile = SIZE_PROFILES["5k"]
+        assert profile.commodity_eligible is False
+        assert profile.commodity_instruments == []
+
+    def test_10k_commodity_eligible(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+        profile = SIZE_PROFILES["10k"]
+        assert profile.commodity_eligible is True
+        assert profile.max_commodity_allocation_pct == 0.10
+        assert "GLD" in profile.commodity_instruments
+        assert "SLV" in profile.commodity_instruments
+
+    def test_1y_horizon_narrows_instruments(self):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        hp = HORIZON_PARAMS["1y"]
+        assert hp.get("commodity_eligible") is True
+        assert hp.get("commodity_instruments_override") == ["GLD", "SLV"]
+
+
+class TestPortfolioCommittee:
+    """Tests for portfolio committee commodity awareness."""
+
+    def test_commodity_regime_alignment_crisis_gld(self):
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+        committee = PortfolioCommittee()
+        result = committee._assess_regime_alignment("long", {"overall_regime": "crisis"}, ticker="GLD")
+        assert result == "aligned"
+
+    def test_commodity_regime_alignment_crisis_xle(self):
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+        committee = PortfolioCommittee()
+        result = committee._assess_regime_alignment("long", {"overall_regime": "crisis"}, ticker="XLE")
+        assert result == "misaligned"
+
+    def test_commodity_regime_alignment_stressed_slv(self):
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+        committee = PortfolioCommittee()
+        result = committee._assess_regime_alignment("long", {"overall_regime": "stressed"}, ticker="SLV")
+        assert result == "aligned"
+
+    def test_regime_alignment_backward_compatible(self):
+        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+        committee = PortfolioCommittee()
+        result = committee._assess_regime_alignment("short", {"overall_regime": "crisis"})
+        assert result == "aligned"
