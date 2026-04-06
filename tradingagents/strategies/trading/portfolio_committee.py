@@ -183,7 +183,7 @@ class PortfolioCommittee:
 
             # Regime alignment
             regime_alignment = self._assess_regime_alignment(
-                direction, regime_context,
+                direction, regime_context, ticker,
             )
 
             # Confidence: based on strategy count, consensus, and regime
@@ -225,6 +225,19 @@ class PortfolioCommittee:
 
         recommendations = self._enforce_sector_limits(recommendations)
 
+        # Enforce commodity allocation cap
+        if self._size_profile and getattr(self._size_profile, 'commodity_eligible', False):
+            from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
+            max_commodity = getattr(self._size_profile, 'max_commodity_allocation_pct', 0.10)
+            commodity_alloc = sum(
+                r.position_size_pct for r in recommendations if r.ticker in COMMODITY_ETFS
+            )
+            if commodity_alloc > max_commodity and commodity_alloc > 0:
+                scale = max_commodity / commodity_alloc
+                for r in recommendations:
+                    if r.ticker in COMMODITY_ETFS:
+                        r.position_size_pct *= scale
+
         # Cap short exposure
         if self._size_profile and getattr(self._size_profile, 'max_short_exposure_pct', 0) > 0:
             short_recs = [r for r in recommendations if r.direction == "short"]
@@ -239,18 +252,24 @@ class PortfolioCommittee:
 
         return recommendations
 
-    def _assess_regime_alignment(self, direction: str, regime_context: dict) -> str:
+    def _assess_regime_alignment(self, direction: str, regime_context: dict, ticker: str = "") -> str:
         """Assess whether a trade direction aligns with current regime.
 
         - Crisis regime + long equity = misaligned
         - Crisis regime + short/defensive = aligned
         - Normal regime = neutral for all
         - Benign regime + long equity = aligned
+        - Crisis regime + long safe-haven commodities (GLD, SLV) = aligned
         """
         overall = regime_context.get("overall_regime", "normal")
 
         if overall in ("crisis", "stressed"):
-            return "aligned" if direction == "short" else "misaligned"
+            if direction == "short":
+                return "aligned"
+            # Safe-haven commodities are aligned long in crisis
+            if ticker in ("GLD", "SLV") and direction == "long":
+                return "aligned"
+            return "misaligned"
         elif overall == "benign":
             return "aligned" if direction == "long" else "misaligned"
         return "neutral"
