@@ -1,0 +1,16 @@
+EventEdge
+Copyright 2025 TauricResearch (original work)
+Copyright 2026 Pedro Otalora (derivative work)
+
+This product includes software developed by TauricResearch
+(https://github.com/TauricResearch/TradingAgents), licensed under
+the Apache License, Version 2.0.
+
+The original TauricResearch code (core pipeline architecture, LangGraph
+agents, data vendor interface) remains under the Apache License 2.0.
+See LICENSE-APACHE for the full text.
+
+All other code — including the autoresearch system, event-driven
+strategies, portfolio committee, generation management, cohort
+orchestration, and paper trading infrastructure — is proprietary.
+See LICENSE for terms.

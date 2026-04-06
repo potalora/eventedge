@@ -1,0 +1,331 @@
+"""Risk gate: hard portfolio controls between signal generation and execution.
+
+Every trade must pass ALL gates or it's rejected. This is the safety layer
+that prevents unbounded losses on a $5K portfolio.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_BORROW_TIERS = [(5, 0.005), (15, 0.02), (30, 0.05)]
+
+
+def _estimate_borrow_cost(si_pct: float) -> float:
+    """Estimate annualised borrow cost from short-interest percentage.
+
+    Args:
+        si_pct: Short interest as % of float (e.g. 25.0 = 25%).
+
+    Returns:
+        Annualised borrow cost fraction (e.g. 0.05 = 5%).
+    """
+    for threshold, cost in _BORROW_TIERS:
+        if si_pct < threshold:
+            return cost
+    return 0.10
+
+
+@dataclass
+class RiskGateConfig:
+    """Portfolio risk parameters."""
+    total_capital: float = 5000.0
+    max_positions: int = 8
+    max_position_pct: float = 0.15          # Max 15% in one position ($750)
+    min_position_value: float = 100.0       # Don't open micro-positions
+    daily_loss_limit_pct: float = 0.03      # 3% daily = $150
+    max_drawdown_pct: float = 0.15          # 15% max DD = $750
+    per_strategy_max: int = 3               # Max 3 positions per strategy
+    global_stop_loss_pct: float = 0.08      # 8% stop per position
+    long_only: bool = True                  # $5K accounts can't short easily
+    cash_reserve_pct: float = 0.0           # Min cash as % of portfolio (0 = disabled)
+    # Short-specific gates (0 = disabled)
+    earnings_blackout_days: int = 0         # Block shorts within N days of earnings
+    max_borrow_cost_pct: float = 0.0        # Max annualised borrow cost (0 = disabled)
+    max_margin_utilization_pct: float = 0.0 # Max margin as % of total capital (0 = disabled)
+    short_squeeze_stop_pct: float = 0.15    # Stop-loss % for short squeeze protection
+    short_squeeze_window_days: int = 5      # Days to look back for squeeze detection
+    premium_decay_floor_pct: float = 0.20   # Options premium decay floor
+
+    @classmethod
+    def from_dict(cls, config: dict) -> RiskGateConfig:
+        """Build from nested config dict (reads autoresearch.risk_gate section)."""
+        rg = config.get("autoresearch", {}).get("risk_gate", {})
+        total_capital = config.get("autoresearch", {}).get("total_capital", 5000.0)
+        return cls(
+            total_capital=total_capital,
+            max_positions=rg.get("max_positions", 8),
+            max_position_pct=rg.get("max_position_pct", 0.15),
+            min_position_value=rg.get("min_position_value", 100.0),
+            daily_loss_limit_pct=rg.get("daily_loss_limit_pct", 0.03),
+            max_drawdown_pct=rg.get("max_drawdown_pct", 0.15),
+            per_strategy_max=rg.get("per_strategy_max", 3),
+            global_stop_loss_pct=rg.get("global_stop_loss_pct", 0.08),
+            long_only=rg.get("long_only", True),
+            cash_reserve_pct=rg.get("cash_reserve_pct", 0.0),
+            earnings_blackout_days=rg.get("earnings_blackout_days", 0),
+            max_borrow_cost_pct=rg.get("max_borrow_cost_pct", 0.0),
+            max_margin_utilization_pct=rg.get("max_margin_utilization_pct", 0.0),
+            short_squeeze_stop_pct=rg.get("short_squeeze_stop_pct", 0.15),
+            short_squeeze_window_days=rg.get("short_squeeze_window_days", 5),
+            premium_decay_floor_pct=rg.get("premium_decay_floor_pct", 0.20),
+        )
+
+
+class RiskGate:
+    """Enforces hard portfolio risk controls.
+
+    Every trade must pass check() before execution. Position sizing
+    is computed by compute_position_size() from portfolio committee
+    recommendations. The committee is the sole sizing authority;
+    this gate only enforces hard limits.
+    """
+
+    def __init__(self, config: RiskGateConfig, broker: Any) -> None:
+        """
+        Args:
+            config: Risk parameters.
+            broker: BaseBroker instance (PaperBroker or AlpacaBroker).
+        """
+        self.config = config
+        self.broker = broker
+        self._high_water_mark: float = config.total_capital
+        self._daily_losses: float = 0.0
+        self._daily_date: str = ""
+        self._margin_used: float = 0.0
+
+    def check(
+        self,
+        ticker: str,
+        direction: str,
+        position_value: float,
+        strategy: str,
+        open_trades: list[dict] | None = None,
+        earnings_dates: dict[str, int] | None = None,
+        short_interest: dict[str, float] | None = None,
+    ) -> tuple[bool, str]:
+        """Run all gates. Returns (passed, rejection_reason).
+
+        Args:
+            ticker: Stock ticker.
+            direction: "long" or "short".
+            position_value: Dollar value of proposed position.
+            strategy: Strategy name (for per-strategy limit).
+            open_trades: List of open trade dicts (from PaperTrader state).
+            earnings_dates: Optional mapping of ticker -> days until next earnings.
+            short_interest: Optional mapping of ticker -> short interest % of float.
+        """
+        open_trades = open_trades or []
+
+        # 1. Long-only filter
+        if self.config.long_only and direction == "short":
+            return False, "long_only: short trades disabled"
+
+        # 2. Max positions (portfolio-wide)
+        positions = self.broker.get_positions()
+        if len(positions) >= self.config.max_positions:
+            return False, f"max_positions: {len(positions)}/{self.config.max_positions}"
+
+        # 3. Per-strategy limit
+        strategy_count = sum(
+            1 for t in open_trades if t.get("strategy") == strategy
+        )
+        if strategy_count >= self.config.per_strategy_max:
+            return False, f"per_strategy_max: {strategy} has {strategy_count}/{self.config.per_strategy_max}"
+
+        # 4. Position size bounds
+        if position_value < self.config.min_position_value:
+            return False, f"min_position_value: ${position_value:.0f} < ${self.config.min_position_value:.0f}"
+
+        account = self.broker.get_account()
+        max_value = account.portfolio_value * self.config.max_position_pct
+        if position_value > max_value:
+            return False, f"max_position_pct: ${position_value:.0f} > ${max_value:.0f} ({self.config.max_position_pct:.0%})"
+
+        # 5. Daily loss limit
+        if self._daily_losses >= account.portfolio_value * self.config.daily_loss_limit_pct:
+            return False, f"daily_loss_limit: ${self._daily_losses:.0f} losses today"
+
+        # 6. Max drawdown
+        if self._high_water_mark > 0:
+            drawdown = (self._high_water_mark - account.portfolio_value) / self._high_water_mark
+            if drawdown >= self.config.max_drawdown_pct:
+                return False, f"max_drawdown: {drawdown:.1%} >= {self.config.max_drawdown_pct:.0%}"
+
+        # 7. Duplicate check (already holding this ticker?)
+        held_tickers = {p.get("ticker", "") for p in positions}
+        if ticker in held_tickers:
+            return False, f"duplicate: already holding {ticker}"
+
+        # 8. Buying power check
+        if position_value > account.buying_power:
+            return False, f"buying_power: need ${position_value:.0f}, have ${account.buying_power:.0f}"
+
+        # 9. Cash reserve check
+        if self.config.cash_reserve_pct > 0:
+            min_cash = account.portfolio_value * self.config.cash_reserve_pct
+            remaining_cash = account.buying_power - position_value
+            if remaining_cash < min_cash:
+                return False, (
+                    f"cash_reserve: ${remaining_cash:.0f} remaining < "
+                    f"${min_cash:.0f} ({self.config.cash_reserve_pct:.0%} reserve)"
+                )
+
+        # Short-specific gates (10-12)
+        if direction == "short":
+            # 10. Earnings blackout — avoid shorting near earnings surprises
+            if self.config.earnings_blackout_days > 0 and earnings_dates:
+                days_to_earnings = earnings_dates.get(ticker)
+                if days_to_earnings is not None and days_to_earnings <= self.config.earnings_blackout_days:
+                    return False, (
+                        f"earnings_blackout: {ticker} earnings in {days_to_earnings}d "
+                        f"(blackout={self.config.earnings_blackout_days}d)"
+                    )
+
+            # 11. Borrow cost gate — avoid hard-to-borrow names
+            if self.config.max_borrow_cost_pct > 0 and short_interest:
+                si = short_interest.get(ticker)
+                if si is not None:
+                    estimated_cost = _estimate_borrow_cost(si)
+                    if estimated_cost > self.config.max_borrow_cost_pct:
+                        return False, (
+                            f"borrow_cost: {ticker} estimated borrow cost "
+                            f"{estimated_cost:.1%} > max {self.config.max_borrow_cost_pct:.1%} "
+                            f"(SI={si:.1f}%)"
+                        )
+
+            # 12. Margin utilization gate
+            if self.config.max_margin_utilization_pct > 0:
+                utilization = self._margin_used / self.config.total_capital if self.config.total_capital > 0 else 0.0
+                if utilization >= self.config.max_margin_utilization_pct:
+                    return False, (
+                        f"margin_utilization: {utilization:.1%} >= "
+                        f"{self.config.max_margin_utilization_pct:.1%} limit "
+                        f"(${self._margin_used:.0f}/${self.config.total_capital:.0f})"
+                    )
+
+        return True, ""
+
+    def compute_position_size(
+        self,
+        position_size_pct: float,
+        current_price: float,
+    ) -> int:
+        """Convert committee recommendation to whole shares.
+
+        The portfolio committee is the sole sizing authority. This method
+        only enforces hard limits (max position, min position, buying power).
+
+        Args:
+            position_size_pct: From TradeRecommendation (0.01-0.10).
+            current_price: Current stock price.
+
+        Returns:
+            Number of whole shares (0 if position too small).
+        """
+        import math
+        if not (current_price > 0) or math.isnan(current_price):
+            return 0
+
+        account = self.broker.get_account()
+        capital = account.portfolio_value
+
+        # Base allocation from committee recommendation
+        base_allocation = capital * position_size_pct
+
+        # Cap at max_position_pct
+        max_value = capital * self.config.max_position_pct
+        allocation = min(base_allocation, max_value)
+
+        # Cap at available buying power
+        allocation = min(allocation, account.buying_power)
+
+        # Guard against NaN propagation
+        if math.isnan(allocation):
+            return 0
+
+        # Convert to whole shares
+        shares = int(allocation / current_price)
+
+        # Floor: if committee approved the signal but sizing fell below
+        # min_position_value, bump up to the minimum instead of dropping.
+        if shares * current_price < self.config.min_position_value:
+            min_shares = math.ceil(self.config.min_position_value / current_price)
+            if min_shares * current_price <= min(max_value, account.buying_power):
+                shares = min_shares
+            else:
+                return 0
+
+        return shares
+
+    def enforce_stop_losses(
+        self,
+        open_trades: list[dict],
+        price_cache: dict[str, Any],
+    ) -> list[str]:
+        """Check all open positions against global stop loss.
+
+        Args:
+            open_trades: List of open trade dicts with entry_price, ticker, direction.
+            price_cache: {ticker: DataFrame with "Close" column}.
+
+        Returns:
+            List of trade_ids that should be force-closed.
+        """
+        force_close: list[str] = []
+
+        for trade in open_trades:
+            ticker = trade.get("ticker", "")
+            entry_price = trade.get("entry_price", 0)
+            direction = trade.get("direction", "long")
+
+            if entry_price <= 0 or not ticker:
+                continue
+
+            ticker_prices = price_cache.get(ticker)
+            if ticker_prices is None:
+                continue
+
+            try:
+                if hasattr(ticker_prices, 'empty') and not ticker_prices.empty:
+                    current_price = float(ticker_prices["Close"].iloc[-1])
+                else:
+                    continue
+            except (KeyError, IndexError):
+                continue
+
+            # Compute P&L
+            if direction == "long":
+                pnl_pct = (current_price - entry_price) / entry_price
+            else:
+                pnl_pct = (entry_price - current_price) / entry_price
+
+            if pnl_pct <= -self.config.global_stop_loss_pct:
+                trade_id = trade.get("trade_id", "")
+                if trade_id:
+                    force_close.append(trade_id)
+                    logger.warning(
+                        "Stop loss triggered: %s %s pnl=%.1f%% (limit=%.1f%%)",
+                        ticker, direction, pnl_pct * 100, -self.config.global_stop_loss_pct * 100,
+                    )
+
+        return force_close
+
+    def record_daily_loss(self, loss_amount: float) -> None:
+        """Record a realized loss for daily limit tracking."""
+        self._daily_losses += abs(loss_amount)
+
+    def reset_daily(self, date: str) -> None:
+        """Reset daily loss counter for a new trading day."""
+        if date != self._daily_date:
+            self._daily_losses = 0.0
+            self._daily_date = date
+
+    def update_high_water_mark(self) -> None:
+        """Update high-water mark from current portfolio value."""
+        account = self.broker.get_account()
+        if account.portfolio_value > self._high_water_mark:
+            self._high_water_mark = account.portfolio_value

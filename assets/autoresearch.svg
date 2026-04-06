@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 620" font-family="'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace">
+  <defs>
+    <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="100%" style="stop-color:#161b22"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="800" height="620" rx="12" fill="url(#bg2)"/>
+
+  <!-- Title -->
+  <text x="400" y="36" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="bold">Autoresearch System</text>
+  <text x="400" y="54" text-anchor="middle" fill="#7d8590" font-size="11">10 strategies, 16 portfolios, daily cron</text>
+
+  <!-- Data Sources column -->
+  <g transform="translate(30, 80)">
+    <rect width="160" height="310" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+    <text x="80" y="22" text-anchor="middle" fill="#7d8590" font-size="10" font-weight="bold">DATA SOURCES</text>
+    <line x1="12" y1="32" x2="148" y2="32" stroke="#30363d" stroke-width="1"/>
+    <text x="80" y="52" text-anchor="middle" fill="#79c0ff" font-size="9">SEC EDGAR</text>
+    <text x="80" y="70" text-anchor="middle" fill="#79c0ff" font-size="9">Finnhub</text>
+    <text x="80" y="88" text-anchor="middle" fill="#79c0ff" font-size="9">OpenBB Platform</text>
+    <text x="80" y="106" text-anchor="middle" fill="#79c0ff" font-size="9">yfinance</text>
+    <text x="80" y="124" text-anchor="middle" fill="#79c0ff" font-size="9">FRED</text>
+    <text x="80" y="142" text-anchor="middle" fill="#79c0ff" font-size="9">NOAA CDO</text>
+    <text x="80" y="160" text-anchor="middle" fill="#79c0ff" font-size="9">USDA NASS</text>
+    <text x="80" y="178" text-anchor="middle" fill="#79c0ff" font-size="9">Drought Monitor</text>
+    <text x="80" y="196" text-anchor="middle" fill="#79c0ff" font-size="9">Capitol Trades</text>
+    <text x="80" y="214" text-anchor="middle" fill="#79c0ff" font-size="9">CourtListener</text>
+    <text x="80" y="232" text-anchor="middle" fill="#79c0ff" font-size="9">Regulations.gov</text>
+    <text x="80" y="250" text-anchor="middle" fill="#79c0ff" font-size="9">USASpending</text>
+    <line x1="12" y1="264" x2="148" y2="264" stroke="#30363d" stroke-width="1"/>
+    <text x="80" y="284" text-anchor="middle" fill="#484f58" font-size="9">shared fetch</text>
+    <text x="80" y="298" text-anchor="middle" fill="#484f58" font-size="9">across all cohorts</text>
+  </g>
+
+  <!-- Arrow from data to strategies -->
+  <line x1="190" y1="235" x2="220" y2="235" stroke="#30363d" stroke-width="1.5"/>
+  <polygon points="225,235 218,230 218,240" fill="#30363d"/>
+
+  <!-- Strategies column -->
+  <g transform="translate(230, 80)">
+    <rect width="170" height="310" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+    <text x="85" y="22" text-anchor="middle" fill="#7d8590" font-size="10" font-weight="bold">10 STRATEGIES</text>
+    <line x1="12" y1="32" x2="158" y2="32" stroke="#30363d" stroke-width="1"/>
+    <text x="85" y="52" text-anchor="middle" fill="#7ee787" font-size="9">Earnings Calls</text>
+    <text x="85" y="70" text-anchor="middle" fill="#7ee787" font-size="9">Insider Activity</text>
+    <text x="85" y="88" text-anchor="middle" fill="#7ee787" font-size="9">Filing Analysis</text>
+    <text x="85" y="106" text-anchor="middle" fill="#7ee787" font-size="9">Regulatory Pipeline</text>
+    <text x="85" y="124" text-anchor="middle" fill="#7ee787" font-size="9">Supply Chain</text>
+    <text x="85" y="142" text-anchor="middle" fill="#7ee787" font-size="9">Litigation</text>
+    <text x="85" y="160" text-anchor="middle" fill="#7ee787" font-size="9">Congressional Trades</text>
+    <text x="85" y="178" text-anchor="middle" fill="#7ee787" font-size="9">Govt Contracts</text>
+    <text x="85" y="196" text-anchor="middle" fill="#7ee787" font-size="9">State Economics</text>
+    <text x="85" y="214" text-anchor="middle" fill="#7ee787" font-size="9">Weather / Ag</text>
+    <line x1="12" y1="228" x2="158" y2="228" stroke="#30363d" stroke-width="1"/>
+    <text x="85" y="248" text-anchor="middle" fill="#484f58" font-size="9">each generates</text>
+    <text x="85" y="262" text-anchor="middle" fill="#484f58" font-size="9">entry/exit signals</text>
+    <text x="85" y="276" text-anchor="middle" fill="#484f58" font-size="9">with confidence</text>
+    <text x="85" y="290" text-anchor="middle" fill="#484f58" font-size="9">scores</text>
+  </g>
+
+  <!-- Arrow from strategies to committee -->
+  <line x1="400" y1="235" x2="430" y2="235" stroke="#30363d" stroke-width="1.5"/>
+  <polygon points="435,235 428,230 428,240" fill="#30363d"/>
+
+  <!-- Portfolio Committee -->
+  <g transform="translate(440, 170)">
+    <rect width="150" height="130" rx="8" fill="#1a2332" stroke="#d2a8ff" stroke-width="1.5"/>
+    <text x="75" y="22" text-anchor="middle" fill="#d2a8ff" font-size="10" font-weight="bold">PORTFOLIO</text>
+    <text x="75" y="36" text-anchor="middle" fill="#d2a8ff" font-size="10" font-weight="bold">COMMITTEE</text>
+    <line x1="15" y1="46" x2="135" y2="46" stroke="#30363d" stroke-width="1"/>
+    <text x="75" y="65" text-anchor="middle" fill="#8b949e" font-size="9">signal synthesis</text>
+    <text x="75" y="80" text-anchor="middle" fill="#8b949e" font-size="9">position sizing</text>
+    <text x="75" y="95" text-anchor="middle" fill="#8b949e" font-size="9">sector limits</text>
+    <text x="75" y="110" text-anchor="middle" fill="#8b949e" font-size="9">vehicle selection</text>
+    <text x="75" y="122" text-anchor="middle" fill="#484f58" font-size="8">(LLM-powered)</text>
+  </g>
+
+  <!-- Arrow down from committee -->
+  <line x1="515" y1="300" x2="515" y2="330" stroke="#d2a8ff" stroke-width="1.5"/>
+  <polygon points="515,335 510,328 520,328" fill="#d2a8ff"/>
+
+  <!-- Risk Gates -->
+  <g transform="translate(620, 80)">
+    <rect width="150" height="155" rx="8" fill="#0d1117" stroke="#f0883e" stroke-width="1"/>
+    <text x="75" y="22" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">RISK GATES</text>
+    <line x1="12" y1="32" x2="138" y2="32" stroke="#30363d" stroke-width="1"/>
+    <text x="75" y="52" text-anchor="middle" fill="#8b949e" font-size="9">earnings blackout</text>
+    <text x="75" y="70" text-anchor="middle" fill="#8b949e" font-size="9">borrow cost tiers</text>
+    <text x="75" y="88" text-anchor="middle" fill="#8b949e" font-size="9">margin utilization</text>
+    <text x="75" y="106" text-anchor="middle" fill="#8b949e" font-size="9">sector concentration</text>
+    <text x="75" y="124" text-anchor="middle" fill="#8b949e" font-size="9">position limits</text>
+    <text x="75" y="145" text-anchor="middle" fill="#484f58" font-size="8">rejects bad trades</text>
+  </g>
+
+  <!-- Arrow from risk gates to committee -->
+  <line x1="620" y1="235" x2="590" y2="235" stroke="#f0883e" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- 16 Cohort Matrix -->
+  <g transform="translate(100, 345)">
+    <rect width="600" height="250" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+    <text x="300" y="24" text-anchor="middle" fill="#7d8590" font-size="11" font-weight="bold">16 PAPER PORTFOLIOS</text>
+    <text x="300" y="40" text-anchor="middle" fill="#484f58" font-size="9">4 horizons x 4 sizes = 16 independent cohorts</text>
+
+    <!-- Column headers -->
+    <text x="190" y="68" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">$5k</text>
+    <text x="300" y="68" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">$10k</text>
+    <text x="410" y="68" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">$50k</text>
+    <text x="520" y="68" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">$100k</text>
+
+    <!-- Row headers -->
+    <text x="80" y="98" text-anchor="middle" fill="#79c0ff" font-size="10">30 day</text>
+    <text x="80" y="134" text-anchor="middle" fill="#79c0ff" font-size="10">3 month</text>
+    <text x="80" y="170" text-anchor="middle" fill="#79c0ff" font-size="10">6 month</text>
+    <text x="80" y="206" text-anchor="middle" fill="#79c0ff" font-size="10">1 year</text>
+
+    <!-- Grid cells - 30d row -->
+    <rect x="145" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="190" y="100" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
+    <rect x="255" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="300" y="100" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <rect x="365" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="410" y="100" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
+    <rect x="475" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="520" y="100" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
+
+    <!-- Grid cells - 3m row -->
+    <rect x="145" y="118" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="190" y="136" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
+    <rect x="255" y="118" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="300" y="136" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <rect x="365" y="118" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
+    <text x="410" y="136" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
+    <rect x="475" y="118" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
+    <text x="520" y="136" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
+
+    <!-- Grid cells - 6m row -->
+    <rect x="145" y="154" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="190" y="172" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
+    <rect x="255" y="154" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="300" y="172" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <rect x="365" y="154" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
+    <text x="410" y="172" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
+    <rect x="475" y="154" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
+    <text x="520" y="172" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
+
+    <!-- Grid cells - 1y row -->
+    <rect x="145" y="190" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="190" y="208" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
+    <rect x="255" y="190" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
+    <text x="300" y="208" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <rect x="365" y="190" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
+    <text x="410" y="208" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
+    <rect x="475" y="190" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
+    <text x="520" y="208" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
+
+    <!-- Legend -->
+    <text x="300" y="238" text-anchor="middle" fill="#484f58" font-size="8">each cell = independent paper portfolio with its own state, positions, and P&amp;L</text>
+  </g>
+</svg>
