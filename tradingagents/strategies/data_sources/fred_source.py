@@ -24,6 +24,9 @@ SERIES_MAP = {
     "payrolls": "PAYEMS",                # Total Nonfarm Payrolls
     "initial_claims": "ICSA",            # Initial Jobless Claims
     "vix": "VIXCLS",                     # VIX (FRED version)
+    "wti_spot": "DCOILWTICO",             # WTI Crude Oil Spot Price
+    "gold_spot": "GOLDAMGBD228NLBM",      # Gold Fixing Price London
+    "copper_spot": "PCOPPUSDM",           # Global Price of Copper
 }
 
 
