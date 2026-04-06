@@ -42,6 +42,11 @@ class PortfolioSizeProfile:
     options_eligible: list[str] = field(default_factory=list)  # e.g. ["covered_call"]
     max_options_premium_pct: float = 0.0  # max options premium spend as % of capital
 
+    # Commodity eligibility
+    commodity_eligible: bool = False
+    max_commodity_allocation_pct: float = 0.0
+    commodity_instruments: list[str] = field(default_factory=list)
+
 
 SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
     "5k": PortfolioSizeProfile(
@@ -64,6 +69,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         # Options: covered calls only, no short selling
         options_eligible=["covered_call"],
         max_options_premium_pct=0.05,
+        # Commodities
+        commodity_eligible=True,
+        max_commodity_allocation_pct=0.10,
+        commodity_instruments=["GLD", "SLV", "PDBC"],
     ),
     "50k": PortfolioSizeProfile(
         name="50k",
@@ -82,6 +91,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         # Options: covered calls
         options_eligible=["covered_call"],
         max_options_premium_pct=0.05,
+        # Commodities
+        commodity_eligible=True,
+        max_commodity_allocation_pct=0.10,
+        commodity_instruments=["GLD", "SLV", "PDBC", "COPX", "XLE", "USO", "UNG"],
     ),
     "100k": PortfolioSizeProfile(
         name="100k",
@@ -100,6 +113,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         # Options: covered calls
         options_eligible=["covered_call"],
         max_options_premium_pct=0.08,
+        # Commodities
+        commodity_eligible=True,
+        max_commodity_allocation_pct=0.10,
+        commodity_instruments=["GLD", "SLV", "PDBC", "COPX", "XLE", "USO", "UNG"],
     ),
 }
 
@@ -108,21 +125,29 @@ HORIZON_PARAMS: dict[str, dict] = {
         "hold_days_default": 25,
         "hold_days_range": (20, 45),
         "signal_decay_window": (5, 10),
+        "commodity_eligible": False,
     },
     "3m": {
         "hold_days_default": 90,
         "hold_days_range": (60, 120),
         "signal_decay_window": (15, 30),
+        "commodity_eligible": True,
+        "commodity_signal_decay_window": (7, 21),
     },
     "6m": {
         "hold_days_default": 180,
         "hold_days_range": (120, 210),
         "signal_decay_window": (30, 60),
+        "commodity_eligible": True,
+        "commodity_signal_decay_window": (14, 45),
     },
     "1y": {
         "hold_days_default": 300,
         "hold_days_range": (250, 365),
         "signal_decay_window": (60, 120),
+        "commodity_eligible": True,
+        "commodity_signal_decay_window": (30, 90),
+        "commodity_instruments_override": ["GLD", "SLV"],
     },
 }
 
