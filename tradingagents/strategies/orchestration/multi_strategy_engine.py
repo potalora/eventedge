@@ -815,11 +815,27 @@ class MultiStrategyEngine:
         if chains:
             result["supply_chains"] = chains
 
+        # PQC migration news for quantum_readiness strategy
+        pqc_tickers = ["CRWD", "PANW", "ZS", "FTNT", "IBM", "CSCO", "MSFT",
+                        "IONQ", "RGTI", "COIN"]
+        pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
+        pqc_news = []
+        for symbol in pqc_tickers[:6]:  # Rate limit: 6 tickers max
+            news = source.fetch_company_news(symbol, date_from, date_to)
+            for article in news:
+                text = (article.get("headline", "") + " " + article.get("summary", "")).lower()
+                if any(kw in text for kw in pqc_kw):
+                    article["symbol"] = symbol
+                    pqc_news.append(article)
+        if pqc_news:
+            result["pqc_news"] = pqc_news
+
         logger.info(
-            "Finnhub fetch: %d earnings, %d news, %d chains",
+            "Finnhub fetch: %d earnings, %d news, %d chains, %d pqc_news",
             len(result.get("transcripts", [])),
             len(result.get("disruption_news", [])),
             len(result.get("supply_chains", {})),
+            len(result.get("pqc_news", [])),
         )
         return result
 
@@ -849,7 +865,7 @@ class MultiStrategyEngine:
 
         # Filings for P3 (filing changes), P9 (exec comp)
         filings = monitor.poll_edgar_filings(
-            form_types=["10-K", "10-Q", "DEF 14A"],
+            form_types=["10-K", "10-Q", "DEF 14A", "8-K"],
             days_back=14,
         )
         if filings:
@@ -867,11 +883,21 @@ class MultiStrategyEngine:
         if filings_13d:
             result["activist_13d"] = filings_13d
 
+        # PQC keyword filings for quantum_readiness strategy
+        pqc_filings = monitor.poll_keyword_filings(
+            form_types=["8-K", "10-K", "10-Q"],
+            keywords=["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"],
+            days_back=30,
+        )
+        if pqc_filings:
+            result["pqc_filings"] = pqc_filings
+
         logger.info(
-            "EDGAR fetch: %d filings, %d form4 tickers, %d 13D",
+            "EDGAR fetch: %d filings, %d form4 tickers, %d 13D, %d PQC",
             len(result.get("filings", [])),
             len(result.get("form4", {})),
             len(result.get("activist_13d", [])),
+            len(result.get("pqc_filings", [])),
         )
         return result
 

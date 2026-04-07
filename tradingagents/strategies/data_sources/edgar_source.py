@@ -103,6 +103,7 @@ class EDGARSource:
         date_from: str | None = None,
         date_to: str | None = None,
         ticker: str | None = None,
+        keyword: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search EDGAR full-text search for filings.
 
@@ -111,6 +112,7 @@ class EDGARSource:
             date_from: Start date (YYYY-MM-DD).
             date_to: End date (YYYY-MM-DD).
             ticker: Optional ticker to filter by.
+            keyword: Optional keyword to search within filing text.
 
         Returns:
             List of filing metadata dicts with keys:
@@ -121,6 +123,8 @@ class EDGARSource:
         query_parts = [f'form:"{form_type}"']
         if ticker:
             query_parts.append(f'ticker:"{ticker}"')
+        if keyword:
+            query_parts.append(f'"{keyword}"')
 
         params: dict[str, Any] = {
             "q": " AND ".join(query_parts),
@@ -553,6 +557,7 @@ class EDGARSource:
             date_from=params.get("date_from"),
             date_to=params.get("date_to"),
             ticker=params.get("ticker"),
+            keyword=params.get("keyword"),
         )}
 
     def _dispatch_company_filings(self, params: dict[str, Any]) -> dict[str, Any]:

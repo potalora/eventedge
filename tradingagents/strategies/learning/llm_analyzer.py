@@ -101,6 +101,23 @@ support the proposed direction. Consider:
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"short"/"neutral"), score (0.0-1.0), reasoning (1-2 sentences).
 Keep ALL string values under 100 characters.""",
+    "quantum_readiness": """You are analyzing signals related to post-quantum cryptography migration.
+
+Context: NIST finalized PQC standards (ML-KEM, ML-DSA, SLH-DSA). CRQCs could break RSA/ECC by 2029.
+Three regimes exist: (1) CRQC accelerating -- timeline compression, (2) CRQC stalling -- physics
+bottleneck, (3) migration manageable -- priced in. Assess which regime a signal supports AND
+whether the specific company is a winner or loser in that regime.
+
+The key asymmetry: centralized systems push updates quickly; decentralized systems (crypto) need
+consensus upgrades, hard forks, and individual wallet migrations -- potentially years.
+
+Return ONLY compact JSON. No explanation outside JSON.
+Keys: regime_signal ("bull"/"bear"/"neutral"), regime_confidence (0.0-1.0),
+direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
+pqc_readiness ("proactive"/"aware"/"silent"/"n/a"),
+crypto_dependency ("high"/"medium"/"low"/"unknown"),
+rationale (1 sentence).
+Keep ALL string values under 100 characters.""",
 }
 
 
@@ -491,6 +508,50 @@ Nature of Suit: {nature_of_suit}
 Cause: {cause}
 
 Identify the defendant, assess severity, and return JSON.""" + self._regime_suffix(regime_context)
+
+        result = self._call_llm(system, user)
+        return _parse_json_response(result) if result else {}
+
+    # ------------------------------------------------------------------
+    # Quantum readiness analysis (PQC migration regime)
+    # ------------------------------------------------------------------
+
+    def analyze_quantum_readiness(
+        self,
+        text: str,
+        ticker: str,
+        text_source: str = "filing",
+        regime_context: dict | None = None,
+    ) -> dict[str, Any]:
+        """Assess PQC readiness and regime signal from filing or news text.
+
+        Args:
+            text: Filing excerpt or news article text.
+            ticker: Company ticker (may be empty for mandate/industry news).
+            text_source: "filing", "news", or "milestone".
+            regime_context: Optional market regime data.
+
+        Returns:
+            Dict with: regime_signal, regime_confidence, direction,
+            conviction, pqc_readiness, crypto_dependency, rationale.
+        """
+        system = self.get_prompt("quantum_readiness")
+
+        source_labels = {
+            "filing": "SEC FILING",
+            "news": "NEWS ARTICLE",
+            "milestone": "QUANTUM MILESTONE REPORT",
+        }
+        label = source_labels.get(text_source, "TEXT")
+        excerpt = text[:4000]
+
+        user = f"""Ticker: {ticker or "(industry-level signal)"}
+Source type: {text_source}
+
+{label} (excerpt):
+{excerpt}
+
+Analyze for PQC regime signal and trading direction. Return JSON.""" + self._regime_suffix(regime_context)
 
         result = self._call_llm(system, user)
         return _parse_json_response(result) if result else {}

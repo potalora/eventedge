@@ -20,6 +20,7 @@ from .govt_contracts import GovtContractsStrategy
 from .state_economics import StateEconomicsStrategy
 from .weather_ag import WeatherAgStrategy
 from .commodity_macro import CommodityMacroStrategy
+from .quantum_readiness import QuantumReadinessStrategy
 
 __all__ = [
     # Protocol and data classes
@@ -40,6 +41,7 @@ __all__ = [
     "StateEconomicsStrategy",
     "WeatherAgStrategy",
     "CommodityMacroStrategy",
+    "QuantumReadinessStrategy",
     # Helper
     "get_all_strategies",
     "get_paper_trade_strategies",
@@ -65,4 +67,5 @@ def get_paper_trade_strategies() -> list[StrategyModule]:
         StateEconomicsStrategy(),
         WeatherAgStrategy(),
         CommodityMacroStrategy(),
+        QuantumReadinessStrategy(),
     ]

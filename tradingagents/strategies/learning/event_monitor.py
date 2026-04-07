@@ -173,6 +173,75 @@ class EventMonitor:
             return []
         return source.get_recent_13d(days_back=days_back)
 
+    def poll_keyword_filings(
+        self,
+        form_types: list[str],
+        keywords: list[str],
+        days_back: int = 30,
+        fetch_text: bool = True,
+        max_text_fetches: int = 10,
+    ) -> list[dict]:
+        """Search EDGAR filings containing specific keywords.
+
+        Searches across multiple form types and keywords, returning
+        deduplicated filings. Useful for thematic strategies that need
+        to find filings mentioning specific topics.
+
+        Args:
+            form_types: SEC form types to search (e.g. ["8-K", "10-K"]).
+            keywords: Keywords to search within filing text.
+            days_back: How far back to search.
+            fetch_text: If True, fetch filing text for matched filings.
+            max_text_fetches: Max number of filings to fetch text for.
+
+        Returns:
+            Deduplicated list of filing dicts.
+        """
+        source = self.registry.get("edgar")
+        if source is None or not source.is_available():
+            return []
+
+        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = datetime.now().strftime("%Y-%m-%d")
+
+        seen_urls: set[str] = set()
+        all_filings: list[dict] = []
+
+        for form_type in form_types:
+            for keyword in keywords:
+                filings = source.search_filings(
+                    form_type=form_type,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                )
+                for f in filings:
+                    url = f.get("file_url", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        f["matched_keyword"] = keyword
+                        all_filings.append(f)
+
+        # Fetch filing text for LLM analysis
+        if fetch_text and source:
+            fetched = 0
+            for filing in all_filings:
+                if fetched >= max_text_fetches:
+                    break
+                url = filing.get("file_url", "")
+                if not url:
+                    continue
+                raw_text = source.get_filing_text(url)
+                if raw_text:
+                    filing["filing_text"] = self._strip_html(raw_text)[:5000]
+                    fetched += 1
+
+        logger.info(
+            "Keyword filing poll: %d filings for %s across %s",
+            len(all_filings), keywords, form_types,
+        )
+        return all_filings
+
     def poll_form4_filings(
         self, tickers: list[str], days_back: int = 14
     ) -> dict[str, list[dict]]:
