@@ -10,7 +10,7 @@
 
   <!-- Title -->
   <text x="400" y="36" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="bold">Autoresearch System</text>
-  <text x="400" y="54" text-anchor="middle" fill="#7d8590" font-size="11">10 strategies, 16 portfolios, daily cron</text>
+  <text x="400" y="54" text-anchor="middle" fill="#7d8590" font-size="11">12 strategies, 16 portfolios, daily cron</text>
 
   <!-- Data Sources column -->
   <g transform="translate(30, 80)">
@@ -40,8 +40,8 @@
 
   <!-- Strategies column -->
   <g transform="translate(230, 80)">
-    <rect width="170" height="310" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
-    <text x="85" y="22" text-anchor="middle" fill="#7d8590" font-size="10" font-weight="bold">10 STRATEGIES</text>
+    <rect width="170" height="346" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+    <text x="85" y="22" text-anchor="middle" fill="#7d8590" font-size="10" font-weight="bold">12 STRATEGIES</text>
     <line x1="12" y1="32" x2="158" y2="32" stroke="#30363d" stroke-width="1"/>
     <text x="85" y="52" text-anchor="middle" fill="#7ee787" font-size="9">Earnings Calls</text>
     <text x="85" y="70" text-anchor="middle" fill="#7ee787" font-size="9">Insider Activity</text>
@@ -53,11 +53,13 @@
     <text x="85" y="178" text-anchor="middle" fill="#7ee787" font-size="9">Govt Contracts</text>
     <text x="85" y="196" text-anchor="middle" fill="#7ee787" font-size="9">State Economics</text>
     <text x="85" y="214" text-anchor="middle" fill="#7ee787" font-size="9">Weather / Ag</text>
-    <line x1="12" y1="228" x2="158" y2="228" stroke="#30363d" stroke-width="1"/>
-    <text x="85" y="248" text-anchor="middle" fill="#484f58" font-size="9">each generates</text>
-    <text x="85" y="262" text-anchor="middle" fill="#484f58" font-size="9">entry/exit signals</text>
-    <text x="85" y="276" text-anchor="middle" fill="#484f58" font-size="9">with confidence</text>
-    <text x="85" y="290" text-anchor="middle" fill="#484f58" font-size="9">scores</text>
+    <text x="85" y="232" text-anchor="middle" fill="#7ee787" font-size="9">Commodity Macro</text>
+    <text x="85" y="250" text-anchor="middle" fill="#7ee787" font-size="9">Quantum Readiness</text>
+    <line x1="12" y1="264" x2="158" y2="264" stroke="#30363d" stroke-width="1"/>
+    <text x="85" y="284" text-anchor="middle" fill="#484f58" font-size="9">each generates</text>
+    <text x="85" y="298" text-anchor="middle" fill="#484f58" font-size="9">entry/exit signals</text>
+    <text x="85" y="312" text-anchor="middle" fill="#484f58" font-size="9">with confidence</text>
+    <text x="85" y="326" text-anchor="middle" fill="#484f58" font-size="9">scores</text>
   </g>
 
   <!-- Arrow from strategies to committee -->

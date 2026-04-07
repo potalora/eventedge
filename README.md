@@ -12,13 +12,13 @@ There are two main pieces:
   <img src="assets/core-pipeline.svg" style="width: 100%; height: auto;">
 </p>
 
-**The autoresearch system** is the bigger experiment. It runs 10 event-driven strategies every day across 16 paper portfolios (4 time horizons × 4 portfolio sizes), tracks what works, and learns from the results. Each strategy looks at a specific kind of market signal — not price charts, but things like SEC filings, insider trades, and congressional trading disclosures. A portfolio committee (also LLM-powered) synthesizes the signals and sizes positions.
+**The autoresearch system** is the bigger experiment. It runs 12 event-driven strategies every day across 16 paper portfolios (4 time horizons × 4 portfolio sizes), tracks what works, and learns from the results. Each strategy looks at a specific kind of market signal — not price charts, but things like SEC filings, insider trades, and congressional trading disclosures. A portfolio committee (also LLM-powered) synthesizes the signals and sizes positions.
 
 <p align="center">
   <img src="assets/autoresearch.svg" style="width: 100%; height: auto;">
 </p>
 
-## The 10 strategies
+## The 12 strategies
 
 Each one watches for a different kind of event and generates trade signals:
 
@@ -32,6 +32,8 @@ Each one watches for a different kind of event and generates trade signals:
 - **Government contracts** — federal contract awards (USASpending data)
 - **State economics** — FRED macroeconomic indicators by region
 - **Weather/agriculture** — NOAA weather anomalies, USDA crop conditions, drought severity
+- **Commodity macro** — CFTC COT positioning extremes, futures curves, macro regime alignment
+- **Quantum readiness** — post-quantum cryptography migration signals from SEC filings and news, regime-switching across PQC vendor/crypto-exposed/quantum hardware baskets
 
 Data comes from about a dozen sources: yfinance, Finnhub, SEC EDGAR, OpenBB, FRED, NOAA, USDA, US Drought Monitor, Capitol Trades, CourtListener, Regulations.gov, and USASpending.
 
