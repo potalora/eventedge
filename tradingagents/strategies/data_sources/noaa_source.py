@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import time
 from datetime import datetime, timedelta
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.connection import create_connection as _orig_create_connection
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,71 @@ HEAT_STRESS_F = 95  # Corn/soy stress threshold
 FROST_THRESHOLD_F = 32  # Killing frost
 
 
+def _create_ipv6_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+                            source_address=None, socket_options=None):
+    """Create a connection preferring IPv6, falling back to IPv4.
+
+    NOAA's IPv4 endpoints hang on some networks while IPv6 works fine.
+    """
+    host, port = address
+    err = None
+
+    # Try IPv6 first
+    for af in (socket.AF_INET6, socket.AF_INET):
+        try:
+            records = socket.getaddrinfo(host, port, af, socket.SOCK_STREAM)
+        except socket.gaierror:
+            continue
+        for res in records:
+            af, socktype, proto, canonname, sa = res
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                if socket_options:
+                    for opt in socket_options:
+                        sock.setsockopt(*opt)
+                sock.connect(sa)
+                return sock
+            except socket.error as e:
+                err = e
+                if sock is not None:
+                    sock.close()
+
+    if err is not None:
+        raise err
+    raise socket.error("getaddrinfo returned empty list")
+
+
+class _IPv6PreferAdapter(HTTPAdapter):
+    """HTTPAdapter that prefers IPv6 connections."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        super().init_poolmanager(*args, **kwargs)
+        # Patch the pool manager to use our IPv6-preferring connection func
+        self.poolmanager.connection_pool_kw["socket_options"] = []
+
+    def send(self, request, *args, **kwargs):
+        import urllib3.util.connection
+        _orig = urllib3.util.connection.create_connection
+        urllib3.util.connection.create_connection = _create_ipv6_connection
+        try:
+            return super().send(request, *args, **kwargs)
+        finally:
+            urllib3.util.connection.create_connection = _orig
+
+
+def _build_session() -> requests.Session:
+    """Build a requests session that prefers IPv6 for NOAA endpoints."""
+    session = requests.Session()
+    adapter = _IPv6PreferAdapter(max_retries=0)
+    session.mount("https://www.ncei.noaa.gov", adapter)
+    return session
+
+
 class NOAASource:
     """Data source backed by NOAA CDO API v2."""
 
@@ -51,6 +119,12 @@ class NOAASource:
         self._token = token or os.environ.get("NOAA_CDO_TOKEN", "")
         self._cache: dict[str, Any] = {}
         self._last_request_time: float = 0.0
+        self._session: requests.Session | None = None
+
+    def _get_session(self) -> requests.Session:
+        if self._session is None:
+            self._session = _build_session()
+        return self._session
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "ag_weather_summary")
@@ -97,8 +171,11 @@ class NOAASource:
 
         all_results: list[dict] = []
         offset = 1
+        max_pages = 5  # Cap pagination to avoid hanging on huge queries
+        page = 0
 
-        while True:
+        while page < max_pages:
+            page += 1
             data = self._api_get("/data", {
                 "datasetid": "GHCND",
                 "locationid": state_fips,
@@ -221,8 +298,10 @@ class NOAASource:
         """Make a rate-limited GET request to the NOAA CDO API with retry."""
         url = f"{BASE_URL}{endpoint}"
         headers = {"token": self._token}
-        max_retries = 3
-        base_delay = 5.0
+        max_retries = 2
+        base_delay = 3.0
+
+        session = self._get_session()
 
         for attempt in range(max_retries + 1):
             # Rate limit: 5 req/sec
@@ -232,7 +311,9 @@ class NOAASource:
 
             try:
                 self._last_request_time = time.time()
-                resp = requests.get(url, headers=headers, params=params, timeout=60)
+                # (connect_timeout=10s, read_timeout=30s)
+                resp = session.get(url, headers=headers, params=params,
+                                   timeout=(10, 30))
                 if resp.status_code == 200:
                     return resp.json()
                 elif resp.status_code == 429:

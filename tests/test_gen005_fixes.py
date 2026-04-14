@@ -67,50 +67,48 @@ import requests
 class TestNOAARetry:
     """NOAA CDO should retry on timeout/5xx with exponential backoff."""
 
-    def test_retry_on_timeout(self):
+    def _make_source(self):
         from tradingagents.strategies.data_sources.noaa_source import NOAASource
-
         source = NOAASource(token="test-token")
-        with patch("requests.get") as mock_get, patch("time.sleep"):
-            mock_get.side_effect = [
+        source._session = MagicMock()
+        return source
+
+    def test_retry_on_timeout(self):
+        source = self._make_source()
+        with patch("time.sleep"):
+            source._session.get.side_effect = [
                 requests.exceptions.Timeout("timeout"),
                 MagicMock(status_code=200, json=lambda: {"results": [{"value": 1}]}),
             ]
             result = source._api_get("/data", {"datasetid": "GHCND"})
             assert result is not None
-            assert mock_get.call_count == 2
+            assert source._session.get.call_count == 2
 
     def test_retry_on_500(self):
-        from tradingagents.strategies.data_sources.noaa_source import NOAASource
-
-        source = NOAASource(token="test-token")
-        with patch("requests.get") as mock_get, patch("time.sleep"):
+        source = self._make_source()
+        with patch("time.sleep"):
             mock_resp_500 = MagicMock(status_code=500)
             mock_resp_ok = MagicMock(status_code=200, json=lambda: {"results": []})
-            mock_get.side_effect = [mock_resp_500, mock_resp_ok]
+            source._session.get.side_effect = [mock_resp_500, mock_resp_ok]
             result = source._api_get("/data", {"datasetid": "GHCND"})
             assert result is not None
-            assert mock_get.call_count == 2
+            assert source._session.get.call_count == 2
 
     def test_max_retries_exhausted(self):
-        from tradingagents.strategies.data_sources.noaa_source import NOAASource
-
-        source = NOAASource(token="test-token")
-        with patch("requests.get") as mock_get, patch("time.sleep"):
-            mock_get.side_effect = requests.exceptions.Timeout("timeout")
+        source = self._make_source()
+        with patch("time.sleep"):
+            source._session.get.side_effect = requests.exceptions.Timeout("timeout")
             result = source._api_get("/data", {"datasetid": "GHCND"})
             assert result is None
-            assert mock_get.call_count == 4  # 1 initial + 3 retries
+            assert source._session.get.call_count == 3  # 1 initial + 2 retries
 
-    def test_timeout_increased_to_60s(self):
-        from tradingagents.strategies.data_sources.noaa_source import NOAASource
-
-        source = NOAASource(token="test-token")
-        with patch("requests.get") as mock_get, patch("time.sleep"):
-            mock_get.return_value = MagicMock(status_code=200, json=lambda: {"results": []})
+    def test_timeout_uses_connect_and_read(self):
+        source = self._make_source()
+        with patch("time.sleep"):
+            source._session.get.return_value = MagicMock(status_code=200, json=lambda: {"results": []})
             source._api_get("/data", {"datasetid": "GHCND"})
-            _, kwargs = mock_get.call_args
-            assert kwargs["timeout"] == 60
+            _, kwargs = source._session.get.call_args
+            assert kwargs["timeout"] == (10, 30)
 
 
 class TestUSDARetry:

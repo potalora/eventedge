@@ -554,7 +554,10 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
         if self._client is None:
             try:
                 import anthropic
-                self._client = anthropic.Anthropic()
+                import httpx
+                self._client = anthropic.Anthropic(
+                    timeout=httpx.Timeout(60.0, connect=10.0),
+                )
             except (ImportError, Exception):
                 return None
         return self._client
