@@ -8,6 +8,7 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
+from .utils import safe_ticker_component
 
 logger = logging.getLogger(__name__)
 

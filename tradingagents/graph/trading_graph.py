@@ -13,6 +13,7 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import FinancialSituationMemory
+from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -271,12 +272,14 @@ class TradingAgentsGraph:
             "final_trade_decision": final_state["final_trade_decision"],
         }
 
-        # Save to file
-        directory = Path(f"eval_results/{self.ticker}/TradingAgentsStrategy_logs/")
+        # Save to file. Reject ticker values that would escape the
+        # results directory when joined as a path component.
+        safe_ticker = safe_ticker_component(self.ticker)
+        directory = Path(f"eval_results/{safe_ticker}/TradingAgentsStrategy_logs/")
         directory.mkdir(parents=True, exist_ok=True)
 
         with open(
-            f"eval_results/{self.ticker}/TradingAgentsStrategy_logs/full_states_log_{trade_date}.json",
+            directory / f"full_states_log_{trade_date}.json",
             "w",
             encoding="utf-8",
         ) as f:
