@@ -624,12 +624,14 @@ class TestDashboardReadiness:
     """Verify dashboard pages are importable and renderable."""
 
     def test_all_pages_import(self):
-        from tradingagents.dashboard.pages.leaderboard import render as lb_render
-        from tradingagents.dashboard.pages.evolution import render as ev_render
-        from tradingagents.dashboard.pages.paper_trading import render as pt_render
-        assert callable(lb_render)
-        assert callable(ev_render)
-        assert callable(pt_render)
+        from tradingagents.dashboard.pages.overview import render as ov_render
+        from tradingagents.dashboard.pages.cohort_matrix import render as cm_render
+        from tradingagents.dashboard.pages.strategies import render as st_render
+        from tradingagents.dashboard.pages.positions import render as pos_render
+        assert callable(ov_render)
+        assert callable(cm_render)
+        assert callable(st_render)
+        assert callable(pos_render)
 
 
 class TestSchedulerReadiness:

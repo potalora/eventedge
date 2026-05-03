@@ -1,45 +1,22 @@
-import os
-import sys
+"""EventEdge Autoresearch Dashboard.
 
+Launch: streamlit run tradingagents/dashboard/app.py
+"""
 import streamlit as st
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+st.set_page_config(page_title="EventEdge", layout="wide", page_icon=":chart_with_upwards_trend:")
 
-from tradingagents.storage.db import Database
+from tradingagents.dashboard.pages import cohort_matrix, overview, positions, returns, strategies
 
-DB_PATH = os.environ.get(
-    "TRADINGAGENTS_DB",
-    os.path.join(os.path.dirname(__file__), "../../results/tradingagents.db"),
-)
+pages = {
+    "Autoresearch": [
+        st.Page(overview.render, title="Overview", default=True, url_path="overview"),
+        st.Page(returns.render, title="Returns", url_path="returns"),
+        st.Page(cohort_matrix.render, title="Cohort Matrix", url_path="cohort-matrix"),
+        st.Page(strategies.render, title="Strategies", url_path="strategies"),
+        st.Page(positions.render, title="Positions", url_path="positions"),
+    ],
+}
 
-
-@st.cache_resource
-def get_db():
-    return Database(DB_PATH)
-
-
-st.set_page_config(page_title="TradingAgents", layout="wide")
-
-page = st.sidebar.radio("Navigation", ["Portfolio", "Analysis", "Backtest", "Trades", "Leaderboard", "Evolution", "Paper Trading"])
-
-if page == "Portfolio":
-    from tradingagents.dashboard.pages.portfolio import render
-    render(get_db())
-elif page == "Analysis":
-    from tradingagents.dashboard.pages.analysis import render
-    render(get_db())
-elif page == "Backtest":
-    from tradingagents.dashboard.pages.backtest import render
-    render(get_db())
-elif page == "Trades":
-    from tradingagents.dashboard.pages.trades import render
-    render(get_db())
-elif page == "Leaderboard":
-    from tradingagents.dashboard.pages.leaderboard import render
-    render(get_db())
-elif page == "Evolution":
-    from tradingagents.dashboard.pages.evolution import render
-    render(get_db())
-elif page == "Paper Trading":
-    from tradingagents.dashboard.pages.paper_trading import render
-    render(get_db())
+pg = st.navigation(pages)
+pg.run()

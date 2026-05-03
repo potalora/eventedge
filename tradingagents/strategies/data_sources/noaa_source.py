@@ -311,9 +311,9 @@ class NOAASource:
 
             try:
                 self._last_request_time = time.time()
-                # (connect_timeout=10s, read_timeout=30s)
+                # (connect_timeout=5s, read_timeout=10s)
                 resp = session.get(url, headers=headers, params=params,
-                                   timeout=(10, 30))
+                                   timeout=(5, 10))
                 if resp.status_code == 200:
                     return resp.json()
                 elif resp.status_code == 429:

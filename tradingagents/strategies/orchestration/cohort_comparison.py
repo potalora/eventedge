@@ -334,7 +334,14 @@ def _avg_return_5d(entries: list[dict]) -> float | None:
 
 def _sharpe(closed_trades: list[dict]) -> float | None:
     """Sharpe ratio from closed trade PnL values."""
-    pnls = [t["pnl"] for t in closed_trades if "pnl" in t and t["pnl"] is not None]
+    import math
+    pnls = [
+        t["pnl"] for t in closed_trades
+        if "pnl" in t
+        and t["pnl"] is not None
+        and isinstance(t["pnl"], (int, float))
+        and not (isinstance(t["pnl"], float) and (math.isnan(t["pnl"]) or math.isinf(t["pnl"])))
+    ]
     if len(pnls) < 2:
         return None
     sd = statistics.stdev(pnls)

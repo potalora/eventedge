@@ -585,8 +585,11 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
             try:
                 import anthropic
                 import httpx
+                # Force IPv4 — IPv6 connections to Anthropic hang on some networks
+                transport = httpx.HTTPTransport(local_address="0.0.0.0")
                 self._client = anthropic.Anthropic(
                     timeout=httpx.Timeout(60.0, connect=10.0),
+                    http_client=httpx.Client(transport=transport),
                 )
             except (ImportError, Exception):
                 return None

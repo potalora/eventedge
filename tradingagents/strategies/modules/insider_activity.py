@@ -84,9 +84,10 @@ class InsiderActivityStrategy:
                 total_shares = sum(f.get("shares", 0) for f in buys)
                 total_value = sum(f.get("shares", 0) * f.get("price_per_share", 0) for f in buys)
 
-                # Score: cluster size × officer bonus × open-market premium
+                # Score: cluster size × officer bonus × open-market premium, normalized to [0, 1]
                 open_market = [f for f in buys if f.get("transaction_code") == "P"]
-                score = len(buys) * (1.5 if officer_buys else 1.0) * (2.0 if open_market else 1.0)
+                raw = len(buys) * (1.5 if officer_buys else 1.0) * (2.0 if open_market else 1.0)
+                score = min(raw / 10.0, 1.0)  # 10+ filings with bonuses saturates at 1.0
 
                 candidates.append(
                     Candidate(
@@ -115,7 +116,8 @@ class InsiderActivityStrategy:
                 officer_sells = [f for f in sells if f.get("is_officer")]
                 total_sell_shares = sum(f.get("shares", 0) for f in sells)
 
-                score = len(sells) * (1.5 if officer_sells else 1.0)
+                raw = len(sells) * (1.5 if officer_sells else 1.0)
+                score = min(raw / 10.0, 1.0)  # 10+ filings with bonuses saturates at 1.0
 
                 candidates.append(
                     Candidate(

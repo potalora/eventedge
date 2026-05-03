@@ -444,6 +444,26 @@ class MultiStrategyEngine:
                 self._cycle_tracker.snapshot_cycle(cycle_num, open_positions, closed, portfolio_value)
                 logger.info("Cycle %d boundary — snapshot generated", cycle_num)
 
+        # Persist daily equity snapshot (mark-to-market) per cohort
+        try:
+            from tradingagents.strategies.state.equity_snapshot import write_snapshot
+            state_dir = self.ar_config.get("state_dir", "data/state")
+            total_capital = (
+                size_profile.total_capital if size_profile is not None
+                else self.ar_config.get("total_capital", 10000)
+            )
+            write_snapshot(
+                state_dir=state_dir,
+                trading_date=trading_date,
+                cash=bridge.broker.cash,
+                open_trades=self.state.load_paper_trades(status="open"),
+                closed_trades=self.state.load_paper_trades(status="closed"),
+                price_cache=self._price_cache,
+                total_capital=total_capital,
+            )
+        except Exception:
+            logger.warning("Equity snapshot write failed", exc_info=True)
+
         return {
             "signals": deduped_signals,
             "recommendations": [r.__dict__ if hasattr(r, '__dict__') else r for r in recommendations],
