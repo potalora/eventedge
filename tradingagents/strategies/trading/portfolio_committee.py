@@ -178,8 +178,10 @@ class PortfolioCommittee:
             # government contract or multi-member congressional cluster is.
             num_strategies = len(strategies)
             if num_strategies < 2:
+                if direction == "short":
+                    continue  # Shorts require 2+ strategy convergence
                 if consensus_score < 0.5:
-                    continue  # Single strategy, weak event — hold cash instead
+                    continue  # Single-strategy long, weak event — hold cash instead
 
             # Regime alignment
             regime_alignment = self._assess_regime_alignment(
@@ -306,6 +308,26 @@ class PortfolioCommittee:
         if self._size_profile and not getattr(self._size_profile, 'short_eligible', True):
             filtered_signals = [s for s in signals if s.get("direction") != "short"]
 
+        # Short conviction gate: drop short signals that don't have 2+ strategy
+        # convergence on the same ticker. Long signals unaffected.
+        shorts_by_ticker: dict[str, set[str]] = {}
+        for s in filtered_signals:
+            if s.get("direction") == "short":
+                shorts_by_ticker.setdefault(s.get("ticker", ""), set()).add(
+                    s.get("strategy", "")
+                )
+        single_strategy_short_tickers = {
+            t for t, strats in shorts_by_ticker.items() if len(strats) < 2
+        }
+        if single_strategy_short_tickers:
+            filtered_signals = [
+                s for s in filtered_signals
+                if not (
+                    s.get("direction") == "short"
+                    and s.get("ticker") in single_strategy_short_tickers
+                )
+            ]
+
         prompt = self._build_prompt(
             filtered_signals, regime_context, strategy_confidence,
             current_positions, total_capital, enrichment,
@@ -330,7 +352,8 @@ class PortfolioCommittee:
                 "Only recommend trades with genuine event-driven conviction — "
                 "it is better to hold cash than to fill position slots with marginal signals. "
                 "Multi-strategy convergence (2+ strategies on same ticker) is much stronger than single-strategy signals. "
-                "For single-strategy signals, only recommend if the event is clearly material (score >= 2.0 or strong catalyst). "
+                "HARD RULE: never recommend a SHORT trade unless 2+ strategies agree on the same ticker. "
+                "For single-strategy LONG signals, only recommend if the event is clearly material (score >= 2.0 or strong catalyst). "
                 "Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, "
                 "rationale, contributing_strategies, regime_alignment. "
                 f"Keep position_size_pct between 0.01 and {self._max_position:.2f}. Keep rationale under 80 chars."
@@ -338,7 +361,14 @@ class PortfolioCommittee:
             system_prompt = "\n".join(system_parts)
 
             text = self._call_llm(system=system_prompt, prompt=prompt, max_tokens=1024)
-            return self._parse_llm_response(text)
+            recs = self._parse_llm_response(text)
+            # Post-filter: enforce short conviction gate even if the LLM didn't.
+            if recs:
+                recs = [
+                    r for r in recs
+                    if not (r.direction == "short" and len(r.contributing_strategies) < 2)
+                ]
+            return recs
         except Exception:
             logger.warning("LLM synthesis call failed", exc_info=True)
             return None
