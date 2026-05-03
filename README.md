@@ -51,12 +51,12 @@ The 16 portfolios vary in size ($5k to $100k) and time horizon (30 days to 1 yea
 
 ```bash
 git clone <this repo>
-cd TradingAgents
+cd <repo>
 pip install .            # or pip install -e . for development
 cp .env.example .env     # add your API keys
 ```
 
-You'll need API keys for at least one LLM provider (OpenAI, Anthropic, Google, xAI, or OpenRouter) and Alpha Vantage for market data. See `.env.example` for the full list.
+You'll need an API key for at least one LLM provider (OpenAI, Anthropic, Google, xAI, or OpenRouter). Stock prices come from yfinance by default — no key needed. Most event strategies need free-tier keys for their data sources (Finnhub, FRED, NOAA CDO, USDA NASS, FMP, EDGAR User-Agent). The system gracefully degrades if a strategy's data source is unavailable. See `.env.example` for the full list.
 
 ```bash
 # Interactive CLI — analyze a single ticker
@@ -68,8 +68,17 @@ python scripts/run_generations.py run-daily
 # Start a new generation (A/B test a code change)
 python scripts/run_generations.py start "description of what changed"
 
-# Dashboard
+# List active generations
+python scripts/run_generations.py list
+
+# Compare generations side-by-side
+python scripts/run_generations.py compare
+
+# Streamlit dashboard (interactive, in a browser)
 python -m streamlit run tradingagents/dashboard/app.py
+
+# Email-able HTML snapshot (forward to yourself in Gmail)
+python scripts/email_dashboard.py
 ```
 
 Docker works too:
