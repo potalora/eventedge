@@ -4,39 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eventedge"
-version = "0.3.0"
-description = "EventEdge: Autonomous event-driven trading research with LLM-powered strategy synthesis"
+version = "0.4.0"
+description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 12 strategies, with LLM-powered portfolio committee."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "langchain-core>=0.3.81",
-    "backtrader>=1.9.78.123",
-    "langchain-anthropic>=0.3.15",
-    "langchain-experimental>=0.3.4",
-    "langchain-google-genai>=2.1.5",
-    "langchain-openai>=0.3.23",
-    "langgraph>=0.4.8",
-    "pandas>=2.3.0",
-    "parsel>=1.10.0",
-    "pytz>=2025.2",
-    "questionary>=2.1.0",
-    "rank-bm25>=0.2.2",
-    "redis>=6.2.0",
-    "requests>=2.32.4",
-    "rich>=14.0.0",
-    "typer>=0.21.0",
-    "setuptools>=80.9.0",
-    "stockstats>=0.6.5",
-    "tqdm>=4.67.1",
-    "typing-extensions>=4.14.0",
-    "yfinance>=0.2.63",
-    "py_vollib>=1.0.1",
+    "anthropic>=0.40.0",
     "alpaca-py>=0.35.0",
-    "streamlit>=1.45.0",
-    "plotly>=6.0.0",
+    "finnhub-python>=2.4.0",
+    "fredapi>=0.5.2",
+    "httpx>=0.27.0",
     "kaleido>=0.2.1",
-    "apprise>=1.9.2",
-    "apscheduler>=3.11.0",
+    "numpy>=1.26.0",
+    "pandas>=2.3.0",
+    "plotly>=6.0.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.32.4",
+    "streamlit>=1.45.0",
+    "yfinance>=0.2.63",
+    "setuptools>=80.9.0",
 ]
 
 [project.optional-dependencies]
@@ -55,16 +41,10 @@ commodities = [
     "cot_reports",
 ]
 
-[project.scripts]
-tradingagents = "cli.main:app"
-
 [tool.pytest.ini_options]
 markers = [
     "live: marks tests that hit real APIs (deselect with '-m \"not live\"')",
 ]
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
-
-[tool.setuptools.package-data]
-cli = ["static/*"]
+include = ["tradingagents*"]

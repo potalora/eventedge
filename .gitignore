@@ -255,3 +255,4 @@ data/generations/
 data/state/
 data/dashboard_emails/
 f_year.txt
+.playwright-mcp/

@@ -108,7 +108,8 @@ class TestNOAARetry:
             source._session.get.return_value = MagicMock(status_code=200, json=lambda: {"results": []})
             source._api_get("/data", {"datasetid": "GHCND"})
             _, kwargs = source._session.get.call_args
-            assert kwargs["timeout"] == (10, 30)
+            # Tightened to fail fast on flaky NOAA fallback (was (10, 30)).
+            assert kwargs["timeout"] == (5, 10)
 
 
 class TestUSDARetry:
@@ -137,7 +138,10 @@ class TestUSDARetry:
             mock_get.side_effect = requests.exceptions.Timeout("timeout")
             result = source.fetch_crop_progress("CORN", 2026)
             assert result == []
-            assert mock_get.call_count == 4  # 1 initial + 3 retries
+            # 1 initial + 1 retry against the QuickStats API, then 1 ESMIS
+            # landing fetch attempt (which also times out under the mock).
+            assert mock_get.call_count == 3
+            assert source._unavailable is True
 
 
 class TestDroughtMonitorRetry:
