@@ -247,3 +247,39 @@ def test_events_from_journals_filters_by_strategy(tmp_path):
     assert len(events) == 1
     assert events[0].ticker == "AAPL"
     assert events[0].group == "earnings_call"
+
+
+def test_format_report_renders_group_and_windows():
+    from tradingagents.strategies.validation.models import (
+        AggregateResult,
+        BootstrapCI,
+        EventStudyResult,
+        WindowStats,
+    )
+    from tradingagents.strategies.validation.report import format_report
+
+    result = EventStudyResult(
+        aggregates=[
+            AggregateResult(
+                group="earnings_call",
+                n_events=42,
+                windows=[
+                    WindowStats(
+                        window="[0,+5]",
+                        n_events=42,
+                        mean_car=0.0183,
+                        std_car=0.04,
+                        t_stat=2.41,
+                        p_value=0.020,
+                        ci=BootstrapCI(lower=0.0031, upper=0.0328),
+                    )
+                ],
+            )
+        ],
+        skipped_tickers=["BADX"],
+    )
+    text = format_report(result)
+    assert "earnings_call" in text
+    assert "n=42" in text
+    assert "[0,+5]" in text
+    assert "BADX" in text  # skipped tickers surfaced

@@ -79,6 +79,13 @@ def main():
         help="Keep the git worktree (default: delete it)",
     )
 
+    # event-study
+    p_es = sub.add_parser("event-study", help="Run an event study (CAR) over journaled signals")
+    p_es.add_argument("--gen", default=None, help="Generation ID (default: all active)")
+    p_es.add_argument("--strategy", default=None, help="Limit to one strategy/group")
+    p_es.add_argument("--since", default=None, help="Only signals on/after this date (YYYY-MM-DD)")
+    p_es.add_argument("--json", default=None, help="Optional path to dump full result as JSON")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -185,6 +192,54 @@ def main():
     elif args.command == "retire":
         manager.retire_generation(args.gen_id, delete_worktree=not args.keep_worktree)
         print(f"Retired {args.gen_id}")
+
+    elif args.command == "event-study":
+        import glob
+        from dataclasses import asdict
+
+        from tradingagents.strategies.learning.signal_journal import SignalJournal
+        from tradingagents.strategies.validation.engine import compute_car
+        from tradingagents.strategies.validation.journal_source import events_from_journals
+        from tradingagents.strategies.validation.price_adapter import yfinance_price_fn
+        from tradingagents.strategies.validation.report import format_report
+
+        gens = manager.list_generations()
+        if args.gen:
+            gens = [g for g in gens if g.gen_id == args.gen]
+        if not gens:
+            print("No generations found.")
+            return
+
+        journals: list[SignalJournal] = []
+        for g in gens:
+            for path in glob.glob(f"{g.state_dir}/*/signal_journal.jsonl"):
+                cohort_dir = path.rsplit("/", 1)[0]
+                journals.append(SignalJournal(cohort_dir))
+
+        events = events_from_journals(journals, strategy=args.strategy, since=args.since)
+        if not events:
+            print("No journaled signals matched.")
+            return
+        print(f"Studying {len(events)} unique events across {len(journals)} cohort journals...")
+
+        result = compute_car(events, yfinance_price_fn(), rng_seed=1)
+        print(format_report(result))
+
+        if args.json:
+            import json
+
+            with open(args.json, "w") as f:
+                json.dump(
+                    {
+                        "events": [asdict(e) for e in result.events],
+                        "aggregates": [asdict(a) for a in result.aggregates],
+                        "skipped_tickers": result.skipped_tickers,
+                    },
+                    f,
+                    indent=2,
+                    default=str,
+                )
+            print(f"Wrote {args.json}")
 
 
 if __name__ == "__main__":
