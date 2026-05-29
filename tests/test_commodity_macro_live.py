@@ -61,14 +61,21 @@ class TestFREDCommodityLive:
     """Live FRED commodity series tests."""
 
     def test_fred_commodity_series_live(self):
-        """DCOILWTICO, GOLDAMGBD228NLBM, PCOPPUSDM return non-empty series."""
-        from tradingagents.strategies.data_sources.fred_source import FREDSource
+        """The configured commodity spot series each return a non-empty series.
+
+        Reads the IDs from SERIES_MAP (not hardcoded) so the test tracks whatever
+        production actually fetches and can't drift if a series is replaced.
+        """
+        from tradingagents.strategies.data_sources.fred_source import (
+            SERIES_MAP,
+            FREDSource,
+        )
 
         source = FREDSource()
         if not source.is_available():
             pytest.skip("fredapi not installed or no API key")
 
-        series_ids = ["DCOILWTICO", "GOLDAMGBD228NLBM", "PCOPPUSDM"]
+        series_ids = [SERIES_MAP[k] for k in ("wti_spot", "gold_spot", "copper_spot")]
         for sid in series_ids:
             data = source.fetch_series(sid, "2025-01-01", "2026-04-01")
             assert len(data) > 0, f"FRED series {sid} returned empty"

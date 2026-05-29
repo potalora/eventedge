@@ -25,7 +25,7 @@ SERIES_MAP = {
     "initial_claims": "ICSA",            # Initial Jobless Claims
     "vix": "VIXCLS",                     # VIX (FRED version)
     "wti_spot": "DCOILWTICO",             # WTI Crude Oil Spot Price
-    "gold_spot": "GOLDAMGBD228NLBM",      # Gold Fixing Price London
+    "gold_spot": "NASDAQQGLDI",           # Gold price index (London USD fix discontinued by FRED)
     "copper_spot": "PCOPPUSDM",           # Global Price of Copper
 }
 
