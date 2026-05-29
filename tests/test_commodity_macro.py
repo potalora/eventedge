@@ -262,7 +262,7 @@ class TestFREDCommoditySeries:
         assert "wti_spot" in SERIES_MAP
         assert SERIES_MAP["wti_spot"] == "DCOILWTICO"
         assert "gold_spot" in SERIES_MAP
-        assert SERIES_MAP["gold_spot"] == "GOLDAMGBD228NLBM"
+        assert SERIES_MAP["gold_spot"] == "NASDAQQGLDI"
         assert "copper_spot" in SERIES_MAP
         assert SERIES_MAP["copper_spot"] == "PCOPPUSDM"
 

@@ -200,43 +200,51 @@ class TestCheckExits:
 
     def test_hold_period_exit(self, trader, state):
         """Trade exits after holding period."""
+        # Dates are relative to "now" so they stay inside the price window that
+        # _make_price_df anchors to datetime.now() (avoids a time-dependent test).
+        entry_date = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
         trade_id = trader.open_trade(
             strategy="fake_strat",
             ticker="AAPL",
             direction="long",
             entry_price=150.0,
-            entry_date="2026-03-01",
+            entry_date=entry_date,
             shares=5,
         )
 
         prices = _make_price_df(150.0, days=30)
         strategies = {"fake_strat": FakeStrategy(hold_days=10)}
 
-        # Day 5: should NOT exit
-        closed = trader.check_exits(strategies, {"AAPL": prices}, "2026-03-06")
+        # 3 days held: should NOT exit
+        early = (datetime.now() - timedelta(days=12)).strftime("%Y-%m-%d")
+        closed = trader.check_exits(strategies, {"AAPL": prices}, early)
         assert len(closed) == 0
 
-        # Day 11: should exit (holding_days >= 10)
-        closed = trader.check_exits(strategies, {"AAPL": prices}, "2026-03-12")
+        # 15 days held: should exit (holding_days >= 10)
+        today = datetime.now().strftime("%Y-%m-%d")
+        closed = trader.check_exits(strategies, {"AAPL": prices}, today)
         assert len(closed) == 1
         assert closed[0]["exit_reason"] == "hold_period"
 
     def test_stop_loss_exit(self, trader, state):
         """Trade exits on stop loss."""
+        # Relative dates keep the check inside _make_declining_price_df's window.
+        entry_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         trade_id = trader.open_trade(
             strategy="fake_strat",
             ticker="BAD",
             direction="long",
             entry_price=100.0,
-            entry_date="2026-03-01",
+            entry_date=entry_date,
             shares=5,
         )
 
         prices = _make_declining_price_df(100.0, days=30)
         strategies = {"fake_strat": FakeStrategy(hold_days=30)}
 
-        # After ~10 days of -1%/day decline, should hit -10% stop
-        closed = trader.check_exits(strategies, {"BAD": prices}, "2026-03-15")
+        # Price has declined well past -10%: should hit stop loss (not hold period)
+        today = datetime.now().strftime("%Y-%m-%d")
+        closed = trader.check_exits(strategies, {"BAD": prices}, today)
         assert len(closed) == 1
         assert closed[0]["exit_reason"] == "stop_loss"
 
