@@ -166,3 +166,36 @@ def test_compute_car_empty_events():
     result = engine.compute_car([], price_fn, windows=[(0, 5)], n_bootstrap=50, rng_seed=1)
     assert result.events == []
     assert result.aggregates == []
+
+
+def test_yfinance_price_fn_extracts_close_series():
+    import pandas as pd
+
+    from tradingagents.strategies.validation.price_adapter import yfinance_price_fn
+
+    class FakeSource:
+        def fetch_prices(self, tickers, start, end):
+            idx = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+            cols = pd.MultiIndex.from_tuples(
+                [("Close", "AAPL"), ("Open", "AAPL")]
+            )
+            return pd.DataFrame(
+                [[10.0, 9.0], [11.0, 10.0], [12.0, 11.0]], index=idx, columns=cols
+            )
+
+    price_fn = yfinance_price_fn(source=FakeSource())
+    closes = price_fn("AAPL", "2024-01-01", "2024-01-31")
+    assert closes == {"2024-01-02": 10.0, "2024-01-03": 11.0, "2024-01-04": 12.0}
+
+
+def test_yfinance_price_fn_handles_empty():
+    import pandas as pd
+
+    from tradingagents.strategies.validation.price_adapter import yfinance_price_fn
+
+    class EmptySource:
+        def fetch_prices(self, tickers, start, end):
+            return pd.DataFrame()
+
+    price_fn = yfinance_price_fn(source=EmptySource())
+    assert price_fn("AAPL", "2024-01-01", "2024-01-31") == {}
