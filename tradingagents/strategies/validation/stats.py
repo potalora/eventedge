@@ -45,3 +45,36 @@ def sum_car(daily_ar: np.ndarray, start: int, end: int) -> float:
     Indices are offsets into the event-window array where index 0 is day 0.
     """
     return float(np.sum(daily_ar[start : end + 1]))
+
+
+def ttest_cars(cars: np.ndarray) -> tuple[float, float]:
+    """One-sample two-sided t-test of mean CAR vs 0. Returns (t_stat, p_value)."""
+    if len(cars) < 2:
+        return 0.0, 1.0
+    t_stat, p_value = sp_stats.ttest_1samp(cars, popmean=0.0)
+    return float(t_stat), float(p_value)
+
+
+def bootstrap_ci(
+    cars: np.ndarray,
+    n_bootstrap: int = 10_000,
+    confidence: float = 0.95,
+    rng_seed: int | None = None,
+) -> BootstrapCI:
+    """Percentile bootstrap CI for the mean CAR."""
+    rng = np.random.default_rng(rng_seed)
+    n = len(cars)
+    if n == 0:
+        return BootstrapCI(lower=0.0, upper=0.0, confidence=confidence, n_bootstrap=n_bootstrap)
+    boot_means = np.array(
+        [rng.choice(cars, size=n, replace=True).mean() for _ in range(n_bootstrap)]
+    )
+    lower_pct = (1 - confidence) / 2 * 100
+    upper_pct = (1 + confidence) / 2 * 100
+    lower, upper = np.percentile(boot_means, [lower_pct, upper_pct])
+    return BootstrapCI(
+        lower=float(lower),
+        upper=float(upper),
+        confidence=confidence,
+        n_bootstrap=n_bootstrap,
+    )

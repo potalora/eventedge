@@ -71,3 +71,27 @@ def test_sum_car_inclusive_window():
     assert abs(stats.sum_car(daily_ar, 0, 1) - 0.03) < 1e-12
     # window [0, +5] = all six = 0.21
     assert abs(stats.sum_car(daily_ar, 0, 5) - 0.21) < 1e-12
+
+
+def test_ttest_cars_detects_nonzero_mean():
+    # Strongly positive CARs -> small p-value, positive t-stat.
+    cars = np.array([0.02, 0.03, 0.025, 0.018, 0.022, 0.027])
+    t_stat, p_value = stats.ttest_cars(cars)
+    assert t_stat > 0
+    assert p_value < 0.01
+
+
+def test_ttest_cars_handles_too_few():
+    t_stat, p_value = stats.ttest_cars(np.array([0.01]))
+    assert t_stat == 0.0
+    assert p_value == 1.0
+
+
+def test_bootstrap_ci_is_deterministic_with_seed():
+    cars = np.array([0.01, 0.02, 0.03, -0.01, 0.015, 0.005])
+    ci_a = stats.bootstrap_ci(cars, n_bootstrap=1000, rng_seed=42)
+    ci_b = stats.bootstrap_ci(cars, n_bootstrap=1000, rng_seed=42)
+    assert ci_a.lower == ci_b.lower
+    assert ci_a.upper == ci_b.upper
+    assert ci_a.lower < ci_a.upper
+    assert ci_a.n_bootstrap == 1000
