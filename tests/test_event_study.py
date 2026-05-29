@@ -95,3 +95,74 @@ def test_bootstrap_ci_is_deterministic_with_seed():
     assert ci_a.upper == ci_b.upper
     assert ci_a.lower < ci_a.upper
     assert ci_a.n_bootstrap == 1000
+
+
+from tradingagents.strategies.validation import engine
+from tradingagents.strategies.validation.models import EventSpec
+
+
+def _make_price_fn():
+    """Fake price_fn: 400 business days from 2024-01-01.
+
+    SPY rises 0.1%/day. The stock tracks SPY (beta=1, alpha=0) for the whole
+    series EXCEPT it gets a +5% one-day jump on the event date 2025-06-02,
+    so its [0,+5] CAR should be ~+5%.
+    """
+    import pandas as pd
+
+    dates = pd.bdate_range("2024-01-01", periods=400).strftime("%Y-%m-%d").tolist()
+    spy = {}
+    stk = {}
+    spy_price = 100.0
+    stk_price = 50.0
+    for d in dates:
+        spy[d] = round(spy_price, 6)
+        stk[d] = round(stk_price, 6)
+        spy_price *= 1.001
+        stk_price *= 1.001
+    # Inject a +5% abnormal jump on the event date's close.
+    event_date = "2025-06-02"
+    assert event_date in stk
+    idx = dates.index(event_date)
+    for d in dates[idx:]:
+        stk[d] = round(stk[d] * 1.05, 6)
+
+    def price_fn(ticker, start, end):
+        series = spy if ticker == "SPY" else stk
+        return {d: v for d, v in series.items() if start <= d <= end}
+
+    return price_fn, event_date
+
+
+def test_compute_car_detects_abnormal_jump():
+    price_fn, event_date = _make_price_fn()
+    events = [EventSpec(ticker="TEST", event_date=event_date, group="demo")]
+    result = engine.compute_car(
+        events, price_fn, windows=[(0, 5)], n_bootstrap=200, rng_seed=1
+    )
+    assert len(result.events) == 1
+    ev = result.events[0]
+    # The +5% jump lands on day 0; [0,+5] CAR should be close to +5%.
+    assert abs(ev.cars["[0,+5]"] - 0.05) < 0.005
+    assert ev.market_model.n_obs >= 200
+    # One aggregate group with one window.
+    assert len(result.aggregates) == 1
+    agg = result.aggregates[0]
+    assert agg.group == "demo"
+    assert agg.windows[0].window == "[0,+5]"
+
+
+def test_compute_car_skips_insufficient_history():
+    price_fn, _ = _make_price_fn()
+    # Event near the very start has < 200 days of pre-history.
+    events = [EventSpec(ticker="TEST", event_date="2024-01-05", group="demo")]
+    result = engine.compute_car(events, price_fn, windows=[(0, 5)], n_bootstrap=50, rng_seed=1)
+    assert result.events == []
+    assert "TEST" in result.skipped_tickers
+
+
+def test_compute_car_empty_events():
+    price_fn, _ = _make_price_fn()
+    result = engine.compute_car([], price_fn, windows=[(0, 5)], n_bootstrap=50, rng_seed=1)
+    assert result.events == []
+    assert result.aggregates == []
