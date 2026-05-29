@@ -55,3 +55,19 @@ def test_fit_market_model_recovers_known_params():
     assert abs(fit.beta - 1.5) < 1e-9
     assert abs(fit.r_squared - 1.0) < 1e-9
     assert fit.n_obs == 300
+
+
+def test_compute_abnormal_returns():
+    stock = np.array([0.02, 0.03, 0.01])
+    market = np.array([0.01, 0.01, 0.00])
+    # expected = alpha + beta*market = 0.005 + 1.0*market
+    ar = stats.compute_abnormal_returns(stock, market, alpha=0.005, beta=1.0)
+    np.testing.assert_allclose(ar, [0.005, 0.015, 0.005])
+
+
+def test_sum_car_inclusive_window():
+    daily_ar = np.array([0.01, 0.02, 0.03, 0.04, 0.05, 0.06])
+    # window [0, +1] = days 0 and 1 = 0.01 + 0.02
+    assert abs(stats.sum_car(daily_ar, 0, 1) - 0.03) < 1e-12
+    # window [0, +5] = all six = 0.21
+    assert abs(stats.sum_car(daily_ar, 0, 5) - 0.21) < 1e-12

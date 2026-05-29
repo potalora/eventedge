@@ -27,3 +27,21 @@ def fit_market_model(
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
     return MarketModelFit(alpha=alpha, beta=beta, r_squared=r_squared, n_obs=n)
+
+
+def compute_abnormal_returns(
+    stock_returns: np.ndarray,
+    market_returns: np.ndarray,
+    alpha: float,
+    beta: float,
+) -> np.ndarray:
+    """AR_t = R_stock,t - (alpha + beta * R_market,t)."""
+    return stock_returns - (alpha + beta * market_returns)
+
+
+def sum_car(daily_ar: np.ndarray, start: int, end: int) -> float:
+    """Cumulative Abnormal Return = sum of daily ARs over [start, end] inclusive.
+
+    Indices are offsets into the event-window array where index 0 is day 0.
+    """
+    return float(np.sum(daily_ar[start : end + 1]))
