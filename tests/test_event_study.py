@@ -38,3 +38,20 @@ def test_event_study_result_defaults():
     assert result.events == []
     assert result.aggregates == []
     assert result.skipped_tickers == []
+
+
+import numpy as np
+
+from tradingagents.strategies.validation import stats
+
+
+def test_fit_market_model_recovers_known_params():
+    # Construct R_stock = 0.001 + 1.5 * R_market exactly (no noise).
+    rng = np.random.default_rng(0)
+    market = rng.normal(0.0, 0.01, size=300)
+    stock = 0.001 + 1.5 * market
+    fit = stats.fit_market_model(stock, market)
+    assert abs(fit.alpha - 0.001) < 1e-9
+    assert abs(fit.beta - 1.5) < 1e-9
+    assert abs(fit.r_squared - 1.0) < 1e-9
+    assert fit.n_obs == 300
