@@ -199,3 +199,51 @@ def test_yfinance_price_fn_handles_empty():
 
     price_fn = yfinance_price_fn(source=EmptySource())
     assert price_fn("AAPL", "2024-01-01", "2024-01-31") == {}
+
+
+def test_events_from_journals_dedupes_across_cohorts(tmp_path):
+    from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+    from tradingagents.strategies.validation.journal_source import events_from_journals
+
+    # Two cohort journals with an overlapping signal.
+    j1 = SignalJournal(str(tmp_path / "cohortA"))
+    j2 = SignalJournal(str(tmp_path / "cohortB"))
+    entry = JournalEntry(
+        timestamp="2026-05-01T00:00:00",
+        strategy="earnings_call",
+        ticker="AAPL",
+        direction="long",
+        score=0.8,
+    )
+    j1.log_signal(entry)
+    j2.log_signal(entry)  # duplicate across cohorts
+    j2.log_signal(
+        JournalEntry(
+            timestamp="2026-05-02T00:00:00",
+            strategy="insider_activity",
+            ticker="MSFT",
+            direction="long",
+            score=0.6,
+        )
+    )
+
+    events = events_from_journals([j1, j2])
+    keys = sorted((e.ticker, e.group, e.event_date) for e in events)
+    assert keys == [
+        ("AAPL", "earnings_call", "2026-05-01"),
+        ("MSFT", "insider_activity", "2026-05-02"),
+    ]
+
+
+def test_events_from_journals_filters_by_strategy(tmp_path):
+    from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+    from tradingagents.strategies.validation.journal_source import events_from_journals
+
+    j = SignalJournal(str(tmp_path / "c"))
+    j.log_signal(JournalEntry(timestamp="2026-05-01T00:00:00", strategy="earnings_call", ticker="AAPL", direction="long", score=0.8))
+    j.log_signal(JournalEntry(timestamp="2026-05-01T00:00:00", strategy="litigation", ticker="XYZ", direction="short", score=0.5))
+
+    events = events_from_journals([j], strategy="earnings_call")
+    assert len(events) == 1
+    assert events[0].ticker == "AAPL"
+    assert events[0].group == "earnings_call"
