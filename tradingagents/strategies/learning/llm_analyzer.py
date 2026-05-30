@@ -133,6 +133,9 @@ class LLMAnalyzer:
         self._model_name = self.config.get(
             "autoresearch", {}
         ).get("autoresearch_model", "claude-haiku-4-5-20251001")
+        # Deterministic by default so signal enrichment doesn't add sampling noise
+        # to generation comparisons (see autoresearch.llm_temperature).
+        self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
         self._client = None
         self._prompt_overrides: dict[str, str] = {}
 
@@ -190,6 +193,7 @@ class LLMAnalyzer:
             response = client.messages.create(
                 model=self._model_name,
                 max_tokens=max_tokens,
+                temperature=self._temperature,
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )

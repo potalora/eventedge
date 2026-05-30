@@ -113,6 +113,10 @@ DEFAULT_CONFIG = {
         "proposals_per_strategy": 3,
         # LLM for autoresearch
         "autoresearch_model": "claude-sonnet-4-6",
+        # LLM sampling temperature for committee + enrichment. 0.0 = deterministic,
+        # so the same signals/data give the same decisions and generation diffs
+        # reflect code changes rather than sampling noise.
+        "llm_temperature": 0.0,
         # Tickers to exclude from trading (compliance, conflict of interest)
         "blocked_tickers": [],
         # API keys (user provides when ready)

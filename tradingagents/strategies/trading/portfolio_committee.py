@@ -84,6 +84,9 @@ class PortfolioCommittee:
             self.config.get("autoresearch", {}).get("autoresearch_model", "claude-haiku-4-5-20251001"),
         )
         self._enabled = pt_config.get("portfolio_committee_enabled", True)
+        # Deterministic by default so generation comparisons aren't confounded by
+        # LLM sampling noise (see autoresearch.llm_temperature).
+        self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
 
         # Use size profile if provided, otherwise fall back to config defaults
         if size_profile is not None:
@@ -659,6 +662,7 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
                 response = client.messages.create(
                     model=self._model_name,
                     max_tokens=max_tokens,
+                    temperature=self._temperature,
                     system=system,
                     messages=[{"role": "user", "content": prompt}],
                 )
