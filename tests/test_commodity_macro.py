@@ -322,3 +322,40 @@ class TestPortfolioCommittee:
         committee = PortfolioCommittee()
         result = committee._assess_regime_alignment("short", {"overall_regime": "crisis"})
         assert result == "aligned"
+
+
+class TestLatestValueSeriesHandling:
+    """_latest_value must accept pandas Series (the shape FRED indicators arrive in).
+
+    Regression: _fetch_fred_data passes dict[str, pd.Series], so the macro veto
+    called _latest_value with a Series. The old `if not series_data:` guard raised
+    'truth value of a Series is ambiguous', crashing commodity_macro.screen once
+    COT data was available to reach the veto branch.
+    """
+
+    def test_latest_value_with_series(self):
+        from tradingagents.strategies.modules.commodity_macro import _latest_value
+        s = pd.Series([1.0, 2.0, 3.5], index=pd.date_range("2026-01-01", periods=3))
+        assert _latest_value(s) == 3.5
+
+    def test_latest_value_with_empty_series(self):
+        from tradingagents.strategies.modules.commodity_macro import _latest_value
+        assert _latest_value(pd.Series(dtype=float)) is None
+
+    def test_latest_value_with_dict_and_none(self):
+        from tradingagents.strategies.modules.commodity_macro import _latest_value
+        assert _latest_value({"2026-01-01": 1.0, "2026-02-01": 2.0}) == 2.0
+        assert _latest_value({}) is None
+        assert _latest_value(None) is None
+
+    def test_macro_veto_runs_with_series_fred_data(self):
+        """The veto path itself must not crash when FRED values are Series."""
+        from tradingagents.strategies.modules.commodity_macro import CommodityMacroStrategy
+        strat = CommodityMacroStrategy()
+        fred = {
+            "FEDFUNDS": pd.Series([5.25, 5.25, 4.75], index=pd.date_range("2026-01-01", periods=3, freq="MS")),
+            "DTWEXBGS": pd.Series([120.0, 121.0, 122.5], index=pd.date_range("2026-01-01", periods=3, freq="MS")),
+        }
+        # Should return a bool without raising, regardless of veto outcome.
+        result = strat._macro_vetoes("gold", "long", fred)
+        assert isinstance(result, bool)

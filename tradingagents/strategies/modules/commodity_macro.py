@@ -274,7 +274,10 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
 
 def _latest_value(series_data):
-    if not series_data:
+    # NB: avoid bare truthiness here — a non-empty pandas Series raises
+    # "truth value is ambiguous". Guard None explicitly; empty dict is handled
+    # in the dict branch and an empty Series falls through to the IndexError.
+    if series_data is None:
         return None
     if isinstance(series_data, dict):
         if not series_data:
