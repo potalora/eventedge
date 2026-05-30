@@ -29,8 +29,7 @@ LOG_FILE="$LOG_DIR/daily_${TODAY}.log"
 echo "=== Daily trading run: $TODAY ===" >> "$LOG_FILE"
 "$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" run-daily --date "$TODAY" >> "$LOG_FILE" 2>&1
 
-# Generate daily report
-echo "=== Generating daily report ===" >> "$LOG_FILE"
-"$VENV_PYTHON" "$REPO_ROOT/scripts/generate_daily_report.py" --date "$TODAY" >> "$LOG_FILE" 2>&1
-
-echo "=== Done: $(date) ===" >> "$LOG_FILE"
+# Daily report is intentionally NOT generated here. Per project convention,
+# Claude writes the report by reading JSON state from
+# data/generations/gen_NNN/horizon_*/ into docs/reports/YYYY-MM-DD-genNNN-daily-report.md.
+echo "=== Done (report written separately by Claude): $(date) ===" >> "$LOG_FILE"
