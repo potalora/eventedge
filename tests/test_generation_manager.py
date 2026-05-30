@@ -447,3 +447,44 @@ class TestEnvVarOverride:
             config["autoresearch"]["state_dir"] = state_dir_override
 
         assert config["autoresearch"]["state_dir"] == override_path
+
+
+class TestRunLogPersistence:
+    """A generation run's captured output must be persisted for silent-strategy diagnosis."""
+
+    def test_write_run_log_persists_stdout_stderr(self, tmp_path):
+        from tradingagents.strategies.orchestration.generation_manager import GenerationManager
+
+        mgr = GenerationManager(str(tmp_path))
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        gen_data = {"gen_id": "gen_099", "state_dir": str(state_dir)}
+
+        mgr._write_run_log(gen_data, "Finnhub fetch: 9 earnings, 1135 news", "WARN throttled")
+
+        log = state_dir / "last_run_output.log"
+        assert log.exists()
+        text = log.read_text()
+        assert "gen_099" in text
+        assert "Finnhub fetch: 9 earnings, 1135 news" in text
+        assert "WARN throttled" in text
+
+    def test_run_subprocess_writes_log_on_success(self, tmp_path, monkeypatch):
+        from tradingagents.strategies.orchestration import generation_manager as gm
+
+        mgr = gm.GenerationManager(str(tmp_path))
+        state_dir = tmp_path / "s"; state_dir.mkdir()
+        wt = tmp_path / "wt"; wt.mkdir()
+        gen_data = {"gen_id": "gen_100", "state_dir": str(state_dir), "worktree_path": str(wt)}
+
+        class _Proc:
+            returncode = 0
+            stdout = "Regulations.gov fetch: 20 proposed rules"
+            stderr = ""
+
+        monkeypatch.setattr(gm.subprocess, "run", lambda *a, **k: _Proc())
+        result = mgr._run_cohorts_subprocess(gen_data, ["run-daily", "--date", "2026-05-29"])
+        assert result["success"] is True
+        log = state_dir / "last_run_output.log"
+        assert log.exists()
+        assert "Regulations.gov fetch: 20 proposed rules" in log.read_text()

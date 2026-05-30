@@ -339,6 +339,12 @@ class GenerationManager:
             )
             elapsed = time.monotonic() - start
 
+            # Persist the run's full stdout/stderr (per-source fetch counts,
+            # per-strategy signal counts, etc.) so a silent strategy can always
+            # be diagnosed after the fact — required by the "never ignore silent
+            # strategies" rule. Kept on success too, not just on failure.
+            self._write_run_log(gen_data, proc.stdout, proc.stderr)
+
             if proc.returncode != 0:
                 error_msg = (proc.stderr or proc.stdout or "").strip()
                 # Truncate long error output
@@ -376,6 +382,25 @@ class GenerationManager:
                 "elapsed_s": round(elapsed, 2),
                 "error": str(e),
             }
+
+    def _write_run_log(self, gen_data: dict, stdout: str, stderr: str) -> None:
+        """Write a generation run's captured output to its state dir.
+
+        Overwrites {state_dir}/last_run_output.log each run (bounded, no growth).
+        This is the durable record of what each strategy's data fetch returned —
+        the evidence needed to classify any silent strategy.
+        """
+        try:
+            log_path = Path(gen_data["state_dir"]) / "last_run_output.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            header = f"=== {gen_data.get('gen_id', '?')} run @ {datetime.now().isoformat()} ===\n"
+            log_path.write_text(
+                header
+                + "----- STDOUT -----\n" + (stdout or "")
+                + "\n----- STDERR -----\n" + (stderr or "")
+            )
+        except Exception:
+            logger.warning("Failed to persist run log for %s", gen_data.get("gen_id"), exc_info=True)
 
     def _next_gen_id(self) -> str:
         """Return the next sequential gen_id like 'gen_001', 'gen_002'."""
