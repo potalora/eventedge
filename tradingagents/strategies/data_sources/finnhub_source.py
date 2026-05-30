@@ -13,6 +13,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _RATE_DELAY = 1.1  # ~60 calls/min → 1 call/sec with margin
+_MAX_RETRIES = 3   # retry transient 429s a few times before giving up
+_RETRY_BACKOFF = 2.0  # base seconds; grows as _RETRY_BACKOFF * 2**attempt
 
 
 class FinnhubSource:
@@ -31,6 +33,26 @@ class FinnhubSource:
             import finnhub
             self._client = finnhub.Client(api_key=self._api_key)
         return self._client
+
+    def _call_with_retry(self, fn, *args, **kwargs):
+        """Call a finnhub client method, retrying transient rate-limits (429).
+
+        The free tier (60/min) can 429 mid-burst during the full multi-source
+        fetch; the client raises an exception we'd otherwise swallow as [],
+        silently dropping data (e.g. supply_chain disruption news). Retry only
+        rate-limit errors with exponential backoff; re-raise everything else.
+        """
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — finnhub.FinnhubAPIException et al.
+                status = getattr(exc, "status_code", None)
+                msg = str(exc).lower()
+                is_rate_limit = status == 429 or "429" in msg or "limit reached" in msg
+                if is_rate_limit and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_BACKOFF * (2 ** attempt))
+                    continue
+                raise
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "earnings_transcripts")
@@ -73,8 +95,8 @@ class FinnhubSource:
         client = self._get_client()
         time.sleep(_RATE_DELAY)
         try:
-            result = client.earnings_calendar(
-                _from=date_from, to=date_to, symbol="",
+            result = self._call_with_retry(
+                client.earnings_calendar, _from=date_from, to=date_to, symbol="",
             )
             events = result.get("earningsCalendar", [])
             # Filter to those with actual results (already reported)
@@ -115,7 +137,9 @@ class FinnhubSource:
         client = self._get_client()
         time.sleep(_RATE_DELAY)
         try:
-            news = client.company_news(symbol, _from=date_from, to=date_to)
+            news = self._call_with_retry(
+                client.company_news, symbol, _from=date_from, to=date_to,
+            )
             result = [
                 {
                     "headline": n.get("headline", ""),
@@ -142,7 +166,7 @@ class FinnhubSource:
         client = self._get_client()
         time.sleep(_RATE_DELAY)
         try:
-            peers = client.company_peers(symbol)
+            peers = self._call_with_retry(client.company_peers, symbol)
             result = [{"ticker": p, "relationship": "peer"} for p in (peers or [])]
             self._cache[cache_key] = result
             return result
