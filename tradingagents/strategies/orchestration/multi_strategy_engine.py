@@ -99,6 +99,25 @@ class MultiStrategyEngine:
     # Main entry point
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_signals(all_signals: list[dict]) -> list[dict]:
+        """Keep the single highest-conviction candidate per (strategy, ticker).
+
+        supply_chain emits one candidate per news article, and LLM enrichment can
+        tag the same ticker with opposing directions (e.g. 1 short + 3 long for
+        AAPL). The previous logic cancelled opposing same-ticker directions, which
+        removed BOTH and silenced the strategy entirely. Collapsing to the
+        highest-conviction signal per (strategy, ticker) gives one coherent view
+        and prevents self-cancellation. Cross-strategy disagreements are left
+        intact (they were never resolved by the old key, which included strategy).
+        """
+        best: dict[tuple[str, str], dict] = {}
+        for signal in all_signals:
+            st = (signal["strategy"], signal["ticker"])
+            if st not in best or signal["score"] > best[st]["score"]:
+                best[st] = signal
+        return [s for s in best.values() if s.get("ticker", "").strip()]
+
     def screen_and_enrich(
         self,
         trading_date: str,
@@ -130,22 +149,8 @@ class MultiStrategyEngine:
                 })
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))
 
-        # Dedup and resolve conflicting signals
-        seen: dict[tuple[str, str, str], dict] = {}
-        for signal in all_signals:
-            key = (signal["strategy"], signal["ticker"], signal["direction"])
-            if key not in seen or signal["score"] > seen[key]["score"]:
-                seen[key] = signal
-        to_remove: set[tuple[str, str, str]] = set()
-        for (strat, ticker, direction) in seen:
-            opposite = "short" if direction == "long" else "long"
-            opp_key = (strat, ticker, opposite)
-            if opp_key in seen:
-                to_remove.add((strat, ticker, direction))
-                to_remove.add(opp_key)
-        for key in to_remove:
-            seen.pop(key, None)
-        deduped_signals = [s for s in seen.values() if s.get("ticker", "").strip()]
+        # Collapse same-(strategy, ticker) candidates to the highest-conviction one.
+        deduped_signals = MultiStrategyEngine._resolve_signals(all_signals)
 
         # Filter blocked tickers
         blocked = set(t.upper() for t in self.ar_config.get("blocked_tickers", []))
