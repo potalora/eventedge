@@ -56,7 +56,7 @@ class RegulationsSource:
         agency_id: str | None = None,
         document_type: str = "Proposed Rule",
         posted_date_from: str | None = None,
-        page_size: int = 25,
+        page_size: int = 100,
     ) -> list[dict]:
         """Search regulations.gov for documents.
 
@@ -81,8 +81,10 @@ class RegulationsSource:
             params["filter[searchTerm]"] = search_term
         if agency_id:
             params["filter[agencyId]"] = agency_id
-        if posted_date_from:
-            params["filter[postedDate][ge]"] = posted_date_from
+        # NOTE: regulations.gov's server-side filter[postedDate][ge] is broken —
+        # it pins results to the boundary date and overrides sort=-postedDate, so
+        # agency queries come back empty. We sort newest-first and filter by date
+        # client-side below instead.
 
         time.sleep(_RATE_DELAY)
         try:
@@ -110,6 +112,11 @@ class RegulationsSource:
                     "summary": attrs.get("summary", "")[:500],
                     "docket_id": attrs.get("docketId", ""),
                 })
+            if posted_date_from:
+                results = [
+                    r for r in results
+                    if (r["posted_date"] or "")[:10] >= posted_date_from
+                ]
             return results
         except Exception:
             logger.error("search_documents failed", exc_info=True)
