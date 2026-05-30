@@ -37,6 +37,42 @@ class TradeRecommendation:
 class PortfolioCommittee:
     """Synthesizes signals across strategies into trade recommendations."""
 
+    # A short clears the conviction gate if 2+ strategies short the same ticker,
+    # OR a single strategy shorts it with LLM conviction >= this threshold.
+    # (Downstream short risk gates — borrow cost, earnings blackout, margin — and
+    # cohort short-eligibility still apply.)
+    SHORT_CONVICTION_THRESHOLD = 0.6
+
+    @staticmethod
+    def _signal_conviction(s: dict) -> float:
+        """Best-available LLM conviction (0-1) for a signal.
+
+        Prefers metadata.llm_analysis.conviction; falls back to `score` only when
+        it already lies in [0, 1] (enriched signals set score = conviction). Raw
+        rule scores (e.g. a congressional cluster score of 12) are treated as 0
+        conviction, since they aren't on the conviction scale.
+        """
+        la = (s.get("metadata") or {}).get("llm_analysis")
+        if isinstance(la, dict) and la.get("conviction") is not None:
+            try:
+                return float(la["conviction"])
+            except (TypeError, ValueError):
+                pass
+        try:
+            score = float(s.get("score", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        return score if 0.0 <= score <= 1.0 else 0.0
+
+    @classmethod
+    def _short_passes_gate(cls, ticker_short_signals: list[dict]) -> bool:
+        """True if a ticker's short signals clear the conviction gate."""
+        strategies = {s.get("strategy", "") for s in ticker_short_signals}
+        if len(strategies) >= 2:
+            return True
+        max_conv = max((cls._signal_conviction(s) for s in ticker_short_signals), default=0.0)
+        return max_conv >= cls.SHORT_CONVICTION_THRESHOLD
+
     def __init__(self, config: dict | None = None, size_profile: Any = None) -> None:
         self.config = config or {}
         pt_config = self.config.get("autoresearch", {}).get("paper_trade", {})
@@ -172,15 +208,20 @@ class PortfolioCommittee:
                 continue  # Skip ties
 
             # Filter: require 2+ strategies, or single strategy with a material event.
-            # Multi-strategy convergence is inherently strong.
-            # Single-strategy signals need a meaningful weighted score — a 10-K
-            # filing with 0.5 LLM conviction isn't enough on its own, but a
-            # government contract or multi-member congressional cluster is.
+            # Multi-strategy convergence is inherently strong. Single-strategy
+            # shorts need high LLM conviction (>= threshold); single-strategy longs
+            # need a meaningful weighted score.
             num_strategies = len(strategies)
             if num_strategies < 2:
                 if direction == "short":
-                    continue  # Shorts require 2+ strategy convergence
-                if consensus_score < 0.5:
+                    max_conv = max(
+                        (self._signal_conviction(s) for s in sigs
+                         if s.get("direction") == "short"),
+                        default=0.0,
+                    )
+                    if max_conv < self.SHORT_CONVICTION_THRESHOLD:
+                        continue  # Single-strategy short, low conviction — skip
+                elif consensus_score < 0.5:
                     continue  # Single-strategy long, weak event — hold cash instead
 
             # Regime alignment
@@ -308,23 +349,21 @@ class PortfolioCommittee:
         if self._size_profile and not getattr(self._size_profile, 'short_eligible', True):
             filtered_signals = [s for s in signals if s.get("direction") != "short"]
 
-        # Short conviction gate: drop short signals that don't have 2+ strategy
-        # convergence on the same ticker. Long signals unaffected.
-        shorts_by_ticker: dict[str, set[str]] = {}
+        # Short conviction gate: keep shorts with 2+ strategy convergence OR a
+        # single strategy with high LLM conviction; drop the rest. Longs unaffected.
+        shorts_by_ticker: dict[str, list[dict]] = {}
         for s in filtered_signals:
             if s.get("direction") == "short":
-                shorts_by_ticker.setdefault(s.get("ticker", ""), set()).add(
-                    s.get("strategy", "")
-                )
-        single_strategy_short_tickers = {
-            t for t, strats in shorts_by_ticker.items() if len(strats) < 2
+                shorts_by_ticker.setdefault(s.get("ticker", ""), []).append(s)
+        blocked_short_tickers = {
+            t for t, ss in shorts_by_ticker.items() if not self._short_passes_gate(ss)
         }
-        if single_strategy_short_tickers:
+        if blocked_short_tickers:
             filtered_signals = [
                 s for s in filtered_signals
                 if not (
                     s.get("direction") == "short"
-                    and s.get("ticker") in single_strategy_short_tickers
+                    and s.get("ticker") in blocked_short_tickers
                 )
             ]
 
@@ -352,7 +391,8 @@ class PortfolioCommittee:
                 "Only recommend trades with genuine event-driven conviction — "
                 "it is better to hold cash than to fill position slots with marginal signals. "
                 "Multi-strategy convergence (2+ strategies on same ticker) is much stronger than single-strategy signals. "
-                "HARD RULE: never recommend a SHORT trade unless 2+ strategies agree on the same ticker. "
+                "HARD RULE: only recommend a SHORT trade if 2+ strategies agree on the same ticker, "
+                "OR a single strategy shorts it with high conviction (>= 0.6). "
                 "For single-strategy LONG signals, only recommend if the event is clearly material (score >= 2.0 or strong catalyst). "
                 "Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, "
                 "rationale, contributing_strategies, regime_alignment. "
@@ -362,11 +402,16 @@ class PortfolioCommittee:
 
             text = self._call_llm(system=system_prompt, prompt=prompt, max_tokens=1024)
             recs = self._parse_llm_response(text)
-            # Post-filter: enforce short conviction gate even if the LLM didn't.
+            # Post-filter: enforce short conviction gate even if the LLM didn't —
+            # a short rec needs 2+ contributing strategies OR high LLM confidence.
             if recs:
                 recs = [
                     r for r in recs
-                    if not (r.direction == "short" and len(r.contributing_strategies) < 2)
+                    if not (
+                        r.direction == "short"
+                        and len(r.contributing_strategies) < 2
+                        and r.confidence < self.SHORT_CONVICTION_THRESHOLD
+                    )
                 ]
             return recs
         except Exception:
