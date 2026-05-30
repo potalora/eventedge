@@ -45,24 +45,27 @@ class PortfolioCommittee:
 
     @staticmethod
     def _signal_conviction(s: dict) -> float:
-        """Best-available LLM conviction (0-1) for a signal.
+        """LLM conviction (0-1) for a signal — used only for the short gate.
 
-        Prefers metadata.llm_analysis.conviction; falls back to `score` only when
-        it already lies in [0, 1] (enriched signals set score = conviction). Raw
-        rule scores (e.g. a congressional cluster score of 12) are treated as 0
-        conviction, since they aren't on the conviction scale.
+        Reads the genuine LLM conviction from metadata.llm_analysis.conviction
+        (with a top-level `llm_conviction` fallback). It deliberately does NOT
+        fall back to `score`: rule-based scores (a congressional cluster's 12, or
+        an earnings_call's 1.0) are not LLM conviction, and treating them as such
+        would let conviction-0 shorts clear the high-conviction gate. A signal
+        with no LLM analysis has conviction 0 and cannot pass on conviction alone.
         """
         la = (s.get("metadata") or {}).get("llm_analysis")
         if isinstance(la, dict) and la.get("conviction") is not None:
             try:
                 return float(la["conviction"])
             except (TypeError, ValueError):
-                pass
-        try:
-            score = float(s.get("score", 0.0))
-        except (TypeError, ValueError):
-            return 0.0
-        return score if 0.0 <= score <= 1.0 else 0.0
+                return 0.0
+        if s.get("llm_conviction") is not None:
+            try:
+                return float(s["llm_conviction"])
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
 
     @classmethod
     def _short_passes_gate(cls, ticker_short_signals: list[dict]) -> bool:

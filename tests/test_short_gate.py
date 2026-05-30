@@ -2,8 +2,9 @@
 
 A short clears the gate if 2+ strategies short the same ticker, OR a single
 strategy shorts it with LLM conviction >= PortfolioCommittee.SHORT_CONVICTION_THRESHOLD
-(0.6). Enforced at four layers: signal pre-filter, LLM system prompt rule,
-LLM-output post-filter, and the rule-based fallback path. Long signals unaffected.
+(0.6). Conviction is the genuine LLM conviction (metadata.llm_analysis.conviction),
+NOT the raw rule score. Enforced at four layers: signal pre-filter, LLM system
+prompt rule, LLM-output post-filter, and the rule-based fallback path.
 """
 from __future__ import annotations
 
@@ -14,6 +15,21 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import Portfolio
 from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
 
 THRESH = PortfolioCommittee.SHORT_CONVICTION_THRESHOLD  # 0.6
+
+
+def _short(ticker, strategy, conviction, score=None):
+    """A short signal whose LLM conviction lives in metadata.llm_analysis."""
+    return {
+        "ticker": ticker, "direction": "short",
+        "score": conviction if score is None else score,
+        "strategy": strategy,
+        "metadata": {"llm_analysis": {"conviction": conviction}},
+    }
+
+
+def _long(ticker, strategy, score):
+    return {"ticker": ticker, "direction": "long", "score": score,
+            "strategy": strategy, "metadata": {"llm_analysis": {"conviction": score}}}
 
 
 def _profile(short_eligible: bool = True) -> PortfolioSizeProfile:
@@ -44,34 +60,26 @@ def _llm_committee(short_eligible: bool = True) -> PortfolioCommittee:
 
 class TestConvictionGateUnit:
     def test_single_high_conviction_passes(self):
-        sigs = [{"ticker": "AAPL", "direction": "short", "score": 0.62,
-                 "strategy": "supply_chain", "metadata": {}}]
-        assert PortfolioCommittee._short_passes_gate(sigs) is True
+        assert PortfolioCommittee._short_passes_gate([_short("AAPL", "supply_chain", 0.62)]) is True
 
     def test_single_low_conviction_fails(self):
-        sigs = [{"ticker": "LCID", "direction": "short", "score": 0.55,
-                 "strategy": "litigation", "metadata": {}}]
-        assert PortfolioCommittee._short_passes_gate(sigs) is False
+        assert PortfolioCommittee._short_passes_gate([_short("LCID", "litigation", 0.55)]) is False
 
     def test_raw_rule_score_not_treated_as_conviction(self):
-        # Congressional cluster score 12 is not on the 0-1 conviction scale.
+        # Congressional cluster score 12, no llm_analysis -> conviction 0, gate fails.
         sigs = [{"ticker": "QCOM", "direction": "short", "score": 12.0,
                  "strategy": "congressional_trades", "metadata": {}}]
         assert PortfolioCommittee._short_passes_gate(sigs) is False
 
-    def test_metadata_conviction_preferred(self):
-        sigs = [{"ticker": "QCOM", "direction": "short", "score": 12.0,
-                 "strategy": "congressional_trades",
-                 "metadata": {"llm_analysis": {"conviction": 0.8}}}]
-        assert PortfolioCommittee._short_passes_gate(sigs) is True
+    def test_rule_score_in_unit_range_still_not_conviction(self):
+        # earnings_call score 1.0 but no LLM analysis -> conviction 0, gate fails
+        # (this is the FUFU case that previously slipped through the score fallback).
+        sigs = [{"ticker": "FUFU", "direction": "short", "score": 1.0,
+                 "strategy": "earnings_call", "metadata": {}}]
+        assert PortfolioCommittee._short_passes_gate(sigs) is False
 
     def test_two_strategies_pass_regardless_of_conviction(self):
-        sigs = [
-            {"ticker": "TSLA", "direction": "short", "score": 0.1,
-             "strategy": "litigation", "metadata": {}},
-            {"ticker": "TSLA", "direction": "short", "score": 0.1,
-             "strategy": "congressional_trades", "metadata": {}},
-        ]
+        sigs = [_short("TSLA", "litigation", 0.1), _short("TSLA", "congressional_trades", 0.1)]
         assert PortfolioCommittee._short_passes_gate(sigs) is True
 
 
@@ -82,52 +90,47 @@ class TestConvictionGateUnit:
 class TestRuleBasedShortGate:
     def test_single_strategy_low_conviction_short_rejected(self):
         committee = _rule_based_committee()
-        signals = [{"ticker": "LCID", "direction": "short", "score": 0.55,
-                    "strategy": "litigation", "metadata": {}}]
-        recs = committee.synthesize(signals, total_capital=50_000)
+        recs = committee.synthesize([_short("LCID", "litigation", 0.55)], total_capital=50_000)
         assert all(r.ticker != "LCID" for r in recs)
 
     def test_single_strategy_high_conviction_short_accepted(self):
         committee = _rule_based_committee()
-        signals = [{"ticker": "AAPL", "direction": "short", "score": 0.7,
-                    "strategy": "supply_chain", "metadata": {}}]
         recs = committee.synthesize(
-            signals, total_capital=50_000,
+            [_short("AAPL", "supply_chain", 0.7)], total_capital=50_000,
             strategy_confidence={"supply_chain": 1.0},
         )
         assert any(r.ticker == "AAPL" and r.direction == "short" for r in recs), \
             f"high-conviction single-strategy short should pass, got {recs}"
 
+    def test_rule_score_short_without_conviction_rejected(self):
+        committee = _rule_based_committee()
+        # earnings_call FUFU: rule score 1.0, no LLM conviction -> must NOT clear.
+        signals = [{"ticker": "FUFU", "direction": "short", "score": 1.0,
+                    "strategy": "earnings_call", "metadata": {}}]
+        recs = committee.synthesize(
+            signals, total_capital=50_000, strategy_confidence={"earnings_call": 1.0},
+        )
+        assert all(r.ticker != "FUFU" for r in recs), \
+            f"conviction-0 rule-score short should be rejected, got {recs}"
+
     def test_two_strategy_short_accepted(self):
         committee = _rule_based_committee()
-        signals = [
-            {"ticker": "AAPL", "direction": "short", "score": 0.7,
-             "strategy": "litigation", "metadata": {}},
-            {"ticker": "AAPL", "direction": "short", "score": 0.6,
-             "strategy": "congressional_trades", "metadata": {}},
-        ]
+        signals = [_short("AAPL", "litigation", 0.7), _short("AAPL", "congressional_trades", 0.6)]
         recs = committee.synthesize(signals, total_capital=50_000)
         short_recs = [r for r in recs if r.ticker == "AAPL"]
         assert len(short_recs) == 1 and short_recs[0].direction == "short"
 
     def test_single_strategy_long_accepted_at_threshold(self):
         committee = _rule_based_committee()
-        signals = [{"ticker": "MSFT", "direction": "long", "score": 0.6,
-                    "strategy": "earnings_call", "metadata": {}}]
         recs = committee.synthesize(
-            signals, total_capital=50_000,
+            [_long("MSFT", "earnings_call", 0.6)], total_capital=50_000,
             strategy_confidence={"earnings_call": 1.0},
         )
         assert any(r.ticker == "MSFT" and r.direction == "long" for r in recs)
 
     def test_short_blocked_for_long_only_cohort_takes_precedence(self):
         committee = _rule_based_committee(short_eligible=False)
-        signals = [
-            {"ticker": "AAPL", "direction": "short", "score": 0.9,
-             "strategy": "litigation", "metadata": {}},
-            {"ticker": "AAPL", "direction": "short", "score": 0.7,
-             "strategy": "congressional_trades", "metadata": {}},
-        ]
+        signals = [_short("AAPL", "litigation", 0.9), _short("AAPL", "congressional_trades", 0.7)]
         recs = committee.synthesize(signals, total_capital=50_000)
         assert all(r.direction != "short" for r in recs)
 
@@ -150,19 +153,11 @@ class TestLLMShortGate:
         mock_call.side_effect = fake_call
         committee = _llm_committee()
         signals = [
-            # Single-strategy LOW conviction — dropped
-            {"ticker": "LCID", "direction": "short", "score": 0.5,
-             "strategy": "litigation", "metadata": {}},
-            # Single-strategy HIGH conviction — kept
-            {"ticker": "AAPL", "direction": "short", "score": 0.7,
-             "strategy": "supply_chain", "metadata": {}},
-            # Two-strategy short — kept
-            {"ticker": "TSLA", "direction": "short", "score": 0.3,
-             "strategy": "litigation", "metadata": {}},
-            {"ticker": "TSLA", "direction": "short", "score": 0.3,
-             "strategy": "congressional_trades", "metadata": {}},
-            {"ticker": "MSFT", "direction": "long", "score": 0.8,
-             "strategy": "earnings_call", "metadata": {}},
+            _short("LCID", "litigation", 0.5),            # low conviction -> dropped
+            _short("AAPL", "supply_chain", 0.7),          # high conviction -> kept
+            _short("TSLA", "litigation", 0.3),            # +
+            _short("TSLA", "congressional_trades", 0.3),  # = 2 strategies -> kept
+            _long("MSFT", "earnings_call", 0.8),
         ]
         committee.synthesize(signals, total_capital=50_000)
         prompt = captured.get("prompt", "")
@@ -185,9 +180,7 @@ class TestLLMShortGate:
         ])
         committee = _llm_committee()
         recs = committee.synthesize(
-            signals=[{"ticker": "AAPL", "direction": "short", "score": 0.7,
-                      "strategy": "supply_chain", "metadata": {}}],
-            total_capital=50_000,
+            signals=[_short("AAPL", "supply_chain", 0.7)], total_capital=50_000,
         )
         assert all(r.ticker != "AAPL" for r in recs), "low-confidence single short should be dropped"
         assert any(r.ticker == "MSFT" for r in recs)
@@ -203,9 +196,7 @@ class TestLLMShortGate:
         ])
         committee = _llm_committee()
         recs = committee.synthesize(
-            signals=[{"ticker": "AAPL", "direction": "short", "score": 0.7,
-                      "strategy": "supply_chain", "metadata": {}}],
-            total_capital=50_000,
+            signals=[_short("AAPL", "supply_chain", 0.7)], total_capital=50_000,
         )
         assert any(r.ticker == "AAPL" and r.direction == "short" for r in recs), \
             f"high-confidence single short should survive, got {recs}"
@@ -221,8 +212,6 @@ class TestLLMShortGate:
         ])
         committee = _llm_committee()
         recs = committee.synthesize(
-            signals=[{"ticker": "MSFT", "direction": "long", "score": 0.8,
-                      "strategy": "earnings_call", "metadata": {}}],
-            total_capital=50_000,
+            signals=[_long("MSFT", "earnings_call", 0.8)], total_capital=50_000,
         )
         assert any(r.ticker == "MSFT" and r.direction == "long" for r in recs)
