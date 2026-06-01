@@ -99,6 +99,13 @@ def main():
     except ImportError:
         pass
 
+    # Raise the soft file-descriptor limit before any FD-heavy work. launchd
+    # imposes a soft RLIMIT_NOFILE of 256, which the 13-source / 12-strategy
+    # fetch fan-out exceeds (it errored all 16 cohorts on 2026-06-01). setrlimit
+    # is inherited by the per-generation worktree subprocesses spawned below.
+    from tradingagents.sys_limits import raise_fd_limit
+    raise_fd_limit()
+
     from tradingagents.strategies.orchestration.generation_manager import GenerationManager
 
     repo = _repo_root()

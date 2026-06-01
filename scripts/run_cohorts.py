@@ -33,7 +33,30 @@ logging.basicConfig(
 logger = logging.getLogger("run_cohorts")
 
 
+def _raise_fd_limit() -> None:
+    """Raise the soft file-descriptor limit (launchd default is 256, too low
+    for the 13-source fetch fan-out). Prefer the shared helper; fall back to a
+    stdlib-only bump for frozen worktrees that predate tradingagents.sys_limits.
+    """
+    try:
+        from tradingagents.sys_limits import raise_fd_limit
+        raise_fd_limit()
+        return
+    except Exception:
+        pass
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = 16384 if hard == resource.RLIM_INFINITY else min(16384, hard)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:
+        pass
+
+
 def main():
+    _raise_fd_limit()
     parser = argparse.ArgumentParser(
         description="Run 16-cohort paper trading matrix",
     )
@@ -149,6 +172,24 @@ def main():
 
     print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
     print(json.dumps(result, indent=2, default=str))
+
+    # Surface cohort failures via exit code so a run where cohorts errored is
+    # never recorded as a clean success (2026-06-01: all 16 cohorts errored on
+    # FD exhaustion, but the run exited 0 and was logged successful).
+    try:
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            count_failed_cohorts,
+        )
+        n_failed, n_total, failed = count_failed_cohorts(result)
+    except Exception:
+        failed = [k for k, v in result.items() if isinstance(v, dict) and v.get("error")]
+        n_failed, n_total = len(failed), len(result)
+    if n_failed:
+        print(
+            f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
