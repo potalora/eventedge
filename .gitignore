@@ -254,5 +254,6 @@ data/logs/
 data/generations/
 data/state/
 data/dashboard_emails/
+data/archive/
 f_year.txt
 .playwright-mcp/

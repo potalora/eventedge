@@ -15,6 +15,24 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
+    """Count cohorts that errored in a ``run_daily`` results dict.
+
+    A cohort is considered failed when its result is a mapping carrying a truthy
+    ``"error"`` (cohort_orchestrator records ``{"error": True}`` for any cohort
+    whose ``run_paper_trade_phase`` raised). Used to surface masked failures —
+    a run where cohorts errored must never be recorded as a clean success.
+
+    Returns ``(n_failed, n_total, sorted_failed_names)``.
+    """
+    failed = sorted(
+        name
+        for name, r in results.items()
+        if isinstance(r, dict) and r.get("error")
+    )
+    return len(failed), len(results), failed
+
+
 # ---------------------------------------------------------------------------
 # Lookup tables
 # ---------------------------------------------------------------------------

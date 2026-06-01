@@ -22,6 +22,33 @@ logger = logging.getLogger(__name__)
 _MAX_RUN_HISTORY = 100
 
 
+def _extract_cohort_results(stdout: str) -> dict | None:
+    """Extract the trailing top-level JSON results object that run_cohorts.py
+    prints (``json.dumps(result, indent=2)``) from its mixed stdout.
+
+    Lets the parent detect cohort failures even when a (frozen) worktree's
+    run_cohorts.py exits 0 on a run where cohorts errored. Returns None when no
+    top-level object is parseable, in which case callers fall back to the exit
+    code alone.
+    """
+    if not stdout:
+        return None
+    lines = stdout.splitlines()
+    end = next((i for i in range(len(lines) - 1, -1, -1)
+                if lines[i].rstrip() == "}"), None)
+    if end is None:
+        return None
+    start = next((i for i in range(end, -1, -1)
+                  if lines[i].startswith("{")), None)
+    if start is None:
+        return None
+    try:
+        obj = json.loads("\n".join(lines[start:end + 1]))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 @dataclass
 class GenerationInfo:
     """Metadata for a single generation (frozen code snapshot)."""
@@ -359,6 +386,29 @@ class GenerationManager:
                     "elapsed_s": round(elapsed, 2),
                     "error": error_msg,
                 }
+
+            # rc==0 does not imply the cohorts succeeded: run_cohorts.py catches
+            # per-cohort errors and prints {"error": true} for each, then exits
+            # 0. Inspect the printed results so a run where cohorts failed is
+            # never recorded as a masked success (2026-06-01 incident).
+            cohort_results = _extract_cohort_results(proc.stdout)
+            if cohort_results is not None:
+                from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                    count_failed_cohorts,
+                )
+
+                n_failed, n_total, failed = count_failed_cohorts(cohort_results)
+                if n_failed:
+                    msg = (
+                        f"{n_failed}/{n_total} cohorts failed: "
+                        f"{', '.join(failed)}"
+                    )
+                    logger.error("Generation %s: %s", gen_data["gen_id"], msg)
+                    return {
+                        "success": False,
+                        "elapsed_s": round(elapsed, 2),
+                        "error": msg,
+                    }
 
             logger.info(
                 "Generation %s completed in %.1fs",
