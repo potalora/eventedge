@@ -249,13 +249,24 @@ class MultiStrategyEngine:
         bridge.risk_gate.reset_daily(trading_date)
         bridge.risk_gate.update_high_water_mark()
 
-        # Reconstruct broker state from persistent trades
+        # Reconstruct broker state from persistent trades. Realized P&L from
+        # closed trades is banked into cash so the capital base compounds across
+        # runs (a take-profit winner adds buying power; a stop-loss loser removes
+        # it). Without this, closed-trade gains/losses silently vanish each run.
         open_trades_for_broker = self.state.load_paper_trades(status="open")
-        if open_trades_for_broker and hasattr(bridge.broker, "reconstruct_from_trades"):
-            bridge.broker.reconstruct_from_trades(open_trades_for_broker)
+        closed_trades_for_broker = self.state.load_paper_trades(status="closed")
+        realized_pnl = sum(
+            float(t.get("pnl", 0.0) or 0.0) for t in closed_trades_for_broker
+        )
+        if (open_trades_for_broker or realized_pnl) and hasattr(
+            bridge.broker, "reconstruct_from_trades"
+        ):
+            bridge.broker.reconstruct_from_trades(
+                open_trades_for_broker, realized_pnl=realized_pnl
+            )
             logger.info(
-                "Reconstructed broker: cash=$%.2f, %d positions",
-                bridge.broker.cash, len(bridge.broker.positions),
+                "Reconstructed broker: cash=$%.2f, %d positions, realized P&L=$%.2f",
+                bridge.broker.cash, len(bridge.broker.positions), realized_pnl,
             )
 
         committee = PortfolioCommittee(self.config, size_profile=size_profile)

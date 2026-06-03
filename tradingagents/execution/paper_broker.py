@@ -209,12 +209,19 @@ class PaperBroker(BaseBroker):
             buying_power=buying_power,
         )
 
-    def reconstruct_from_trades(self, open_trades: list[dict]) -> None:
+    def reconstruct_from_trades(
+        self, open_trades: list[dict], realized_pnl: float = 0.0
+    ) -> None:
         """Rebuild positions and cash from persisted open trades.
 
         Called at the start of each daily run to restore broker state
         from the persistent StateManager trade records, since PaperBroker
         is ephemeral (created fresh each run).
+
+        ``realized_pnl`` is the cumulative banked gain/loss from all *closed*
+        trades. It must be added back into cash so the capital base compounds:
+        without it, a take-profit winner's proceeds and a stop-loss loser's
+        loss both vanish on the next reconstruction, leaving buying power wrong.
         """
         self.positions.clear()
         self.short_positions.clear()
@@ -265,6 +272,9 @@ class PaperBroker(BaseBroker):
                         "avg_price": avg_price, "instrument_type": "stock",
                     }
                 self.cash -= shares * avg_price
+
+        # Bank cumulative realized P&L so the capital base compounds across runs.
+        self.cash += realized_pnl
 
         if self.cash < 0:
             logger.warning("Broker cash negative after reconstruction: $%.2f", self.cash)
