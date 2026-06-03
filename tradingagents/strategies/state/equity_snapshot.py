@@ -85,7 +85,16 @@ def write_snapshot(
             short_liability += -pv
 
     realized = _realized_pnl(closed_trades)
-    portfolio_value = cash + long_value - short_liability
+    # Equity identity: equity == starting capital + banked realized P&L +
+    # mark-to-market unrealized P&L. This is provably equal to
+    # (cash + long_value - short_liability) when cash is correct, but does NOT
+    # depend on the live broker's cash — which is stale on exit days because
+    # `close_trade` updates persisted state, not the in-memory broker. Deriving
+    # portfolio_value from the identity keeps the snapshot correct regardless.
+    portfolio_value = total_capital + realized + unrealized
+    # Report the cash implied by the identity so the row is self-consistent
+    # (cash + long_value - short_liability == portfolio_value).
+    cash = portfolio_value - long_value + short_liability
     total_return_pct = (
         (portfolio_value - total_capital) / total_capital * 100
         if total_capital > 0
