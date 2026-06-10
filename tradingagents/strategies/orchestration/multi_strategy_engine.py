@@ -269,6 +269,20 @@ class MultiStrategyEngine:
                 bridge.broker.cash, len(bridge.broker.positions), realized_pnl,
             )
 
+        # Re-entry cooldown: block names stopped out within the cooldown window
+        from tradingagents.strategies.trading.risk_gate import compute_cooling_tickers
+        cooling = compute_cooling_tickers(
+            closed_trades_for_broker,
+            trading_date,
+            bridge.risk_gate.config.reentry_cooldown_days,
+        )
+        bridge.risk_gate.set_cooling_tickers(cooling)
+        if cooling:
+            logger.info(
+                "Re-entry cooldown active for %d tickers: %s",
+                len(cooling), sorted(cooling),
+            )
+
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
         recommendations = committee.synthesize(
             signals=deduped_signals,
