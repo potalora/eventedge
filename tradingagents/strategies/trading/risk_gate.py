@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,40 @@ def _estimate_borrow_cost(si_pct: float) -> float:
     return 0.10
 
 
+def compute_cooling_tickers(
+    closed_trades: list[dict],
+    trading_date: str,
+    cooldown_days: int,
+) -> set[str]:
+    """Tickers with a stop_loss exit within ``cooldown_days`` of ``trading_date``.
+
+    Used to block re-entry into names just stopped out (they tend to keep
+    falling and get re-bought into the downtrend). Returns an empty set when
+    ``cooldown_days <= 0`` so callers get baseline (gen_001) behavior.
+    """
+    if cooldown_days <= 0:
+        return set()
+    try:
+        td = datetime.strptime(trading_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return set()
+    cooling: set[str] = set()
+    for t in closed_trades:
+        if t.get("exit_reason") != "stop_loss":
+            continue
+        exit_date = t.get("exit_date")
+        ticker = t.get("ticker", "")
+        if not exit_date or not ticker:
+            continue
+        try:
+            xd = datetime.strptime(exit_date, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+        if 0 <= (td - xd).days < cooldown_days:
+            cooling.add(ticker)
+    return cooling
+
+
 @dataclass
 class RiskGateConfig:
     """Portfolio risk parameters."""
@@ -42,6 +77,7 @@ class RiskGateConfig:
     global_stop_loss_pct: float = 0.08      # 8% stop per position
     long_only: bool = True                  # $5K accounts can't short easily
     cash_reserve_pct: float = 0.0           # Min cash as % of portfolio (0 = disabled)
+    reentry_cooldown_days: int = 0          # Block re-entry of stopped names for N days (0 = off)
     # Short-specific gates (0 = disabled)
     earnings_blackout_days: int = 0         # Block shorts within N days of earnings
     max_borrow_cost_pct: float = 0.0        # Max annualised borrow cost (0 = disabled)
@@ -54,6 +90,7 @@ class RiskGateConfig:
     def from_dict(cls, config: dict) -> RiskGateConfig:
         """Build from nested config dict (reads autoresearch.risk_gate section)."""
         rg = config.get("autoresearch", {}).get("risk_gate", {})
+        rd = config.get("autoresearch", {}).get("risk_discipline", {})
         total_capital = config.get("autoresearch", {}).get("total_capital", 5000.0)
         return cls(
             total_capital=total_capital,
@@ -66,6 +103,7 @@ class RiskGateConfig:
             global_stop_loss_pct=rg.get("global_stop_loss_pct", 0.08),
             long_only=rg.get("long_only", True),
             cash_reserve_pct=rg.get("cash_reserve_pct", 0.0),
+            reentry_cooldown_days=rd.get("reentry_cooldown_days", 0),
             earnings_blackout_days=rg.get("earnings_blackout_days", 0),
             max_borrow_cost_pct=rg.get("max_borrow_cost_pct", 0.0),
             max_margin_utilization_pct=rg.get("max_margin_utilization_pct", 0.0),
@@ -96,6 +134,11 @@ class RiskGate:
         self._daily_losses: float = 0.0
         self._daily_date: str = ""
         self._margin_used: float = 0.0
+        self._cooling_tickers: set[str] = set()
+
+    def set_cooling_tickers(self, tickers: set[str]) -> None:
+        """Set tickers in re-entry cooldown (stopped out within the cooldown window)."""
+        self._cooling_tickers = set(tickers)
 
     def check(
         self,
@@ -159,6 +202,10 @@ class RiskGate:
         held_tickers = {p.get("ticker", "") for p in positions}
         if ticker in held_tickers:
             return False, f"duplicate: already holding {ticker}"
+
+        # 7b. Re-entry cooldown — skip names stopped out within the cooldown window
+        if ticker in self._cooling_tickers:
+            return False, f"cooldown: {ticker} stopped out recently"
 
         # 8. Buying power check
         if position_value > account.buying_power:
