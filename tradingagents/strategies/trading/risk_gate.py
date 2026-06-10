@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,40 @@ def _estimate_borrow_cost(si_pct: float) -> float:
         if si_pct < threshold:
             return cost
     return 0.10
+
+
+def compute_cooling_tickers(
+    closed_trades: list[dict],
+    trading_date: str,
+    cooldown_days: int,
+) -> set[str]:
+    """Tickers with a stop_loss exit within ``cooldown_days`` of ``trading_date``.
+
+    Used to block re-entry into names just stopped out (they tend to keep
+    falling and get re-bought into the downtrend). Returns an empty set when
+    ``cooldown_days <= 0`` so callers get baseline (gen_001) behavior.
+    """
+    if cooldown_days <= 0:
+        return set()
+    try:
+        td = datetime.strptime(trading_date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return set()
+    cooling: set[str] = set()
+    for t in closed_trades:
+        if t.get("exit_reason") != "stop_loss":
+            continue
+        exit_date = t.get("exit_date")
+        ticker = t.get("ticker", "")
+        if not exit_date or not ticker:
+            continue
+        try:
+            xd = datetime.strptime(exit_date, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+        if 0 <= (td - xd).days < cooldown_days:
+            cooling.add(ticker)
+    return cooling
 
 
 @dataclass
