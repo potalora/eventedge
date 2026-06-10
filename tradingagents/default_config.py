@@ -156,5 +156,12 @@ DEFAULT_CONFIG = {
             "borrow_cost_reject_above": 0.05,
             "hard_to_borrow_si_pct": 30,
         },
+        # gen_002 risk-discipline knobs. Defaults reproduce gen_001 behavior;
+        # each is read by exactly one component. Flip per generation.
+        "risk_discipline": {
+            "reentry_cooldown_days": 0,         # block re-entry of a stopped name for N days (0 = off)
+            "short_conviction_threshold": 0.60, # min LLM conviction for a single-strategy short
+            "regime_vix_stressed": 25.0,        # VIX above this => "stressed" regime
+        },
     },
 }
