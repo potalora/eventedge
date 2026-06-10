@@ -134,6 +134,11 @@ class RiskGate:
         self._daily_losses: float = 0.0
         self._daily_date: str = ""
         self._margin_used: float = 0.0
+        self._cooling_tickers: set[str] = set()
+
+    def set_cooling_tickers(self, tickers: set[str]) -> None:
+        """Set tickers in re-entry cooldown (stopped out within the cooldown window)."""
+        self._cooling_tickers = set(tickers)
 
     def check(
         self,
@@ -197,6 +202,10 @@ class RiskGate:
         held_tickers = {p.get("ticker", "") for p in positions}
         if ticker in held_tickers:
             return False, f"duplicate: already holding {ticker}"
+
+        # 7b. Re-entry cooldown — skip names stopped out within the cooldown window
+        if ticker in self._cooling_tickers:
+            return False, f"cooldown: {ticker} stopped out recently"
 
         # 8. Buying power check
         if position_value > account.buying_power:
