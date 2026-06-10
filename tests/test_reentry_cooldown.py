@@ -30,3 +30,20 @@ class TestComputeCoolingTickers:
     def test_malformed_dates_ignored(self):
         closed = [_stop("X", ""), _stop("Y", None), {"ticker": "Z", "exit_reason": "stop_loss"}]
         assert compute_cooling_tickers(closed, "2026-06-09", 7) == set()
+
+
+from tradingagents.strategies.trading.risk_gate import RiskGateConfig
+
+
+class TestRiskGateConfigCooldown:
+    def test_default_cooldown_is_zero(self):
+        assert RiskGateConfig().reentry_cooldown_days == 0
+
+    def test_from_dict_reads_risk_discipline(self):
+        cfg = RiskGateConfig.from_dict(
+            {"autoresearch": {"risk_discipline": {"reentry_cooldown_days": 7}}}
+        )
+        assert cfg.reentry_cooldown_days == 7
+
+    def test_from_dict_defaults_to_zero(self):
+        assert RiskGateConfig.from_dict({"autoresearch": {}}).reentry_cooldown_days == 0

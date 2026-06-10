@@ -77,6 +77,7 @@ class RiskGateConfig:
     global_stop_loss_pct: float = 0.08      # 8% stop per position
     long_only: bool = True                  # $5K accounts can't short easily
     cash_reserve_pct: float = 0.0           # Min cash as % of portfolio (0 = disabled)
+    reentry_cooldown_days: int = 0          # Block re-entry of stopped names for N days (0 = off)
     # Short-specific gates (0 = disabled)
     earnings_blackout_days: int = 0         # Block shorts within N days of earnings
     max_borrow_cost_pct: float = 0.0        # Max annualised borrow cost (0 = disabled)
@@ -89,6 +90,7 @@ class RiskGateConfig:
     def from_dict(cls, config: dict) -> RiskGateConfig:
         """Build from nested config dict (reads autoresearch.risk_gate section)."""
         rg = config.get("autoresearch", {}).get("risk_gate", {})
+        rd = config.get("autoresearch", {}).get("risk_discipline", {})
         total_capital = config.get("autoresearch", {}).get("total_capital", 5000.0)
         return cls(
             total_capital=total_capital,
@@ -101,6 +103,7 @@ class RiskGateConfig:
             global_stop_loss_pct=rg.get("global_stop_loss_pct", 0.08),
             long_only=rg.get("long_only", True),
             cash_reserve_pct=rg.get("cash_reserve_pct", 0.0),
+            reentry_cooldown_days=rd.get("reentry_cooldown_days", 0),
             earnings_blackout_days=rg.get("earnings_blackout_days", 0),
             max_borrow_cost_pct=rg.get("max_borrow_cost_pct", 0.0),
             max_margin_utilization_pct=rg.get("max_margin_utilization_pct", 0.0),
