@@ -645,10 +645,11 @@ class MultiStrategyEngine:
             yc_slope = float(yield_curve.iloc[-1]) if not pd.isna(yield_curve.iloc[-1]) else 0.0
 
         overall = self._classify_regime(vix_level, credit_bps, yc_slope)
+        stressed_vix = self.ar_config.get("risk_discipline", {}).get("regime_vix_stressed", 25.0)
 
         return {
             "vix_level": vix_level,
-            "vix_regime": "crisis" if vix_level > 35 else "elevated" if vix_level > 25 else "normal" if vix_level > 15 else "low",
+            "vix_regime": "crisis" if vix_level > 35 else "elevated" if vix_level > stressed_vix else "normal" if vix_level > 15 else "low",
             "credit_spread_bps": credit_bps,
             "credit_regime": "crisis" if credit_bps > 600 else "stressed" if credit_bps > 400 else "normal",
             "yield_curve_slope": yc_slope,
@@ -656,7 +657,7 @@ class MultiStrategyEngine:
             "overall_regime": overall,
             "timestamp": datetime.now().isoformat(),
             "thresholds": {
-                "vix": {"low": 15, "elevated": 25, "crisis": 35},
+                "vix": {"low": 15, "elevated": stressed_vix, "crisis": 35},
                 "credit_bps": {"stressed": 400, "crisis": 600},
                 "yield_curve": {"inverted": -0.2, "flat": 0.5, "steep": 1.5},
             },
@@ -664,6 +665,7 @@ class MultiStrategyEngine:
 
     def _classify_regime(self, vix: float, credit_bps: float, yc_slope: float) -> str:
         """Classify overall market regime."""
+        stressed_vix = self.ar_config.get("risk_discipline", {}).get("regime_vix_stressed", 25.0)
         crisis_signals = 0
         if vix > 35:
             crisis_signals += 1
@@ -674,7 +676,7 @@ class MultiStrategyEngine:
 
         if crisis_signals >= 2:
             return "crisis"
-        if vix > 25 or credit_bps > 400:
+        if vix > stressed_vix or credit_bps > 400:
             return "stressed"
         if vix < 15 and credit_bps < 300:
             return "benign"
