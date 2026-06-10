@@ -68,13 +68,17 @@ class PortfolioCommittee:
         return 0.0
 
     @classmethod
-    def _short_passes_gate(cls, ticker_short_signals: list[dict]) -> bool:
+    def _short_passes_gate(
+        cls, ticker_short_signals: list[dict], threshold: float | None = None
+    ) -> bool:
         """True if a ticker's short signals clear the conviction gate."""
+        if threshold is None:
+            threshold = cls.SHORT_CONVICTION_THRESHOLD
         strategies = {s.get("strategy", "") for s in ticker_short_signals}
         if len(strategies) >= 2:
             return True
         max_conv = max((cls._signal_conviction(s) for s in ticker_short_signals), default=0.0)
-        return max_conv >= cls.SHORT_CONVICTION_THRESHOLD
+        return max_conv >= threshold
 
     def __init__(self, config: dict | None = None, size_profile: Any = None) -> None:
         self.config = config or {}
@@ -97,6 +101,11 @@ class PortfolioCommittee:
             self._max_position = pt_config.get("max_single_position_pct", 0.10)
 
         self._size_profile = size_profile
+        self._short_conviction_threshold = float(
+            self.config.get("autoresearch", {})
+            .get("risk_discipline", {})
+            .get("short_conviction_threshold", self.SHORT_CONVICTION_THRESHOLD)
+        )
         self._client = None
 
     def synthesize(
@@ -225,7 +234,7 @@ class PortfolioCommittee:
                          if s.get("direction") == "short"),
                         default=0.0,
                     )
-                    if max_conv < self.SHORT_CONVICTION_THRESHOLD:
+                    if max_conv < self._short_conviction_threshold:
                         continue  # Single-strategy short, low conviction — skip
                 elif consensus_score < 0.5:
                     continue  # Single-strategy long, weak event — hold cash instead
@@ -362,7 +371,7 @@ class PortfolioCommittee:
             if s.get("direction") == "short":
                 shorts_by_ticker.setdefault(s.get("ticker", ""), []).append(s)
         blocked_short_tickers = {
-            t for t, ss in shorts_by_ticker.items() if not self._short_passes_gate(ss)
+            t for t, ss in shorts_by_ticker.items() if not self._short_passes_gate(ss, self._short_conviction_threshold)
         }
         if blocked_short_tickers:
             filtered_signals = [
@@ -416,7 +425,7 @@ class PortfolioCommittee:
                     if not (
                         r.direction == "short"
                         and len(r.contributing_strategies) < 2
-                        and r.confidence < self.SHORT_CONVICTION_THRESHOLD
+                        and r.confidence < self._short_conviction_threshold
                     )
                 ]
             return recs
