@@ -26,8 +26,22 @@ fi
 
 LOG_FILE="$LOG_DIR/daily_${TODAY}.log"
 
+# Prevent the Mac from sleeping mid-run. On battery the system enters
+# "Maintenance Sleep" and suspends this process: that suspended the run for
+# most of its window on 2026-06-15 (killed by the 3600s wall) and 2026-06-16
+# (never finished, corrupting gen_001 state). caffeinate holds idle/system/disk
+# sleep assertions for the lifetime of the run.
+# CAVEAT: -s only blocks *system* sleep while on AC power; with the lid closed
+# on battery the Mac still sleeps. Keep the machine plugged in during the run
+# (or move to the always-on VPS) for reliable execution.
+RUN_CMD=("$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" run-daily --date "$TODAY")
+
 echo "=== Daily trading run: $TODAY ===" >> "$LOG_FILE"
-"$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" run-daily --date "$TODAY" >> "$LOG_FILE" 2>&1
+if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -ims "${RUN_CMD[@]}" >> "$LOG_FILE" 2>&1
+else
+    "${RUN_CMD[@]}" >> "$LOG_FILE" 2>&1
+fi
 
 # Daily report is intentionally NOT generated here. Per project convention,
 # Claude writes the report by reading JSON state from

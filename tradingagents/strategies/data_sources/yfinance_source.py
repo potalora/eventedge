@@ -97,7 +97,9 @@ class YFinanceSource:
 
         try:
             yf_tickers = normalize_tickers(tickers)
-            df = yf.download(yf_tickers, start=start, end=end, progress=False)
+            df = yf.download(
+                yf_tickers, start=start, end=end, progress=False, timeout=30,
+            )
             if df.empty:
                 logger.warning("yfinance returned empty DataFrame for %s", tickers)
                 return df
@@ -174,7 +176,7 @@ class YFinanceSource:
         import yfinance as yf
 
         try:
-            df = yf.download("^VIX", start=start, end=end, progress=False)
+            df = yf.download("^VIX", start=start, end=end, progress=False, timeout=30)
             # Flatten MultiIndex if present (single ticker)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
