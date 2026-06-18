@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import statistics
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -23,6 +24,91 @@ from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.modules.base import Candidate
 
 logger = logging.getLogger(__name__)
+
+
+def _fetch_timeout_s() -> float:
+    """Wall-clock ceiling for the parallel API-key-source fetch fan-out
+    (finnhub, fred, edgar, congress, regulations, etc.).
+
+    Defense-in-depth behind those sources' per-call HTTP timeouts (requests=15s,
+    finnhub=10s) so one hung source can't stall the run until the outer 3600s
+    generation kill. NOTE: the yfinance price fetch runs synchronously outside
+    this fan-out and is bounded separately by ``yf.download(timeout=30)``; OpenBB
+    enrichment is not bounded here. Overridable via AUTORESEARCH_FETCH_TIMEOUT_S.
+    """
+    try:
+        return float(os.environ.get("AUTORESEARCH_FETCH_TIMEOUT_S", "300"))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def _positions_to_price(
+    deduped_signals: list[dict],
+    open_trades: list[dict],
+    price_cache: dict | None,
+) -> list[str]:
+    """Tickers needing a current price for the daily snapshot.
+
+    Every current signal PLUS every open position. Including open positions is
+    what marks held longs and shorts to market even after they stop being
+    signaled — without it, a position that drops out of the signal set freezes
+    at its entry price in the equity snapshot (the 2026-06 ADMA short whose
+    ``short_liability`` never moved). Already-cached tickers are excluded.
+    """
+    wanted = {s.get("ticker") for s in deduped_signals if s.get("ticker")}
+    wanted |= {t.get("ticker") for t in open_trades if t.get("ticker")}
+    return sorted(wanted - set(price_cache or {}))
+
+
+def _gather_with_timeout(
+    api_fetches: dict[str, tuple],
+    timeout_s: float,
+    max_workers: int = 4,
+) -> dict[str, Any]:
+    """Run each ``name -> (fn, args)`` fetch in a thread pool, returning
+    ``{name: result}``.
+
+    Every source defaults to ``{}`` so any that error or never return within
+    ``timeout_s`` are recorded as empty rather than hanging the caller. On
+    timeout the pool is shut down with ``wait=False`` so a genuinely-stuck
+    thread cannot re-block the main thread at pool teardown (the default
+    context-manager exit waits for running futures, which would defeat the
+    timeout).
+    """
+    from concurrent.futures import (
+        ThreadPoolExecutor,
+        TimeoutError as FuturesTimeout,
+        as_completed,
+    )
+
+    results: dict[str, Any] = {name: {} for name in api_fetches}
+    if not api_fetches:
+        return results
+
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {
+            pool.submit(fn, *args): name
+            for name, (fn, args) in api_fetches.items()
+        }
+        try:
+            for future in as_completed(futures, timeout=timeout_s):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception:
+                    logger.error("Failed to fetch %s", name, exc_info=True)
+                    results[name] = {}
+        except FuturesTimeout:
+            stuck = sorted(futures[f] for f in futures if not f.done())
+            logger.error(
+                "Data fetch exceeded %.0fs; abandoning slow sources: %s",
+                timeout_s, stuck,
+            )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    return results
 
 
 class MultiStrategyEngine:
@@ -216,12 +302,15 @@ class MultiStrategyEngine:
                 strategy_confidence[strat_name] = 0.5
 
         # ------------------------------------------------------------------
-        # 3. Fetch prices for signal tickers
+        # 3. Fetch prices for signal tickers AND open positions
         # ------------------------------------------------------------------
-        missing_tickers = sorted({
-            s["ticker"] for s in deduped_signals
-            if s["ticker"] not in self._price_cache
-        })
+        # Open positions are included so held longs and shorts are marked to
+        # market in the daily snapshot even when they are no longer signaled.
+        missing_tickers = _positions_to_price(
+            deduped_signals,
+            self.state.load_paper_trades(status="open"),
+            self._price_cache,
+        )
         if missing_tickers:
             self._fetch_missing_prices(missing_tickers, lookback_start, trading_date)
 
@@ -763,8 +852,6 @@ class MultiStrategyEngine:
             data["yfinance"] = self._fetch_yfinance_data(start_date, end_date)
 
         # Fetch API-key sources in parallel (I/O bound, no dependency on each other)
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         api_fetches: dict[str, tuple] = {}
         if "finnhub" in needed_sources and "finnhub" in available:
             api_fetches["finnhub"] = (self._fetch_finnhub_data, (end_date,))
@@ -792,18 +879,7 @@ class MultiStrategyEngine:
             api_fetches["cftc"] = (self._fetch_cftc_data, ())
 
         if api_fetches:
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {
-                    pool.submit(fn, *args): name
-                    for name, (fn, args) in api_fetches.items()
-                }
-                for future in as_completed(futures):
-                    name = futures[future]
-                    try:
-                        data[name] = future.result()
-                    except Exception:
-                        logger.error("Failed to fetch %s", name, exc_info=True)
-                        data[name] = {}
+            data.update(_gather_with_timeout(api_fetches, _fetch_timeout_s()))
 
         self._emit("phase", phase="data_fetch", status="done")
         return data

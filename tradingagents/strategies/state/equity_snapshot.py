@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import tempfile
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
@@ -15,12 +17,31 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_FILENAME = "equity_snapshots.jsonl"
 
 
+def _atomic_write_text(path: str, text: str) -> None:
+    """Write text via a temp file + os.replace so a crash can't truncate the
+    existing file. Mirrors generation_manager._save_manifest."""
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _mark_to_market(trade: dict[str, Any], current_price: float | None) -> tuple[float, float]:
     """Return (position_value, unrealized_pnl) for a single open trade."""
     entry = float(trade.get("entry_price", 0) or 0)
     shares = float(trade.get("shares", 0) or 0)
     direction = trade.get("direction", "long")
-    if current_price is None or current_price <= 0:
+    if current_price is None or math.isnan(current_price) or current_price <= 0:
         current_price = entry
 
     if direction == "short":
@@ -54,9 +75,10 @@ def _current_price_for(ticker: str, price_cache: dict[str, Any] | None) -> float
     if df is None or getattr(df, "empty", True):
         return None
     try:
-        return float(df["Close"].iloc[-1])
+        v = float(df["Close"].iloc[-1])
     except (KeyError, IndexError, ValueError):
         return None
+    return None if math.isnan(v) else v
 
 
 def write_snapshot(
@@ -134,9 +156,8 @@ def write_snapshot(
     by_date = {row.get("date"): row for row in existing}
     by_date[trading_date] = snapshot
 
-    with open(path, "w") as f:
-        for date in sorted(by_date):
-            f.write(json.dumps(by_date[date]) + "\n")
+    text = "".join(json.dumps(by_date[d]) + "\n" for d in sorted(by_date))
+    _atomic_write_text(path, text)
 
     return snapshot
 

@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_RUN_HISTORY = 100
 
+# Wall-clock ceiling for a single generation's cohort run. This is an outer
+# backstop: if a run gets suspended (e.g. the laptop sleeps on battery) or a
+# fetch genuinely hangs, the subprocess is killed after this many seconds.
+_GENERATION_TIMEOUT_S = 3600
+
 
 def _extract_cohort_results(stdout: str) -> dict | None:
     """Extract the trailing top-level JSON results object that run_cohorts.py
@@ -362,7 +367,7 @@ class GenerationManager:
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=3600,
+                timeout=_GENERATION_TIMEOUT_S,
             )
             elapsed = time.monotonic() - start
 
@@ -422,7 +427,7 @@ class GenerationManager:
             return {
                 "success": False,
                 "elapsed_s": round(elapsed, 2),
-                "error": "Timed out after 600s",
+                "error": f"Timed out after {_GENERATION_TIMEOUT_S}s",
             }
         except Exception as e:
             elapsed = time.monotonic() - start
