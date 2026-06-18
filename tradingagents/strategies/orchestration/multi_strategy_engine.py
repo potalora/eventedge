@@ -27,12 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_timeout_s() -> float:
-    """Wall-clock ceiling for the whole parallel API-fetch fan-out.
+    """Wall-clock ceiling for the parallel API-key-source fetch fan-out
+    (finnhub, fred, edgar, congress, regulations, etc.).
 
-    Defense-in-depth behind per-call HTTP timeouts (requests=15s, finnhub=10s,
-    yfinance internal): bounds library calls that manage their own sockets
-    (curl_cffi/yfinance, openbb) so one hung source can't stall the run until
-    the outer 3600s generation kill. Overridable via AUTORESEARCH_FETCH_TIMEOUT_S.
+    Defense-in-depth behind those sources' per-call HTTP timeouts (requests=15s,
+    finnhub=10s) so one hung source can't stall the run until the outer 3600s
+    generation kill. NOTE: the yfinance price fetch runs synchronously outside
+    this fan-out and is bounded separately by ``yf.download(timeout=30)``; OpenBB
+    enrichment is not bounded here. Overridable via AUTORESEARCH_FETCH_TIMEOUT_S.
     """
     try:
         return float(os.environ.get("AUTORESEARCH_FETCH_TIMEOUT_S", "300"))
