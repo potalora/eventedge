@@ -1,8 +1,8 @@
 """LLM-based signal analyzer for paper-trade strategies.
 
-Uses Haiku for all analysis calls (~$0.001/call). Each method takes
-raw event data and returns a structured signal dict with direction,
-conviction, and rationale.
+Each method takes raw event data and returns a structured signal dict with
+direction, conviction, and rationale. The VPS defaults to Claude Sonnet 5 at
+medium effort.
 """
 from __future__ import annotations
 
@@ -133,8 +133,9 @@ class LLMAnalyzer:
         self._model_name = self.config.get(
             "autoresearch", {}
         ).get("autoresearch_model", "claude-haiku-4-5-20251001")
-        # Deterministic by default so signal enrichment doesn't add sampling noise
-        # to generation comparisons (see autoresearch.llm_temperature).
+        self._effort = self.config.get("autoresearch", {}).get("llm_effort", "medium")
+        # Older models use temperature zero by default. Sonnet 5 omits sampling
+        # controls because adaptive thinking rejects non-default values.
         self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
         self._client = None
         self._prompt_overrides: dict[str, str] = {}
@@ -184,20 +185,29 @@ class LLMAnalyzer:
             f"Factor regime into your conviction level."
         )
 
-    def _call_llm(self, system: str, user: str, max_tokens: int = 2048) -> str:
+    def _call_llm(self, system: str, user: str, max_tokens: int = 4096) -> str:
         """Make a single LLM call. Returns response text or empty string."""
         client = self._get_client()
         if client is None:
             return ""
         try:
+            from tradingagents.strategies.llm_utils import (
+                anthropic_request_options,
+                anthropic_response_text,
+            )
+
             response = client.messages.create(
                 model=self._model_name,
                 max_tokens=max_tokens,
-                temperature=self._temperature,
                 system=system,
                 messages=[{"role": "user", "content": user}],
+                **anthropic_request_options(
+                    model=self._model_name,
+                    temperature=self._temperature,
+                    effort=self._effort,
+                ),
             )
-            return response.content[0].text
+            return anthropic_response_text(response)
         except Exception:
             logger.error("LLM call failed", exc_info=True)
             return ""

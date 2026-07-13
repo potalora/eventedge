@@ -863,6 +863,11 @@ class MultiStrategyEngine:
             api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
             api_fetches["congress"] = (self._fetch_congress_data, (end_date,))
+        if "openbb" in needed_sources and "openbb" in available:
+            # CongressionalTradesStrategy prefers OpenBB/FMP government trades
+            # over the rate-limit-prone CapitolTrades scraper. This source was
+            # previously registered but never fetched into strategy data.
+            api_fetches["openbb"] = (self._fetch_openbb_strategy_data, ())
         if "noaa" in needed_sources and "noaa" in available:
             api_fetches["noaa"] = (self._fetch_noaa_data, (end_date,))
         if "usda" in needed_sources and "usda" in available:
@@ -1095,6 +1100,31 @@ class MultiStrategyEngine:
             logger.error("Failed to fetch congressional trades", exc_info=True)
 
         return result
+
+    def _fetch_openbb_strategy_data(self) -> dict[str, Any]:
+        """Fetch OpenBB data consumed directly by strategy ``screen()`` calls."""
+        source = self.registry.get("openbb")
+        if source is None:
+            return {}
+
+        government_trades = source.fetch({"method": "equity_government_trades"})
+        if not isinstance(government_trades, dict):
+            logger.error(
+                "OpenBB government trades returned unexpected %s",
+                type(government_trades).__name__,
+            )
+            government_trades = {"error": "unexpected OpenBB response"}
+
+        trades = government_trades.get("trades", [])
+        if government_trades.get("error"):
+            logger.error(
+                "OpenBB government trades unavailable: %s. "
+                "Set FMP_API_KEY to enable the primary congressional-trades path.",
+                government_trades["error"],
+            )
+        else:
+            logger.info("OpenBB government trades fetch: %d trades", len(trades))
+        return {"government_trades": government_trades}
 
     def _fetch_usaspending_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch recent large federal contract awards."""
@@ -1354,4 +1384,3 @@ class MultiStrategyEngine:
             enriched.append(c)
 
         return enriched
-

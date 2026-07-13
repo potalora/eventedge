@@ -7,6 +7,7 @@ client-side instead. These tests pin that behavior (all mocked, no network).
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from tradingagents.strategies.data_sources.regulations_source import RegulationsSource
@@ -69,9 +70,11 @@ def test_no_date_filter_returns_all_parsed_docs():
 def test_get_recent_proposed_rules_filters_each_agency_by_date():
     src = RegulationsSource(api_key="test")
     # Two agencies; the API returns a mix of recent and old rules for each.
+    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    old = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT00:00:00Z")
     docs = [
-        {"id": "new", "posted": "2026-05-28T00:00:00Z", "agency": "EPA"},
-        {"id": "old", "posted": "2026-01-01T00:00:00Z", "agency": "EPA"},
+        {"id": "new", "posted": recent, "agency": "EPA"},
+        {"id": "old", "posted": old, "agency": "EPA"},
     ]
     with patch("time.sleep"), patch("requests.get", return_value=_mock_response(docs)):
         rules = src.get_recent_proposed_rules(agencies=["EPA", "SEC"], days_back=14)

@@ -87,9 +87,10 @@ class PortfolioCommittee:
             "portfolio_committee_model",
             self.config.get("autoresearch", {}).get("autoresearch_model", "claude-haiku-4-5-20251001"),
         )
+        self._effort = self.config.get("autoresearch", {}).get("llm_effort", "medium")
         self._enabled = pt_config.get("portfolio_committee_enabled", True)
-        # Deterministic by default so generation comparisons aren't confounded by
-        # LLM sampling noise (see autoresearch.llm_temperature).
+        # Older models use temperature zero by default. Sonnet 5 omits sampling
+        # controls because adaptive thinking rejects non-default values.
         self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
 
         # Use size profile if provided, otherwise fall back to config defaults
@@ -415,7 +416,7 @@ class PortfolioCommittee:
             )
             system_prompt = "\n".join(system_parts)
 
-            text = self._call_llm(system=system_prompt, prompt=prompt, max_tokens=1024)
+            text = self._call_llm(system=system_prompt, prompt=prompt, max_tokens=4096)
             recs = self._parse_llm_response(text)
             # Post-filter: enforce short conviction gate even if the LLM didn't —
             # a short rec needs 2+ contributing strategies OR high LLM confidence.
@@ -627,7 +628,7 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
             text = self._call_llm(
                 system="You are a portfolio manager specializing in options overlays. Be conservative.",
                 prompt=prompt,
-                max_tokens=512,
+                max_tokens=2048,
             )
             if text.startswith("```"):
                 lines = text.split("\n")
@@ -668,14 +669,23 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
         base_delay = 2.0
         for attempt in range(max_retries + 1):
             try:
+                from tradingagents.strategies.llm_utils import (
+                    anthropic_request_options,
+                    anthropic_response_text,
+                )
+
                 response = client.messages.create(
                     model=self._model_name,
                     max_tokens=max_tokens,
-                    temperature=self._temperature,
                     system=system,
                     messages=[{"role": "user", "content": prompt}],
+                    **anthropic_request_options(
+                        model=self._model_name,
+                        temperature=self._temperature,
+                        effort=self._effort,
+                    ),
                 )
-                return response.content[0].text.strip()
+                return anthropic_response_text(response)
             except Exception as exc:
                 is_rate_limit = "rate" in str(exc).lower() or "429" in str(exc)
                 is_overloaded = "overloaded" in str(exc).lower() or "529" in str(exc)

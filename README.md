@@ -31,7 +31,7 @@ Data comes from about a dozen sources: yfinance, Finnhub, SEC EDGAR, OpenBB, FRE
 
 ## How it runs
 
-Daily cron job on a MacBook Air (16GB M4). The generation management system lets me A/B test different code versions in parallel using git worktrees — each generation gets its own frozen copy of the code and independent state. LLM costs run about $0.03/day per generation using Claude Sonnet and Haiku.
+The daily job runs on a private VPS. The generation management system lets me A/B test different code versions in parallel using git worktrees — each generation gets its own frozen copy of the code and independent state. Autoresearch LLM calls use Claude Sonnet 5 at medium effort, with rule-based synthesis as the failure fallback.
 
 <p align="center">
   <img src="assets/daily-cycle.svg" style="width: 100%; height: auto;">
@@ -48,7 +48,7 @@ pip install .            # or pip install -e . for development
 cp .env.example .env     # add your API keys
 ```
 
-You'll need an API key for at least one LLM provider (OpenAI, Anthropic, Google, xAI, or OpenRouter). Stock prices come from yfinance by default — no key needed. Most event strategies need free-tier keys for their data sources (Finnhub, FRED, NOAA CDO, USDA NASS, FMP, EDGAR User-Agent). The system gracefully degrades if a strategy's data source is unavailable. See `.env.example` for the full list.
+You'll need an Anthropic API key for the autoresearch LLM calls. Stock prices come from yfinance by default — no key needed. Most event strategies need free-tier keys for their data sources (Finnhub, FRED, NOAA CDO, USDA NASS, FMP, EDGAR User-Agent). The system gracefully degrades if a strategy's data source is unavailable. See `.env.example` for the full list.
 
 ```bash
 # Daily automation — run all active generations

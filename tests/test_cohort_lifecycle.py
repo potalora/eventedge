@@ -40,9 +40,13 @@ from tradingagents.strategies.modules.base import Candidate
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_price_df(base_price: float, days: int = 60) -> pd.DataFrame:
+def _make_price_df(
+    base_price: float,
+    days: int = 60,
+    end: datetime | None = None,
+) -> pd.DataFrame:
     """Create a price DataFrame with slight daily drift."""
-    dates = pd.bdate_range(end=datetime.now(), periods=days)
+    dates = pd.bdate_range(end=end or datetime.now(), periods=days)
     prices = [base_price * (1 + 0.002 * i) for i in range(days)]
     return pd.DataFrame({"Close": prices, "Volume": [1_000_000] * days}, index=dates)
 
@@ -472,11 +476,15 @@ class TestMultiDaySimulation:
         """Run 30 days: open trades, hold, exit, back-fill returns, learn."""
         state_dir = str(tmp_path / "sim30")
         engine, state = self._build_engine(state_dir)
+        base_date = datetime(2026, 3, 1)
 
-        # Mock data fetch
+        # Align mocked prices to the simulated clock. Using datetime.now() here
+        # makes this test expire once the 60-day fixture no longer overlaps
+        # March 2026, preventing journal return backfills.
+        price_end = base_date + timedelta(days=29)
         prices = {
-            "AAPL": _make_price_df(150.0, days=60),
-            "MSFT": _make_price_df(400.0, days=60),
+            "AAPL": _make_price_df(150.0, days=60, end=price_end),
+            "MSFT": _make_price_df(400.0, days=60, end=price_end),
         }
         mock_fetch.return_value = {"yfinance": {"prices": prices}}
 
@@ -502,7 +510,6 @@ class TestMultiDaySimulation:
         # Populate the price cache manually since _fetch_all_data is mocked
         engine._price_cache = prices
 
-        base_date = datetime(2026, 3, 1)
         results_by_day = []
 
         for day in range(30):

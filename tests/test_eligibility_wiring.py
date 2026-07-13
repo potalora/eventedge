@@ -40,7 +40,8 @@ class TestCohortEligibilityWiring:
         assert opts["covered_call_default_dte"] == 30
         assert opts["covered_call_strike_offset"] == 0.05
 
-    def test_autoresearch_model_is_sonnet(self):
+    def test_autoresearch_model_is_sonnet_5_medium_effort(self):
         from tradingagents.default_config import DEFAULT_CONFIG
-        model = DEFAULT_CONFIG["autoresearch"]["autoresearch_model"]
-        assert "sonnet" in model
+        autoresearch = DEFAULT_CONFIG["autoresearch"]
+        assert autoresearch["autoresearch_model"] == "claude-sonnet-5"
+        assert autoresearch["llm_effort"] == "medium"
