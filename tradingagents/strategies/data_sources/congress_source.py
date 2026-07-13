@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 CAPITOLTRADES_URL = "https://www.capitoltrades.com/trades"
+FMP_BASE_URL = "https://financialmodelingprep.com/stable"
+FMP_FREE_LIMIT = 25
 
 # RSC (React Server Components) request headers
 _RSC_HEADERS = {
@@ -108,17 +111,47 @@ def _normalize_trade(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_fmp_trade(raw: dict[str, Any], chamber: str) -> dict[str, Any]:
+    """Convert an FMP latest-disclosure record to our standard format."""
+    first = str(raw.get("firstName") or "").strip()
+    last = str(raw.get("lastName") or "").strip()
+    representative = str(raw.get("office") or "").strip()
+    if not representative:
+        representative = f"{first} {last}".strip()
+
+    return {
+        "ticker": str(raw.get("symbol") or "").upper().strip(),
+        "issuer_name": raw.get("assetDescription", ""),
+        "sector": "",
+        "transaction_date": raw.get("transactionDate", ""),
+        "transaction_type": raw.get("type", ""),
+        "amount": raw.get("amount", ""),
+        "amount_raw": 0,
+        "chamber": chamber,
+        "representative": representative,
+        "party": "",
+        "state": raw.get("district", ""),
+        "pub_date": raw.get("disclosureDate", ""),
+        "owner": raw.get("owner", ""),
+        "comment": raw.get("comment", ""),
+        "source_url": raw.get("link", ""),
+    }
+
+
 class CongressSource:
     """Data source for congressional stock trading disclosures.
 
-    Fetches trade data from CapitolTrades.com via their RSC endpoint.
-    Results are cached in-memory for the session.
+    Uses FMP's authenticated latest House and Senate disclosure endpoints when
+    a key is configured. CapitolTrades' undocumented RSC page is a best-effort
+    fallback because it may rate-limit server IPs. Results are cached in-memory
+    for the session.
     """
 
     name: str = "congress"
     requires_api_key: bool = False
 
-    def __init__(self) -> None:
+    def __init__(self, fmp_api_key: str | None = None) -> None:
+        self._fmp_api_key = fmp_api_key or os.environ.get("FMP_API_KEY", "")
         self._cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -157,6 +190,53 @@ class CongressSource:
     # ------------------------------------------------------------------
     # Public data methods
     # ------------------------------------------------------------------
+
+    def _fetch_fmp_latest(self) -> list[dict[str, Any]]:
+        """Fetch the latest free-tier page for both congressional chambers.
+
+        FMP's Basic plan allows at most 25 records and page zero for these
+        endpoints. Two calls per daily run stay well inside the 250-call daily
+        allowance while covering the most recent disclosures.
+        """
+        if not self._fmp_api_key:
+            return []
+        if "fmp_latest" in self._cache:
+            return self._cache["fmp_latest"]
+
+        import requests
+
+        trades: list[dict[str, Any]] = []
+        for chamber in ("House", "Senate"):
+            endpoint = f"{chamber.lower()}-latest"
+            try:
+                response = requests.get(
+                    f"{FMP_BASE_URL}/{endpoint}",
+                    params={
+                        "page": 0,
+                        "limit": FMP_FREE_LIMIT,
+                        "apikey": self._fmp_api_key,
+                    },
+                    timeout=20,
+                )
+                if response.status_code != 200:
+                    logger.warning(
+                        "FMP %s disclosures returned %d",
+                        chamber,
+                        response.status_code,
+                    )
+                    continue
+                payload = response.json()
+                if not isinstance(payload, list):
+                    logger.warning("FMP %s disclosures returned non-list data", chamber)
+                    continue
+                trades.extend(_normalize_fmp_trade(item, chamber) for item in payload)
+            except Exception:
+                logger.error("Failed to fetch FMP %s disclosures", chamber, exc_info=True)
+
+        if trades:
+            self._cache["fmp_latest"] = trades
+            logger.info("Loaded %d congressional trades from FMP", len(trades))
+        return trades
 
     def _fetch_page(self, page: int = 1, page_size: int = 96) -> list[dict[str, Any]]:
         """Fetch a single page of trades from CapitolTrades."""
@@ -197,6 +277,13 @@ class CongressSource:
         if "all_trades" in self._cache:
             return self._cache["all_trades"]
 
+        fmp_trades = self._fetch_fmp_latest()
+        if fmp_trades:
+            self._cache["all_trades"] = fmp_trades
+            return fmp_trades
+        if self._fmp_api_key:
+            logger.warning("FMP returned no congressional trades; trying CapitolTrades")
+
         all_trades: list[dict[str, Any]] = []
         for page in range(1, max_pages + 1):
             trades = self._fetch_page(page=page)
@@ -229,7 +316,7 @@ class CongressSource:
         recent: list[dict[str, Any]] = []
         for trade in all_trades:
             trade_date = self._parse_trade_date(trade)
-            if trade_date and trade_date >= cutoff:
+            if trade_date and cutoff <= trade_date <= ref_date:
                 recent.append(trade)
 
         self._cache[cache_key] = recent

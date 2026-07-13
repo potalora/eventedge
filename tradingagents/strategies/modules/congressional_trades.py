@@ -43,7 +43,7 @@ class CongressionalTradesStrategy:
 
     name = "congressional_trades"
     track = "paper_trade"
-    data_sources = ["congress", "yfinance", "openbb"]
+    data_sources = ["congress", "yfinance"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
@@ -69,26 +69,6 @@ class CongressionalTradesStrategy:
         """Screen congressional trade disclosures for purchase and sale clusters."""
         congress_data = data.get("congress", {})
         trades = congress_data.get("recent_trades", congress_data.get("trades", []))
-
-        # Try OpenBB government trades first (stable API), fall back to CapitolTrades
-        openbb_data = data.get("openbb", {})
-        govt_trades = openbb_data.get("government_trades", {})
-        obb_trades = govt_trades.get("trades", []) if isinstance(govt_trades, dict) else []
-
-        if obb_trades:
-            # Normalize OpenBB format and inject into congress data
-            normalized = []
-            for t in obb_trades:
-                normalized.append({
-                    "ticker": t.get("ticker", ""),
-                    "transaction_date": t.get("transaction_date", ""),
-                    "transaction_type": t.get("transaction_type", ""),
-                    "amount": t.get("amount", ""),
-                    "representative": t.get("representative", ""),
-                    "chamber": t.get("chamber", ""),
-                })
-            logger.info("Using OpenBB government trades: %d trades", len(normalized))
-            trades = normalized
 
         if not trades:
             return []

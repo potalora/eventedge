@@ -111,7 +111,7 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     registry.register(EDGARSource(user_agent=edgar_ua))
 
     registry.register(USASpendingSource())
-    registry.register(CongressSource())
+    registry.register(CongressSource(fmp_api_key=config.get("fmp_api_key")))
 
     # API-key sources (free keys)
     registry.register(FREDSource(api_key=config.get("fred_api_key")))
