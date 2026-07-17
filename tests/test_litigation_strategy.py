@@ -178,3 +178,32 @@ def test_litigation_screen_logs_classification_counts(
         "Litigation screen: fetched=1 unique=1 eligible=1 sec=0 "
         "selected=1 resolved=1 unresolved=0"
     ) in caplog.text
+
+
+def test_litigation_screen_reuses_edgar_name_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instances: list[EDGARSource] = []
+
+    def fake_init(self: EDGARSource) -> None:
+        instances.append(self)
+        self._name_to_ticker_cache = {
+            "apple": "AAPL",
+            "five below": "FIVE",
+        }
+
+    monkeypatch.setattr(EDGARSource, "__init__", fake_init)
+    strategy = LitigationStrategy()
+    data = {
+        "courtlistener": {
+            "dockets": [
+                _docket(1, "Alvarez v. Apple Inc."),
+                _docket(2, "JOHNS v. FIVE BELOW, INC."),
+            ]
+        }
+    }
+
+    strategy.screen(data, "2026-07-16", {"max_positions": 3})
+    strategy.screen(data, "2026-07-16", {"max_positions": 3})
+
+    assert len(instances) == 1

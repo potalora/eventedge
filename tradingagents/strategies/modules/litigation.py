@@ -45,6 +45,9 @@ class LitigationStrategy:
     track = "paper_trade"
     data_sources = ["courtlistener", "yfinance", "openbb"]
 
+    def __init__(self) -> None:
+        self._edgar_source: Any | None = None
+
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
@@ -229,8 +232,12 @@ class LitigationStrategy:
         # Resolve via SEC company_tickers.json
         try:
             from tradingagents.strategies.data_sources.edgar_source import EDGARSource
-            source = EDGARSource()
-            ticker = source.name_to_ticker(defendant, allow_prefix=False)
+            if self._edgar_source is None:
+                self._edgar_source = EDGARSource()
+            ticker = self._edgar_source.name_to_ticker(
+                defendant,
+                allow_prefix=False,
+            )
             if ticker:
                 return ticker
         except Exception:
