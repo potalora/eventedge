@@ -24,15 +24,17 @@ _PLAINTIFF_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
-# High-signal nature of suit codes (federal civil)
-SIGNAL_NATURES = {
-    "Securities/Commodities/Exchange",
-    "Antitrust",
-    "RICO",
-    "Patent",
-    "Environmental Matters",
-    "Consumer Credit",
-    "Fraud",
+# Normalized keywords for high-signal federal nature-of-suit codes.
+SIGNAL_NATURE_KEYWORDS = {
+    "securities",
+    "commodities",
+    "anti trust",
+    "rico",
+    "patent",
+    "environmental",
+    "consumer credit",
+    "fraud",
+    "stockholder",
 }
 
 
@@ -71,17 +73,16 @@ class LitigationStrategy:
         """
         cl_data = data.get("courtlistener", {})
         dockets = cl_data.get("dockets", [])
+        fetched_count = len(dockets)
+        unique_dockets = self._deduplicate_dockets(dockets)
+        ranked: list[tuple[int, float, int, Candidate]] = []
 
-        if not dockets:
-            return []
-
-        candidates = []
-        for docket in dockets:
+        for source_index, docket in enumerate(unique_dockets):
             nature = docket.get("nature_of_suit", "")
             case_name = docket.get("case_name", "")
 
             # Score boost for high-signal case types (was a hard gate)
-            is_high_signal = any(s.lower() in nature.lower() for s in SIGNAL_NATURES)
+            is_high_signal = self._is_high_signal_nature(nature)
             is_class_action = self._is_class_action(case_name)
 
             # Gate: any case with a resolvable company ticker
@@ -93,55 +94,108 @@ class LitigationStrategy:
             if is_class_action:
                 base_score = max(base_score, 0.6)
 
-            candidates.append(
-                Candidate(
-                    ticker=ticker,
-                    date=date,
-                    direction="short",
-                    score=base_score,
-                    metadata={
-                        "docket_id": docket.get("docket_id", ""),
-                        "case_name": case_name,
-                        "court": docket.get("court", ""),
-                        "date_filed": docket.get("date_filed", ""),
-                        "nature_of_suit": nature,
-                        "cause": docket.get("cause", ""),
-                        "is_high_signal_nature": is_high_signal,
-                        "is_class_action": is_class_action,
-                        "needs_llm_analysis": True,
-                        "analysis_type": "litigation",
-                    },
-                )
+            candidate = Candidate(
+                ticker=ticker,
+                date=date,
+                direction="short",
+                score=base_score,
+                metadata={
+                    "docket_id": docket.get("docket_id", ""),
+                    "case_name": case_name,
+                    "court": docket.get("court", ""),
+                    "date_filed": docket.get("date_filed", ""),
+                    "nature_of_suit": nature,
+                    "cause": docket.get("cause", ""),
+                    "is_high_signal_nature": is_high_signal,
+                    "is_class_action": is_class_action,
+                    "needs_llm_analysis": True,
+                    "analysis_type": "litigation",
+                },
             )
+            tier = 1 if ticker else 2
+            ranked.append((tier, -base_score, source_index, candidate))
 
         # Merge SEC enforcement actions (higher signal quality)
         openbb_data = data.get("openbb", {})
         sec_lit = openbb_data.get("sec_litigation", {})
         sec_releases = sec_lit.get("releases", []) if isinstance(sec_lit, dict) else []
-        for release in sec_releases:
+        sec_offset = len(unique_dockets)
+        eligible_count = len(ranked)
+        for release_index, release in enumerate(sec_releases):
             title = release.get("title", "")
-            candidates.append(
-                Candidate(
-                    ticker="",  # LLM will resolve from title
-                    date=date,
-                    direction="short",  # Enforcement = bearish for target
-                    score=0.8,  # High base score for SEC actions
-                    metadata={
-                        "source": "sec_enforcement",
-                        "title": title[:200],
-                        "url": release.get("url", ""),
-                        "release_date": release.get("date", ""),
-                        "needs_llm_analysis": True,
-                    },
-                )
+            candidate = Candidate(
+                ticker="",  # LLM will resolve from title
+                date=date,
+                direction="short",  # Enforcement = bearish for target
+                score=0.8,  # High base score for SEC actions
+                metadata={
+                    "source": "sec_enforcement",
+                    "title": title[:200],
+                    "url": release.get("url", ""),
+                    "release_date": release.get("date", ""),
+                    "case_name": title[:200],
+                    "nature_of_suit": "SEC enforcement",
+                    "cause": "",
+                    "court": "SEC",
+                    "needs_llm_analysis": True,
+                    "analysis_type": "litigation",
+                },
             )
+            ranked.append((0, -candidate.score, sec_offset + release_index, candidate))
 
-        return candidates[: params.get("max_positions", 3)]
+        ranked.sort(key=lambda item: item[:3])
+        selected = [item[3] for item in ranked[: params.get("max_positions", 3)]]
+        resolved = sum(bool(candidate.ticker) for candidate in selected)
+        logger.info(
+            "Litigation screen: fetched=%d unique=%d eligible=%d sec=%d "
+            "selected=%d resolved=%d unresolved=%d",
+            fetched_count,
+            len(unique_dockets),
+            eligible_count,
+            len(sec_releases),
+            len(selected),
+            resolved,
+            len(selected) - resolved,
+        )
+        return selected
 
     def _is_class_action(self, case_name: str) -> bool:
         """Check if case name suggests a class action."""
         lower = case_name.lower()
-        return "class action" in lower or "securities" in lower or " v. " in lower
+        return any(
+            marker in lower
+            for marker in (
+                "class action",
+                "securities litigation",
+                "shareholder litigation",
+                "derivative action",
+            )
+        )
+
+    def _is_high_signal_nature(self, nature: str) -> bool:
+        """Check normalized CourtListener nature text for high-signal codes."""
+        normalized = re.sub(r"[^a-z0-9]+", " ", nature.lower()).strip()
+        return any(keyword in normalized for keyword in SIGNAL_NATURE_KEYWORDS)
+
+    def _deduplicate_dockets(self, dockets: list[dict]) -> list[dict]:
+        """Keep the first docket for each stable CourtListener identity."""
+        unique: list[dict] = []
+        seen: set[tuple[str, ...]] = set()
+        for docket in dockets:
+            docket_id = str(docket.get("docket_id", "")).strip()
+            if docket_id:
+                key = ("id", docket_id)
+            else:
+                key = (
+                    "case",
+                    str(docket.get("case_name", "")).casefold().strip(),
+                    str(docket.get("date_filed", "")).strip(),
+                )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(docket)
+        return unique
 
     def _extract_ticker(self, case_name: str) -> str:
         """Best-effort extraction of defendant company ticker.
@@ -176,7 +230,7 @@ class LitigationStrategy:
         try:
             from tradingagents.strategies.data_sources.edgar_source import EDGARSource
             source = EDGARSource()
-            ticker = source.name_to_ticker(defendant)
+            ticker = source.name_to_ticker(defendant, allow_prefix=False)
             if ticker:
                 return ticker
         except Exception:
