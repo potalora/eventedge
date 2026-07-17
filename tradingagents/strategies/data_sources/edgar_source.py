@@ -480,10 +480,16 @@ class EDGARSource:
         except Exception:
             logger.error("company_tickers download failed", exc_info=True)
 
-    def name_to_ticker(self, company_name: str) -> str | None:
+    def name_to_ticker(
+        self,
+        company_name: str,
+        *,
+        allow_prefix: bool = True,
+    ) -> str | None:
         """Resolve a company name to ticker using SEC's company_tickers.json.
 
-        Tries exact match first, then prefix match.
+        Exact normalized matches are always accepted. Prefix fallback remains
+        the default for compatibility, but strict callers can disable it.
         Returns None if no match found.
         """
         mapping = self._ensure_name_map()
@@ -495,6 +501,9 @@ class EDGARSource:
         # Exact match
         if normalized in mapping:
             return mapping[normalized]
+
+        if not allow_prefix:
+            return None
 
         # Prefix match: input is prefix of a known company name
         for name, ticker in mapping.items():
