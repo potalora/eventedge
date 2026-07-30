@@ -34,3 +34,15 @@ class TestAutoresearchConfig:
         assert config_copy["autoresearch"] == DEFAULT_CONFIG["autoresearch"]
         config_copy["autoresearch"]["max_generations"] = 999
         assert DEFAULT_CONFIG["autoresearch"]["max_generations"] == 15
+
+    def test_finnhub_reliability_defaults_are_endpoint_scoped_and_bounded(self):
+        policy = DEFAULT_CONFIG["autoresearch"]["finnhub_reliability"]
+
+        assert policy["earnings_calendar"]["read_timeout_s"] > (
+            policy["company_peers"]["read_timeout_s"]
+        )
+        assert policy["earnings_calendar"]["max_attempts"] == 3
+        assert policy["company_peers"]["max_attempts"] == 2
+        assert policy["company_news"]["max_attempts"] == 3
+        assert policy["workflow_budget_s"] == 240.0
+        assert policy["workflow_budget_s"] <= 300.0 - 30.0

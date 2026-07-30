@@ -125,6 +125,37 @@ DEFAULT_CONFIG = {
         "fmp_api_key": "",
         "fred_api_key": "",
         "finnhub_api_key": "",
+        # One Finnhub workflow scheduling budget leaves a 60s margin before the
+        # engine's normal 300s source-fetch timeout. Connect/read values below
+        # are requests inactivity timeouts, not end-to-end wall-clock bounds.
+        "finnhub_reliability": {
+            "rate_delay_s": 1.1,
+            "workflow_budget_s": 240.0,
+            "earnings_calendar": {
+                "connect_timeout_s": 5.0,
+                "read_timeout_s": 30.0,
+                "max_attempts": 3,
+                "base_backoff_s": 2.0,
+                "max_backoff_s": 6.0,
+                "jitter_s": 0.5,
+            },
+            "company_peers": {
+                "connect_timeout_s": 5.0,
+                "read_timeout_s": 15.0,
+                "max_attempts": 2,
+                "base_backoff_s": 2.0,
+                "max_backoff_s": 4.0,
+                "jitter_s": 0.5,
+            },
+            "company_news": {
+                "connect_timeout_s": 5.0,
+                "read_timeout_s": 15.0,
+                "max_attempts": 3,
+                "base_backoff_s": 2.0,
+                "max_backoff_s": 6.0,
+                "jitter_s": 0.5,
+            },
+        },
         "regulations_api_key": "",
         "courtlistener_token": "",
         "noaa_cdo_token": "",

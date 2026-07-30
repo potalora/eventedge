@@ -115,7 +115,10 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
 
     # API-key sources (free keys)
     registry.register(FREDSource(api_key=config.get("fred_api_key")))
-    registry.register(FinnhubSource(api_key=config.get("finnhub_api_key")))
+    registry.register(FinnhubSource(
+        api_key=config.get("finnhub_api_key"),
+        reliability_config=config.get("finnhub_reliability"),
+    ))
     registry.register(RegulationsSource(api_key=config.get("regulations_api_key")))
     registry.register(CourtListenerSource(token=config.get("courtlistener_token")))
 

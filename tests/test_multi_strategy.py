@@ -173,6 +173,25 @@ class TestDataSourceRegistry:
         assert registry.get("yfinance") is not None
         assert "yfinance" in registry.available_sources()
 
+    def test_registry_passes_finnhub_reliability_config(self):
+        from tradingagents.strategies.data_sources.registry import (
+            build_default_registry,
+        )
+
+        reliability = {
+            "rate_delay_s": 0.25,
+            "workflow_budget_s": 12.0,
+        }
+        registry = build_default_registry({
+            "finnhub_api_key": "not-real",
+            "finnhub_reliability": reliability,
+        })
+
+        source = registry.get("finnhub")
+        assert source is not None
+        assert source._rate_delay_s == 0.25
+        assert source._workflow_budget_s == 12.0
+
     def test_register_and_get(self):
         from tradingagents.strategies.data_sources.registry import DataSourceRegistry
 
@@ -228,6 +247,35 @@ class TestMultiStrategyEngine:
         assert "overall_regime" in regime
         assert "vix_level" in regime
         assert regime["vix_level"] == 20.0
+
+    def test_finnhub_peer_batch_runs_once_and_sibling_news_survives(self, engine):
+        source = MagicMock()
+        source.new_workflow_deadline.return_value = 42.0
+        source.fetch_recent_earnings.return_value = []
+        source.fetch_company_news.side_effect = (
+            lambda symbol, _from, to, deadline: [{
+                "headline": f"{symbol} supplier disruption",
+                "summary": "Factory delay",
+                "source": "wire",
+            }]
+        )
+        source.fetch_supply_chains.return_value = {}
+        engine.registry = MagicMock()
+        engine.registry.get.return_value = source
+
+        result = engine._fetch_finnhub_data("2026-07-30")
+
+        source.fetch_supply_chains.assert_called_once_with(
+            ["AAPL", "TSLA", "NVDA", "AMZN", "BA", "CAT", "DE"],
+            deadline=42.0,
+        )
+        assert all(
+            call.kwargs["deadline"] == 42.0
+            for call in source.fetch_company_news.call_args_list
+        )
+        assert len(result["disruption_news"]) == 7
+        assert "transcripts" not in result
+        assert "supply_chains" not in result
 
 
 # ---------------------------------------------------------------------------

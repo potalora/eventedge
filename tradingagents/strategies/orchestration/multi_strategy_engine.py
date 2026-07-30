@@ -25,16 +25,19 @@ from tradingagents.strategies.modules.base import Candidate
 
 logger = logging.getLogger(__name__)
 
+_FINNHUB_FETCH_SAFETY_MARGIN_S = 30.0
+
 
 def _fetch_timeout_s() -> float:
-    """Wall-clock ceiling for the parallel API-key-source fetch fan-out
+    """Caller wait ceiling for the parallel API-key-source fetch fan-out
     (finnhub, fred, edgar, congress, regulations, etc.).
 
-    Defense-in-depth behind those sources' per-call HTTP timeouts (requests=15s,
-    finnhub=10s) so one hung source can't stall the run until the outer 3600s
-    generation kill. NOTE: the yfinance price fetch runs synchronously outside
-    this fan-out and is bounded separately by ``yf.download(timeout=30)``; OpenBB
-    enrichment is not bounded here. Overridable via AUTORESEARCH_FETCH_TIMEOUT_S.
+    A thread already running when this expires cannot be cancelled safely.
+    Cooperative source deadlines therefore prevent follow-on calls in normal
+    timeout failure modes. NOTE: the yfinance price fetch runs synchronously
+    outside this fan-out and is bounded separately by ``yf.download(timeout=30)``;
+    OpenBB enrichment is not bounded here. Overridable via
+    AUTORESEARCH_FETCH_TIMEOUT_S.
     """
     try:
         return float(os.environ.get("AUTORESEARCH_FETCH_TIMEOUT_S", "300"))
@@ -68,12 +71,12 @@ def _gather_with_timeout(
     """Run each ``name -> (fn, args)`` fetch in a thread pool, returning
     ``{name: result}``.
 
-    Every source defaults to ``{}`` so any that error or never return within
-    ``timeout_s`` are recorded as empty rather than hanging the caller. On
-    timeout the pool is shut down with ``wait=False`` so a genuinely-stuck
-    thread cannot re-block the main thread at pool teardown (the default
-    context-manager exit waits for running futures, which would defeat the
-    timeout).
+    Every source defaults to ``{}`` so any that error or do not return within
+    ``timeout_s`` are recorded as empty rather than delaying the caller. Python
+    cannot safely stop a running thread, so this is not request cancellation.
+    On timeout the pool is shut down with ``wait=False`` so its teardown does
+    not re-block the caller; sources need cooperative scheduling deadlines to
+    avoid issuing follow-on requests after the caller has moved on.
     """
     from concurrent.futures import (
         ThreadPoolExecutor,
@@ -852,9 +855,17 @@ class MultiStrategyEngine:
             data["yfinance"] = self._fetch_yfinance_data(start_date, end_date)
 
         # Fetch API-key sources in parallel (I/O bound, no dependency on each other)
+        fetch_timeout_s = _fetch_timeout_s()
         api_fetches: dict[str, tuple] = {}
         if "finnhub" in needed_sources and "finnhub" in available:
-            api_fetches["finnhub"] = (self._fetch_finnhub_data, (end_date,))
+            finnhub_budget_cap_s = max(
+                fetch_timeout_s - _FINNHUB_FETCH_SAFETY_MARGIN_S,
+                0.0,
+            )
+            api_fetches["finnhub"] = (
+                self._fetch_finnhub_data,
+                (end_date, finnhub_budget_cap_s),
+            )
         if "regulations" in needed_sources and "regulations" in available:
             api_fetches["regulations"] = (self._fetch_regulations_data, ())
         if "courtlistener" in needed_sources and "courtlistener" in available:
@@ -879,23 +890,34 @@ class MultiStrategyEngine:
             api_fetches["cftc"] = (self._fetch_cftc_data, ())
 
         if api_fetches:
-            data.update(_gather_with_timeout(api_fetches, _fetch_timeout_s()))
+            data.update(_gather_with_timeout(api_fetches, fetch_timeout_s))
 
         self._emit("phase", phase="data_fetch", status="done")
         return data
 
-    def _fetch_finnhub_data(self, trading_date: str) -> dict[str, Any]:
-        """Fetch Finnhub data for earnings calls and supply chain strategies."""
+    def _fetch_finnhub_data(
+        self,
+        trading_date: str,
+        max_workflow_budget_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Fetch all Finnhub subpaths under one cooperative scheduling deadline."""
         source = self.registry.get("finnhub")
         if source is None:
             return {}
 
         result: dict[str, Any] = {}
+        deadline = source.new_workflow_deadline(
+            max_budget_s=max_workflow_budget_s,
+        )
 
         # Earnings calendar: who reported recently? (P1/P2)
         date_to = trading_date
         date_from = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-        earnings = source.fetch_recent_earnings(date_from, date_to)
+        earnings = source.fetch_recent_earnings(
+            date_from,
+            date_to,
+            deadline=deadline,
+        )
         if earnings:
             # Collect news around earnings dates for top reporters (proxy for transcripts)
             transcripts = []
@@ -904,7 +926,11 @@ class MultiStrategyEngine:
                 edate = e.get("date", "")
                 if not symbol or not edate:
                     continue
-                news = source.fetch_earnings_news(symbol, edate)
+                news = source.fetch_earnings_news(
+                    symbol,
+                    edate,
+                    deadline=deadline,
+                )
                 if news:
                     # Build a pseudo-transcript from earnings news
                     news_text = "\n".join(
@@ -922,12 +948,23 @@ class MultiStrategyEngine:
                         "revenue_estimate": e.get("revenueEstimate"),
                     })
             result["transcripts"] = transcripts
+        logger.info(
+            "Finnhub strategy fetch strategy=earnings_call candidate_count=%d "
+            "qualifying_count=%d",
+            len(earnings),
+            len(result.get("transcripts", [])),
+        )
 
         # Company news for supply chain disruption detection (P6)
         sc_symbols = ["AAPL", "TSLA", "NVDA", "AMZN", "BA", "CAT", "DE"]
         all_news = []
         for symbol in sc_symbols:
-            news = source.fetch_company_news(symbol, date_from, date_to)
+            news = source.fetch_company_news(
+                symbol,
+                date_from,
+                date_to,
+                deadline=deadline,
+            )
             for article in news:
                 article["symbol"] = symbol
             all_news.extend(news)
@@ -936,10 +973,12 @@ class MultiStrategyEngine:
 
         # Supply chain / peer relationships
         chains: dict[str, list[str]] = {}
-        for symbol in sc_symbols:
-            peers = source.fetch_supply_chain(symbol)
-            if peers:
-                chains[symbol] = [p["ticker"] for p in peers]
+        peer_batches = source.fetch_supply_chains(
+            sc_symbols,
+            deadline=deadline,
+        )
+        for symbol, peers in peer_batches.items():
+            chains[symbol] = [p["ticker"] for p in peers]
         if chains:
             result["supply_chains"] = chains
 
@@ -949,7 +988,12 @@ class MultiStrategyEngine:
         pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
         pqc_news = []
         for symbol in pqc_tickers[:6]:  # Rate limit: 6 tickers max
-            news = source.fetch_company_news(symbol, date_from, date_to)
+            news = source.fetch_company_news(
+                symbol,
+                date_from,
+                date_to,
+                deadline=deadline,
+            )
             for article in news:
                 text = (article.get("headline", "") + " " + article.get("summary", "")).lower()
                 if any(kw in text for kw in pqc_kw):
@@ -959,7 +1003,9 @@ class MultiStrategyEngine:
             result["pqc_news"] = pqc_news
 
         logger.info(
-            "Finnhub fetch: %d earnings, %d news, %d chains, %d pqc_news",
+            "Finnhub fetch: %d earnings_candidates, %d earnings_qualifying, "
+            "%d news, %d chains, %d pqc_news",
+            len(earnings),
             len(result.get("transcripts", [])),
             len(result.get("disruption_news", [])),
             len(result.get("supply_chains", {})),
