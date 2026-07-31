@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import json
 import statistics
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -75,12 +76,16 @@ _MUTABLE_EVIDENCE_KEYS = {
 _EVENT_DATETIME_KEYS = (
     "event_at",
     "published_at",
+    "observed_at",
 )
 _EVENT_DATE_ONLY_KEYS = (
     "posted_date",
     "date_filed",
     "release_date",
     "file_date",
+    "filing_date",
+    "observation_date",
+    "window_end",
 )
 
 
@@ -370,6 +375,7 @@ class MultiStrategyEngine:
             next_session,
             session_close,
         )
+        from tradingagents.strategies.orchestration.session_executor import PHASES
         from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
         from tradingagents.strategies.trading.portfolio_committee import (
             PortfolioCommittee,
@@ -406,6 +412,9 @@ class MultiStrategyEngine:
         epoch_id = marked_account.epoch_id
         cutoff = session_close(session)
         eligible_session = next_session(session)
+        expected_staging_state_digest = self.ledger.verify_session_phase_chain(
+            session, PHASES
+        )
         if self.ledger.staging_completed(session, epoch_id, policy_id):
             records = self.ledger.read_signals(
                 session, session, epoch_id=epoch_id, policy_id=policy_id
@@ -427,6 +436,7 @@ class MultiStrategyEngine:
         records: list[SignalRecord] = []
         timely: list[tuple[dict, SignalRecord]] = []
         late_ids: list[str] = []
+        seen_signal_ids: set[str] = set()
         for signal in shared_signals:
             ticker = str(signal.get("ticker", "")).strip().upper()
             strategy = str(signal.get("strategy", "")).strip()
@@ -453,6 +463,41 @@ class MultiStrategyEngine:
                 if isinstance(signal.get("metadata"), dict)
                 else {}
             )
+            from tradingagents.strategies.orchestration.event_identity import (
+                ACTIVE_STRATEGY_NAMES,
+                canonical_event_key,
+                canonical_observation_time,
+            )
+
+            explicit_event_key = metadata.get("event_key")
+            if explicit_event_key and strategy not in ACTIVE_STRATEGY_NAMES:
+                event_key = str(explicit_event_key)
+            else:
+                event_key = canonical_event_key(strategy, ticker, metadata, session)
+            signal_id = stable_id(
+                "signal", epoch_id, strategy, horizon, direction, event_key
+            )
+            if signal_id in seen_signal_ids:
+                continue
+            seen_signal_ids.add(signal_id)
+            existing_observation = self.ledger.signal_observation(signal_id)
+            if existing_observation is not None:
+                record, candidate_context, journal_payload = existing_observation
+                records.append(record)
+                status = str(journal_payload.get("status", "timely"))
+                if status == "cutoff-late":
+                    late_ids.append(signal_id)
+                elif record.reference_session == session:
+                    stored_signal = candidate_context.get("signal")
+                    if not isinstance(stored_signal, dict):
+                        raise ValueError(
+                            f"signal {signal_id} lacks canonical committee context"
+                        )
+                    enriched = dict(stored_signal)
+                    enriched["_signal_id"] = signal_id
+                    timely.append((enriched, record))
+                continue
+
             evidence = _canonical_signal_evidence(
                 {
                     "metadata": metadata,
@@ -462,39 +507,40 @@ class MultiStrategyEngine:
                     "direction": direction,
                 }
             )
-            explicit_event_key = metadata.get("event_key")
-            if explicit_event_key:
-                event_key = str(explicit_event_key)
+            if strategy in ACTIVE_STRATEGY_NAMES:
+                observed_at = canonical_observation_time(strategy, metadata)
+                event_at = observed_at
             else:
-                from tradingagents.strategies.orchestration.event_identity import (
-                    canonical_event_key,
+                event_times = [
+                    parsed
+                    for key in _EVENT_DATETIME_KEYS
+                    if (
+                        parsed := _metadata_timestamp(
+                            metadata, key, allow_date_only=False
+                        )
+                    )
+                    is not None
+                ]
+                event_times.extend(
+                    parsed
+                    for key in _EVENT_DATE_ONLY_KEYS
+                    if (
+                        parsed := _metadata_timestamp(
+                            metadata, key, allow_date_only=True
+                        )
+                    )
+                    is not None
                 )
-
-                event_key = canonical_event_key(strategy, ticker, metadata, session)
-            event_times = [
-                parsed
-                for key in _EVENT_DATETIME_KEYS
-                if (parsed := _metadata_timestamp(metadata, key, allow_date_only=False))
-                is not None
-            ]
-            event_times.extend(
-                parsed
-                for key in _EVENT_DATE_ONLY_KEYS
-                if (parsed := _metadata_timestamp(metadata, key, allow_date_only=True))
-                is not None
-            )
-            event_at = max(event_times) if event_times else None
-            observed_at = (
-                _metadata_timestamp(metadata, "observed_at", allow_date_only=False)
-                if "observed_at" in metadata
-                else cutoff
-            )
-            assert observed_at is not None
+                event_at = max(event_times) if event_times else None
+                observed_at = (
+                    _metadata_timestamp(metadata, "observed_at", allow_date_only=False)
+                    if "observed_at" in metadata
+                    else event_at
+                )
+            if observed_at is None:  # pragma: no cover - strict parser invariant.
+                raise ValueError(f"{strategy} candidate lacks observation time")
             decision_at = max(
                 [cutoff, observed_at] + ([event_at] if event_at is not None else [])
-            )
-            signal_id = stable_id(
-                "signal", epoch_id, strategy, horizon, direction, event_key
             )
             record = SignalRecord(
                 signal_id,
@@ -546,7 +592,23 @@ class MultiStrategyEngine:
                 )
             )
             self.ledger.record_signal_with_journal(
-                record, journal_payload, record.decision_at
+                record,
+                journal_payload,
+                record.decision_at,
+                {
+                    "signal": json.loads(
+                        json.dumps(
+                            {
+                                **signal,
+                                "ticker": ticker,
+                                "strategy": strategy,
+                                "direction": direction,
+                            },
+                            sort_keys=True,
+                            default=str,
+                        )
+                    )
+                },
             )
 
         self._journal.mirror_signals(records, {})
@@ -622,7 +684,12 @@ class MultiStrategyEngine:
                 staged_ids.append(intent.intent_id)
 
         executed, _ = self.ledger.complete_staging(
-            session, epoch_id, policy_id, cutoff, persist_staging
+            session,
+            epoch_id,
+            policy_id,
+            cutoff,
+            persist_staging,
+            expected_staging_state_digest,
         )
         if not executed:
             staged_ids = []

@@ -72,7 +72,7 @@ _DDL: tuple[str, ...] = (
     """CREATE TABLE IF NOT EXISTS session_phases (
         session_phase_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
         session TEXT NOT NULL, phase TEXT NOT NULL, started_at TEXT,
-        completed_at TEXT
+        completed_at TEXT, pre_state_digest TEXT, post_state_digest TEXT
     )""",
     """CREATE TABLE IF NOT EXISTS session_execution_contexts (
         execution_context_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
@@ -82,12 +82,13 @@ _DDL: tuple[str, ...] = (
         borrow_digest TEXT NOT NULL, required_tickers_json TEXT NOT NULL,
         economic_inputs_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
         provenance_digest TEXT NOT NULL,
-        bound_at TEXT NOT NULL, UNIQUE(cohort_id, session)
+        bound_at TEXT NOT NULL, starting_state_digest TEXT NOT NULL DEFAULT '',
+        borrow_inputs_json TEXT NOT NULL DEFAULT '{}', UNIQUE(cohort_id, session)
     )""",
     """CREATE TABLE IF NOT EXISTS staging_runs (
         staging_run_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
         session TEXT NOT NULL, epoch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
-        completed_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL, post_state_digest TEXT NOT NULL,
         UNIQUE(cohort_id, session, epoch_id, policy_id)
     )""",
     """CREATE TABLE IF NOT EXISTS signals (
@@ -102,6 +103,11 @@ _DDL: tuple[str, ...] = (
         payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
         state TEXT NOT NULL, journal_offset INTEGER, journal_length INTEGER,
         queued_at TEXT NOT NULL, mirrored_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS signal_candidate_contexts (
+        signal_id TEXT PRIMARY KEY REFERENCES signals(signal_id),
+        payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
+        captured_at TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS signal_journal_projection (
         cohort_id TEXT PRIMARY KEY, verified_offset INTEGER NOT NULL,
@@ -446,6 +452,37 @@ class PortfolioLedger:
                             row["execution_context_id"],
                         ),
                     )
+            if "starting_state_digest" not in context_columns:
+                self._connection.execute(
+                    "ALTER TABLE session_execution_contexts "
+                    "ADD COLUMN starting_state_digest TEXT NOT NULL DEFAULT ''"
+                )
+            if "borrow_inputs_json" not in context_columns:
+                self._connection.execute(
+                    "ALTER TABLE session_execution_contexts "
+                    "ADD COLUMN borrow_inputs_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            phase_columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(session_phases)")
+            }
+            if "pre_state_digest" not in phase_columns:
+                self._connection.execute(
+                    "ALTER TABLE session_phases ADD COLUMN pre_state_digest TEXT"
+                )
+            if "post_state_digest" not in phase_columns:
+                self._connection.execute(
+                    "ALTER TABLE session_phases ADD COLUMN post_state_digest TEXT"
+                )
+            staging_columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(staging_runs)")
+            }
+            if "post_state_digest" not in staging_columns:
+                self._connection.execute(
+                    "ALTER TABLE staging_runs "
+                    "ADD COLUMN post_state_digest TEXT NOT NULL DEFAULT ''"
+                )
             self._backfill_adjustment_sequences()
             self._connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_intent_adjustment_sequence "
@@ -529,6 +566,18 @@ class PortfolioLedger:
             raise LedgerConflictError(
                 f"execution context economic payload conflict for {session}"
             )
+        borrow_inputs = json.loads(row["borrow_inputs_json"])
+        if row["borrow_digest"] != stable_id("session_borrow_inputs", borrow_inputs):
+            raise LedgerConflictError(
+                f"execution context borrow payload conflict for {session}"
+            )
+        starting_state = economic_inputs.get("starting_state")
+        if row["starting_state_digest"] != stable_id(
+            "session_governed_state", starting_state
+        ):
+            raise LedgerConflictError(
+                f"execution context starting-state conflict for {session}"
+            )
         return {
             "epoch_id": row["epoch_id"],
             "input_digest": row["input_digest"],
@@ -539,14 +588,22 @@ class PortfolioLedger:
             "economic_inputs_json": row["economic_inputs_json"],
             "provenance_json": row["provenance_json"],
             "provenance_digest": row["provenance_digest"],
+            "starting_state_digest": row["starting_state_digest"],
+            "borrow_inputs_json": row["borrow_inputs_json"],
             "bound_at": _datetime(row["bound_at"]),
         }
 
     def execution_starting_state(self, session: date) -> dict[str, object]:
-        """Canonical bounded ledger provenance captured before phase one."""
+        """Canonical bounded state governed by the execution phase machine."""
         account = self.account_state()
         due_intents = []
-        for intent in self.pending_intents(session):
+        intent_rows = self._connection.execute(
+            """SELECT * FROM order_intents
+               WHERE cohort_id = ? AND eligible_session = ? ORDER BY intent_id""",
+            (self.cohort_id, self._encode(session)),
+        ).fetchall()
+        for row in intent_rows:
+            intent = self._intent_from_row(row)
             signals = self.signals_for_intent(intent.intent_id)
             due_intents.append(
                 {
@@ -558,16 +615,49 @@ class PortfolioLedger:
             """SELECT eil.intent_id, eil.lot_id, eil.quantity
                FROM exit_intent_lots eil
                JOIN order_intents i ON i.intent_id = eil.intent_id
-               WHERE i.cohort_id = ? AND i.status = 'pending'
+               WHERE i.cohort_id = ? AND i.eligible_session = ?
                ORDER BY eil.intent_id, eil.lot_id""",
-            (self.cohort_id,),
+            (self.cohort_id, self._encode(session)),
         ).fetchall()
+
+        def rows(sql: str, parameters: tuple[object, ...]) -> list[dict[str, object]]:
+            return [dict(row) for row in self._connection.execute(sql, parameters)]
+
         return {
             "account": account.__dict__,
             "due_intents": due_intents,
             "open_lots": self.open_exit_positions(),
             "exit_allocations": [dict(row) for row in allocations],
+            "session_cash_events": rows(
+                "SELECT * FROM cash_events WHERE cohort_id = ? AND session = ? "
+                "ORDER BY cash_event_id",
+                (self.cohort_id, self._encode(session)),
+            ),
+            "session_actions": rows(
+                "SELECT * FROM corporate_actions WHERE session = ? ORDER BY action_id",
+                (self._encode(session),),
+            ),
+            "session_marks": rows(
+                "SELECT * FROM marks WHERE cohort_id = ? AND session = ? ORDER BY mark_id",
+                (self.cohort_id, self._encode(session)),
+            ),
+            "session_benchmarks": rows(
+                "SELECT * FROM benchmark_observations WHERE cohort_id = ? AND session = ? "
+                "ORDER BY observation_id",
+                (self.cohort_id, self._encode(session)),
+            ),
+            "session_snapshots": rows(
+                "SELECT * FROM account_snapshots WHERE cohort_id = ? AND session = ? "
+                "ORDER BY snapshot_id",
+                (self.cohort_id, self._encode(session)),
+            ),
         }
+
+    def execution_governed_state_digest(self, session: date) -> str:
+        """Hash the exact live state allowed to advance only inside a phase."""
+        return stable_id(
+            "session_governed_state", self.execution_starting_state(session)
+        )
 
     def bind_session_execution_context(
         self,
@@ -581,6 +671,8 @@ class PortfolioLedger:
         economic_inputs_json: str,
         provenance_json: str,
         bound_at: datetime,
+        starting_state_digest: str,
+        borrow_inputs_json: str,
     ) -> None:
         """Bind all phase commits to one epoch and one economic input digest."""
         self._require_timezone_aware(bound_at, "bound_at")
@@ -590,6 +682,7 @@ class PortfolioLedger:
             or not market_digest
             or not config_digest
             or not borrow_digest
+            or not starting_state_digest
         ):
             raise ValueError("epoch and execution-context digests are required")
         tickers_json = json.dumps(list(required_tickers), separators=(",", ":"))
@@ -613,15 +706,21 @@ class PortfolioLedger:
                     or row["config_digest"] != config_digest
                     or row["borrow_digest"] != borrow_digest
                     or row["required_tickers_json"] != tickers_json
+                    or row["starting_state_digest"] != starting_state_digest
+                    or row["borrow_inputs_json"] != borrow_inputs_json
                 ):
                     raise LedgerConflictError(
                         f"execution context input conflict for {session}"
                     )
                 return
             self._connection.execute(
-                """INSERT INTO session_execution_contexts VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )""",
+                """INSERT INTO session_execution_contexts
+                   (execution_context_id, cohort_id, session, epoch_id,
+                    input_digest, market_digest, config_digest, borrow_digest,
+                    required_tickers_json, economic_inputs_json, provenance_json,
+                    provenance_digest, bound_at, starting_state_digest,
+                    borrow_inputs_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     stable_id("execution_context", self.cohort_id, session),
                     self.cohort_id,
@@ -636,6 +735,8 @@ class PortfolioLedger:
                     provenance_json,
                     provenance_digest,
                     self._encode(bound_at),
+                    starting_state_digest,
+                    borrow_inputs_json,
                 ),
             )
 
@@ -645,42 +746,104 @@ class PortfolioLedger:
         phase: str,
         processed_at: datetime,
         operation: Callable[[], _T],
-    ) -> tuple[bool, _T | None]:
+        expected_pre_state_digest: str,
+    ) -> tuple[bool, _T | None, str]:
         """Run one phase and its completion marker in one outer transaction."""
         self._require_timezone_aware(processed_at, "processed_at")
         if not phase:
             raise ValueError("phase is required")
         with self.transaction():
             row = self._connection.execute(
-                """SELECT completed_at FROM session_phases
+                """SELECT completed_at, pre_state_digest, post_state_digest
+                   FROM session_phases
                    WHERE cohort_id = ? AND session = ? AND phase = ?""",
                 (self.cohort_id, self._encode(session), phase),
             ).fetchone()
             if row is not None and row["completed_at"] is not None:
-                return False, None
+                if row["post_state_digest"] is None:
+                    raise LedgerConflictError(
+                        f"completed phase {phase} has no governed state commitment"
+                    )
+                return False, None, str(row["post_state_digest"])
+            actual_pre_state_digest = self.execution_governed_state_digest(session)
+            if actual_pre_state_digest != expected_pre_state_digest:
+                raise LedgerConflictError(
+                    f"governed session state conflict before {phase}"
+                )
             phase_id = stable_id("session_phase", self.cohort_id, session, phase)
             if row is None:
                 self._connection.execute(
-                    "INSERT INTO session_phases VALUES (?, ?, ?, ?, ?, NULL)",
+                    """INSERT INTO session_phases
+                       (session_phase_id, cohort_id, session, phase, started_at,
+                        completed_at, pre_state_digest, post_state_digest)
+                       VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)""",
                     (
                         phase_id,
                         self.cohort_id,
                         self._encode(session),
                         phase,
                         self._encode(processed_at),
+                        expected_pre_state_digest,
                     ),
                 )
             else:
                 self._connection.execute(
-                    "UPDATE session_phases SET started_at = ? WHERE session_phase_id = ?",
-                    (self._encode(processed_at), phase_id),
+                    """UPDATE session_phases
+                       SET started_at = ?, pre_state_digest = ?
+                       WHERE session_phase_id = ?""",
+                    (self._encode(processed_at), expected_pre_state_digest, phase_id),
                 )
             value = operation()
+            post_state_digest = self.execution_governed_state_digest(session)
             self._connection.execute(
-                "UPDATE session_phases SET completed_at = ? WHERE session_phase_id = ?",
-                (self._encode(processed_at), phase_id),
+                """UPDATE session_phases
+                   SET completed_at = ?, post_state_digest = ?
+                   WHERE session_phase_id = ?""",
+                (self._encode(processed_at), post_state_digest, phase_id),
             )
-            return True, value
+            return True, value, post_state_digest
+
+    def verify_session_phase_chain(self, session: date, phases: tuple[str, ...]) -> str:
+        """Verify committed phase transitions and the exact current boundary."""
+        context = self.session_execution_context(session)
+        if context is None:
+            raise LedgerConflictError(f"missing execution context for {session}")
+        expected = str(context["starting_state_digest"])
+        saw_incomplete = False
+        for phase in phases:
+            row = self._connection.execute(
+                """SELECT completed_at, pre_state_digest, post_state_digest
+                   FROM session_phases WHERE cohort_id = ? AND session = ? AND phase = ?""",
+                (self.cohort_id, self._encode(session), phase),
+            ).fetchone()
+            if row is None or row["completed_at"] is None:
+                saw_incomplete = True
+                continue
+            if saw_incomplete:
+                raise LedgerConflictError(
+                    f"non-prefix completed execution phase {phase}"
+                )
+            if row["pre_state_digest"] != expected or not row["post_state_digest"]:
+                raise LedgerConflictError(
+                    f"governed state commitment conflict for phase {phase}"
+                )
+            expected = str(row["post_state_digest"])
+        staging_rows = self._connection.execute(
+            """SELECT post_state_digest FROM staging_runs
+               WHERE cohort_id = ? AND session = ? ORDER BY staging_run_id""",
+            (self.cohort_id, self._encode(session)),
+        ).fetchall()
+        if len(staging_rows) > 1:
+            raise LedgerConflictError("multiple staging boundary commitments")
+        if staging_rows:
+            if not staging_rows[0]["post_state_digest"]:
+                raise LedgerConflictError("staging boundary commitment is missing")
+            expected = str(staging_rows[0]["post_state_digest"])
+        if self.execution_governed_state_digest(session) != expected:
+            raise LedgerConflictError(
+                "governed session state conflict at resume boundary"
+            )
+        return expected
 
     def staging_completed(self, session: date, epoch_id: str, policy_id: str) -> bool:
         row = self._connection.execute(
@@ -697,15 +860,24 @@ class PortfolioLedger:
         policy_id: str,
         completed_at: datetime,
         operation: Callable[[], _T],
+        expected_pre_state_digest: str,
     ) -> tuple[bool, _T | None]:
         """Atomically persist every staged intent and the staging completion."""
         self._require_timezone_aware(completed_at, "completed_at")
         with self.transaction():
             if self.staging_completed(session, epoch_id, policy_id):
                 return False, None
+            if (
+                self.execution_governed_state_digest(session)
+                != expected_pre_state_digest
+            ):
+                raise LedgerConflictError(
+                    "governed session state conflict before staging"
+                )
             value = operation()
+            post_state_digest = self.execution_governed_state_digest(session)
             self._connection.execute(
-                "INSERT INTO staging_runs VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO staging_runs VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     stable_id(
                         "staging_run", self.cohort_id, session, epoch_id, policy_id
@@ -715,6 +887,7 @@ class PortfolioLedger:
                     epoch_id,
                     policy_id,
                     self._encode(completed_at),
+                    post_state_digest,
                 ),
             )
             return True, value
@@ -939,7 +1112,11 @@ class PortfolioLedger:
         )
 
     def record_signal_with_journal(
-        self, signal: SignalRecord, payload: dict[str, object], queued_at: datetime
+        self,
+        signal: SignalRecord,
+        payload: dict[str, object],
+        queued_at: datetime,
+        candidate_context: dict[str, object] | None = None,
     ) -> None:
         """Atomically persist a signal and its exact immutable journal payload."""
         self._require_timezone_aware(queued_at, "queued_at")
@@ -947,8 +1124,37 @@ class PortfolioLedger:
             payload, sort_keys=True, separators=(",", ":"), default=str
         )
         payload_hash = stable_id("signal_journal_payload", payload_json)
+        context_json = json.dumps(
+            candidate_context or {},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        context_hash = stable_id("signal_candidate_context", context_json)
         with self.transaction():
             self._record_signal(signal)
+            context_row = self._connection.execute(
+                "SELECT * FROM signal_candidate_contexts WHERE signal_id = ?",
+                (signal.signal_id,),
+            ).fetchone()
+            if context_row is not None:
+                if (
+                    context_row["payload_json"] != context_json
+                    or context_row["payload_hash"] != context_hash
+                ):
+                    raise LedgerConflictError(
+                        f"conflicting candidate context for signal {signal.signal_id}"
+                    )
+            else:
+                self._connection.execute(
+                    "INSERT INTO signal_candidate_contexts VALUES (?, ?, ?, ?)",
+                    (
+                        signal.signal_id,
+                        context_json,
+                        context_hash,
+                        self._encode(queued_at),
+                    ),
+                )
             row = self._connection.execute(
                 "SELECT * FROM signal_journal_outbox WHERE signal_id = ?",
                 (signal.signal_id,),
@@ -972,6 +1178,27 @@ class PortfolioLedger:
                     self._encode(queued_at),
                 ),
             )
+
+    def signal_observation(
+        self, signal_id: str
+    ) -> tuple[SignalRecord, dict[str, object], dict[str, object]] | None:
+        """Read one immutable first observation and its committee/journal context."""
+        row = self._connection.execute(
+            """SELECT s.*, c.payload_json AS candidate_json,
+                      o.payload_json AS journal_json
+               FROM signals s
+               JOIN signal_candidate_contexts c ON c.signal_id = s.signal_id
+               JOIN signal_journal_outbox o ON o.signal_id = s.signal_id
+               WHERE s.signal_id = ?""",
+            (signal_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return (
+            self._signal_from_row(row),
+            json.loads(row["candidate_json"]),
+            json.loads(row["journal_json"]),
+        )
 
     def pending_signal_journal_outbox(
         self, limit: int = 256
@@ -1631,8 +1858,13 @@ class PortfolioLedger:
         )
         reason = "invalid corporate action batch: " + "; ".join(sorted(set(errors)))
         governed = set(governed_tickers)
+        held = {str(position["ticker"]) for position in self.open_positions()}
         affected = sorted(
-            {action.ticker for action in actions if action.ticker in governed}
+            {
+                action.ticker
+                for action in actions
+                if action.ticker in governed and action.ticker in held
+            }
         )
         with self.transaction():
             self._connection.execute(
@@ -1648,10 +1880,141 @@ class PortfolioLedger:
                     self._encode(rejected_at),
                 ),
             )
-            self.invalidate_session_and_cancel_due(session, reason, rejected_at)
+            if not self.session_invalid_reason(session):
+                self.invalidate_session_and_cancel_due(session, reason, rejected_at)
+            else:
+                self._invalidate_session(session, reason, rejected_at)
             for ticker in affected:
                 self._quarantine_ticker(ticker, reason, rejected_at)
         return reason
+
+    def corporate_action_batch_state_errors(
+        self, session: date, actions: tuple[CorporateAction, ...]
+    ) -> tuple[str, ...]:
+        """Validate a complete action batch against live lot/intent state."""
+        errors: list[str] = []
+        lot_quantities: dict[str, list[Decimal]] = {}
+        intent_quantities: dict[str, list[Decimal]] = {}
+        allocation_quantities: dict[str, list[Decimal]] = {}
+        for action in actions:
+            ticker = action.ticker
+            if ticker in lot_quantities:
+                continue
+            lot_quantities[ticker] = [
+                Decimal(int(row["open_qty"]))
+                for row in self._connection.execute(
+                    """SELECT open_qty FROM lots
+                       WHERE cohort_id = ? AND ticker = ? AND open_qty > 0
+                       ORDER BY lot_id""",
+                    (self.cohort_id, ticker),
+                )
+            ]
+            pending = self._pending_exit_rows_for_ticker(ticker)
+            intent_quantities[ticker] = [
+                Decimal(int(row["requested_qty"])) for row in pending
+            ]
+            allocation_quantities[ticker] = [
+                Decimal(int(row["quantity"]))
+                for intent in pending
+                for row in self._connection.execute(
+                    """SELECT quantity FROM exit_intent_lots
+                       WHERE intent_id = ? ORDER BY lot_id""",
+                    (intent["intent_id"],),
+                )
+            ]
+        for action in sorted(actions, key=lambda item: item.action_id):
+            existing = self._connection.execute(
+                "SELECT * FROM corporate_actions WHERE action_id = ?",
+                (action.action_id,),
+            ).fetchone()
+            if existing is not None:
+                if not self._same_corporate_action(existing, action):
+                    errors.append(
+                        f"conflicting corporate action identity {action.action_id}"
+                    )
+                continue
+            if action.session != session:
+                errors.append(f"corporate action session mismatch {action.action_id}")
+                continue
+            if action.action_type != "split":
+                continue
+            ratio = action.ratio
+            if ratio is None or not ratio.is_finite() or ratio <= 0:
+                errors.append(f"invalid split ratio {action.action_id}")
+                continue
+            groups = (
+                lot_quantities[action.ticker],
+                intent_quantities[action.ticker],
+                allocation_quantities[action.ticker],
+            )
+            scaled_groups = [
+                [quantity * ratio for quantity in group] for group in groups
+            ]
+            if any(
+                quantity != quantity.to_integral_value()
+                for group in scaled_groups
+                for quantity in group
+            ):
+                errors.append(
+                    f"split produces fractional share quantity {action.action_id}"
+                )
+                continue
+            (
+                lot_quantities[action.ticker],
+                intent_quantities[action.ticker],
+                allocation_quantities[action.ticker],
+            ) = scaled_groups
+        return tuple(sorted(set(errors)))
+
+    def corporate_action_batch_errors(
+        self,
+        session: date,
+        actions: tuple[CorporateAction, ...],
+        processed_at: datetime,
+    ) -> tuple[str, ...]:
+        """Validate structural and state-dependent action invariants without mutation."""
+        errors: list[str] = list(
+            self.corporate_action_batch_state_errors(session, actions)
+        )
+        seen: dict[str, CorporateAction] = {}
+        for action in actions:
+            if action.action_id in seen and seen[action.action_id] != action:
+                errors.append(f"conflicting corporate action {action.action_id}")
+            seen[action.action_id] = action
+            if action.session != session:
+                errors.append(f"corporate action session mismatch {action.action_id}")
+            if not action.source.strip():
+                errors.append(f"missing source corporate action {action.action_id}")
+            if not action.verified:
+                errors.append(f"unverified corporate action {action.action_id}")
+            if (
+                action.fetched_at.tzinfo is None
+                or action.fetched_at.utcoffset() is None
+            ):
+                errors.append(f"naive corporate action {action.action_id}")
+            elif action.fetched_at > processed_at:
+                errors.append(f"future corporate action {action.action_id}")
+            elif action.fetched_at < session_close(session):
+                errors.append(f"pre-close corporate action {action.action_id}")
+            if action.action_type == "split":
+                if (
+                    action.ratio is None
+                    or not action.ratio.is_finite()
+                    or action.ratio <= 0
+                    or action.cash_per_share is not None
+                ):
+                    errors.append(f"invalid split {action.action_id}")
+            elif action.action_type == "cash_dividend":
+                if (
+                    action.cash_per_share is None
+                    or not action.cash_per_share.is_finite()
+                    or action.cash_per_share < 0
+                    or action.ratio is not None
+                ):
+                    errors.append(f"invalid dividend {action.action_id}")
+            else:
+                errors.append(f"unsupported corporate action {action.action_id}")
+        return tuple(sorted(set(errors)))
 
     def invalidate_session_and_cancel_due(
         self, session: date, reason: str, processed_at: datetime
@@ -2028,10 +2391,46 @@ class PortfolioLedger:
             default=self._session_close_timestamp(session),
         )
         self._require_timezone_aware(processed, "processed_at")
-        if any(processed < action.fetched_at for action in actions):
+        if any(
+            action.fetched_at.tzinfo is not None
+            and action.fetched_at.utcoffset() is not None
+            and processed < action.fetched_at
+            for action in actions
+        ):
             raise ValueError("processed_at precedes corporate action observation")
         events: list[LedgerEvent] = []
         with self.transaction():
+            batch = tuple(actions)
+            errors = self.corporate_action_batch_errors(session, batch, processed)
+            if errors:
+                for action in batch:
+                    existing = self._connection.execute(
+                        "SELECT * FROM corporate_actions WHERE action_id = ?",
+                        (action.action_id,),
+                    ).fetchone()
+                    if existing is not None and not self._same_corporate_action(
+                        existing, action
+                    ):
+                        self._record_corporate_action_conflict(
+                            session, action, processed
+                        )
+                reason = self.reject_corporate_action_batch(
+                    session,
+                    batch,
+                    tuple(sorted({action.ticker for action in batch})),
+                    errors,
+                    processed,
+                )
+                return [
+                    LedgerEvent(
+                        stable_id("action_invalid", self.cohort_id, session, reason),
+                        session,
+                        "corporate_action_invalid",
+                        Decimal("0"),
+                        True,
+                        reason,
+                    )
+                ]
             for action in sorted(actions, key=lambda item: item.action_id):
                 existing = self._connection.execute(
                     "SELECT * FROM corporate_actions WHERE action_id = ?",

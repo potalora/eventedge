@@ -150,6 +150,17 @@ class InsiderActivityStrategy:
                             "needs_llm_analysis": True,
                             "analysis_type": "insider_activity",
                             "cluster_type": "buy_cluster",
+                            **(
+                                {
+                                    "filing_date": max(
+                                        str(filing["filing_date"])
+                                        for filing in buys
+                                        if filing.get("filing_date")
+                                    )
+                                }
+                                if any(filing.get("filing_date") for filing in buys)
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -187,6 +198,17 @@ class InsiderActivityStrategy:
                             "needs_llm_analysis": True,
                             "analysis_type": "insider_activity",
                             "cluster_type": "sell_pattern",
+                            **(
+                                {
+                                    "filing_date": max(
+                                        str(filing["filing_date"])
+                                        for filing in sells
+                                        if filing.get("filing_date")
+                                    )
+                                }
+                                if any(filing.get("filing_date") for filing in sells)
+                                else {}
+                            ),
                         },
                     )
                 )

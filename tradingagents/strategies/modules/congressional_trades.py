@@ -129,6 +129,9 @@ class CongressionalTradesStrategy:
                     "amount": amount,
                     "tier": tier,
                     "date": trade.get("transaction_date", ""),
+                    "publication_date": trade.get("publication_date")
+                    or trade.get("disclosure_date")
+                    or trade.get("filing_date", ""),
                     "trade_key": trade_key,
                 }
             )
@@ -161,6 +164,9 @@ class CongressionalTradesStrategy:
                     "amount": amount,
                     "tier": tier,
                     "date": trade.get("transaction_date", ""),
+                    "publication_date": trade.get("publication_date")
+                    or trade.get("disclosure_date")
+                    or trade.get("filing_date", ""),
                     "trade_key": trade_key,
                 }
             )
@@ -189,6 +195,17 @@ class CongressionalTradesStrategy:
                         "members": list(unique_members)[:5],
                         "max_tier": max(b["tier"] for b in buys),
                         "trade_keys": sorted({b["trade_key"] for b in buys}),
+                        **(
+                            {
+                                "publication_date": max(
+                                    str(b["publication_date"])
+                                    for b in buys
+                                    if b.get("publication_date")
+                                )
+                            }
+                            if any(b.get("publication_date") for b in buys)
+                            else {}
+                        ),
                         "needs_llm_analysis": False,
                     },
                 )
@@ -216,6 +233,17 @@ class CongressionalTradesStrategy:
                         "members": list(unique_members)[:5],
                         "max_tier": max(s["tier"] for s in sells),
                         "trade_keys": sorted({s["trade_key"] for s in sells}),
+                        **(
+                            {
+                                "publication_date": max(
+                                    str(s["publication_date"])
+                                    for s in sells
+                                    if s.get("publication_date")
+                                )
+                            }
+                            if any(s.get("publication_date") for s in sells)
+                            else {}
+                        ),
                         "needs_llm_analysis": False,
                     },
                 )

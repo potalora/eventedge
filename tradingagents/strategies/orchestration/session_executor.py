@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from importlib.metadata import version as package_version
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Callable
@@ -30,8 +31,10 @@ from tradingagents.strategies.orchestration.trading_calendar import (
 from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     PortfolioLedger,
+    SCHEMA_VERSION,
 )
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
+from tradingagents.strategies.trading.risk_gate import RiskGateConfig
 
 
 PHASES = (
@@ -83,6 +86,19 @@ class SessionInputBundle:
     bars: dict[tuple[str, date], MarketBar]
     actions: tuple[CorporateAction, ...]
     benchmarks: dict[tuple[str, date], AdjustedClose]
+
+    def for_tickers(self, tickers: tuple[str, ...]) -> SessionInputBundle:
+        """Return a cohort-scoped view of one validated shared response."""
+        selected = tuple(sorted(set(tickers)))
+        if not set(selected).issubset(self.tickers):
+            raise ValueError("cohort ticker scope is outside the shared input bundle")
+        return SessionInputBundle(
+            self.session,
+            selected,
+            {key: value for key, value in self.bars.items() if key[0] in selected},
+            tuple(action for action in self.actions if action.ticker in selected),
+            self.benchmarks,
+        )
 
 
 @dataclass(frozen=True)
@@ -139,6 +155,11 @@ class SessionExecutor:
         ):
             raise ValueError("benchmark_symbols must be unique and non-empty")
         self.cost_model = PaperCostModel(self.ledger_config)
+        self.borrow_reject_above = PaperCostModel._configured_decimal(
+            self.ar_config.get("short_selling", {}),
+            "borrow_cost_reject_above",
+            "0.05",
+        )
         self._after_phase_mutation = after_phase_mutation or (lambda phase: None)
         self._after_phase_commit = after_phase_commit or (lambda phase: None)
 
@@ -247,6 +268,41 @@ class SessionExecutor:
             validated_at=context["bound_at"],
         )
 
+    def persisted_borrow_rates(self, session: date) -> dict[str, Decimal | None]:
+        """Rehydrate the exact canonical borrow document bound to a session."""
+        context = self.ledger.session_execution_context(session)
+        if context is None:
+            raise ValueError(f"session {session} has no bound execution context")
+        values = json.loads(str(context["borrow_inputs_json"]))
+        return {
+            str(ticker): Decimal(str(value)) if value is not None else None
+            for ticker, value in values.items()
+        }
+
+    def validate_bound_context(
+        self, session: date, epoch_id: str
+    ) -> dict[str, Decimal | None]:
+        """Validate a bound complete/stage/partial replay using ledger state only."""
+        context = self.ledger.session_execution_context(session)
+        if context is None:
+            raise LedgerConflictError(f"missing execution context for {session}")
+        if context["epoch_id"] != epoch_id:
+            raise LedgerConflictError(f"execution context epoch conflict for {session}")
+        borrow_rates = self.persisted_borrow_rates(session)
+        config_inputs, borrow_inputs = self._static_context_documents(
+            tuple(context["required_tickers"]), borrow_rates
+        )
+        if context["config_digest"] != stable_id(
+            "session_execution_config", config_inputs
+        ) or context["borrow_digest"] != stable_id(
+            "session_borrow_inputs", borrow_inputs
+        ):
+            raise LedgerConflictError(
+                "execution context conflict: effective config or borrow inputs changed"
+            )
+        self.ledger.verify_session_phase_chain(session, PHASES)
+        return borrow_rates
+
     def execute_open_and_mark(
         self,
         session: date,
@@ -304,6 +360,18 @@ class SessionExecutor:
                     session, reason, processed_at
                 )
             return SessionExecutionResult(session, False, None, reason, ())
+        if bound_context is not None:
+            try:
+                self._expected_state_digest = self.ledger.verify_session_phase_chain(
+                    session, PHASES
+                )
+            except LedgerConflictError as error:
+                reason = f"execution context conflict: {error}"
+                if not existing:
+                    self.ledger.invalidate_session_and_cancel_due(
+                        session, reason, processed_at
+                    )
+                return SessionExecutionResult(session, False, None, reason, ())
         if fully_complete and bound_context is not None:
             return SessionExecutionResult(session, True, existing[0], "", PHASES)
         for ticker in required:
@@ -325,6 +393,12 @@ class SessionExecutor:
             bars, actions, benchmarks = self._validate_bundle(
                 bundle, required, session, processed_at
             )
+            if bound_context is None:
+                state_errors = self.ledger.corporate_action_batch_state_errors(
+                    session, actions
+                )
+                if state_errors:
+                    raise CorporateActionBatchError(actions, state_errors)
             market_inputs, config_inputs, borrow_inputs, provenance = (
                 self._execution_context_documents(
                     session,
@@ -336,11 +410,10 @@ class SessionExecutor:
                 )
             )
             if bound_context is None:
+                starting_state = self.ledger.execution_starting_state(session)
                 economic_inputs = {
                     "market": market_inputs,
-                    "starting_state": _canonical_json_value(
-                        self.ledger.execution_starting_state(session)
-                    ),
+                    "starting_state": _canonical_json_value(starting_state),
                 }
                 economic_json = json.dumps(
                     economic_inputs, sort_keys=True, separators=(",", ":")
@@ -364,6 +437,21 @@ class SessionExecutor:
                 economic_json,
                 json.dumps(provenance, sort_keys=True, separators=(",", ":")),
                 processed_at,
+                (
+                    stable_id("session_governed_state", starting_state)
+                    if bound_context is None
+                    else str(bound_context["starting_state_digest"])
+                ),
+                json.dumps(borrow_inputs, sort_keys=True, separators=(",", ":")),
+            )
+            if bound_context is not None:
+                state_errors = self.ledger.corporate_action_batch_state_errors(
+                    session, actions
+                )
+                if state_errors:
+                    raise CorporateActionBatchError(actions, state_errors)
+            self._expected_state_digest = self.ledger.verify_session_phase_chain(
+                session, PHASES
             )
         except CorporateActionBatchError as error:
             reason = self.ledger.reject_corporate_action_batch(
@@ -593,14 +681,33 @@ class SessionExecutor:
             )
             for ticker in required
         }
+        cost_model = {
+            name: format(getattr(self.cost_model, name), "f")
+            for name in PaperCostModel.DEFAULTS
+        }
         config_inputs = _canonical_json_value(
             {
-                "execution": {"mode": self.config.get("execution", {}).get("mode")},
-                "paper_ledger": self.ledger_config,
-                "risk_gate": self.ar_config.get("risk_gate", {}),
-                "short_selling": self.ar_config.get("short_selling", {}),
-                "total_capital": self.ar_config.get("total_capital"),
-                "options": self.config.get("options", {}),
+                "policy_document_version": "execution-policy-v2",
+                "execution": {
+                    "mode": self.config.get("execution", {}).get("mode", "paper"),
+                    "price_rules": ["next_session_open", "resting_stop"],
+                },
+                "schema_version": SCHEMA_VERSION,
+                "pricing_contract": "raw-unadjusted-daily-ohlc-v1",
+                "execution_clock_contract": "exact-next-xnys-open-v1",
+                "cost_model_contract": "adverse-equity-fill-v1",
+                "calendar": {
+                    "name": "XNYS",
+                    "provider": "exchange-calendars",
+                    "provider_version": package_version("exchange-calendars"),
+                },
+                "bar_max_age_hours": self.ledger_config.get("bar_max_age_hours", 24),
+                "benchmark_symbols": list(self.benchmark_symbols),
+                "cost_model": cost_model,
+                "risk_gate": asdict(RiskGateConfig.from_dict(self.config)),
+                "short_selling": {
+                    "borrow_cost_reject_above": format(self.borrow_reject_above, "f"),
+                },
             }
         )
         assert isinstance(config_inputs, dict)
@@ -619,9 +726,14 @@ class SessionExecutor:
             self._after_phase_mutation(phase)
             return value
 
-        executed, value = self.ledger.run_session_phase(
-            session, phase, processed_at, atomic_operation
+        executed, value, post_state_digest = self.ledger.run_session_phase(
+            session,
+            phase,
+            processed_at,
+            atomic_operation,
+            self._expected_state_digest,
         )
+        self._expected_state_digest = post_state_digest
         if executed:
             completed.append(phase)
             self._after_phase_commit(phase)
@@ -736,11 +848,13 @@ class SessionExecutor:
             if isinstance(bundle, _PersistedSessionInputBundle)
             else processed_at
         )
-        # The response is one provider batch. Validate it globally before
-        # selecting the governed subset for this cohort.
+        self.validate_shared_action_response(bundle.actions, bundle.tickers, session)
+        actions = tuple(
+            action for action in bundle.actions if action.ticker in set(required)
+        )
         self._validate_actions(
-            bundle.actions,
-            tuple(sorted(set(bundle.tickers))),
+            actions,
+            required,
             session,
             validation_at,
             max_age,
@@ -762,15 +876,31 @@ class SessionExecutor:
         for symbol in self.benchmark_symbols:
             if bundle.benchmarks[(symbol, session)].fetched_at < cutoff:
                 raise BarValidationError(f"pre-close {symbol}/{session}")
-        actions = tuple(
-            action for action in bundle.actions if action.ticker in set(required)
-        )
         bars = {ticker: bundle.bars[(ticker, session)] for ticker in required}
         benchmarks = {
             symbol: bundle.benchmarks[(symbol, session)]
             for symbol in self.benchmark_symbols
         }
         return bars, actions, benchmarks
+
+    @staticmethod
+    def validate_shared_action_response(
+        actions: tuple[CorporateAction, ...],
+        shared_tickers: tuple[str, ...],
+        session: date,
+    ) -> None:
+        """Validate only response-wide identity and scope invariants."""
+        seen: dict[str, CorporateAction] = {}
+        errors: list[str] = []
+        allowed = set(shared_tickers)
+        for action in actions:
+            if action.action_id in seen and seen[action.action_id] != action:
+                errors.append(f"conflicting corporate action {action.action_id}")
+            seen[action.action_id] = action
+            if action.ticker not in allowed or action.session != session:
+                errors.append(f"corporate action scope mismatch {action.action_id}")
+        if errors:
+            raise CorporateActionBatchError(actions, tuple(sorted(set(errors))))
 
     @staticmethod
     def _validate_actions(

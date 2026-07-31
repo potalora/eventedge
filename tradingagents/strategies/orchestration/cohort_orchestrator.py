@@ -305,6 +305,7 @@ class CohortOrchestrator:
     def run_daily(self, trading_date: str | None = None) -> dict[str, Any]:
         """Execute/mark every cohort, then share four screens and stage intents."""
         from tradingagents.strategies.orchestration.session_executor import (
+            CorporateActionBatchError,
             PHASES,
             SessionExecutor,
             ensure_reference_bars,
@@ -353,6 +354,15 @@ class CohortOrchestrator:
             staging_complete = ledger.staging_completed(
                 session, self._epoch_id, policy_id
             )
+            if len(snapshots) == 1 and phases_complete:
+                try:
+                    cohort["executor"].validate_bound_context(session, self._epoch_id)
+                except Exception as error:
+                    results[cohort["config"].name] = {
+                        "error": True,
+                        "invalid_reason": str(error),
+                    }
+                    continue
             if len(snapshots) == 1 and phases_complete and staging_complete:
                 fills = ledger.read_fills(session, session)
                 complete_replays[cohort["config"].name] = {
@@ -399,11 +409,14 @@ class CohortOrchestrator:
                         fresh_execution.append(cohort)
                         continue
                     persisted = cohort["executor"].persisted_input_bundle(session)
+                    persisted_borrow = cohort["executor"].persisted_borrow_rates(
+                        session
+                    )
                     lifecycle = cohort["executor"].execute_open_and_mark(
                         session,
                         self._epoch_id,
                         persisted,
-                        {},
+                        persisted_borrow,
                         processed_at,
                     )
                 except Exception as error:
@@ -437,7 +450,25 @@ class CohortOrchestrator:
                     self._price_source,
                     benchmark_symbols,
                 )
+                SessionExecutor.validate_shared_action_response(
+                    bundle.actions, bundle.tickers, session
+                )
                 processed_at = datetime.now(timezone.utc)
+            except CorporateActionBatchError as error:
+                for cohort in fresh_execution:
+                    required = cohort["executor"].required_tickers(session)
+                    reason = cohort["ledger"].reject_corporate_action_batch(
+                        session,
+                        error.actions,
+                        required,
+                        error.errors,
+                        processed_at,
+                    )
+                    results[cohort["config"].name] = {
+                        "error": True,
+                        "invalid_reason": reason,
+                    }
+                bundle = None
             except Exception as error:
                 reason = f"shared session input fetch failed: {error}"
                 for cohort in fresh_execution:
@@ -456,10 +487,11 @@ class CohortOrchestrator:
                 for cohort in fresh_execution:
                     name = cohort["config"].name
                     try:
+                        required = cohort["executor"].required_tickers(session)
                         lifecycle = cohort["executor"].execute_open_and_mark(
                             session,
                             self._epoch_id,
-                            bundle,
+                            bundle.for_tickers(required),
                             {},
                             processed_at,
                         )

@@ -17,6 +17,7 @@ from tradingagents.strategies.execution import (
     stable_id,
 )
 from tradingagents.strategies.execution.price_source import AdjustedClose
+from tradingagents.strategies.execution.cost_model import PaperCostModel
 from tradingagents.strategies.orchestration.session_executor import (
     PHASES,
     SessionInputBundle,
@@ -585,6 +586,270 @@ def test_crash_after_completed_action_phase_resumes_without_duplicate_dividend(
 
 
 @pytest.mark.parametrize(
+    ("crash_phase", "scenario"),
+    [
+        ("apply_corporate_actions", "action"),
+        ("execute_exits", "exit"),
+        ("execute_entries", "entry"),
+    ],
+)
+@pytest.mark.parametrize("inserted_ticker", ["AAPL", "MSFT"])
+def test_resume_rejects_due_intent_inserted_after_bound_phase_commit(
+    tmp_path, crash_phase, scenario, inserted_ticker
+):
+    ledger = _ledger(tmp_path, cash="3000")
+    try:
+        actions = []
+        if scenario in {"action", "exit"}:
+            _open_long(ledger, "AAPL", 2)
+        if scenario == "action":
+            actions = [
+                CorporateAction(
+                    "dividend-aapl",
+                    "AAPL",
+                    MONDAY,
+                    "cash_dividend",
+                    None,
+                    Decimal("1"),
+                    "fixture-action",
+                    PROCESSED,
+                    True,
+                )
+            ]
+        elif scenario == "exit":
+            _intent(ledger, "AAPL", "sell", MONDAY, 1)
+        else:
+            _intent(ledger, "AAPL", "buy", MONDAY, 1)
+        source = FakePriceSource({("AAPL", MONDAY): _bar("AAPL")}, actions=actions)
+
+        def crash_after_commit(phase):
+            if phase == crash_phase:
+                raise RuntimeError(f"crash after {phase}")
+
+        with pytest.raises(RuntimeError, match=f"crash after {crash_phase}"):
+            SessionExecutor(
+                ledger, _config(), after_phase_commit=crash_after_commit
+            ).execute_open_and_mark(MONDAY, "epoch", source, {}, PROCESSED)
+
+        injected = _intent(ledger, inserted_ticker, "buy", MONDAY, 3)
+        resumed = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", source, {}, PROCESSED
+        )
+
+        assert not resumed.valid
+        assert "governed session state conflict" in resumed.invalid_reason
+        assert ledger.intent(injected.intent_id).status != "filled"
+        assert ledger.read_snapshots(MONDAY, MONDAY) == []
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("mutation", ["lot", "allocation", "accounting"])
+def test_resume_rejects_other_governed_state_mutations_after_binding(
+    tmp_path, mutation
+):
+    ledger = _ledger(tmp_path, cash="3000")
+    try:
+        source = FakePriceSource()
+        if mutation == "allocation":
+            opened = _open_long(ledger, "AAPL", 2)
+            signal_ids = tuple(
+                signal.signal_id
+                for signal in ledger.signals_for_intent(opened.intent_id)
+            )
+            lot_id = ledger.open_exit_positions()[0]["lot_id"]
+            exit_intent = OrderIntent(
+                stable_id("governed_exit", MONDAY),
+                signal_ids,
+                ledger.cohort_id,
+                "sell",
+                2,
+                session_close(FRIDAY),
+                MONDAY,
+                "next_session_open",
+                "pending",
+                None,
+                None,
+            )
+            ledger.stage_exit_intent(exit_intent, ((str(lot_id), 2),))
+            source = FakePriceSource({("AAPL", MONDAY): _bar("AAPL")})
+
+        def crash_after_commit(phase):
+            if phase == "validate_market_data":
+                raise RuntimeError("crash after binding")
+
+        with pytest.raises(RuntimeError, match="crash after binding"):
+            SessionExecutor(
+                ledger, _config(), after_phase_commit=crash_after_commit
+            ).execute_open_and_mark(MONDAY, "epoch", source, {}, PROCESSED)
+
+        if mutation == "lot":
+            _open_long(
+                ledger,
+                "MSFT",
+                1,
+                reference=date(2026, 7, 29),
+                opened=FRIDAY,
+            )
+        elif mutation == "allocation":
+            ledger.connection.execute(
+                "UPDATE exit_intent_lots SET quantity = 1 WHERE intent_id = ?",
+                (exit_intent.intent_id,),
+            )
+        else:
+            ledger.connection.execute(
+                "UPDATE accounting_state SET cash = '2999' WHERE cohort_id = ?",
+                (ledger.cohort_id,),
+            )
+
+        resumed = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", source, {}, PROCESSED
+        )
+        assert not resumed.valid
+        assert "governed session state conflict" in resumed.invalid_reason
+        assert ledger.read_snapshots(MONDAY, MONDAY) == []
+    finally:
+        ledger.close()
+
+
+def test_mixed_valid_dividend_and_state_invalid_split_rejects_atomically(tmp_path):
+    ledger = _ledger(tmp_path, cash="3000")
+    try:
+        _open_long(ledger, "AAPL", 1)
+        due = _intent(ledger, "AAPL", "buy", MONDAY, 1)
+        dividend = CorporateAction(
+            "a-dividend-aapl",
+            "AAPL",
+            MONDAY,
+            "cash_dividend",
+            None,
+            Decimal("10"),
+            "fixture-action",
+            PROCESSED,
+            True,
+        )
+        fractional_split = CorporateAction(
+            "z-split-aapl",
+            "AAPL",
+            MONDAY,
+            "split",
+            Decimal("1.5"),
+            None,
+            "fixture-action",
+            PROCESSED,
+            True,
+        )
+
+        result = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            FakePriceSource(
+                {("AAPL", MONDAY): _bar("AAPL")},
+                actions=[dividend, fractional_split],
+            ),
+            {},
+            PROCESSED,
+        )
+
+        assert not result.valid
+        assert "fractional" in result.invalid_reason
+        assert not ledger.phase_completed(MONDAY, "apply_corporate_actions")
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM dividend_events"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_actions"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+            ).fetchone()[0]
+            == 1
+        )
+        assert ledger.intent(due.intent_id).status == "cancelled"
+        assert "invalid corporate action batch" in ledger.session_invalid_reason(
+            MONDAY, "AAPL"
+        )
+    finally:
+        ledger.close()
+
+
+def test_conflicting_action_identity_rejects_before_earlier_sorted_action(tmp_path):
+    ledger = _ledger(tmp_path, cash="3000")
+    try:
+        _open_long(ledger, "AAPL", 2)
+        due = _intent(ledger, "AAPL", "sell", MONDAY, 2)
+        dividend = CorporateAction(
+            "a-dividend",
+            "AAPL",
+            MONDAY,
+            "cash_dividend",
+            None,
+            Decimal("5"),
+            "fixture",
+            PROCESSED,
+            True,
+        )
+        first = CorporateAction(
+            "z-conflict",
+            "AAPL",
+            MONDAY,
+            "split",
+            Decimal("2"),
+            None,
+            "fixture",
+            PROCESSED,
+            True,
+        )
+        second = CorporateAction(
+            "z-conflict",
+            "AAPL",
+            MONDAY,
+            "split",
+            Decimal("3"),
+            None,
+            "fixture",
+            PROCESSED,
+            True,
+        )
+        bundle = SessionInputBundle(
+            MONDAY,
+            ("AAPL",),
+            {("AAPL", MONDAY): _bar("AAPL")},
+            (dividend, first, second),
+            FakePriceSource().adjusted,
+        )
+
+        result = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", bundle, {}, PROCESSED
+        )
+
+        assert not result.valid
+        assert "conflicting corporate action z-conflict" in result.invalid_reason
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_actions"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM dividend_events"
+            ).fetchone()[0]
+            == 0
+        )
+        assert ledger.intent(due.intent_id).status == "cancelled"
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
     ("crash_phase", "scenario", "mutated_input"),
     [
         ("apply_corporate_actions", "action", "action"),
@@ -900,6 +1165,145 @@ def test_partial_resume_rejects_effective_config_or_borrow_drift_before_market_i
         assert "effective config or borrow" in result.invalid_reason
     finally:
         ledger.close()
+
+
+def test_omitted_cost_default_drift_changes_effective_policy_digest(
+    tmp_path, monkeypatch
+):
+    ledger = _ledger(tmp_path)
+    try:
+        _intent(ledger, "AAPL", "buy", MONDAY, 1)
+        config = _config()
+        del config["autoresearch"]["paper_ledger"]["slippage_bps"]
+
+        def crash_after_commit(phase):
+            if phase == "validate_market_data":
+                raise RuntimeError("partial crash")
+
+        with pytest.raises(RuntimeError, match="partial crash"):
+            SessionExecutor(
+                ledger, config, after_phase_commit=crash_after_commit
+            ).execute_open_and_mark(
+                MONDAY,
+                "epoch",
+                FakePriceSource({("AAPL", MONDAY): _bar("AAPL")}),
+                {},
+                PROCESSED,
+            )
+
+        monkeypatch.setitem(PaperCostModel.DEFAULTS, "slippage_bps", "20")
+        resumed = SessionExecutor(ledger, config).execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            SessionExecutor(ledger, config).persisted_input_bundle(MONDAY),
+            {},
+            PROCESSED,
+        )
+
+        assert not resumed.valid
+        assert "effective config" in resumed.invalid_reason
+        assert ledger.read_fills(MONDAY, MONDAY) == []
+    finally:
+        ledger.close()
+
+
+def test_bound_context_rehydrates_canonical_nonempty_borrow_inputs(tmp_path):
+    ledger = _ledger(tmp_path)
+    try:
+        _intent(ledger, "AAPL", "buy", MONDAY, 1)
+        borrow = {"AAPL": Decimal("0.0125")}
+
+        def crash_after_commit(phase):
+            if phase == "validate_market_data":
+                raise RuntimeError("partial crash")
+
+        with pytest.raises(RuntimeError, match="partial crash"):
+            SessionExecutor(
+                ledger, _config(), after_phase_commit=crash_after_commit
+            ).execute_open_and_mark(
+                MONDAY,
+                "epoch",
+                FakePriceSource({("AAPL", MONDAY): _bar("AAPL")}),
+                borrow,
+                PROCESSED,
+            )
+
+        executor = SessionExecutor(ledger, _config())
+        assert executor.persisted_borrow_rates(MONDAY) == borrow
+        resumed = executor.execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            executor.persisted_input_bundle(MONDAY),
+            executor.persisted_borrow_rates(MONDAY),
+            PROCESSED,
+        )
+        assert resumed.valid
+    finally:
+        ledger.close()
+
+
+def test_shared_action_batch_isolates_malformed_member_to_affected_cohort(tmp_path):
+    (tmp_path / "aapl").mkdir()
+    (tmp_path / "msft").mkdir()
+    aapl_ledger = _ledger(tmp_path / "aapl", cash="3000")
+    msft_ledger = _ledger(tmp_path / "msft", cash="3000")
+    try:
+        _open_long(aapl_ledger, "AAPL", 1)
+        _open_long(msft_ledger, "MSFT", 1)
+        actions = (
+            CorporateAction(
+                "dividend-aapl",
+                "AAPL",
+                MONDAY,
+                "cash_dividend",
+                None,
+                Decimal("1"),
+                "fixture",
+                PROCESSED,
+                True,
+            ),
+            CorporateAction(
+                "dividend-msft-malformed",
+                "MSFT",
+                MONDAY,
+                "cash_dividend",
+                None,
+                Decimal("1"),
+                "fixture",
+                PROCESSED,
+                False,
+            ),
+        )
+        shared = SessionInputBundle(
+            MONDAY,
+            ("AAPL", "MSFT"),
+            {
+                ("AAPL", MONDAY): _bar("AAPL"),
+                ("MSFT", MONDAY): _bar("MSFT"),
+            },
+            actions,
+            FakePriceSource().adjusted,
+        )
+        SessionExecutor.validate_shared_action_response(
+            shared.actions, shared.tickers, MONDAY
+        )
+
+        aapl = SessionExecutor(aapl_ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", shared.for_tickers(("AAPL",)), {}, PROCESSED
+        )
+        msft = SessionExecutor(msft_ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", shared.for_tickers(("MSFT",)), {}, PROCESSED
+        )
+
+        assert aapl.valid
+        assert aapl.snapshot is not None
+        assert aapl.snapshot.dividend_cash == Decimal("1.0000")
+        assert not msft.valid
+        assert "unverified" in msft.invalid_reason
+        assert not aapl_ledger.session_invalid_reason(MONDAY)
+    finally:
+        aapl_ledger.close()
+        msft_ledger.close()
 
 
 def test_partial_resume_accepts_economically_identical_refetch_with_new_provenance(
@@ -1493,6 +1897,227 @@ def test_screen_and_stage_persists_all_events_partitions_late_and_replays(tmp_pa
         assert len(ledger.read_signals(FRIDAY, FRIDAY)) == 3
         assert len(ledger.pending_intents(MONDAY)) == 1
         assert len(engine._journal.get_entries()) == 3
+    finally:
+        ledger.close()
+
+
+def test_screen_and_stage_reuses_first_observation_context_across_retry_and_repeat(
+    tmp_path,
+):
+    state_dir = str(tmp_path / "state")
+    config = _config()
+    config["autoresearch"]["state_dir"] = state_dir
+    config["autoresearch"]["horizon"] = "30d"
+    ledger = PortfolioLedger(
+        Path(state_dir) / "portfolio.db", "cohort", Decimal("1000")
+    )
+    try:
+        friday = SessionExecutor(ledger, config).execute_open_and_mark(
+            FRIDAY,
+            "epoch",
+            FakePriceSource(
+                adjusted={
+                    ("SPY", FRIDAY): Decimal("649"),
+                    ("BIL", FRIDAY): Decimal("91"),
+                }
+            ),
+            {},
+            datetime(2026, 7, 31, 22, tzinfo=UTC),
+        )
+        assert friday.snapshot is not None
+        engine = MultiStrategyEngine(
+            config=config,
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        first = {
+            "ticker": "AAPL",
+            "direction": "long",
+            "score": 2.0,
+            "strategy": "strategy",
+            "metadata": {
+                "event_key": "immutable-catalyst",
+                "observed_at": "2026-07-31T19:30:00+00:00",
+                "llm_analysis": {"conviction": 0.7, "rationale": "first"},
+            },
+        }
+        common = {
+            "trading_date": FRIDAY.isoformat(),
+            "data": {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+            "shared_regime": {},
+            "enrichment": {},
+            "size_profile": None,
+            "marked_account": friday.snapshot,
+        }
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=RuntimeError("committee crash"),
+        ):
+            with pytest.raises(RuntimeError, match="committee crash"):
+                engine.screen_and_stage(shared_signals=[first], **common)
+
+        changed = json.loads(json.dumps(first))
+        changed["score"] = 9.0
+        changed["metadata"]["llm_analysis"] = {
+            "conviction": 0.1,
+            "rationale": "changed",
+        }
+        first_recommendation = TradeRecommendation(
+            "AAPL", "long", 0.20, 0.8, "first", ["strategy"]
+        )
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            return_value=[first_recommendation],
+        ) as committee:
+            retry = engine.screen_and_stage(shared_signals=[changed], **common)
+
+        committee_signal = committee.call_args.kwargs["signals"][0]
+        assert committee_signal["score"] == 2.0
+        assert committee_signal["metadata"]["llm_analysis"]["conviction"] == 0.7
+        assert len(retry["signals"]) == 1
+        observation = ledger.signal_observation(retry["signals"][0]["signal_id"])
+        assert observation is not None
+        assert observation[2]["score"] == 2.0
+        assert observation[2]["llm_conviction"] == 0.7
+        assert len(retry["intents_staged"]) == 1
+        first_intent_id = retry["intents_staged"][0]
+
+        monday = SessionExecutor(ledger, config).execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            FakePriceSource(
+                {("AAPL", MONDAY): _bar("AAPL", MONDAY)},
+                adjusted={
+                    ("SPY", MONDAY): Decimal("650"),
+                    ("BIL", MONDAY): Decimal("91.1"),
+                },
+            ),
+            {},
+            PROCESSED,
+        )
+        assert monday.snapshot is not None
+        repeat = json.loads(json.dumps(changed))
+        repeat["metadata"]["observed_at"] = "2026-08-03T19:30:00+00:00"
+        distinct = json.loads(json.dumps(repeat))
+        distinct["ticker"] = "MSFT"
+        distinct["metadata"]["event_key"] = "distinct-catalyst"
+        distinct_recommendation = TradeRecommendation(
+            "MSFT", "long", 0.20, 0.8, "distinct", ["strategy"]
+        )
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            return_value=[distinct_recommendation],
+        ) as later_committee:
+            later = engine.screen_and_stage(
+                trading_date=MONDAY.isoformat(),
+                data={
+                    "_execution_reference_bars": {
+                        "AAPL": _bar("AAPL", MONDAY),
+                        "MSFT": _bar("MSFT", MONDAY),
+                    }
+                },
+                shared_signals=[repeat, distinct],
+                shared_regime={},
+                enrichment={},
+                size_profile=None,
+                marked_account=monday.snapshot,
+            )
+
+        assert [
+            item["ticker"] for item in later_committee.call_args.kwargs["signals"]
+        ] == ["MSFT"]
+        later_entries = [
+            intent_id
+            for intent_id in later["intents_staged"]
+            if ledger.intent(intent_id).side == "buy"
+        ]
+        assert len(later_entries) == 1
+        assert later_entries[0] != first_intent_id
+        assert {
+            signal.ticker for signal in ledger.signals_for_intent(later_entries[0])
+        } == {"MSFT"}
+        assert ledger.intent(first_intent_id).status == "filled"
+        aapl_buys = ledger.connection.execute(
+            """SELECT i.intent_id FROM order_intents i
+               JOIN intent_signals isg ON isg.intent_id = i.intent_id
+               JOIN signals s ON s.signal_id = isg.signal_id
+               WHERE i.side = 'buy' AND s.ticker = 'AAPL'"""
+        ).fetchall()
+        assert [row["intent_id"] for row in aapl_buys] == [first_intent_id]
+        assert len(ledger.read_signals()) == 2
+        original = ledger.signal_observation(retry["signals"][0]["signal_id"])
+        assert original is not None
+        assert original[0].reference_session == FRIDAY
+        assert original[2]["score"] == 2.0
+    finally:
+        ledger.close()
+
+
+def test_active_strategy_ignores_caller_event_key_and_requires_source_timing(tmp_path):
+    from tradingagents.strategies.orchestration.event_identity import (
+        canonical_event_key,
+    )
+
+    state_dir = str(tmp_path / "state")
+    config = _config()
+    config["autoresearch"]["state_dir"] = state_dir
+    config["autoresearch"]["horizon"] = "30d"
+    ledger = PortfolioLedger(
+        Path(state_dir) / "portfolio.db", "cohort", Decimal("1000")
+    )
+    try:
+        lifecycle = SessionExecutor(ledger, config).execute_open_and_mark(
+            FRIDAY,
+            "epoch",
+            FakePriceSource(
+                adjusted={
+                    ("SPY", FRIDAY): Decimal("649"),
+                    ("BIL", FRIDAY): Decimal("91"),
+                }
+            ),
+            {},
+            datetime(2026, 7, 31, 22, tzinfo=UTC),
+        )
+        assert lifecycle.snapshot is not None
+        engine = MultiStrategyEngine(
+            config=config,
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        metadata = {
+            "year": 2026,
+            "quarter": 2,
+            "published_at": "2026-07-31T19:00:00+00:00",
+            "event_key": "caller-controlled-bypass",
+        }
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            return_value=[],
+        ):
+            result = engine.screen_and_stage(
+                trading_date=FRIDAY.isoformat(),
+                data={"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                shared_signals=[
+                    {
+                        "ticker": "AAPL",
+                        "direction": "long",
+                        "score": 1.0,
+                        "strategy": "earnings_call",
+                        "metadata": metadata,
+                    }
+                ],
+                shared_regime={},
+                enrichment={},
+                size_profile=None,
+                marked_account=lifecycle.snapshot,
+            )
+
+        assert result["signals"][0]["event_key"] == canonical_event_key(
+            "earnings_call", "AAPL", metadata, FRIDAY
+        )
+        assert result["signals"][0]["event_key"] != "caller-controlled-bypass"
     finally:
         ledger.close()
 

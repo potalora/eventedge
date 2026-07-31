@@ -187,6 +187,22 @@ class QuantumReadinessStrategy:
             )
             return []
 
+        published_times = sorted(
+            str(article["published_at"])
+            for article in pqc_news
+            if article.get("published_at")
+        )
+        filing_dates = sorted(
+            str(filing.get("file_date") or filing.get("filing_date"))
+            for filing in pqc_filings
+            if filing.get("file_date") or filing.get("filing_date")
+        )
+        for candidate in candidates:
+            if published_times:
+                candidate.metadata["published_at"] = published_times[-1]
+            if filing_dates:
+                candidate.metadata["window_end"] = filing_dates[-1]
+
         # Enrich with OpenBB sector data
         openbb_data = data.get("openbb", {})
         profile_data = openbb_data.get("profile", {})

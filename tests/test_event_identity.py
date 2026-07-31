@@ -9,7 +9,10 @@ import pandas as pd
 import pytest
 
 from tradingagents.strategies.modules import get_paper_trade_strategies
-from tradingagents.strategies.orchestration.event_identity import canonical_event_key
+from tradingagents.strategies.orchestration.event_identity import (
+    canonical_event_key,
+    canonical_observation_time,
+)
 
 
 FAMILIES = [
@@ -132,6 +135,26 @@ def test_supply_chain_fallback_requires_source_headline_and_publication_time():
         )
 
 
+def test_congressional_transaction_date_cannot_prove_source_availability():
+    with pytest.raises(ValueError, match="observation time"):
+        canonical_observation_time(
+            "congressional_trades",
+            {
+                "trade_keys": ["disclosure-1"],
+                "transaction_date": "2026-06-25",
+            },
+        )
+    observed = canonical_observation_time(
+        "congressional_trades",
+        {
+            "trade_keys": ["disclosure-1"],
+            "transaction_date": "2026-06-25",
+            "publication_date": "2026-07-01",
+        },
+    )
+    assert observed.date() == date(2026, 7, 1)
+
+
 def test_all_active_strategy_outputs_carry_usable_source_native_identity():
     sessions = pd.bdate_range("2026-05-01", periods=45)
 
@@ -155,6 +178,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                         "eps_actual": 2.0,
                         "eps_estimate": 1.5,
                         "transcript_text": "Demand improved.",
+                        "published_at": "2026-07-01T12:00:00+00:00",
                     }
                 ]
             }
@@ -169,6 +193,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                             "owner_name": f"Owner {ordinal}",
                             "shares": 10,
                             "price_per_share": 100,
+                            "filing_date": "2026-06-30",
                         }
                         for ordinal in range(3)
                     ]
@@ -209,6 +234,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                         "headline": "Factory disruption closes port",
                         "summary": "shortage",
                         "url": "https://example.test/news/1",
+                        "published_at": "2026-07-01T12:00:00+00:00",
                     }
                 ]
             }
@@ -236,6 +262,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                         "chamber": "house",
                         "transaction_date": "2026-06-25",
                         "source_url": "https://example.test/disclosure/1",
+                        "publication_date": "2026-06-30",
                     }
                 ]
             }
@@ -248,6 +275,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                             "recipient_name": "Lockheed Martin",
                             "amount": 50_000_000,
                             "award_id": "AWARD-1",
+                            "last_modified_date": "2026-06-30",
                         }
                     ]
                 }
@@ -290,6 +318,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                         "headline": "Quantum milestone and PQC deadline",
                         "summary": "quantum-safe migration",
                         "url": "https://example.test/pqc/1",
+                        "published_at": "2026-07-01T12:00:00+00:00",
                     }
                 ]
             }
@@ -311,3 +340,4 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                 candidate.metadata,
                 date(2026, 7, 1),
             )
+            assert canonical_observation_time(name, candidate.metadata)

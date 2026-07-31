@@ -130,6 +130,15 @@ class GovtContractsStrategy:
                             "contract_amount": amount,
                             "source": "usaspending",
                             "award_id": award_id,
+                            **(
+                                {
+                                    "last_modified_date": contract.get(
+                                        "last_modified_date"
+                                    )
+                                }
+                                if contract.get("last_modified_date")
+                                else {}
+                            ),
                         },
                     )
                 )

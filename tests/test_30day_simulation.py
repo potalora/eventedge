@@ -20,7 +20,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tradingagents.strategies.execution import MarketBar
+from tradingagents.strategies.execution import (
+    MarketBar,
+    OrderIntent,
+    SignalRecord,
+    stable_id,
+)
 from tradingagents.strategies.execution.price_source import AdjustedClose
 
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -30,7 +35,12 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
 from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
-from tradingagents.strategies.orchestration.trading_calendar import next_session
+from tradingagents.strategies.orchestration.session_executor import SessionExecutor
+from tradingagents.strategies.orchestration.trading_calendar import (
+    next_session,
+    previous_session,
+    session_close,
+)
 from tradingagents.strategies.trading.portfolio_committee import (
     TradeRecommendation,
 )
@@ -99,7 +109,11 @@ class FakeStrategy:
                 date=date,
                 direction="long",
                 score=5.0,
-                metadata={"source": "test", "event_key": f"{self.name}:{date}"},
+                metadata={
+                    "source": "test",
+                    "event_key": f"{self.name}:{date}",
+                    "observed_at": f"{date}T19:00:00+00:00",
+                },
             )
         ]
 
@@ -126,7 +140,11 @@ class FakeStrategy2(FakeStrategy):
                 date=date,
                 direction="long",
                 score=4.0,
-                metadata={"source": "test", "event_key": f"{self.name}:{date}"},
+                metadata={
+                    "source": "test",
+                    "event_key": f"{self.name}:{date}",
+                    "observed_at": f"{date}T19:00:00+00:00",
+                },
             )
         ]
 
@@ -505,6 +523,149 @@ class TestIdempotencyDoubleRun:
 
         assert not resumed["cohort_0"]["error"]
         assert len(source.raw_calls) == before[0] + 1
+        assert len(source.action_calls) == before[1]
+        assert len(source.benchmark_calls) == before[2]
+
+    def test_complete_and_stage_only_replay_validate_local_policy_without_market_io(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
+        session = date(2026, 3, 30)
+        second_engine = orchestrator.cohorts[1]["engine"]
+        original_stage = second_engine.screen_and_stage
+
+        def fail_stage(*args, **kwargs):
+            raise RuntimeError("staging crash")
+
+        second_engine.screen_and_stage = fail_stage
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            first = orchestrator.run_daily(session.isoformat())
+        assert not first["cohort_0"]["error"]
+        assert first["cohort_1"]["error"]
+        second_engine.screen_and_stage = original_stage
+        before = (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        )
+
+        for cohort in orchestrator.cohorts:
+            drifted = {
+                **cohort["executor"].config,
+                "autoresearch": {
+                    **cohort["executor"].config["autoresearch"],
+                    "paper_ledger": {
+                        **cohort["executor"]
+                        .config["autoresearch"]
+                        .get("paper_ledger", {}),
+                        "slippage_bps": "20",
+                    },
+                },
+            }
+            cohort["executor"] = SessionExecutor(cohort["ledger"], drifted)
+
+        replay = orchestrator.run_daily(session.isoformat())
+        assert replay["cohort_0"]["error"]
+        assert replay["cohort_1"]["error"]
+        assert "effective config" in replay["cohort_0"]["invalid_reason"]
+        assert "effective config" in replay["cohort_1"]["invalid_reason"]
+        assert (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        ) == before
+
+    def test_partial_orchestrator_resume_rehydrates_nonempty_borrow_document(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path)
+        cohort = orchestrator.cohorts[0]
+        ledger = cohort["ledger"]
+        executor = cohort["executor"]
+        session = date(2026, 3, 30)
+        prior = previous_session(session)
+        cutoff = session_close(prior)
+        signal = SignalRecord(
+            stable_id("borrow_resume_signal", "AAPL"),
+            orchestrator._epoch_id,
+            "foundation-30d",
+            "borrow-resume-event",
+            "fake_strat",
+            "AAPL",
+            "long",
+            cutoff,
+            cutoff,
+            prior,
+            Decimal("100"),
+            cutoff,
+            stable_id("borrow_resume_evidence", "AAPL"),
+        )
+        ledger.record_signal(signal)
+        intent = OrderIntent(
+            stable_id("borrow_resume_intent", "AAPL"),
+            (signal.signal_id,),
+            ledger.cohort_id,
+            "buy",
+            1,
+            cutoff,
+            session,
+            "next_session_open",
+            "pending",
+            None,
+            None,
+        )
+        ledger.stage_intent(intent)
+
+        def crash_after_commit(phase):
+            if phase == "validate_market_data":
+                raise RuntimeError("execution crash")
+
+        executor._after_phase_commit = crash_after_commit
+        bundle = SessionExecutor.fetch_input_bundle(
+            session, ("AAPL",), source, executor.benchmark_symbols
+        )
+        with pytest.raises(RuntimeError, match="execution crash"):
+            executor.execute_open_and_mark(
+                session,
+                orchestrator._epoch_id,
+                bundle,
+                {"AAPL": Decimal("0.0125")},
+                datetime.now(timezone.utc),
+            )
+        assert executor.persisted_borrow_rates(session) == {"AAPL": Decimal("0.0125")}
+        before = (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        )
+
+        executor._after_phase_commit = lambda phase: None
+        with (
+            patch(
+                "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+                side_effect=_authoritative_committee,
+            ),
+            patch(
+                "tradingagents.strategies.orchestration.session_executor.ensure_reference_bars",
+                return_value={
+                    "AAPL": bundle.bars[("AAPL", session)],
+                    "MSFT": MarketBar(
+                        **{
+                            **bundle.bars[("AAPL", session)].__dict__,
+                            "ticker": "MSFT",
+                        }
+                    ),
+                },
+            ),
+        ):
+            resumed = orchestrator.run_daily(session.isoformat())
+
+        assert not resumed["cohort_0"]["error"]
+        assert ledger.intent(intent.intent_id).status == "filled"
+        assert len(source.raw_calls) == before[0]
         assert len(source.action_calls) == before[1]
         assert len(source.benchmark_calls) == before[2]
 

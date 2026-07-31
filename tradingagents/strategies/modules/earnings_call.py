@@ -90,6 +90,8 @@ class EarningsCallStrategy:
                 "quarter": quarter,
                 "analysis_type": "earnings_call",
             }
+            if t.get("published_at"):
+                metadata["published_at"] = t["published_at"]
             direction = "long"
             score = 0.5
             if (

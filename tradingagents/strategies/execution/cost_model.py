@@ -49,29 +49,45 @@ def validate_new_short_borrow_rate(
 class PaperCostModel:
     """Fixed 10-bps adverse equity execution costs for the paper ledger."""
 
+    DEFAULTS = {
+        "slippage_bps": "10",
+        "commission_per_fill": "0",
+        "other_fee_per_fill": "0",
+        "margin_requirement": "1.50",
+        "margin_financing_rate": "0",
+        "idle_cash_yield_rate": "0",
+        "existing_short_missing_borrow_rate": "0.30",
+    }
+
     def __init__(self, config: Mapping[str, object] | None = None) -> None:
         values = config or {}
         nested = values.get("paper_ledger")
         if isinstance(nested, Mapping):
             values = nested
-        self.slippage_bps = self._configured_decimal(values, "slippage_bps", "10")
+        self.slippage_bps = self._configured_decimal(
+            values, "slippage_bps", self.DEFAULTS["slippage_bps"]
+        )
         self.commission_per_fill = self._configured_decimal(
-            values, "commission_per_fill", "0"
+            values, "commission_per_fill", self.DEFAULTS["commission_per_fill"]
         )
         self.other_fee_per_fill = self._configured_decimal(
-            values, "other_fee_per_fill", "0"
+            values, "other_fee_per_fill", self.DEFAULTS["other_fee_per_fill"]
         )
         self.margin_requirement = self._configured_decimal(
-            values, "margin_requirement", "1.50"
+            values, "margin_requirement", self.DEFAULTS["margin_requirement"]
         )
         self.margin_financing_rate = self._configured_decimal(
-            values, "margin_financing_rate", "0"
+            values,
+            "margin_financing_rate",
+            self.DEFAULTS["margin_financing_rate"],
         )
         self.idle_cash_yield_rate = self._configured_decimal(
-            values, "idle_cash_yield_rate", "0"
+            values, "idle_cash_yield_rate", self.DEFAULTS["idle_cash_yield_rate"]
         )
         self.existing_short_missing_borrow_rate = self._configured_decimal(
-            values, "existing_short_missing_borrow_rate", "0.30"
+            values,
+            "existing_short_missing_borrow_rate",
+            self.DEFAULTS["existing_short_missing_borrow_rate"],
         )
 
     @staticmethod

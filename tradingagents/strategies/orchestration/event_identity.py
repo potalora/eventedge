@@ -2,10 +2,96 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timezone
 from typing import Any
 
 from tradingagents.strategies.execution import stable_id
+
+
+ACTIVE_STRATEGY_NAMES = frozenset(
+    {
+        "earnings_call",
+        "insider_activity",
+        "filing_analysis",
+        "regulatory_pipeline",
+        "supply_chain",
+        "litigation",
+        "congressional_trades",
+        "govt_contracts",
+        "state_economics",
+        "weather_ag",
+        "commodity_macro",
+        "quantum_readiness",
+    }
+)
+
+_AVAILABILITY_FIELDS: dict[str, tuple[tuple[str, bool], ...]] = {
+    "earnings_call": (("published_at", False),),
+    "insider_activity": (("filing_date", True),),
+    "filing_analysis": (("file_date", True),),
+    "regulatory_pipeline": (("posted_date", True),),
+    "supply_chain": (("published_at", False),),
+    "litigation": (("release_date", True), ("date_filed", True)),
+    "congressional_trades": (
+        ("publication_date", True),
+        ("disclosure_date", True),
+        ("filing_date", True),
+    ),
+    "govt_contracts": (
+        ("published_at", False),
+        ("last_modified_date", True),
+        ("observation_date", True),
+    ),
+    "state_economics": (("window_end", True),),
+    "weather_ag": (("window_end", True),),
+    "commodity_macro": (("window_end", True),),
+    "quantum_readiness": (("published_at", False), ("window_end", True)),
+}
+
+
+def _availability_timestamp(value: object, *, date_only: bool, field: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        if not date_only:
+            raise ValueError(f"candidate timestamp {field} requires an aware datetime")
+        return datetime.combine(value, time.max, tzinfo=timezone.utc)
+    elif isinstance(value, str):
+        if date_only:
+            try:
+                parsed_date = date.fromisoformat(value)
+            except ValueError:
+                parsed_date = None
+            if parsed_date is not None and value == parsed_date.isoformat():
+                return datetime.combine(parsed_date, time.max, tzinfo=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError(f"invalid candidate timestamp {field}") from error
+    else:
+        raise ValueError(f"invalid candidate timestamp {field}")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"candidate timestamp {field} requires timezone awareness")
+    return parsed.astimezone(timezone.utc)
+
+
+def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
+    """Resolve when source evidence became available without using economic dates."""
+    if metadata.get("observed_at") not in (None, ""):
+        return _availability_timestamp(
+            metadata["observed_at"], date_only=False, field="observed_at"
+        )
+    values: list[datetime] = []
+    for field, date_only in _AVAILABILITY_FIELDS.get(strategy, ()):
+        if metadata.get(field) not in (None, ""):
+            values.append(
+                _availability_timestamp(
+                    metadata[field], date_only=date_only, field=field
+                )
+            )
+    if not values:
+        raise ValueError(f"{strategy} candidate lacks recognized observation time")
+    return max(values)
 
 
 def _present(value: object) -> bool:
