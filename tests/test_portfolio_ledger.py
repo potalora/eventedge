@@ -18,6 +18,7 @@ from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     PortfolioLedger,
 )
+from tradingagents.strategies.state import portfolio_ledger
 
 
 UTC = timezone.utc
@@ -48,11 +49,16 @@ REQUIRED_TABLES = {
 }
 
 
-def _signal() -> SignalRecord:
+def _signal(
+    *,
+    signal_id: str = "signal-1",
+    epoch_id: str = "epoch-1",
+    policy_id: str = "policy-1",
+) -> SignalRecord:
     return SignalRecord(
-        signal_id="signal-1",
-        epoch_id="epoch-1",
-        policy_id="policy-1",
+        signal_id=signal_id,
+        epoch_id=epoch_id,
+        policy_id=policy_id,
         event_key="event-1",
         strategy="litigation",
         ticker="AAPL",
@@ -66,10 +72,15 @@ def _signal() -> SignalRecord:
     )
 
 
-def _intent(*, requested_qty: int = 10) -> OrderIntent:
+def _intent(
+    *,
+    requested_qty: int = 10,
+    intent_id: str = "intent-1",
+    signal_ids: tuple[str, ...] = ("signal-1",),
+) -> OrderIntent:
     return OrderIntent(
-        intent_id="intent-1",
-        signal_ids=("signal-1",),
+        intent_id=intent_id,
+        signal_ids=signal_ids,
         cohort_id="horizon_30d_size_5k",
         side="buy",
         requested_qty=requested_qty,
@@ -148,6 +159,137 @@ def test_intent_duplicate_with_different_signal_provenance_conflicts(tmp_path):
             ledger.stage_intent(conflicting)
     finally:
         ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("signal_ids", "signals", "message"),
+    [
+        ((), (), "at least one signal"),
+        (("missing-signal",), (), "missing signal IDs"),
+        (
+            ("signal-1", "signal-2"),
+            (_signal(), _signal(signal_id="signal-2", epoch_id="epoch-2")),
+            "one epoch_id",
+        ),
+        (
+            ("signal-1", "signal-2"),
+            (_signal(), _signal(signal_id="signal-2", policy_id="policy-2")),
+            "one policy_id",
+        ),
+    ],
+)
+def test_stage_intent_rejects_invalid_signal_provenance(
+    tmp_path, signal_ids, signals, message
+):
+    ledger = PortfolioLedger(
+        tmp_path / "portfolio.db", "horizon_30d_size_5k", Decimal("5000")
+    )
+    try:
+        for signal in signals:
+            ledger.record_signal(signal)
+        with pytest.raises(ValueError, match=message):
+            ledger.stage_intent(
+                _intent(intent_id="invalid-intent", signal_ids=signal_ids)
+            )
+        assert ledger.pending_intents(date(2026, 8, 3)) == []
+    finally:
+        ledger.close()
+
+
+def test_single_epoch_signal_provenance_returns_fill_from_exactly_one_epoch(tmp_path):
+    ledger = PortfolioLedger(
+        tmp_path / "portfolio.db", "horizon_30d_size_5k", Decimal("5000")
+    )
+    signal_one = _signal(signal_id="signal-1")
+    signal_two = _signal(signal_id="signal-2")
+    intent = _intent(
+        intent_id="single-epoch-intent",
+        signal_ids=(signal_two.signal_id, signal_one.signal_id),
+    )
+    session = date(2026, 8, 3)
+    timestamp = datetime(2026, 8, 3, 22, tzinfo=UTC)
+    try:
+        ledger.record_signal(signal_one)
+        ledger.record_signal(signal_two)
+        ledger.stage_intent(intent)
+        with ledger.transaction() as connection:
+            connection.execute(
+                "INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "single-epoch-fill",
+                    intent.intent_id,
+                    "buy",
+                    session.isoformat(),
+                    timestamp.isoformat(),
+                    timestamp.isoformat(),
+                    "100",
+                    "100.10",
+                    10,
+                    "1",
+                    "0",
+                    "0",
+                ),
+            )
+        assert ledger.pending_intents(session) == [intent]
+        assert [fill.fill_id for fill in ledger.read_fills(epoch_id="epoch-1")] == [
+            "single-epoch-fill"
+        ]
+        assert ledger.read_fills(epoch_id="other-epoch") == []
+    finally:
+        ledger.close()
+
+
+def test_intent_signals_enforce_unique_order_and_read_defensively(tmp_path):
+    ledger = PortfolioLedger(
+        tmp_path / "portfolio.db", "horizon_30d_size_5k", Decimal("5000")
+    )
+    first = _signal(signal_id="signal-1")
+    second = _signal(signal_id="signal-2")
+    third = _signal(signal_id="signal-3")
+    intent = _intent(
+        intent_id="ordered-intent", signal_ids=(second.signal_id, first.signal_id)
+    )
+    try:
+        for signal in (first, second, third):
+            ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        with pytest.raises(sqlite3.IntegrityError):
+            with ledger.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO intent_signals(intent_id, signal_id, signal_order) VALUES (?, ?, ?)",
+                    (intent.intent_id, third.signal_id, 0),
+                )
+        assert ledger.pending_intents(intent.eligible_session) == [intent]
+    finally:
+        ledger.close()
+
+
+def test_constructor_closes_connection_when_initialization_fails(monkeypatch, tmp_path):
+    class TrackedConnection:
+        closed = False
+        row_factory = None
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    connection = TrackedConnection()
+
+    def fail_initialize(self, initial_cash):
+        raise RuntimeError("initialization failure")
+
+    monkeypatch.setattr(
+        portfolio_ledger.sqlite3, "connect", lambda *_args, **_kwargs: connection
+    )
+    monkeypatch.setattr(PortfolioLedger, "_initialize", fail_initialize)
+
+    with pytest.raises(RuntimeError, match="initialization failure"):
+        PortfolioLedger(
+            tmp_path / "portfolio.db", "horizon_30d_size_5k", Decimal("5000")
+        )
+    assert connection.closed is True
 
 
 def test_reopen_preserves_pending_intent_and_single_deterministic_opening_cash(

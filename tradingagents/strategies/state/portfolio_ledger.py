@@ -70,7 +70,8 @@ _DDL: tuple[str, ...] = (
         intent_id TEXT NOT NULL REFERENCES order_intents(intent_id),
         signal_id TEXT NOT NULL REFERENCES signals(signal_id),
         signal_order INTEGER NOT NULL,
-        PRIMARY KEY(intent_id, signal_id)
+        PRIMARY KEY(intent_id, signal_id),
+        UNIQUE(intent_id, signal_order)
     )""",
     """CREATE TABLE IF NOT EXISTS order_status_transitions (
         transition_id TEXT PRIMARY KEY,
@@ -254,11 +255,15 @@ class PortfolioLedger:
         self.cohort_id = cohort_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path, isolation_level=None)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA foreign_keys=ON")
-        self._connection.execute("PRAGMA synchronous=FULL")
-        self._initialize(initial_cash)
+        try:
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA foreign_keys=ON")
+            self._connection.execute("PRAGMA synchronous=FULL")
+            self._initialize(initial_cash)
+        except BaseException:
+            self._connection.close()
+            raise
 
     @property
     def connection(self) -> sqlite3.Connection:
@@ -380,9 +385,40 @@ class PortfolioLedger:
     def stage_intent(self, intent: OrderIntent) -> None:
         if intent.cohort_id != self.cohort_id:
             raise ValueError("intent cohort_id does not match ledger cohort_id")
-        if len(set(intent.signal_ids)) != len(intent.signal_ids):
-            raise ValueError("intent signal_ids must be unique")
         with self.transaction():
+            if not intent.signal_ids:
+                raise ValueError("intent must reference at least one signal")
+            if len(set(intent.signal_ids)) != len(intent.signal_ids):
+                raise ValueError("intent signal_ids must be unique")
+            signal_placeholders = ", ".join("?" for _ in intent.signal_ids)
+            provenance_rows = self._connection.execute(
+                "SELECT signal_id, epoch_id, policy_id FROM signals WHERE signal_id IN "
+                f"({signal_placeholders})",
+                intent.signal_ids,
+            ).fetchall()
+            provenance_by_id = {row["signal_id"]: row for row in provenance_rows}
+            missing_signal_ids = [
+                signal_id
+                for signal_id in intent.signal_ids
+                if signal_id not in provenance_by_id
+            ]
+            if missing_signal_ids:
+                raise ValueError(
+                    "intent references missing signal IDs: "
+                    + ", ".join(missing_signal_ids)
+                )
+            epoch_ids = {
+                provenance_by_id[signal_id]["epoch_id"]
+                for signal_id in intent.signal_ids
+            }
+            if len(epoch_ids) != 1:
+                raise ValueError("intent signals must share one epoch_id")
+            policy_ids = {
+                provenance_by_id[signal_id]["policy_id"]
+                for signal_id in intent.signal_ids
+            }
+            if len(policy_ids) != 1:
+                raise ValueError("intent signals must share one policy_id")
             inserted = self._insert_idempotent(
                 "order_intents",
                 "intent_id",
@@ -404,7 +440,8 @@ class PortfolioLedger:
                 existing_signal_ids = tuple(
                     item[0]
                     for item in self._connection.execute(
-                        "SELECT signal_id FROM intent_signals WHERE intent_id = ? ORDER BY signal_order",
+                        "SELECT signal_id FROM intent_signals WHERE intent_id = ? "
+                        "ORDER BY signal_order, signal_id",
                         (intent.intent_id,),
                     )
                 )
@@ -549,7 +586,8 @@ class PortfolioLedger:
         signal_ids = tuple(
             item[0]
             for item in self._connection.execute(
-                "SELECT signal_id FROM intent_signals WHERE intent_id = ? ORDER BY signal_order",
+                "SELECT signal_id FROM intent_signals WHERE intent_id = ? "
+                "ORDER BY signal_order, signal_id",
                 (row["intent_id"],),
             )
         )
