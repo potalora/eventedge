@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 
 from tradingagents.strategies.execution import (
+    CorporateAction,
     Fill,
     MarketBar,
     OrderIntent,
@@ -19,6 +21,7 @@ from tradingagents.strategies.state.compatibility_projection import (
     project_paper_trades,
 )
 from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
     MissingMarkError,
     PortfolioLedger,
     TradeProjectionRecord,
@@ -31,16 +34,23 @@ UTC = timezone.utc
 COHORT = "horizon_30d_size_50k"
 DAY_ONE = date(2026, 8, 3)
 DAY_TWO = date(2026, 8, 4)
+DAY_THREE = date(2026, 8, 5)
 
 
-def _signal(signal_id: str, ticker: str, direction: str) -> SignalRecord:
+def _signal(
+    signal_id: str,
+    ticker: str,
+    direction: str,
+    *,
+    strategy: str | None = None,
+) -> SignalRecord:
     observed = datetime(2026, 7, 31, 20, tzinfo=UTC)
     return SignalRecord(
         signal_id,
         "epoch-1",
         "policy-1",
         f"event-{signal_id}",
-        "litigation" if ticker == "AAPL" else "supply_chain",
+        strategy or ("litigation" if ticker == "AAPL" else "supply_chain"),
         ticker,
         direction,
         observed,
@@ -416,3 +426,298 @@ def test_state_reader_uses_legacy_json_only_without_ledger(tmp_path):
     expected = [{"trade_id": "legacy", "strategy": "test", "status": "open"}]
     (tmp_path / "paper_trades.json").write_text(json.dumps(expected))
     assert StateManager(str(tmp_path)).load_paper_trades() == expected
+
+
+def test_open_existing_is_read_only_and_does_not_reconstruct_accounting_state(
+    tmp_path,
+):
+    ledger = _seed_ledger(tmp_path)
+    ledger_path = ledger.path
+    ledger.connection.execute("DELETE FROM accounting_state")
+    ledger.close()
+    before = ledger_path.read_bytes()
+
+    reopened = PortfolioLedger.open_existing(ledger_path)
+    try:
+        assert (
+            reopened.connection.execute(
+                "SELECT COUNT(*) FROM accounting_state"
+            ).fetchone()[0]
+            == 0
+        )
+        with pytest.raises(LedgerConflictError, match="missing accounting summary"):
+            reopened.account_state()
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            reopened.record_signal(_signal("read-only", "AAPL", "long"))
+    finally:
+        reopened.close()
+
+    assert ledger_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("marker_kind", ["directory", "broken_symlink", "malformed"])
+def test_present_invalid_ledger_marker_fails_closed_without_legacy_fallback(
+    tmp_path, marker_kind
+):
+    marker = tmp_path / "portfolio.db"
+    if marker_kind == "directory":
+        marker.mkdir()
+    elif marker_kind == "broken_symlink":
+        marker.symlink_to(tmp_path / "missing-ledger-target")
+    else:
+        marker.write_bytes(b"not a sqlite database")
+
+    legacy = [{"trade_id": "legacy", "strategy": "test", "status": "open"}]
+    legacy_path = tmp_path / "paper_trades.json"
+    legacy_path.write_text(json.dumps(legacy))
+    state = StateManager(str(tmp_path))
+
+    assert state.has_portfolio_ledger
+    with pytest.raises((OSError, sqlite3.Error, ValueError)):
+        state.load_paper_trades()
+    with pytest.raises(RuntimeError, match="PortfolioLedger"):
+        state.save_paper_trade({"ticker": "MUST_NOT_PERSIST"})
+    assert json.loads(legacy_path.read_text()) == legacy
+
+    from tradingagents.strategies.state import equity_snapshot
+
+    with pytest.raises((OSError, sqlite3.Error, ValueError)):
+        equity_snapshot.load_snapshots(str(tmp_path))
+
+
+def test_partial_exit_projects_current_legacy_position_and_no_terminal_exit(
+    tmp_path,
+):
+    ledger = PortfolioLedger(tmp_path / "portfolio.db", COHORT, Decimal("50000"))
+    signal = _signal("signal-partial-projection", "AAPL", "long")
+    ledger.record_signal(signal)
+    buy = _intent("intent-partial-projection-buy", signal.signal_id, "buy", 10, DAY_ONE)
+    ledger.stage_intent(buy)
+    ledger.apply_fill(
+        buy,
+        _fill(
+            "fill-partial-projection-buy",
+            buy,
+            "100",
+            "100",
+            slippage="0",
+            commission="0",
+            other_fees="0",
+        ),
+    )
+    sell = _intent(
+        "intent-partial-projection-sell", signal.signal_id, "sell", 4, DAY_TWO
+    )
+    ledger.stage_exit_intent(
+        sell, ((stable_id("lot", "fill-partial-projection-buy"), 4),)
+    )
+    ledger.apply_fill(
+        sell,
+        _fill(
+            "fill-partial-projection-sell",
+            sell,
+            "110",
+            "110",
+            slippage="0",
+            commission="0",
+            other_fees="0",
+        ),
+    )
+    try:
+        trade = project_paper_trades(ledger, tmp_path / "paper_trades.json")[0]
+        assert trade["status"] == "open"
+        assert trade["shares"] == 6
+        assert trade["open_shares"] == 6
+        assert trade["position_value"] == pytest.approx(600.0)
+        assert trade["original_shares"] == 10
+        assert trade["closed_shares"] == 4
+        assert trade["exit_execution_ids"] == ["fill-partial-projection-sell"]
+        assert trade["exit_session"] is None
+        assert trade["exit_date"] is None
+        assert trade["exit_price"] is None
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    (
+        "ticker",
+        "direction",
+        "entry_side",
+        "exit_side",
+        "partial_price",
+        "final_price",
+        "expected_exit_price",
+    ),
+    [
+        ("AAPL", "long", "buy", "sell", "110", "55", 55.0),
+        ("TSLA", "short", "short", "cover", "90", "45", 45.0),
+    ],
+)
+def test_split_after_partial_close_projects_adjusted_return_that_reconciles_to_pnl(
+    tmp_path,
+    ticker,
+    direction,
+    entry_side,
+    exit_side,
+    partial_price,
+    final_price,
+    expected_exit_price,
+):
+    ledger = PortfolioLedger(tmp_path / "portfolio.db", COHORT, Decimal("50000"))
+    signal = _signal(f"signal-split-{direction}", ticker, direction)
+    ledger.record_signal(signal)
+    entry = _intent(
+        f"intent-split-{direction}-entry", signal.signal_id, entry_side, 10, DAY_ONE
+    )
+    ledger.stage_intent(entry)
+    ledger.apply_fill(
+        entry,
+        _fill(
+            f"fill-split-{direction}-entry",
+            entry,
+            "100",
+            "100",
+            slippage="0",
+            commission="0",
+            other_fees="0",
+        ),
+        **({"borrow_rate": Decimal("0.01")} if direction == "short" else {}),
+    )
+    partial = _intent(
+        f"intent-split-{direction}-partial",
+        signal.signal_id,
+        exit_side,
+        4,
+        DAY_TWO,
+    )
+    lot_id = stable_id("lot", f"fill-split-{direction}-entry")
+    ledger.stage_exit_intent(partial, ((lot_id, 4),))
+    ledger.apply_fill(
+        partial,
+        _fill(
+            f"fill-split-{direction}-partial",
+            partial,
+            partial_price,
+            partial_price,
+            slippage="0",
+            commission="0",
+            other_fees="0",
+        ),
+    )
+    action_at = datetime(2026, 8, 4, 23, tzinfo=UTC)
+    ledger.apply_corporate_actions(
+        DAY_TWO,
+        [
+            CorporateAction(
+                f"split-{direction}-2x",
+                ticker,
+                DAY_TWO,
+                "split",
+                Decimal("2"),
+                None,
+                "fixture",
+                action_at,
+                True,
+            )
+        ],
+        action_at,
+    )
+    final = _intent(
+        f"intent-split-{direction}-final",
+        signal.signal_id,
+        exit_side,
+        12,
+        DAY_THREE,
+    )
+    ledger.stage_exit_intent(final, ((lot_id, 12),))
+    ledger.apply_fill(
+        final,
+        _fill(
+            f"fill-split-{direction}-final",
+            final,
+            final_price,
+            final_price,
+            slippage="0",
+            commission="0",
+            other_fees="0",
+        ),
+    )
+    try:
+        trade = project_paper_trades(ledger, tmp_path / "paper_trades.json")[0]
+        assert trade["status"] == "closed"
+        assert trade["entry_price"] == pytest.approx(50.0)
+        assert trade["shares"] == 20
+        assert trade["realized_pnl"] == pytest.approx(100.0)
+        assert trade["exit_price"] == pytest.approx(expected_exit_price)
+        projected_return = (trade["exit_price"] - trade["entry_price"]) / trade[
+            "entry_price"
+        ]
+        if direction == "short":
+            projected_return = -projected_return
+        assert projected_return == pytest.approx(0.10)
+        assert trade["pnl_pct"] == pytest.approx(projected_return)
+    finally:
+        ledger.close()
+
+
+def test_multi_strategy_projection_preserves_and_filters_every_contributor(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "portfolio.db", COHORT, Decimal("50000"))
+    zeta = _signal("signal-zeta", "AAPL", "long", strategy="zeta_strategy")
+    alpha = _signal("signal-alpha", "AAPL", "long", strategy="alpha_strategy")
+    ledger.record_signal(zeta)
+    ledger.record_signal(alpha)
+    intent = OrderIntent(
+        "intent-multi-strategy",
+        (zeta.signal_id, alpha.signal_id),
+        COHORT,
+        "buy",
+        10,
+        datetime(2026, 7, 31, 22, tzinfo=UTC),
+        DAY_ONE,
+        "next_session_open",
+        "pending",
+        None,
+        None,
+    )
+    ledger.stage_intent(intent)
+    ledger.apply_fill(
+        intent,
+        _fill(
+            "fill-multi-strategy",
+            intent,
+            "100",
+            "100",
+            slippage="0",
+            commission="0",
+            other_fees="0",
+        ),
+    )
+    ledger.close()
+
+    state = StateManager(str(tmp_path))
+    trade = state.load_paper_trades()[0]
+    assert trade["strategies"] == ["alpha_strategy", "zeta_strategy"]
+    assert trade["strategy"] == "alpha_strategy"
+    assert [
+        row["trade_id"] for row in state.load_paper_trades(strategy="alpha_strategy")
+    ] == ["fill-multi-strategy"]
+    assert [
+        row["trade_id"] for row in state.load_paper_trades(strategy="zeta_strategy")
+    ] == ["fill-multi-strategy"]
+
+
+@pytest.mark.parametrize("method", ["open_trade", "check_exits", "close_trade"])
+def test_paper_trader_mutators_are_read_only_without_ledger(tmp_path, method):
+    state = StateManager(str(tmp_path))
+    trader = PaperTrader(state)
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        if method == "open_trade":
+            trader.open_trade("test", "AAPL", "long", 100.0, DAY_ONE.isoformat())
+        elif method == "check_exits":
+            trader.check_exits({}, {}, DAY_TWO.isoformat())
+        else:
+            trader.close_trade("missing", 110.0, DAY_TWO.isoformat(), "must not mutate")
+
+    assert not (tmp_path / "paper_trades.json").exists()

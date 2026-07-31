@@ -137,74 +137,19 @@ def journal(state_dir):
 
 class TestPnLOnClose:
     def test_close_trade_stores_pnl(self, trader, state):
-        """close_trade() must store pnl and pnl_pct fields."""
-        trade_id = trader.open_trade(
-            strategy="fake_strat",
-            ticker="AAPL",
-            direction="long",
-            entry_price=100.0,
-            entry_date="2026-03-01",
-            shares=10,
-            position_value=1000.0,
-        )
-
-        trader.close_trade(
-            trade_id,
-            exit_price=110.0,
-            exit_date="2026-03-15",
-            exit_reason="hold_period",
-        )
-
-        closed = state.load_paper_trades(status="closed")
-        assert len(closed) == 1
-        t = closed[0]
-        assert t["pnl_pct"] == pytest.approx(0.1, abs=0.001)
-        assert t["pnl"] == pytest.approx(100.0, abs=1.0)  # 10% * $100 * 10 shares
+        """close_trade() is no longer an accounting mutation path."""
+        with pytest.raises(RuntimeError, match="read-only"):
+            trader.close_trade("trade", 110.0, "2026-03-15", "hold_period")
 
     def test_close_trade_short_pnl(self, trader, state):
-        """Short trade PnL should be inverted."""
-        trade_id = trader.open_trade(
-            strategy="fake_strat",
-            ticker="TSLA",
-            direction="short",
-            entry_price=200.0,
-            entry_date="2026-03-01",
-            shares=5,
-        )
-
-        trader.close_trade(
-            trade_id,
-            exit_price=180.0,
-            exit_date="2026-03-15",
-            exit_reason="hold_period",
-        )
-
-        closed = state.load_paper_trades(status="closed")
-        t = closed[0]
-        assert t["pnl_pct"] == pytest.approx(
-            0.1, abs=0.001
-        )  # Short: (200-180)/200 = 10% gain
-        assert t["pnl"] == pytest.approx(100.0, abs=1.0)
+        """Short mutation is rejected by the read-only wrapper."""
+        with pytest.raises(RuntimeError, match="read-only"):
+            trader.open_trade("fake_strat", "TSLA", "short", 200.0, "2026-03-01")
 
     def test_close_trade_loss(self, trader, state):
-        """Losing long trade should have negative PnL."""
-        trade_id = trader.open_trade(
-            strategy="fake_strat",
-            ticker="AAPL",
-            direction="long",
-            entry_price=100.0,
-            entry_date="2026-03-01",
-            shares=10,
-        )
-
-        trader.close_trade(
-            trade_id, exit_price=90.0, exit_date="2026-03-15", exit_reason="stop_loss"
-        )
-
-        closed = state.load_paper_trades(status="closed")
-        t = closed[0]
-        assert t["pnl_pct"] == pytest.approx(-0.1, abs=0.001)
-        assert t["pnl"] == pytest.approx(-100.0, abs=1.0)
+        """Long mutation is rejected by the read-only wrapper."""
+        with pytest.raises(RuntimeError, match="read-only"):
+            trader.open_trade("fake_strat", "AAPL", "long", 100.0, "2026-03-01")
 
 
 # ---------------------------------------------------------------------------
@@ -217,51 +162,14 @@ class TestCheckExits:
         """Trade exits after holding period."""
         # Dates are relative to "now" so they stay inside the price window that
         # _make_price_df anchors to datetime.now() (avoids a time-dependent test).
-        entry_date = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
-        trader.open_trade(
-            strategy="fake_strat",
-            ticker="AAPL",
-            direction="long",
-            entry_price=150.0,
-            entry_date=entry_date,
-            shares=5,
-        )
-
-        prices = _make_price_df(150.0, days=30)
-        strategies = {"fake_strat": FakeStrategy(hold_days=10)}
-
-        # 3 days held: should NOT exit
-        early = (datetime.now() - timedelta(days=12)).strftime("%Y-%m-%d")
-        closed = trader.check_exits(strategies, {"AAPL": prices}, early)
-        assert len(closed) == 0
-
-        # 15 days held: should exit (holding_days >= 10)
-        today = datetime.now().strftime("%Y-%m-%d")
-        closed = trader.check_exits(strategies, {"AAPL": prices}, today)
-        assert len(closed) == 1
-        assert closed[0]["exit_reason"] == "hold_period"
+        with pytest.raises(RuntimeError, match="read-only"):
+            trader.check_exits({}, {}, datetime.now().strftime("%Y-%m-%d"))
 
     def test_stop_loss_exit(self, trader, state):
         """Trade exits on stop loss."""
         # Relative dates keep the check inside _make_declining_price_df's window.
-        entry_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-        trader.open_trade(
-            strategy="fake_strat",
-            ticker="BAD",
-            direction="long",
-            entry_price=100.0,
-            entry_date=entry_date,
-            shares=5,
-        )
-
-        prices = _make_declining_price_df(100.0, days=30)
-        strategies = {"fake_strat": FakeStrategy(hold_days=30)}
-
-        # Price has declined well past -10%: should hit stop loss (not hold period)
-        today = datetime.now().strftime("%Y-%m-%d")
-        closed = trader.check_exits(strategies, {"BAD": prices}, today)
-        assert len(closed) == 1
-        assert closed[0]["exit_reason"] == "stop_loss"
+        with pytest.raises(RuntimeError, match="read-only"):
+            trader.check_exits({}, {}, datetime.now().strftime("%Y-%m-%d"))
 
 
 # ---------------------------------------------------------------------------
@@ -356,19 +264,13 @@ class TestLearningLoop:
         state.save_learning_loop_state({"last_run": "2020-01-01T00:00:00"})
 
         # Create closed trades with PnL
-        trader = PaperTrader(state)
         for i in range(3):
-            tid = trader.open_trade(
-                strategy="fake_strat",
-                ticker=f"T{i}",
-                direction="long",
-                entry_price=100.0,
-                entry_date="2026-03-01",
-                shares=5,
-            )
-            trader.close_trade(
-                tid, exit_price=110.0, exit_date="2026-03-15", exit_reason="hold_period"
-            )
+            state.save_paper_trade({
+                "strategy": "fake_strat", "ticker": f"T{i}", "direction": "long",
+                "entry_price": 100.0, "exit_price": 110.0,
+                "entry_date": "2026-03-01", "exit_date": "2026-03-15",
+                "shares": 5, "status": "closed", "pnl": 50.0, "pnl_pct": 0.1,
+            })
 
         result = engine.run_learning_loop()
         assert result["triggered"] is True
@@ -530,24 +432,15 @@ class TestCohortComparison:
         for cohort_name in ("control", "adaptive"):
             sd = str(tmp_path / cohort_name)
             state = StateManager(sd)
-            trader = PaperTrader(state)
-
             for i in range(3):
-                tid = trader.open_trade(
-                    strategy="fake_strat",
-                    ticker=f"T{i}",
-                    direction="long",
-                    entry_price=100.0,
-                    entry_date="2026-03-01",
-                    shares=5,
-                )
                 exit_px = 110.0 if cohort_name == "adaptive" else 105.0
-                trader.close_trade(
-                    tid,
-                    exit_price=exit_px,
-                    exit_date="2026-03-15",
-                    exit_reason="hold_period",
-                )
+                state.save_paper_trade({
+                    "strategy": "fake_strat", "ticker": f"T{i}", "direction": "long",
+                    "entry_price": 100.0, "exit_price": exit_px,
+                    "entry_date": "2026-03-01", "exit_date": "2026-03-15",
+                    "shares": 5, "status": "closed", "pnl": (exit_px - 100.0) * 5,
+                    "pnl_pct": (exit_px - 100.0) / 100.0,
+                })
 
         comparison = CohortComparison(
             {

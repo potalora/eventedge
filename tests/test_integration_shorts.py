@@ -6,7 +6,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
-from tradingagents.strategies.execution import MarketBar, SignalRecord
+import pytest
+
+from tradingagents.strategies.execution import Fill, MarketBar, OrderIntent, SignalRecord, stable_id
 from tradingagents.strategies.execution.cost_model import PaperCostModel
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     SIZE_PROFILES,
@@ -53,7 +55,7 @@ class TestIntegrationShortPipeline:
         assert rec.ticker == "AAPL"
 
         ledger = PortfolioLedger(
-            tmp_path / "ledger.db", "cohort", Decimal("50000"),
+            state.portfolio_ledger_path, "cohort", Decimal("50000"),
             short_selling_config=config["autoresearch"]["short_selling"],
         )
         try:
@@ -94,22 +96,33 @@ class TestIntegrationShortPipeline:
             )
             assert result.status == "filled"
 
-            # 3. Compatibility projection is downstream from the ledger fill.
-            trader = PaperTrader(state)
-            trade_id = trader.open_trade(
-                strategy="litigation", ticker="AAPL", direction="short",
-                entry_price=150.0, entry_date="2026-04-04",
-                shares=result.fill.quantity,
-                position_value=result.fill.quantity * 150.0,
+            # 3. Cover through the authoritative ledger, then consume only its
+            # compatibility projection downstream.
+            cover = OrderIntent(
+                "cover-short-aapl", intent.signal_ids, ledger.cohort_id, "cover",
+                result.fill.quantity, datetime(2026, 8, 3, 23, tzinfo=timezone.utc),
+                date(2026, 8, 4), "next_session_open", "pending", None, None,
             )
-            assert trade_id
-            open_trades = state.load_paper_trades(status="open")
-            assert len(open_trades) == 1
-            assert open_trades[0]["direction"] == "short"
-            trader.close_trade(trade_id, exit_price=140.0, exit_date="2026-04-10", exit_reason="take_profit")
+            lot_id = stable_id("lot", result.fill.fill_id)
+            ledger.stage_exit_intent(cover, ((lot_id, result.fill.quantity),))
+            cover_at = datetime(2026, 8, 4, 22, tzinfo=timezone.utc)
+            ledger.apply_fill(
+                cover,
+                Fill(
+                    "cover-fill-aapl", cover.intent_id, "cover", date(2026, 8, 4),
+                    cover_at, cover_at, Decimal("140"), Decimal("140"),
+                    result.fill.quantity, Decimal("0"), Decimal("0"), Decimal("0"),
+                ),
+            )
+
             closed = state.load_paper_trades(status="closed")
             assert len(closed) == 1
-            assert closed[0]["pnl"] > 0  # short at 150, cover at 140 = profit
+            trade = closed[0]
+            assert trade["direction"] == "short"
+            assert trade["pnl"] > 0
+            assert trade["pnl_pct"] == pytest.approx(
+                (trade["entry_price"] - trade["exit_price"]) / trade["entry_price"]
+            )
         finally:
             ledger.close()
 
@@ -185,48 +198,29 @@ class TestIntegrationShortPipeline:
             ledger.close()
 
     def test_short_pnl_computation_in_state(self):
-        """PaperTrader.close_trade should compute positive PnL for profitable short."""
+        """PaperTrader cannot create a short outside the ledger."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = StateManager(tmpdir)
             trader = PaperTrader(state)
 
-            # Open a short at 200
-            trade_id = trader.open_trade(
-                strategy="supply_chain", ticker="TSLA", direction="short",
-                entry_price=200.0, entry_date="2026-04-01",
-                shares=10, position_value=2000.0,
-            )
-            assert trade_id
-
-            # Close at 180 — profitable (sold high, bought low)
-            trader.close_trade(trade_id, exit_price=180.0, exit_date="2026-04-10", exit_reason="take_profit")
-
-            closed = state.load_paper_trades(status="closed")
-            assert len(closed) == 1
-            trade = closed[0]
-            assert trade["pnl"] > 0
-            assert trade["pnl_pct"] > 0
+            with pytest.raises(RuntimeError, match="read-only"):
+                trader.open_trade(
+                    strategy="supply_chain", ticker="TSLA", direction="short",
+                    entry_price=200.0, entry_date="2026-04-01",
+                    shares=10, position_value=2000.0,
+                )
 
     def test_short_pnl_negative_when_loss(self):
-        """PaperTrader should record negative PnL when short price moves against."""
+        """PaperTrader rejects direct short closure regardless of outcome."""
         with tempfile.TemporaryDirectory() as tmpdir:
             state = StateManager(tmpdir)
             trader = PaperTrader(state)
 
-            trade_id = trader.open_trade(
-                strategy="supply_chain", ticker="TSLA", direction="short",
-                entry_price=200.0, entry_date="2026-04-01",
-                shares=10, position_value=2000.0,
-            )
-
-            # Close at 220 — loss (price went up against our short)
-            trader.close_trade(trade_id, exit_price=220.0, exit_date="2026-04-10", exit_reason="stop_loss")
-
-            closed = state.load_paper_trades(status="closed")
-            assert len(closed) == 1
-            trade = closed[0]
-            assert trade["pnl"] < 0
-            assert trade["pnl_pct"] < 0
+            with pytest.raises(RuntimeError, match="read-only"):
+                trader.close_trade(
+                    "missing", exit_price=220.0, exit_date="2026-04-10",
+                    exit_reason="stop_loss",
+                )
 
     def test_10k_cohort_allows_covered_calls_not_shorts(self):
         """10k profile: covered calls eligible, short selling not eligible."""

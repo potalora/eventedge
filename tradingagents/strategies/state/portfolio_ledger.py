@@ -8,6 +8,7 @@ order or fill never carries an independently asserted ticker.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -63,11 +64,14 @@ class TradeProjectionRecord:
     execution_id: str
     exit_fill_ids: tuple[str, ...]
     strategy: str
+    strategies: tuple[str, ...]
     ticker: str
     direction: str
     entry_session: date
     entry_price: Decimal
     shares: int
+    original_shares: int
+    closed_shares: int
     open_shares: int
     status: str
     exit_session: date | None
@@ -416,13 +420,16 @@ class PortfolioLedger:
 
     @classmethod
     def open_existing(cls, path: Path) -> PortfolioLedger:
-        """Open an initialized ledger using its persisted cohort and opening cash."""
+        """Open an initialized ledger without running any write initializer."""
         path = Path(path)
-        if not path.is_file():
+        if not os.path.lexists(path):
             raise FileNotFoundError(path)
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection = sqlite3.connect(
+            f"file:{path}?mode=ro", uri=True, isolation_level=None
+        )
         connection.row_factory = sqlite3.Row
         try:
+            connection.execute("PRAGMA query_only=ON")
             cohort_row = connection.execute(
                 "SELECT metadata_value FROM schema_metadata WHERE metadata_key = 'cohort_id'"
             ).fetchone()
@@ -437,10 +444,16 @@ class PortfolioLedger:
             ).fetchone()
             if cash_row is None:
                 raise ValueError(f"ledger has no opening cash event: {path}")
-            initial_cash = Decimal(str(cash_row["amount"]))
-        finally:
+            Decimal(str(cash_row["amount"]))
+        except BaseException:
             connection.close()
-        return cls(path, cohort_id, initial_cash)
+            raise
+
+        ledger = cls.__new__(cls)
+        ledger.path = path
+        ledger.cohort_id = cohort_id
+        ledger._connection = connection
+        return ledger
 
     def close(self) -> None:
         self._connection.close()
@@ -2363,17 +2376,21 @@ class PortfolioLedger:
             realized_pnl = sum(
                 (_decimal(row["realized_pnl"]) for row in closures), Decimal("0")
             )
-            closed_qty = sum(int(row["quantity"]) for row in closures)
+            original_shares = int(lot["original_qty"])
+            open_shares = int(lot["open_qty"])
+            status = "open" if open_shares else "closed"
             exit_price = None
             exit_session = None
-            if closed_qty:
-                exit_price = sum(
-                    (
-                        _decimal(row["fill_price"]) * Decimal(int(row["quantity"]))
-                        for row in closures
-                    ),
-                    Decimal("0"),
-                ) / Decimal(closed_qty)
+            if status == "closed":
+                # Corporate actions adjust the lot's entry price and quantity but
+                # intentionally leave historical fills untouched.  Derive the
+                # economically equivalent terminal price on that current basis so
+                # legacy price-return consumers reconcile exactly to ledger P&L.
+                pnl_per_share = realized_pnl / Decimal(original_shares)
+                if str(lot["direction"]) == "short":
+                    exit_price = _decimal(lot["entry_price"]) - pnl_per_share
+                else:
+                    exit_price = _decimal(lot["entry_price"]) + pnl_per_share
                 exit_session = _date(closures[-1]["session"])
 
             costs = [
@@ -2385,6 +2402,7 @@ class PortfolioLedger:
                 amounts = allocated_costs[(closure["fill_id"], lot["lot_id"])]
                 costs = [total + amount for total, amount in zip(costs, amounts)]
 
+            strategies = tuple(sorted({str(row["strategy"]) for row in signals}))
             records.append(
                 TradeProjectionRecord(
                     trade_id=str(lot["entry_fill_id"]),
@@ -2394,14 +2412,17 @@ class PortfolioLedger:
                     exit_fill_ids=tuple(
                         dict.fromkeys(str(row["fill_id"]) for row in closures)
                     ),
-                    strategy=str(signals[0]["strategy"]),
+                    strategy=strategies[0],
+                    strategies=strategies,
                     ticker=ticker,
                     direction=str(lot["direction"]),
                     entry_session=_date(lot["opened_session"]),
                     entry_price=_decimal(lot["entry_price"]),
-                    shares=int(lot["original_qty"]),
-                    open_shares=int(lot["open_qty"]),
-                    status="open" if int(lot["open_qty"]) else "closed",
+                    shares=open_shares if status == "open" else original_shares,
+                    original_shares=original_shares,
+                    closed_shares=original_shares - open_shares,
+                    open_shares=open_shares,
+                    status=status,
                     exit_session=exit_session,
                     exit_price=exit_price,
                     realized_pnl=realized_pnl,

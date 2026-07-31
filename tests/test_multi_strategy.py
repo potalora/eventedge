@@ -341,20 +341,17 @@ class TestVintageState:
 
 class TestVintageTracking:
     def test_open_trade_with_vintage(self, tmp_path):
-        """Trades opened with vintage_id have it in the record."""
+        """PaperTrader cannot create legacy vintage trades."""
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
-        trade_id = trader.open_trade(
-            strategy="test_strat", ticker="AAPL", direction="long",
-            entry_price=150.0, entry_date="2024-01-01",
-            vintage_id="v-001", is_exploration=True,
-        )
-        trades = state.load_paper_trades()
-        trade = [t for t in trades if t.get("trade_id") == trade_id][0]
-        assert trade["vintage_id"] == "v-001"
-        assert trade["is_exploration"] is True
+        with pytest.raises(RuntimeError, match="read-only"):
+            trader.open_trade(
+                strategy="test_strat", ticker="AAPL", direction="long",
+                entry_price=150.0, entry_date="2024-01-01",
+                vintage_id="v-001", is_exploration=True,
+            )
 
     def test_vintage_performance_no_trades(self, tmp_path):
         """Vintage with no completed trades returns zero metrics."""
@@ -372,17 +369,14 @@ class TestVintageTracking:
         from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
-        # Open and close two trades
-        t1 = trader.open_trade(
-            strategy="s", ticker="AAPL", direction="long",
-            entry_price=100.0, entry_date="2024-01-01", vintage_id="v-001",
-        )
-        t2 = trader.open_trade(
-            strategy="s", ticker="MSFT", direction="long",
-            entry_price=200.0, entry_date="2024-01-01", vintage_id="v-001",
-        )
-        trader.close_trade(t1, exit_price=110.0, exit_date="2024-02-01", exit_reason="hold_period")
-        trader.close_trade(t2, exit_price=190.0, exit_date="2024-02-01", exit_reason="stop_loss")
+        for ticker, entry, exit_price in (("AAPL", 100.0, 110.0), ("MSFT", 200.0, 190.0)):
+            state.save_paper_trade({
+                "strategy": "s", "ticker": ticker, "direction": "long",
+                "entry_price": entry, "exit_price": exit_price,
+                "entry_date": "2024-01-01", "exit_date": "2024-02-01",
+                "status": "closed", "vintage_id": "v-001",
+                "pnl_pct": (exit_price - entry) / entry,
+            })
 
         perf = trader.get_vintage_performance("v-001")
         assert perf["num_completed"] == 2
@@ -394,15 +388,16 @@ class TestVintageTracking:
         from tradingagents.strategies.trading.paper_trader import PaperTrader
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
-        trader.open_trade(
-            strategy="s", ticker="AAPL", direction="long",
-            entry_price=100.0, entry_date="2024-01-01", vintage_id="v-001",
-        )
-        trader.open_trade(
-            strategy="s", ticker="MSFT", direction="long",
-            entry_price=200.0, entry_date="2024-01-01", vintage_id="v-002",
-            is_exploration=True,
-        )
+        state.save_paper_trade({
+            "strategy": "s", "ticker": "AAPL", "direction": "long",
+            "entry_price": 100.0, "entry_date": "2024-01-01",
+            "status": "open", "vintage_id": "v-001",
+        })
+        state.save_paper_trade({
+            "strategy": "s", "ticker": "MSFT", "direction": "long",
+            "entry_price": 200.0, "entry_date": "2024-01-01",
+            "status": "open", "vintage_id": "v-002", "is_exploration": True,
+        })
         summary = trader.get_strategy_vintage_summary("s")
         assert len(summary) == 2
         vintages = {s["vintage_id"] for s in summary}

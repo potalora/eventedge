@@ -97,7 +97,7 @@ class StateManager:
 
     @property
     def has_portfolio_ledger(self) -> bool:
-        return self.portfolio_ledger_path.is_file()
+        return os.path.lexists(self.portfolio_ledger_path)
 
     @staticmethod
     def _ledger_mutation_error() -> RuntimeError:
@@ -141,7 +141,11 @@ class StateManager:
         else:
             trades = _load_json(self._paper_trades_path, [])
         if strategy is not None:
-            trades = [t for t in trades if t.get("strategy") == strategy]
+            trades = [
+                trade
+                for trade in trades
+                if strategy in trade.get("strategies", [trade.get("strategy")])
+            ]
         if status is not None:
             trades = [t for t in trades if t.get("status") == status]
         return trades

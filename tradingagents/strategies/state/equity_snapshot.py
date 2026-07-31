@@ -99,7 +99,7 @@ def write_snapshot(
     Returns the snapshot dict that was written.
     """
     ledger_path = Path(state_dir) / "portfolio.db"
-    if ledger_path.is_file():
+    if os.path.lexists(ledger_path):
         from tradingagents.strategies.state.compatibility_projection import (
             project_equity_snapshots,
         )
@@ -195,7 +195,7 @@ def write_snapshot(
 def load_snapshots(state_dir: str) -> list[dict[str, Any]]:
     """Read all equity snapshots for a cohort, sorted by date."""
     ledger_path = Path(state_dir) / "portfolio.db"
-    if ledger_path.is_file():
+    if os.path.lexists(ledger_path):
         from tradingagents.strategies.state.compatibility_projection import (
             project_equity_snapshots,
         )
