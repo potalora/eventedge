@@ -64,8 +64,10 @@ is rewritten.
 
 ## Benchmark
 
-Persist SPY and a cash proxy with the same session and quality rules as the
-book. For gross exposure `G` and net exposure `N`:
+Persist total-return-adjusted SPY and BIL observations with the same session
+and quality rules as the book; BIL is the initial cash proxy. Raw execution
+bars are never reused as benchmark returns. For gross exposure `G` and net
+exposure `N`:
 
 `matched_return = N * SPY_return + max(0, 1 - G) * cash_return`
 

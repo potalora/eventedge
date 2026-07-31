@@ -387,13 +387,15 @@ Closed-trade P&L is never called portfolio Sharpe or portfolio return.
 
 ### Benchmark
 
-Each run persists SPY and cash-proxy observations with the same timestamps and
-quality checks as portfolio marks.
+Each run persists total-return-adjusted SPY and BIL observations with the same
+session/timestamp quality checks as portfolio marks. BIL is the initial cash
+proxy. Execution and position marks continue to use raw, unadjusted OHLC; raw
+execution bars are never reused as benchmark returns.
 
 For a portfolio with gross exposure `G` and net exposure `N`, the first-order
 matched benchmark is:
 
-`N * SPY_return + max(0, 1 - G) * cash_return`
+`N * SPY_return + max(0, 1 - G) * BIL_return`
 
 Long and short notionals are also reported separately. Reports perform no
 network fetches.
