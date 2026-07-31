@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
@@ -833,5 +835,91 @@ def test_prior_pending_short_margin_participates_in_margin_limit(tmp_path):
 
         assert result.status == "rejected"
         assert "margin_utilization" in result.reason
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("invalid_price", ["NaN", "Infinity", "-Infinity"])
+def test_invalid_pending_opening_price_fails_before_any_ledger_mutation(
+    tmp_path, invalid_price
+):
+    bridge, ledger = _bridge(tmp_path)
+    prior_signal = _signal(
+        signal_id="prior",
+        strategy="supply_chain",
+        ticker="MSFT",
+        decision_at=datetime(2026, 7, 31, 19, 59, tzinfo=UTC),
+    )
+    current_signal = _signal(signal_id="current")
+    try:
+        ledger.record_signal(prior_signal)
+        ledger.record_signal(current_signal)
+        prior = bridge.stage_intent(
+            _recommendation(ticker="MSFT", contributors=["supply_chain"]),
+            (prior_signal,),
+            ledger.account_state(),
+            prior_signal.decision_at,
+            MONDAY,
+        )
+        current = bridge.stage_intent(
+            _recommendation(),
+            (current_signal,),
+            ledger.account_state(),
+            current_signal.decision_at,
+            MONDAY,
+        )
+        before = ledger.account_state()
+
+        with pytest.raises(ValueError, match="invalid opening price"):
+            bridge.execute_due_intent(
+                current,
+                _bar(),
+                before,
+                {
+                    "processing_at": datetime(2026, 8, 3, 22, tzinfo=UTC),
+                    "opening_prices": {"MSFT": Decimal(invalid_price)},
+                },
+                PaperCostModel(),
+            )
+
+        assert ledger.intent(prior.intent_id).status == "pending"
+        assert ledger.intent(current.intent_id).status == "pending"
+        assert ledger.read_fills() == []
+        assert ledger.account_state() == before
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("invalid_high_water", ["NaN", "Infinity", "-Infinity", "-1"])
+def test_invalid_authoritative_account_fails_before_any_ledger_mutation(
+    tmp_path, invalid_high_water
+):
+    bridge, ledger = _bridge(tmp_path)
+    signal = _signal()
+    try:
+        ledger.record_signal(signal)
+        intent = bridge.stage_intent(
+            _recommendation(),
+            (signal,),
+            ledger.account_state(),
+            signal.decision_at,
+            MONDAY,
+        )
+        before = ledger.account_state()
+        invalid_account = replace(before, high_water_mark=Decimal(invalid_high_water))
+
+        with patch.object(ledger, "account_state", return_value=invalid_account):
+            with pytest.raises(ValueError, match="authoritative high_water_mark"):
+                bridge.execute_due_intent(
+                    intent,
+                    _bar(),
+                    invalid_account,
+                    {"processing_at": datetime(2026, 8, 3, 22, tzinfo=UTC)},
+                    PaperCostModel(),
+                )
+
+        assert ledger.intent(intent.intent_id).status == "pending"
+        assert ledger.read_fills() == []
+        assert ledger.account_state() == before
     finally:
         ledger.close()

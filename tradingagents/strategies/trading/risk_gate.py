@@ -7,6 +7,7 @@ that prevents unbounded losses on a $5K portfolio.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -185,18 +186,31 @@ class RiskGate:
         """
         open_trades = open_trades or []
         current_strategies = (strategy,) if isinstance(strategy, str) else strategy
-        pending_position_value = sum(entry.position_value for entry in pending_entries)
-        pending_margin = sum(entry.margin_required for entry in pending_entries)
+        self._require_nonnegative_finite(position_value, "position_value")
+        self._require_nonnegative_finite(proposed_margin, "proposed_margin")
         if any(
             not entry.ticker
             or not entry.strategies
+            or not math.isfinite(entry.position_value)
             or entry.position_value < 0
+            or not math.isfinite(entry.margin_required)
             or entry.margin_required < 0
             for entry in pending_entries
         ):
             raise ValueError("invalid pending risk entry")
-        if proposed_margin < 0:
-            raise ValueError("proposed_margin cannot be negative")
+        if authoritative_account is not None:
+            for field_name in (
+                "net_equity",
+                "buying_power",
+                "high_water_mark",
+                "margin_used",
+            ):
+                self._require_nonnegative_finite(
+                    getattr(authoritative_account, field_name),
+                    f"authoritative {field_name}",
+                )
+        pending_position_value = sum(entry.position_value for entry in pending_entries)
+        pending_margin = sum(entry.margin_required for entry in pending_entries)
 
         # 1. Long-only filter
         if self.config.long_only and direction == "short":
@@ -331,6 +345,15 @@ class RiskGate:
                     )
 
         return True, ""
+
+    @staticmethod
+    def _require_nonnegative_finite(value: object, label: str) -> None:
+        try:
+            valid = math.isfinite(value) and value >= 0
+        except TypeError as error:
+            raise ValueError(f"{label} must be finite and non-negative") from error
+        if not valid:
+            raise ValueError(f"{label} must be finite and non-negative")
 
     def compute_position_size(
         self,

@@ -1,8 +1,19 @@
 """Tests for short-specific risk gates."""
 from __future__ import annotations
 
+from dataclasses import replace
+from decimal import Decimal
 from unittest.mock import MagicMock
-from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig, _estimate_borrow_cost
+
+import pytest
+
+from tradingagents.strategies.execution import AccountState
+from tradingagents.strategies.trading.risk_gate import (
+    PendingRiskEntry,
+    RiskGate,
+    RiskGateConfig,
+    _estimate_borrow_cost,
+)
 from tradingagents.execution.base_broker import AccountInfo
 
 
@@ -106,3 +117,85 @@ class TestShortRiskGates:
         passed, _ = gate.check("AAPL", "short", 5000, "litigation",
                                earnings_dates={"AAPL": 2}, short_interest={"AAPL": 40.0})
         assert passed
+
+
+NON_FINITE_OR_NEGATIVE = [float("nan"), float("inf"), float("-inf"), -1.0]
+
+
+@pytest.mark.parametrize("field", ["position_value", "margin_required"])
+@pytest.mark.parametrize("value", NON_FINITE_OR_NEGATIVE)
+def test_pending_risk_entry_rejects_nonfinite_or_negative_values(field, value):
+    broker = _make_broker()
+    gate = RiskGate(RiskGateConfig(long_only=False, total_capital=50_000), broker)
+    entry = replace(
+        PendingRiskEntry("MSFT", ("litigation",), 1000.0, 500.0),
+        **{field: value},
+    )
+
+    with pytest.raises(ValueError, match="invalid pending risk entry"):
+        gate.check(
+            "AAPL",
+            "short",
+            5000.0,
+            "litigation",
+            pending_entries=(entry,),
+        )
+
+    broker.get_positions.assert_not_called()
+    broker.get_account.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["position_value", "proposed_margin"])
+@pytest.mark.parametrize("value", NON_FINITE_OR_NEGATIVE)
+def test_proposed_risk_values_reject_nonfinite_or_negative(field, value):
+    broker = _make_broker()
+    gate = RiskGate(RiskGateConfig(long_only=False, total_capital=50_000), broker)
+    kwargs = {"position_value": 5000.0, "proposed_margin": 1000.0}
+    kwargs[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        gate.check(
+            "AAPL",
+            "short",
+            kwargs["position_value"],
+            "litigation",
+            proposed_margin=kwargs["proposed_margin"],
+        )
+
+    broker.get_positions.assert_not_called()
+    broker.get_account.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["net_equity", "buying_power", "high_water_mark", "margin_used"],
+)
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "-1"])
+def test_authoritative_account_rejects_nonfinite_or_negative_fields(field, value):
+    broker = _make_broker()
+    gate = RiskGate(RiskGateConfig(long_only=False, total_capital=50_000), broker)
+    account = replace(
+        AccountState(
+            "cohort",
+            Decimal("50000"),
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("0"),
+            Decimal("50000"),
+            Decimal("50000"),
+            Decimal("50000"),
+        ),
+        **{field: Decimal(value)},
+    )
+
+    with pytest.raises(ValueError, match=f"authoritative {field}"):
+        gate.check(
+            "AAPL",
+            "short",
+            5000.0,
+            "litigation",
+            authoritative_account=account,
+        )
+
+    broker.get_positions.assert_not_called()
+    broker.get_account.assert_not_called()
