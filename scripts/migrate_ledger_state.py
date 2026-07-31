@@ -19,6 +19,122 @@ from pathlib import Path
 
 _REPORT_NAME = "migration-report.txt"
 _EXPECTED_EVIDENCE = ("paper_trades.json", "signal_journal.jsonl")
+
+
+def _expected_user_tables() -> frozenset[str]:
+    """Derive the canonical user-table set directly from current ledger DDL."""
+    from tradingagents.strategies.state.portfolio_ledger import _DDL
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in _DDL:
+            connection.execute(statement)
+        return frozenset(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        )
+    finally:
+        connection.close()
+
+
+def _validate_sidecars(path: Path) -> bool:
+    """Reject unsafe sidecars and report whether a live WAL must be consulted."""
+    sidecars = {suffix: Path(f"{path}{suffix}") for suffix in ("-wal", "-shm")}
+    for sidecar in sidecars.values():
+        if os.path.lexists(sidecar) and (
+            sidecar.is_symlink() or not sidecar.is_file()
+        ):
+            raise RuntimeError(
+                f"existing SQLite sidecar is not a regular file: {sidecar}"
+            )
+    wal = sidecars["-wal"]
+    live_wal = os.path.lexists(wal) and wal.stat().st_size > 0
+    if live_wal and not os.path.lexists(sidecars["-shm"]):
+        raise RuntimeError(f"nonempty SQLite WAL has no SHM sidecar: {wal}")
+    return live_wal
+
+
+def _validate_output_topology(
+    output: Path,
+    cohort_names: list[str],
+    *,
+    require_complete: bool,
+    initialize_clean: bool,
+) -> None:
+    """Require an exact report plus direct 16-ledger output topology."""
+    expected_cohorts = set(cohort_names)
+    allowed_root = {_REPORT_NAME, *expected_cohorts} if initialize_clean else {_REPORT_NAME}
+    actual_root = {entry.name for entry in output.iterdir()}
+    unexpected_root = actual_root - allowed_root
+    if unexpected_root:
+        raise RuntimeError(
+            "output is not an exact clean ledger topology: unexpected root entries "
+            + ", ".join(sorted(unexpected_root))
+        )
+
+    report = output / _REPORT_NAME
+    if os.path.lexists(report) and (report.is_symlink() or not report.is_file()):
+        raise RuntimeError(
+            f"output is not an exact clean ledger topology: invalid report {report}"
+        )
+    if require_complete and not os.path.lexists(report):
+        raise RuntimeError(
+            "output is not an exact clean ledger topology: migration report missing"
+        )
+
+    if not initialize_clean:
+        return
+    for cohort_name in cohort_names:
+        cohort_dir = output / cohort_name
+        if not os.path.lexists(cohort_dir):
+            if require_complete:
+                raise RuntimeError(
+                    "output is not an exact clean ledger topology: "
+                    f"missing cohort {cohort_name}"
+                )
+            continue
+        if cohort_dir.is_symlink() or not cohort_dir.is_dir():
+            raise RuntimeError(
+                "output is not an exact clean ledger topology: "
+                f"invalid cohort directory {cohort_dir}"
+            )
+        allowed_files = {"portfolio.db", "portfolio.db-wal", "portfolio.db-shm"}
+        actual_files = {entry.name for entry in cohort_dir.iterdir()}
+        unexpected_files = actual_files - allowed_files
+        if unexpected_files:
+            raise RuntimeError(
+                "output is not an exact clean ledger topology: "
+                f"unexpected files in {cohort_name}: "
+                + ", ".join(sorted(unexpected_files))
+            )
+        database = cohort_dir / "portfolio.db"
+        if require_complete and not os.path.lexists(database):
+            raise RuntimeError(
+                "output is not an exact clean ledger topology: "
+                f"missing portfolio.db for {cohort_name}"
+            )
+        if os.path.lexists(database) and (
+            database.is_symlink() or not database.is_file()
+        ):
+            raise RuntimeError(
+                "output is not an exact clean ledger topology: "
+                f"invalid portfolio.db for {cohort_name}"
+            )
+        if not os.path.lexists(database) and any(
+            os.path.lexists(cohort_dir / name)
+            for name in ("portfolio.db-wal", "portfolio.db-shm")
+        ):
+            raise RuntimeError(
+                "output is not an exact clean ledger topology: "
+                f"orphaned SQLite sidecar for {cohort_name}"
+            )
+        if os.path.lexists(database):
+            _validate_sidecars(database)
+
+
 def _regular_inputs(root: Path) -> list[Path]:
     files: list[Path] = []
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
@@ -122,7 +238,10 @@ def _inventory_lines(legacy: Path, cohort_names: list[str]) -> list[str]:
 
 
 def _assert_clean_existing_ledger(
-    path: Path, cohort_id: str, opening_cash: Decimal
+    path: Path,
+    cohort_id: str,
+    opening_cash: Decimal,
+    expected_user_tables: frozenset[str] | None = None,
 ) -> None:
     from tradingagents.strategies.execution import stable_id
     from tradingagents.strategies.state.portfolio_ledger import SCHEMA_VERSION
@@ -131,10 +250,31 @@ def _assert_clean_existing_ledger(
         return
     if path.is_symlink() or not path.is_file():
         raise RuntimeError(f"existing ledger path is not a regular file: {path}")
+    live_wal = _validate_sidecars(path)
     try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        uri = path.resolve().as_uri()
+        if live_wal:
+            uri += "?mode=ro"
+        else:
+            uri += "?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row
         try:
+            actual_user_tables = frozenset(
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            )
+            canonical_tables = expected_user_tables or _expected_user_tables()
+            if actual_user_tables != canonical_tables:
+                missing = sorted(canonical_tables - actual_user_tables)
+                extra = sorted(actual_user_tables - canonical_tables)
+                raise RuntimeError(
+                    f"existing ledger {cohort_id} is not an exact clean schema: "
+                    f"missing={missing}, extra={extra}"
+                )
             metadata = {
                 row["metadata_key"]: row["metadata_value"]
                 for row in connection.execute(
@@ -233,6 +373,7 @@ def _initialize_clean_ledgers(output: Path, cohorts: list[object]) -> None:
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
     autoresearch = DEFAULT_CONFIG["autoresearch"]
+    expected_tables = _expected_user_tables()
     planned: list[tuple[object, Decimal, Path]] = []
     for cohort in cohorts:
         profile = SIZE_PROFILES[cohort.size_profile]
@@ -245,7 +386,9 @@ def _initialize_clean_ledgers(output: Path, cohorts: list[object]) -> None:
                 f"existing cohort directory is not a regular directory: {cohort_dir}"
             )
         path = cohort_dir / "portfolio.db"
-        _assert_clean_existing_ledger(path, cohort.name, cash)
+        _assert_clean_existing_ledger(
+            path, cohort.name, cash, expected_user_tables=expected_tables
+        )
         planned.append((cohort, cash, path))
 
     for cohort, cash, path in planned:
@@ -294,7 +437,20 @@ def run_migration(
 
     output.mkdir(parents=True, exist_ok=True)
     if initialize_clean:
+        _validate_output_topology(
+            output,
+            cohort_names,
+            require_complete=False,
+            initialize_clean=True,
+        )
         _initialize_clean_ledgers(output, cohorts)
+    else:
+        _validate_output_topology(
+            output,
+            cohort_names,
+            require_complete=False,
+            initialize_clean=False,
+        )
 
     lines = [
         "legacy_execution_model=same_session_close",
@@ -313,6 +469,12 @@ def run_migration(
         )
     report_path = output / _REPORT_NAME
     _write_report(report_path, lines)
+    _validate_output_topology(
+        output,
+        cohort_names,
+        require_complete=True,
+        initialize_clean=initialize_clean,
+    )
     return report_path
 
 

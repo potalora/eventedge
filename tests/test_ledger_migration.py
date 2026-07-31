@@ -293,6 +293,92 @@ def test_initialize_clean_rejects_symlinked_cohort_parent(tmp_path):
     assert not (outside / "portfolio.db").exists()
 
 
+def test_checkpointed_clean_ledgers_without_sidecars_remain_idempotent(tmp_path):
+    legacy = _legacy_tree(tmp_path)
+    output = tmp_path / "clean"
+    initialized = _run_migration(legacy, output, "--initialize-clean")
+    assert initialized.returncode == 0, initialized.stderr
+
+    for database in sorted(output.glob("*/portfolio.db")):
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            connection.close()
+        # A normal last-close may remove these transient files. Remove any
+        # platform leftovers after the completed checkpoint to reproduce that
+        # legitimate WAL lifecycle deterministically.
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{database}{suffix}")
+            if os.path.lexists(sidecar):
+                sidecar.unlink()
+            assert not os.path.lexists(sidecar)
+
+    repeated = _run_migration(legacy, output, "--initialize-clean")
+
+    assert repeated.returncode == 0, repeated.stderr
+    assert len(list(output.glob("*/portfolio.db"))) == 16
+
+
+def test_initialize_clean_rejects_symlinked_sqlite_sidecar(tmp_path):
+    legacy = _legacy_tree(tmp_path)
+    output = tmp_path / "clean"
+    initialized = _run_migration(legacy, output, "--initialize-clean")
+    assert initialized.returncode == 0, initialized.stderr
+    database = next(iter(sorted(output.glob("*/portfolio.db"))))
+    sidecar = Path(f"{database}-wal")
+    if os.path.lexists(sidecar):
+        sidecar.unlink()
+    outside = tmp_path / "outside-wal"
+    outside.write_bytes(b"")
+    sidecar.symlink_to(outside)
+
+    failed = _run_migration(legacy, output, "--initialize-clean")
+
+    assert failed.returncode != 0
+    assert "sidecar" in failed.stdout + failed.stderr
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "seventeenth_cohort",
+        "extra_cohort_file",
+        "extra_empty_user_table",
+        "missing_expected_table",
+    ],
+)
+def test_initialize_clean_requires_exact_schema_and_output_topology(tmp_path, tamper):
+    legacy = _legacy_tree(tmp_path)
+    output = tmp_path / "clean"
+    initialized = _run_migration(legacy, output, "--initialize-clean")
+    assert initialized.returncode == 0, initialized.stderr
+    cohort_dir = output / _cohort_names()[0]
+    database = cohort_dir / "portfolio.db"
+
+    if tamper == "seventeenth_cohort":
+        extra = output / "unexpected_cohort"
+        extra.mkdir()
+        (extra / "portfolio.db").write_bytes(b"")
+    elif tamper == "extra_cohort_file":
+        (cohort_dir / "unexpected.txt").write_text("not part of clean topology\n")
+    else:
+        connection = sqlite3.connect(database)
+        try:
+            if tamper == "extra_empty_user_table":
+                connection.execute("CREATE TABLE unexpected_history (id TEXT PRIMARY KEY)")
+            else:
+                connection.execute("DROP TABLE metric_epochs")
+            connection.commit()
+        finally:
+            connection.close()
+
+    failed = _run_migration(legacy, output, "--initialize-clean")
+
+    assert failed.returncode != 0
+    assert "exact clean" in failed.stdout + failed.stderr
+
+
 @pytest.mark.parametrize("kind", ["equal", "nested", "symlink-parent"])
 def test_output_must_be_outside_resolved_legacy_tree(tmp_path, kind):
     legacy = _legacy_tree(tmp_path)

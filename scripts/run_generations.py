@@ -141,6 +141,8 @@ def main():
                 error_lines = result["error"].strip().split("\n")
                 for line in error_lines[:5]:
                     print(f"    {line}")
+        if any(not result["success"] for result in results.values()):
+            raise SystemExit(1)
 
     elif args.command == "run-learning":
         results = manager.run_learning()

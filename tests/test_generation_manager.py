@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -279,6 +280,32 @@ class TestGenerationDailyRun:
 
         assert result["success"] is False
         assert "horizon_30d_size_5k" in result["error"]
+
+    def test_run_daily_cli_prints_all_results_then_exits_nonzero(
+        self, monkeypatch, capsys
+    ):
+        """The scheduled top-level command must propagate generation failure."""
+        from scripts import run_generations
+
+        results = {
+            "gen_001": {"success": False, "elapsed_s": 1.0, "error": "invalid"},
+            "gen_002": {"success": True, "elapsed_s": 2.0},
+        }
+        monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(GenerationManager, "run_daily", lambda self, date: results)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_generations.py", "run-daily", "--date", "2026-07-31"],
+        )
+
+        with pytest.raises(SystemExit) as raised:
+            run_generations.main()
+
+        output = capsys.readouterr().out
+        assert raised.value.code == 1
+        assert "gen_001: FAILED" in output
+        assert "gen_002: OK" in output
 
 
 # ------------------------------------------------------------------
