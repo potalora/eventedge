@@ -137,7 +137,9 @@ def test_short_cover_releases_margin_and_realizes_direction_correct_pnl(tmp_path
         opening = intent("short", "short")
         stage(ledger, opening, signal())
         state = ledger.apply_fill(
-            opening, fill("short-fill", "short", "short", "99.90")
+            opening,
+            fill("short-fill", "short", "short", "99.90"),
+            borrow_rate=Decimal("0.01"),
         )
         assert state.cash == Decimal("5999.00")
         assert state.margin_used == Decimal("1498.500")
@@ -236,7 +238,10 @@ def test_close_side_without_matching_lot_fails_closed(tmp_path, side, open_side)
     try:
         opening = intent("open", open_side)
         stage(ledger, opening, signal())
-        ledger.apply_fill(opening, fill("open-fill", "open", open_side, "100"))
+        fill_kwargs = {"borrow_rate": Decimal("0.01")} if open_side == "short" else {}
+        ledger.apply_fill(
+            opening, fill("open-fill", "open", open_side, "100"), **fill_kwargs
+        )
         closing = intent("close", side)
         stage(ledger, closing, signal("close-signal"))
         with pytest.raises(ValueError, match="matching open lots"):

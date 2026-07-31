@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from tradingagents.strategies.execution import (
     CorporateAction,
     Fill,
+    MarketBar,
     OrderIntent,
     SignalRecord,
 )
@@ -151,7 +154,7 @@ def test_cash_dividend_credits_long_debits_short_and_duplicate_is_noop(tmp_path)
         short = _intent("short", "short-signal", "short")
         ledger.record_signal(_signal("short-signal", direction="short"))
         ledger.stage_intent(short)
-        ledger.apply_fill(short, _fill(short))
+        ledger.apply_fill(short, _fill(short), borrow_rate=Decimal("0.01"))
         events = ledger.apply_corporate_actions(
             SESSION, [_action("dividend-1", "cash_dividend", cash="1.25")]
         )
@@ -227,5 +230,94 @@ def test_unverified_or_conflicting_action_durably_quarantines_without_mutating_l
         assert (
             ledger.connection.execute("SELECT open_qty FROM lots").fetchone()[0] == 20
         )
+    finally:
+        ledger.close()
+
+
+def test_quarantine_publishes_invalid_snapshot_and_fail_closed_session_check(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        _opened_long(ledger)
+        ledger.apply_corporate_actions(
+            SESSION, [_action("unverified-split", "split", verified=False, ratio="2")]
+        )
+        assert ledger.session_is_valid(SESSION) is False
+        with pytest.raises(ValueError, match="invalid"):
+            ledger.assert_session_tradeable(SESSION, "AAPL")
+        value = Decimal("100")
+        snapshot = ledger.mark(
+            SESSION,
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    SESSION,
+                    value,
+                    value,
+                    value,
+                    value,
+                    "fixture",
+                    datetime(2026, 8, 3, 23, tzinfo=UTC),
+                    False,
+                )
+            },
+            "epoch",
+            datetime(2026, 8, 3, 23, tzinfo=UTC),
+        )
+        assert snapshot.valid is False
+        assert "unverified" in snapshot.invalid_reason
+    finally:
+        ledger.close()
+
+
+def test_same_timestamp_split_chain_replays_in_persisted_causal_order_across_restart(
+    tmp_path,
+):
+    path = tmp_path / "ledger.db"
+    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        _, exit_ = _opened_long(ledger)
+        ledger.apply_corporate_actions(
+            SESSION,
+            [
+                _action("a", "split", ratio="2"),
+                _action("b", "split", ratio="3"),
+            ],
+        )
+        assert ledger.pending_intents(SESSION)[0].requested_qty == 60
+    finally:
+        ledger.close()
+    reopened = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        reopened.stage_intent(exit_)
+        assert reopened.pending_intents(SESSION)[0].requested_qty == 60
+        assert [
+            row[0]
+            for row in reopened.connection.execute(
+                "SELECT adjustment_sequence FROM intent_action_adjustments ORDER BY adjustment_sequence"
+            )
+        ] == [1, 2]
+    finally:
+        reopened.close()
+
+
+def test_each_conflicting_action_payload_is_persisted_as_immutable_evidence(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        _opened_long(ledger)
+        ledger.apply_corporate_actions(
+            SESSION, [_action("conflict", "split", ratio="2")]
+        )
+        ledger.apply_corporate_actions(
+            SESSION, [_action("conflict", "split", ratio="3")]
+        )
+        ledger.apply_corporate_actions(
+            SESSION, [_action("conflict", "split", ratio="4")]
+        )
+        rows = ledger.connection.execute(
+            "SELECT action_id, content_hash, attempted_payload FROM corporate_action_conflicts ORDER BY content_hash"
+        ).fetchall()
+        assert len(rows) == 2
+        assert {row[0] for row in rows} == {"conflict"}
+        assert all("ratio" in row[2] for row in rows)
     finally:
         ledger.close()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -93,6 +93,7 @@ def _stage_short(ledger: PortfolioLedger) -> OrderIntent:
             Decimal("0"),
             Decimal("0"),
         ),
+        borrow_rate=Decimal("0.01"),
     )
     return intent
 
@@ -125,11 +126,19 @@ def test_daily_borrow_and_financing_are_exactly_once_across_restart(tmp_path):
     try:
         _stage_short(ledger)
         borrow = ledger.accrue_borrow(
-            SESSION, {"AAPL": _bar()}, {"AAPL": Decimal("0.365")}
+            SESSION,
+            {"AAPL": _bar()},
+            {"AAPL": Decimal("0.365")},
+            datetime(2026, 8, 3, 23, tzinfo=UTC),
         )
         assert borrow.amount == Decimal("1.0000")
         assert (
-            ledger.accrue_borrow(SESSION, {"AAPL": _bar()}, {"AAPL": Decimal("0.365")})
+            ledger.accrue_borrow(
+                SESSION,
+                {"AAPL": _bar()},
+                {"AAPL": Decimal("0.365")},
+                datetime(2026, 8, 3, 23, tzinfo=UTC),
+            )
             == borrow
         )
         financing = ledger.accrue_financing(SESSION, Decimal("0.10"))
@@ -141,7 +150,10 @@ def test_daily_borrow_and_financing_are_exactly_once_across_restart(tmp_path):
     try:
         assert (
             reopened.accrue_borrow(
-                SESSION, {"AAPL": _bar()}, {"AAPL": Decimal("0.365")}
+                SESSION,
+                {"AAPL": _bar()},
+                {"AAPL": Decimal("0.365")},
+                datetime(2026, 8, 3, 23, tzinfo=UTC),
             )
             == borrow
         )
@@ -169,7 +181,12 @@ def test_existing_short_missing_rate_uses_flagged_fallback_and_new_short_is_reje
     ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
     try:
         _stage_short(ledger)
-        event = ledger.accrue_borrow(SESSION, {"AAPL": _bar()}, {"AAPL": None})
+        event = ledger.accrue_borrow(
+            SESSION,
+            {"AAPL": _bar()},
+            {"AAPL": None},
+            datetime(2026, 8, 3, 23, tzinfo=UTC),
+        )
         assert event.amount == Decimal("0.8219")
         assert event.flagged is True
         assert tuple(
@@ -187,3 +204,93 @@ def test_existing_short_missing_rate_uses_flagged_fallback_and_new_short_is_reje
     assert validate_new_short_borrow_rate(Decimal("0.05"), Decimal("0.05")) == Decimal(
         "0.05"
     )
+
+
+@pytest.mark.parametrize(
+    "rate, message",
+    [
+        (None, "missing borrow rate"),
+        (Decimal("NaN"), "invalid borrow rate"),
+        (Decimal("0.051"), "exceeds"),
+    ],
+)
+def test_authoritative_new_short_requires_valid_borrow_context_before_mutation(
+    tmp_path, rate, message
+):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        intent = _intent("short")
+        ledger.record_signal(_signal())
+        ledger.stage_intent(intent)
+        fill = PaperCostModel().fill(
+            intent,
+            Decimal("100"),
+            datetime(2026, 8, 3, 13, 30, tzinfo=UTC),
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        with pytest.raises(ValueError, match=message):
+            ledger.apply_fill(
+                intent,
+                fill,
+                borrow_rate=rate,
+            )
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+        )
+    finally:
+        ledger.close()
+
+    with pytest.raises(ValueError, match="invalid paper ledger config"):
+        PortfolioLedger(
+            tmp_path / "bad-threshold.db",
+            COHORT,
+            Decimal("5000"),
+            short_selling_config={"borrow_cost_reject_above": "Infinity"},
+        )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"slippage_bps": "Infinity"},
+        {"commission_per_fill": "NaN"},
+        {"other_fee_per_fill": "-0.0001"},
+        {"existing_short_missing_borrow_rate": "Infinity"},
+    ],
+)
+def test_paper_ledger_cost_config_rejects_nonfinite_or_negative_values(config):
+    with pytest.raises(ValueError):
+        PaperCostModel(config)
+
+
+def test_borrow_uses_injected_fallback_and_independent_cutoff_rejects_bad_marks(
+    tmp_path,
+):
+    ledger = PortfolioLedger(
+        tmp_path / "ledger.db",
+        COHORT,
+        Decimal("5000"),
+        paper_ledger_config={"existing_short_missing_borrow_rate": "0.365"},
+    )
+    try:
+        _stage_short(ledger)
+        cutoff = datetime(2026, 8, 3, 23, tzinfo=UTC)
+        event = ledger.accrue_borrow(SESSION, {"AAPL": _bar()}, {"AAPL": None}, cutoff)
+        assert event.amount == Decimal("1.0000")
+        stale = MarketBar(
+            "AAPL",
+            date(2026, 8, 4),
+            Decimal("100"),
+            Decimal("100"),
+            Decimal("100"),
+            Decimal("100"),
+            "fixture",
+            cutoff - timedelta(hours=24, seconds=1),
+            False,
+        )
+        with pytest.raises(ValueError, match="stale"):
+            ledger.accrue_borrow(
+                date(2026, 8, 4), {"AAPL": stale}, {"AAPL": None}, cutoff
+            )
+    finally:
+        ledger.close()

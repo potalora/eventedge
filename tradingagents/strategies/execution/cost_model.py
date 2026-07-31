@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from .ids import stable_id
 from .models import Fill, OrderIntent
@@ -33,8 +33,12 @@ def validate_new_short_borrow_rate(
         or annual_rate < 0
     ):
         raise ValueError("invalid borrow rate for new short")
-    if not isinstance(borrow_cost_reject_above, Decimal):
-        raise TypeError("borrow_cost_reject_above must be Decimal")
+    if (
+        not isinstance(borrow_cost_reject_above, Decimal)
+        or not borrow_cost_reject_above.is_finite()
+        or borrow_cost_reject_above < 0
+    ):
+        raise ValueError("invalid borrow rejection threshold")
     if annual_rate > borrow_cost_reject_above:
         raise ValueError(
             f"borrow rate {annual_rate} exceeds {borrow_cost_reject_above} for new short"
@@ -50,15 +54,25 @@ class PaperCostModel:
         nested = values.get("paper_ledger")
         if isinstance(nested, Mapping):
             values = nested
-        self.slippage_bps = Decimal(str(values.get("slippage_bps", "10")))
-        self.commission_per_fill = Decimal(str(values.get("commission_per_fill", "0")))
-        self.other_fee_per_fill = Decimal(str(values.get("other_fee_per_fill", "0")))
-        if (
-            self.slippage_bps < 0
-            or self.commission_per_fill < 0
-            or self.other_fee_per_fill < 0
-        ):
-            raise ValueError("paper execution costs must be non-negative")
+        self.slippage_bps = self._configured_decimal(values, "slippage_bps", "10")
+        self.commission_per_fill = self._configured_decimal(
+            values, "commission_per_fill", "0"
+        )
+        self.other_fee_per_fill = self._configured_decimal(
+            values, "other_fee_per_fill", "0"
+        )
+        self.margin_requirement = self._configured_decimal(
+            values, "margin_requirement", "1.50"
+        )
+        self.margin_financing_rate = self._configured_decimal(
+            values, "margin_financing_rate", "0"
+        )
+        self.idle_cash_yield_rate = self._configured_decimal(
+            values, "idle_cash_yield_rate", "0"
+        )
+        self.existing_short_missing_borrow_rate = self._configured_decimal(
+            values, "existing_short_missing_borrow_rate", "0.30"
+        )
 
     @staticmethod
     def validate_new_short_borrow_rate(
@@ -91,13 +105,18 @@ class PaperCostModel:
         slippage = quantize_cash(
             abs(fill_price - reference_price) * intent.requested_qty
         )
+        if effective_at.tzinfo is None or effective_at.utcoffset() is None:
+            raise ValueError("effective_at must be timezone-aware")
+        if processed_at.tzinfo is None or processed_at.utcoffset() is None:
+            raise ValueError("processed_at must be timezone-aware")
+        execution_session = effective_at.date()
         return Fill(
             stable_id(
-                "fill", intent.intent_id, intent.eligible_session, intent.requested_qty
+                "fill", intent.intent_id, execution_session, intent.requested_qty
             ),
             intent.intent_id,
             intent.side,
-            intent.eligible_session,
+            execution_session,
             effective_at,
             processed_at,
             reference_price,
@@ -128,3 +147,15 @@ class PaperCostModel:
                 "notional and annual_rate must be non-negative finite Decimals"
             )
         return quantize_cash(notional * annual_rate / ACT_365_DAYS)
+
+    @staticmethod
+    def _configured_decimal(
+        values: Mapping[str, object], key: str, default: str
+    ) -> Decimal:
+        try:
+            value = Decimal(str(values.get(key, default)))
+        except (InvalidOperation, ValueError) as error:
+            raise ValueError(f"invalid paper ledger config {key}") from error
+        if not value.is_finite() or value < 0:
+            raise ValueError(f"invalid paper ledger config {key}")
+        return value
