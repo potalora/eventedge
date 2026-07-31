@@ -2566,6 +2566,32 @@ class PortfolioLedger:
         self._require_timezone_aware(effective_at, "processed_at")
         accrual_id = stable_id("financing", self.cohort_id, session)
         with self.transaction():
+            existing = self._connection.execute(
+                "SELECT * FROM financing_accruals WHERE accrual_id = ?", (accrual_id,)
+            ).fetchone()
+            if existing is not None:
+                identity = (
+                    accrual_id,
+                    self._encode(session),
+                    self._encode(annual_rate),
+                    0,
+                )
+                columns = ("accrual_id", "session", "annual_rate", "flagged")
+                if any(
+                    existing[column] != value
+                    for column, value in zip(columns, identity)
+                ):
+                    raise LedgerConflictError(
+                        f"conflicting financing accrual {accrual_id}"
+                    )
+                return LedgerEvent(
+                    accrual_id,
+                    session,
+                    "financing",
+                    _decimal(existing["amount"]),
+                    False,
+                    "debit financing ACT/365",
+                )
             debit_balance = max(-self._accounting_summary()["cash"], Decimal("0"))
             amount = self._cost_model.financing_charge(debit_balance, annual_rate)
             event = LedgerEvent(
@@ -2576,9 +2602,6 @@ class PortfolioLedger:
                 False,
                 "debit financing ACT/365",
             )
-            existing = self._connection.execute(
-                "SELECT * FROM financing_accruals WHERE accrual_id = ?", (accrual_id,)
-            ).fetchone()
             expected = (
                 accrual_id,
                 self._encode(session),
@@ -2586,16 +2609,6 @@ class PortfolioLedger:
                 self._encode(annual_rate),
                 0,
             )
-            if existing is not None:
-                columns = ("accrual_id", "session", "amount", "annual_rate", "flagged")
-                if any(
-                    existing[column] != value
-                    for column, value in zip(columns, expected)
-                ):
-                    raise LedgerConflictError(
-                        f"conflicting financing accrual {accrual_id}"
-                    )
-                return event
             self._connection.execute(
                 "INSERT INTO financing_accruals VALUES (?, ?, ?, ?, ?)", expected
             )

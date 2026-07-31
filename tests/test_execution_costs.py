@@ -15,7 +15,10 @@ from tradingagents.strategies.execution.cost_model import (
     PaperCostModel,
     validate_new_short_borrow_rate,
 )
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 from tradingagents.strategies.orchestration.trading_calendar import session_close
 
 
@@ -172,6 +175,44 @@ def test_daily_borrow_and_financing_are_exactly_once_across_restart(tmp_path):
             ).fetchone()[0]
             == 1
         )
+    finally:
+        reopened.close()
+
+
+def test_nonzero_financing_replay_uses_persisted_amount_across_restart(tmp_path):
+    path = tmp_path / "ledger.db"
+    ledger = PortfolioLedger(path, COHORT, Decimal("500"))
+    order = _intent("buy")
+    try:
+        ledger.record_signal(_signal())
+        ledger.stage_intent(order)
+        ledger.apply_fill(
+            order,
+            PaperCostModel().fill(
+                order,
+                Decimal("100"),
+                datetime(2026, 8, 3, 13, 30, tzinfo=UTC),
+                datetime(2026, 8, 3, 22, tzinfo=UTC),
+            ),
+        )
+        event = ledger.accrue_financing(SESSION, Decimal("0.365"))
+        assert event.amount == Decimal("0.5010")
+        cash_after_first_charge = ledger.account_state().cash
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger(path, COHORT, Decimal("500"))
+    try:
+        assert reopened.accrue_financing(SESSION, Decimal("0.365")) == event
+        assert reopened.account_state().cash == cash_after_first_charge
+        assert reopened.connection.execute(
+            "SELECT COUNT(*) FROM financing_accruals"
+        ).fetchone()[0] == 1
+        assert reopened.connection.execute(
+            "SELECT COUNT(*) FROM cash_events WHERE event_type = 'financing'"
+        ).fetchone()[0] == 1
+        with pytest.raises(LedgerConflictError, match="conflicting financing accrual"):
+            reopened.accrue_financing(SESSION, Decimal("0.364"))
     finally:
         reopened.close()
 
