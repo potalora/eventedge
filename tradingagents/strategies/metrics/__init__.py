@@ -1,3 +1,42 @@
 from .calendar import XNYSCalendar
+from .identity import deduplicate_signals, event_key, execution_id, signal_id
+from .models import (
+    LEGACY_SCHEMA_LABEL,
+    METRIC_SCHEMA_VERSION,
+    OUTCOME_WINDOWS,
+    DeduplicationResult,
+    Direction,
+    EpochStatus,
+    HealthStatus,
+    MetricEpoch,
+    OutcomeRecord,
+    OutcomeStatus,
+    PairedComparison,
+    PortfolioMetrics,
+    SignalConflict,
+    SignalMetricRecord,
+    StrategyHealthRecord,
+)
 
-__all__ = ["XNYSCalendar"]
+__all__ = [
+    "LEGACY_SCHEMA_LABEL",
+    "METRIC_SCHEMA_VERSION",
+    "OUTCOME_WINDOWS",
+    "DeduplicationResult",
+    "Direction",
+    "EpochStatus",
+    "HealthStatus",
+    "MetricEpoch",
+    "OutcomeRecord",
+    "OutcomeStatus",
+    "PairedComparison",
+    "PortfolioMetrics",
+    "SignalConflict",
+    "SignalMetricRecord",
+    "StrategyHealthRecord",
+    "XNYSCalendar",
+    "deduplicate_signals",
+    "event_key",
+    "execution_id",
+    "signal_id",
+]
