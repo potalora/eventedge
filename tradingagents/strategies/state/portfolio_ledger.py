@@ -24,6 +24,10 @@ from tradingagents.strategies.execution import (
     SignalRecord,
     stable_id,
 )
+from tradingagents.strategies.execution.price_source import (
+    BarValidationError,
+    validate_required_bars,
+)
 
 
 SCHEMA_VERSION = 1
@@ -129,6 +133,13 @@ _DDL: tuple[str, ...] = (
         cash_event_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, session TEXT,
         event_type TEXT NOT NULL, amount TEXT NOT NULL, effective_at TEXT NOT NULL,
         detail TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS accounting_state (
+        cohort_id TEXT PRIMARY KEY, cash TEXT NOT NULL, realized_pnl TEXT NOT NULL,
+        slippage_cost TEXT NOT NULL, commission_cost TEXT NOT NULL,
+        other_fees TEXT NOT NULL, borrow_cost TEXT NOT NULL,
+        financing_cost TEXT NOT NULL, dividend_cash TEXT NOT NULL,
+        high_water_mark TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS borrow_accruals (
         accrual_id TEXT PRIMARY KEY, lot_id TEXT REFERENCES lots(lot_id),
@@ -320,6 +331,7 @@ class PortfolioLedger:
                     "detail": "deterministic opening cash",
                 },
             )
+            self._initialize_accounting_state()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -360,6 +372,98 @@ class PortfolioLedger:
             f"INSERT INTO {table} ({columns}) VALUES ({marks})", tuple(encoded.values())
         )
         return True
+
+    def _initialize_accounting_state(self) -> None:
+        """Create or deterministically migrate the one-row cohort summary."""
+        existing = self._connection.execute(
+            "SELECT cohort_id FROM accounting_state WHERE cohort_id = ?",
+            (self.cohort_id,),
+        ).fetchone()
+        if existing is not None:
+            return
+        summary = self._historical_summary_for_migration()
+        self._connection.execute(
+            """INSERT INTO accounting_state VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                self.cohort_id,
+                self._encode(summary["cash"]),
+                self._encode(summary["realized_pnl"]),
+                self._encode(summary["slippage_cost"]),
+                self._encode(summary["commission_cost"]),
+                self._encode(summary["other_fees"]),
+                self._encode(summary["borrow_cost"]),
+                self._encode(summary["financing_cost"]),
+                self._encode(summary["dividend_cash"]),
+                self._encode(summary["high_water_mark"]),
+            ),
+        )
+
+    def _historical_summary_for_migration(self) -> dict[str, Decimal]:
+        """Read audit detail once only when upgrading a pre-summary ledger."""
+        opening = self._connection.execute(
+            """SELECT amount FROM cash_events WHERE cohort_id = ?
+               AND event_type = 'opening'""",
+            (self.cohort_id,),
+        ).fetchone()
+        if opening is None:
+            raise LedgerConflictError("missing deterministic opening cash event")
+        cash = self._decimal_column_total(
+            "cash_events", "amount", "cohort_id = ?", (self.cohort_id,)
+        )
+        realized_pnl = self._decimal_column_total("lot_closures", "realized_pnl")
+        slippage_cost = self._fill_cost_total_for_migration("slippage")
+        commission_cost = self._fill_cost_total_for_migration("commission")
+        other_fees = self._fill_cost_total_for_migration("other_fees")
+        borrow_cost = self._decimal_column_total("borrow_accruals", "amount")
+        financing_cost = self._decimal_column_total("financing_accruals", "amount")
+        dividend_cash = self._decimal_column_total("dividend_events", "amount")
+        high_water_mark = _decimal(opening["amount"])
+        snapshot_rows = self._connection.execute(
+            "SELECT high_water_mark FROM account_snapshots WHERE cohort_id = ?",
+            (self.cohort_id,),
+        ).fetchall()
+        for row in snapshot_rows:
+            high_water_mark = max(high_water_mark, _decimal(row["high_water_mark"]))
+        return {
+            "cash": cash,
+            "realized_pnl": realized_pnl,
+            "slippage_cost": slippage_cost,
+            "commission_cost": commission_cost,
+            "other_fees": other_fees,
+            "borrow_cost": borrow_cost,
+            "financing_cost": financing_cost,
+            "dividend_cash": dividend_cash,
+            "high_water_mark": high_water_mark,
+        }
+
+    def _decimal_column_total(
+        self,
+        table: str,
+        column: str,
+        where: str = "1 = 1",
+        values: tuple[object, ...] = (),
+    ) -> Decimal:
+        approved = {
+            ("cash_events", "amount"),
+            ("lot_closures", "realized_pnl"),
+            ("borrow_accruals", "amount"),
+            ("financing_accruals", "amount"),
+            ("dividend_events", "amount"),
+        }
+        if (table, column) not in approved or where not in {"1 = 1", "cohort_id = ?"}:
+            raise ValueError("unapproved accounting migration query")
+        rows = self._connection.execute(
+            f"SELECT {column} FROM {table} WHERE {where}", values
+        ).fetchall()
+        return sum((_decimal(row[column]) for row in rows), Decimal("0"))
+
+    def _fill_cost_total_for_migration(self, cost_type: str) -> Decimal:
+        if cost_type not in {"slippage", "commission", "other_fees"}:
+            raise ValueError("unapproved fill cost type")
+        rows = self._connection.execute(
+            "SELECT amount FROM fill_costs WHERE cost_type = ?", (cost_type,)
+        ).fetchall()
+        return sum((_decimal(row["amount"]) for row in rows), Decimal("0"))
 
     @staticmethod
     def _encode(value: object) -> object:
@@ -621,13 +725,19 @@ class PortfolioLedger:
                     )
                 self._insert_fill(fill)
                 self._insert_fill_costs(fill)
+                realized_pnl = Decimal("0")
                 if stored_intent.side in {"buy", "short"}:
                     self._insert_open_lot(stored_intent, fill, ticker)
                 else:
-                    self._close_lots(stored_intent, fill, ticker)
-                self._insert_cash_event(
-                    fill,
-                    self._cash_delta(stored_intent.side, fill),
+                    realized_pnl = self._close_lots(stored_intent, fill, ticker)
+                cash_delta = self._cash_delta(stored_intent.side, fill)
+                self._insert_cash_event(fill, cash_delta)
+                self._update_accounting_summary(
+                    cash_delta=cash_delta,
+                    realized_pnl_delta=realized_pnl,
+                    slippage_cost_delta=fill.slippage,
+                    commission_cost_delta=fill.commission,
+                    other_fees_delta=fill.other_fees,
                 )
                 self._connection.execute(
                     "UPDATE order_intents SET status = 'filled' WHERE intent_id = ?",
@@ -657,9 +767,12 @@ class PortfolioLedger:
         valuation_at: datetime,
     ) -> AccountSnapshot:
         """Persist exact raw marks and an immutable, reconciled snapshot."""
+        self._require_timezone_aware(valuation_at, "valuation_at")
         with self.transaction():
             open_lots = self._open_lots()
-            marks_by_ticker = self._validate_marks(session, close_marks, open_lots)
+            marks_by_ticker = self._validate_marks(
+                session, close_marks, open_lots, valuation_at
+            )
             for ticker, bar in marks_by_ticker.items():
                 self._insert_mark(ticker, bar)
             snapshot = self._build_snapshot(
@@ -686,34 +799,40 @@ class PortfolioLedger:
                     )""",
                     self._snapshot_values(snapshot),
                 )
+                self._update_accounting_summary(
+                    high_water_mark=snapshot.high_water_mark
+                )
         return snapshot
 
     def account_state(self) -> AccountState:
         """Return bounded cohort state, using a lot's entry until its first mark."""
-        open_lots = self._open_lots()
-        cash = self._cash_balance()
+        open_lots = self._open_lots(include_latest_mark=True)
+        summary = self._accounting_summary()
         long_value = Decimal("0")
         short_liability = Decimal("0")
         margin_used = Decimal("0")
         for lot in open_lots:
-            mark = self._latest_mark_for_lot(lot)
+            mark = (
+                _decimal(lot["mark_close"])
+                if lot["mark_close"] is not None
+                else _decimal(lot["entry_price"])
+            )
             value = _decimal(lot["open_qty"]) * mark
             if lot["direction"] == "long":
                 long_value += value
             else:
                 short_liability += value
                 margin_used += _decimal(lot["margin_reserved"])
-        net_equity = cash + long_value - short_liability
-        previous_high_water = self._previous_high_water_mark()
+        net_equity = summary["cash"] + long_value - short_liability
         return AccountState(
             self.cohort_id,
-            cash,
+            summary["cash"],
             long_value,
             short_liability,
             margin_used,
-            cash - margin_used,
+            summary["cash"] - margin_used,
             net_equity,
-            max(previous_high_water, net_equity),
+            max(summary["high_water_mark"], net_equity),
         )
 
     def _validate_fill(self, intent: OrderIntent, fill: Fill) -> None:
@@ -823,7 +942,7 @@ class PortfolioLedger:
             ),
         )
 
-    def _close_lots(self, intent: OrderIntent, fill: Fill, ticker: str) -> None:
+    def _close_lots(self, intent: OrderIntent, fill: Fill, ticker: str) -> Decimal:
         direction = "long" if intent.side == "sell" else "short"
         lots = self._connection.execute(
             """SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND direction = ?
@@ -833,6 +952,7 @@ class PortfolioLedger:
         if sum(int(lot["open_qty"]) for lot in lots) < fill.quantity:
             raise ValueError("close fill has insufficient matching open lots")
         remaining = fill.quantity
+        realized_total = Decimal("0")
         for lot in lots:
             if remaining == 0:
                 break
@@ -867,6 +987,8 @@ class PortfolioLedger:
                 ),
             )
             remaining -= close_qty
+            realized_total += realized
+        return realized_total
 
     @staticmethod
     def _cash_delta(side: str, fill: Fill) -> Decimal:
@@ -893,10 +1015,22 @@ class PortfolioLedger:
             ),
         )
 
-    def _open_lots(self) -> list[sqlite3.Row]:
+    def _open_lots(self, *, include_latest_mark: bool = False) -> list[sqlite3.Row]:
+        mark_column = (
+            """, (
+                SELECT m.close FROM marks m
+                WHERE m.cohort_id = l.cohort_id AND m.ticker = l.ticker
+                  AND m.session >= l.opened_session
+                ORDER BY m.session DESC, m.mark_id DESC LIMIT 1
+            ) AS mark_close"""
+            if include_latest_mark
+            else ""
+        )
         return self._connection.execute(
-            """SELECT * FROM lots WHERE cohort_id = ? AND open_qty > 0
-               ORDER BY ticker, direction, opened_session, lot_id""",
+            """SELECT l.*"""
+            + mark_column
+            + """ FROM lots l WHERE cohort_id = ? AND open_qty > 0
+                 ORDER BY ticker, direction, opened_session, lot_id""",
             (self.cohort_id,),
         ).fetchall()
 
@@ -905,6 +1039,7 @@ class PortfolioLedger:
         session: date,
         close_marks: dict[str, MarketBar],
         open_lots: list[sqlite3.Row],
+        valuation_at: datetime,
     ) -> dict[str, MarketBar]:
         required_tickers = sorted({lot["ticker"] for lot in open_lots})
         validated: dict[str, MarketBar] = {}
@@ -912,14 +1047,19 @@ class PortfolioLedger:
             bar = close_marks.get(ticker)
             if bar is None:
                 raise MissingMarkError(f"missing mark for {ticker}/{session}")
-            if bar.ticker != ticker or bar.session != session or bar.adjusted:
+            if bar.ticker != ticker or bar.session != session:
                 raise MissingMarkError(f"untrusted mark for {ticker}/{session}")
-            values = (bar.open, bar.high, bar.low, bar.close)
-            if any(not value.is_finite() or value <= 0 for value in values) or not (
-                bar.low <= bar.open <= bar.high and bar.low <= bar.close <= bar.high
-            ):
-                raise MissingMarkError(f"invalid mark for {ticker}/{session}")
+            self._require_timezone_aware(bar.fetched_at, "bar.fetched_at")
             validated[ticker] = bar
+        try:
+            validate_required_bars(
+                {(ticker, session): bar for ticker, bar in validated.items()},
+                set(required_tickers),
+                session,
+                valuation_at,
+            )
+        except BarValidationError as error:
+            raise MissingMarkError(str(error)) from error
         return validated
 
     def _insert_mark(self, ticker: str, bar: MarketBar) -> None:
@@ -962,7 +1102,7 @@ class PortfolioLedger:
         open_lots: list[sqlite3.Row],
         marks_by_ticker: dict[str, MarketBar],
     ) -> AccountSnapshot:
-        cash = self._cash_balance()
+        summary = self._accounting_summary()
         long_market_value = Decimal("0")
         short_liability = Decimal("0")
         unrealized_pnl = Decimal("0")
@@ -978,20 +1118,20 @@ class PortfolioLedger:
                 short_liability += quantity * close
                 unrealized_pnl += (entry - close) * quantity
                 margin_used += _decimal(lot["margin_reserved"])
-        net_equity = cash + long_market_value - short_liability
+        net_equity = summary["cash"] + long_market_value - short_liability
         gross_exposure = long_market_value + short_liability
         net_exposure = long_market_value - short_liability
-        slippage_cost = self._cost_total("slippage")
-        commission_cost = self._cost_total("commission")
-        other_fees = self._cost_total("other_fees")
-        borrow_cost = self._event_total("borrow_accruals")
-        financing_cost = self._event_total("financing_accruals")
-        dividend_cash = self._event_total("dividend_events")
+        slippage_cost = summary["slippage_cost"]
+        commission_cost = summary["commission_cost"]
+        other_fees = summary["other_fees"]
+        borrow_cost = summary["borrow_cost"]
+        financing_cost = summary["financing_cost"]
+        dividend_cash = summary["dividend_cash"]
         cumulative_costs = (
             slippage_cost + commission_cost + other_fees + borrow_cost + financing_cost
         )
         gross_equity = net_equity + cumulative_costs
-        assert net_equity == cash + long_market_value - short_liability
+        assert net_equity == summary["cash"] + long_market_value - short_liability
         assert gross_equity - cumulative_costs == net_equity
         return AccountSnapshot(
             stable_id("snapshot", self.cohort_id, epoch_id, session),
@@ -999,14 +1139,14 @@ class PortfolioLedger:
             epoch_id,
             session,
             valuation_at,
-            cash,
+            summary["cash"],
             long_market_value,
             short_liability,
             gross_exposure,
             net_exposure,
             margin_used,
-            cash - margin_used,
-            self._realized_pnl(),
+            summary["cash"] - margin_used,
+            summary["realized_pnl"],
             unrealized_pnl,
             gross_equity,
             slippage_cost,
@@ -1016,63 +1156,96 @@ class PortfolioLedger:
             financing_cost,
             dividend_cash,
             net_equity,
-            max(self._previous_high_water_mark(), net_equity),
+            max(summary["high_water_mark"], net_equity),
             True,
             "",
         )
 
-    def _cash_balance(self) -> Decimal:
-        # SQLite SUM coerces TEXT to float. Sum Decimal rows directly instead.
-        amounts = self._connection.execute(
-            "SELECT amount FROM cash_events WHERE cohort_id = ? ORDER BY effective_at, cash_event_id",
-            (self.cohort_id,),
-        ).fetchall()
-        return sum((_decimal(item["amount"]) for item in amounts), Decimal("0"))
-
-    def _cost_total(self, cost_type: str) -> Decimal:
-        rows = self._connection.execute(
-            "SELECT amount FROM fill_costs WHERE cost_type = ? ORDER BY fill_cost_id",
-            (cost_type,),
-        ).fetchall()
-        return sum((_decimal(row["amount"]) for row in rows), Decimal("0"))
-
-    def _event_total(self, table: str) -> Decimal:
-        if table not in {"borrow_accruals", "financing_accruals", "dividend_events"}:
-            raise ValueError(f"unapproved event table {table}")
-        rows = self._connection.execute(
-            f"SELECT amount FROM {table} ORDER BY 1"
-        ).fetchall()
-        return sum((_decimal(row["amount"]) for row in rows), Decimal("0"))
-
-    def _realized_pnl(self) -> Decimal:
-        rows = self._connection.execute(
-            "SELECT realized_pnl FROM lot_closures ORDER BY closure_id"
-        ).fetchall()
-        return sum((_decimal(row["realized_pnl"]) for row in rows), Decimal("0"))
-
-    def _previous_high_water_mark(self) -> Decimal:
-        rows = self._connection.execute(
-            "SELECT high_water_mark FROM account_snapshots WHERE cohort_id = ? ORDER BY session, snapshot_id",
-            (self.cohort_id,),
-        ).fetchall()
-        opening = self._connection.execute(
-            "SELECT amount FROM cash_events WHERE cohort_id = ? AND event_type = 'opening'",
-            (self.cohort_id,),
-        ).fetchone()
-        values = [_decimal(row["high_water_mark"]) for row in rows]
-        if opening is not None:
-            values.append(_decimal(opening["amount"]))
-        return max(values, default=Decimal("0"))
-
-    def _latest_mark_for_lot(self, lot: sqlite3.Row) -> Decimal:
+    def _accounting_summary(self) -> dict[str, Decimal]:
         row = self._connection.execute(
-            """SELECT close FROM marks WHERE cohort_id = ? AND ticker = ?
-               AND session >= ? ORDER BY session DESC, mark_id DESC LIMIT 1""",
-            (self.cohort_id, lot["ticker"], lot["opened_session"]),
+            "SELECT * FROM accounting_state WHERE cohort_id = ?", (self.cohort_id,)
         ).fetchone()
-        return (
-            _decimal(row["close"]) if row is not None else _decimal(lot["entry_price"])
+        if row is None:
+            raise LedgerConflictError(
+                f"missing accounting summary for {self.cohort_id}"
+            )
+        return {
+            column: _decimal(row[column])
+            for column in (
+                "cash",
+                "realized_pnl",
+                "slippage_cost",
+                "commission_cost",
+                "other_fees",
+                "borrow_cost",
+                "financing_cost",
+                "dividend_cash",
+                "high_water_mark",
+            )
+        }
+
+    def _update_accounting_summary(
+        self,
+        *,
+        cash_delta: Decimal = Decimal("0"),
+        realized_pnl_delta: Decimal = Decimal("0"),
+        slippage_cost_delta: Decimal = Decimal("0"),
+        commission_cost_delta: Decimal = Decimal("0"),
+        other_fees_delta: Decimal = Decimal("0"),
+        borrow_cost_delta: Decimal = Decimal("0"),
+        financing_cost_delta: Decimal = Decimal("0"),
+        dividend_cash_delta: Decimal = Decimal("0"),
+        high_water_mark: Decimal | None = None,
+    ) -> None:
+        """Apply one exact-Decimal summary mutation inside the caller transaction.
+
+        Task 5 accrual/dividend writers extend this hook with their audit-row
+        insert and the matching cost/cash delta in the same transaction.
+        """
+        deltas = {
+            "cash": cash_delta,
+            "realized_pnl": realized_pnl_delta,
+            "slippage_cost": slippage_cost_delta,
+            "commission_cost": commission_cost_delta,
+            "other_fees": other_fees_delta,
+            "borrow_cost": borrow_cost_delta,
+            "financing_cost": financing_cost_delta,
+            "dividend_cash": dividend_cash_delta,
+        }
+        if any(not isinstance(value, Decimal) for value in deltas.values()):
+            raise TypeError("accounting summary deltas must be Decimal")
+        if high_water_mark is not None and not isinstance(high_water_mark, Decimal):
+            raise TypeError("high_water_mark must be Decimal")
+        summary = self._accounting_summary()
+        next_high_water_mark = max(
+            summary["high_water_mark"],
+            high_water_mark
+            if high_water_mark is not None
+            else summary["high_water_mark"],
         )
+        self._connection.execute(
+            """UPDATE accounting_state SET cash = ?, realized_pnl = ?,
+               slippage_cost = ?, commission_cost = ?, other_fees = ?,
+               borrow_cost = ?, financing_cost = ?, dividend_cash = ?,
+               high_water_mark = ? WHERE cohort_id = ?""",
+            (
+                self._encode(summary["cash"] + deltas["cash"]),
+                self._encode(summary["realized_pnl"] + deltas["realized_pnl"]),
+                self._encode(summary["slippage_cost"] + deltas["slippage_cost"]),
+                self._encode(summary["commission_cost"] + deltas["commission_cost"]),
+                self._encode(summary["other_fees"] + deltas["other_fees"]),
+                self._encode(summary["borrow_cost"] + deltas["borrow_cost"]),
+                self._encode(summary["financing_cost"] + deltas["financing_cost"]),
+                self._encode(summary["dividend_cash"] + deltas["dividend_cash"]),
+                self._encode(next_high_water_mark),
+                self.cohort_id,
+            ),
+        )
+
+    @staticmethod
+    def _require_timezone_aware(value: datetime, label: str) -> None:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise MissingMarkError(f"{label} must be timezone-aware")
 
     @classmethod
     def _fill_values(cls, fill: Fill) -> tuple[object, ...]:

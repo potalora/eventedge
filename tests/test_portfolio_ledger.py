@@ -529,6 +529,12 @@ def test_fill_replay_after_restart_is_a_true_noop_and_divergence_conflicts(tmp_p
                 "order_status_transitions",
             )
         }
+        first_summary = tuple(
+            ledger.connection.execute(
+                """SELECT cash, realized_pnl, slippage_cost, commission_cost,
+                   other_fees, high_water_mark FROM accounting_state"""
+            ).fetchone()
+        )
     finally:
         ledger.close()
 
@@ -541,6 +547,15 @@ def test_fill_replay_after_restart_is_a_true_noop_and_divergence_conflicts(tmp_p
             ).fetchone()[0]
             for table in first_counts
         } == first_counts
+        assert (
+            tuple(
+                reopened.connection.execute(
+                    """SELECT cash, realized_pnl, slippage_cost, commission_cost,
+                   other_fees, high_water_mark FROM accounting_state"""
+                ).fetchone()
+            )
+            == first_summary
+        )
         with pytest.raises(LedgerConflictError, match="fills identity fill-1"):
             reopened.apply_fill(
                 intent, Fill(**{**fill.__dict__, "fill_price": Decimal("100.11")})

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import sqlite3
 
 import pytest
 
@@ -184,6 +185,9 @@ def test_fifo_closures_and_rollback_leave_no_partial_economic_mutation(
         before_cash_events = ledger.connection.execute(
             "SELECT COUNT(*) FROM cash_events"
         ).fetchone()[0]
+        before_summary = tuple(
+            ledger.connection.execute("SELECT * FROM accounting_state").fetchone()
+        )
         original = ledger._insert_cash_event
 
         def fail_after_cash(*args, **kwargs):
@@ -216,6 +220,12 @@ def test_fifo_closures_and_rollback_leave_no_partial_economic_mutation(
             == before_cash_events
         )
         assert ledger.account_state() == before_state
+        assert (
+            tuple(
+                ledger.connection.execute("SELECT * FROM accounting_state").fetchone()
+            )
+            == before_summary
+        )
     finally:
         ledger.close()
 
@@ -260,6 +270,12 @@ def test_mark_snapshot_reconciles_costs_exposure_and_high_water_mark(tmp_path):
         assert snapshot.gross_equity == Decimal("5050.00")
         assert snapshot.gross_equity - snapshot.slippage_cost == snapshot.net_equity
         assert snapshot.high_water_mark == Decimal("5049.00")
+        assert (
+            ledger.connection.execute(
+                "SELECT high_water_mark FROM accounting_state"
+            ).fetchone()[0]
+            == "5049.00"
+        )
     finally:
         ledger.close()
 
@@ -285,6 +301,228 @@ def test_ambiguous_signal_ticker_provenance_fails_before_fill_mutation(tmp_path)
                 "SELECT status FROM order_intents WHERE intent_id = 'ambiguous'"
             ).fetchone()[0]
             == "pending"
+        )
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("close_marks", "valuation_at", "message"),
+    [
+        ({}, datetime(2026, 8, 3, 22, tzinfo=UTC), "missing"),
+        (
+            {"AAPL": bar("MSFT", "105")},
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "untrusted",
+        ),
+        (
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    date(2026, 8, 4),
+                    *(Decimal("105"),) * 4,
+                    "fixture",
+                    datetime(2026, 8, 3, 22, tzinfo=UTC),
+                    False,
+                )
+            },
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "untrusted",
+        ),
+        (
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    SESSION,
+                    *(Decimal("105"),) * 4,
+                    "fixture",
+                    datetime(2026, 8, 3, 22, tzinfo=UTC),
+                    True,
+                )
+            },
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "adjusted",
+        ),
+        (
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    SESSION,
+                    Decimal("105"),
+                    Decimal("105"),
+                    Decimal("105"),
+                    Decimal("0"),
+                    "fixture",
+                    datetime(2026, 8, 3, 22, tzinfo=UTC),
+                    False,
+                )
+            },
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "invalid",
+        ),
+        (
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    SESSION,
+                    *(Decimal("105"),) * 4,
+                    "fixture",
+                    datetime(2026, 8, 3, 22, 1, tzinfo=UTC),
+                    False,
+                )
+            },
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "future",
+        ),
+        (
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    SESSION,
+                    *(Decimal("105"),) * 4,
+                    "fixture",
+                    datetime(2026, 8, 2, 21, 59, 59, tzinfo=UTC),
+                    False,
+                )
+            },
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "stale",
+        ),
+        ({"AAPL": bar("AAPL", "105")}, datetime(2026, 8, 3, 22), "timezone-aware"),
+        (
+            {
+                "AAPL": MarketBar(
+                    "AAPL",
+                    SESSION,
+                    *(Decimal("105"),) * 4,
+                    "fixture",
+                    datetime(2026, 8, 3, 22),
+                    False,
+                )
+            },
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+            "timezone-aware",
+        ),
+    ],
+)
+def test_mark_rejects_untrusted_provenance_before_any_persistence(
+    tmp_path, close_marks, valuation_at, message
+):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        order = intent("buy", "buy")
+        stage(ledger, order, signal())
+        ledger.apply_fill(order, fill("buy-fill", "buy", "buy", "100"))
+        with pytest.raises(ValueError, match=message):
+            ledger.mark(SESSION, close_marks, "epoch-1", valuation_at)
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM account_snapshots"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        ledger.close()
+
+
+def test_accounting_summary_survives_restart_and_hot_reads_do_not_scan_history(
+    tmp_path,
+):
+    path = tmp_path / "ledger.db"
+    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        opening = intent("buy", "buy")
+        stage(ledger, opening, signal())
+        ledger.apply_fill(
+            opening, fill("buy-fill", "buy", "buy", "100.10", slippage="1")
+        )
+        closing = intent("sell", "sell")
+        stage(ledger, closing, signal("sell-signal"))
+        ledger.apply_fill(closing, fill("sell-fill", "sell", "sell", "109.89"))
+        expected_summary = tuple(
+            ledger.connection.execute("SELECT * FROM accounting_state").fetchone()
+        )
+        traces: list[str] = []
+        ledger.connection.set_trace_callback(traces.append)
+        assert ledger.account_state().cash == Decimal("5097.90")
+        ledger.connection.set_trace_callback(None)
+        assert not any(
+            f"FROM {table}" in statement.upper()
+            for table in (
+                "CASH_EVENTS",
+                "FILL_COSTS",
+                "LOT_CLOSURES",
+                "ACCOUNT_SNAPSHOTS",
+            )
+            for statement in traces
+        )
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        assert (
+            tuple(
+                reopened.connection.execute("SELECT * FROM accounting_state").fetchone()
+            )
+            == expected_summary
+        )
+        assert reopened.account_state().cash == Decimal("5097.90")
+    finally:
+        reopened.close()
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DROP TABLE accounting_state")
+    finally:
+        connection.close()
+
+    migrated = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        assert (
+            tuple(
+                migrated.connection.execute("SELECT * FROM accounting_state").fetchone()
+            )
+            == expected_summary
+        )
+    finally:
+        migrated.close()
+
+
+def test_mark_hot_path_reads_summary_not_historical_accounting_detail(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        order = intent("buy", "buy")
+        stage(ledger, order, signal())
+        ledger.apply_fill(order, fill("buy-fill", "buy", "buy", "100.10", slippage="1"))
+        traces: list[str] = []
+        ledger.connection.set_trace_callback(traces.append)
+        snapshot = ledger.mark(
+            SESSION,
+            {"AAPL": bar("AAPL", "105")},
+            "epoch-1",
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        ledger.connection.set_trace_callback(None)
+        assert snapshot.cash == Decimal("3999.00")
+        assert snapshot.realized_pnl == Decimal("0")
+        assert snapshot.slippage_cost == Decimal("1")
+        assert not any(
+            f"FROM {table}" in statement.upper()
+            for table in ("CASH_EVENTS", "FILL_COSTS", "LOT_CLOSURES")
+            for statement in traces
+        )
+        assert all(
+            "WHERE SNAPSHOT_ID" in statement.upper()
+            or (
+                "WHERE COHORT_ID =" in statement.upper()
+                and "AND SESSION =" in statement.upper()
+            )
+            for statement in traces
+            if "FROM ACCOUNT_SNAPSHOTS" in statement.upper()
         )
     finally:
         ledger.close()
