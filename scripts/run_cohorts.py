@@ -10,21 +10,21 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from datetime import date
+
 # Generation isolation: when run via GenerationManager with PYTHONPATH set to a
 # worktree, the editable install's finder would still resolve `tradingagents` to
 # the main repo. Inserting the worktree at sys.path[0] before any project imports
 # ensures the frozen worktree code is loaded instead.
-import os
-import sys
 _worktree = os.environ.get("PYTHONPATH", "")
 if _worktree and _worktree != sys.path[0]:
     sys.path.insert(0, _worktree)
-
-import argparse
-import json
-import logging
-import time
-from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -91,6 +91,18 @@ def main():
         help="Comma-separated tickers to exclude (compliance). Also reads BLOCKED_TICKERS env var.",
     )
     args = parser.parse_args()
+
+    if not (args.learning or args.compare or args.reset):
+        from tradingagents.strategies.orchestration.trading_calendar import is_session
+
+        requested = args.date or date.today().isoformat()
+        try:
+            trading_session = date.fromisoformat(requested)
+        except ValueError:
+            parser.error(f"invalid ISO trading date: {requested}")
+        if not is_session(trading_session):
+            parser.error(f"{requested} is not an XNYS session")
+        exact_trading_date = trading_session.isoformat()
 
     from dotenv import load_dotenv
 
@@ -165,7 +177,7 @@ def main():
         return
 
     # Default: daily trading
-    trading_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    trading_date = exact_trading_date
     start = time.time()
     result = orchestrator.run_daily(trading_date)
     elapsed = time.time() - start

@@ -28,7 +28,14 @@ def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
     Returns ``(n_failed, n_total, sorted_failed_names)``.
     """
     failed = sorted(
-        name for name, r in results.items() if isinstance(r, dict) and r.get("error")
+        name
+        for name, result in results.items()
+        if isinstance(result, dict)
+        and (
+            result.get("error")
+            or result.get("valid") is False
+            or bool(result.get("invalid_reason"))
+        )
     )
     return len(failed), len(results), failed
 

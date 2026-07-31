@@ -18,10 +18,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import os
-import sys
+from datetime import date
 from pathlib import Path
 
 logging.basicConfig(
@@ -121,12 +119,18 @@ def main():
         print(f"  Description: {gen.description}")
 
     elif args.command == "run-daily":
-        from tradingagents.strategies.orchestration.trading_calendar import resolve_trading_date
-        trading_date = resolve_trading_date(args.date)
-        if args.date and trading_date != args.date:
-            logger.info("Resolved %s to trading day %s", args.date, trading_date)
-        elif not args.date:
-            logger.info("Using trading date: %s", trading_date)
+        from tradingagents.strategies.orchestration.trading_calendar import is_session
+
+        requested = args.date or date.today().isoformat()
+        try:
+            trading_session = date.fromisoformat(requested)
+        except ValueError:
+            parser.error(f"invalid ISO trading date: {requested}")
+        if not is_session(trading_session):
+            parser.error(f"{requested} is not an XNYS session")
+        trading_date = trading_session.isoformat()
+        if not args.date:
+            logger.info("Using XNYS session: %s", trading_date)
         results = manager.run_daily(trading_date)
         for gen_id, result in results.items():
             status = "OK" if result["success"] else "FAILED"

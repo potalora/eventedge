@@ -204,7 +204,6 @@ class TestGenerationDailyRun:
         # Mock subprocess.run at module level, but only for non-git calls
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
-        original_run = subprocess.run
         captured_calls = []
 
         def capture_run(*args, **kwargs):
@@ -247,6 +246,39 @@ class TestGenerationDailyRun:
         assert entry["date"] == "2026-03-31"
         assert entry["success"] is True
         assert "elapsed_s" in entry
+
+    def test_subprocess_result_fails_when_any_cohort_is_invalid(self, git_repo, manager):
+        """An invalid lifecycle result is a failed generation even at exit code zero."""
+        info = manager.start_generation("invalid cohort")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        process = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "horizon_30d_size_5k": {
+                        "error": False,
+                        "valid": False,
+                        "invalid_reason": "missing required mark",
+                    },
+                    "horizon_30d_size_10k": {"error": False, "valid": True},
+                },
+                indent=2,
+            ),
+            stderr="",
+        )
+        gen_data = {
+            "gen_id": info.gen_id,
+            "state_dir": info.state_dir,
+            "worktree_path": info.worktree_path,
+        }
+        with patch.object(gm_mod.subprocess, "run", return_value=process):
+            result = manager._run_cohorts_subprocess(
+                gen_data, ["--date", "2026-03-31"]
+            )
+
+        assert result["success"] is False
+        assert "horizon_30d_size_5k" in result["error"]
 
 
 # ------------------------------------------------------------------
@@ -473,8 +505,10 @@ class TestRunLogPersistence:
         from tradingagents.strategies.orchestration import generation_manager as gm
 
         mgr = gm.GenerationManager(str(tmp_path))
-        state_dir = tmp_path / "s"; state_dir.mkdir()
-        wt = tmp_path / "wt"; wt.mkdir()
+        state_dir = tmp_path / "s"
+        state_dir.mkdir()
+        wt = tmp_path / "wt"
+        wt.mkdir()
         gen_data = {"gen_id": "gen_100", "state_dir": str(state_dir), "worktree_path": str(wt)}
 
         class _Proc:
