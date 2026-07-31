@@ -92,6 +92,56 @@ def test_yfinance_rejects_terminal_session_absence(mock_download):
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_cached_raw_bars_retain_download_timestamp_and_fail_stale(mock_download):
+    columns = pd.MultiIndex.from_product(
+        [["Open", "High", "Low", "Close"], ["AAPL"]]
+    )
+    mock_download.return_value = pd.DataFrame(
+        [[100, 103, 99, 102]],
+        index=pd.DatetimeIndex(["2026-07-31"]),
+        columns=columns,
+    )
+    clock = [_AS_OF]
+    source = YFinancePriceSource(now=lambda: clock[0])
+
+    source.get_daily_bars(["AAPL"], _SESSION, _SESSION)
+    clock[0] += timedelta(hours=24, seconds=1)
+
+    with pytest.raises(BarValidationError, match="stale AAPL/2026-07-31"):
+        source.get_daily_bars(["AAPL"], _SESSION, _SESSION)
+    assert mock_download.call_count == 1
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_single_ticker_flat_ohlc_response_is_accepted(mock_download):
+    mock_download.return_value = pd.DataFrame(
+        [[100, 103, 99, 102]],
+        index=pd.DatetimeIndex(["2026-07-31"]),
+        columns=["Open", "High", "Low", "Close"],
+    )
+
+    bars = YFinancePriceSource(now=lambda: _AS_OF).get_daily_bars(
+        ["AAPL"], _SESSION, _SESSION
+    )
+
+    assert bars[("AAPL", _SESSION)].close == Decimal("102")
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_multi_ticker_flat_ohlc_response_fails_closed(mock_download):
+    mock_download.return_value = pd.DataFrame(
+        [[100, 103, 99, 102]],
+        index=pd.DatetimeIndex(["2026-07-31"]),
+        columns=["Open", "High", "Low", "Close"],
+    )
+
+    with pytest.raises(BarValidationError, match="ambiguous flat columns"):
+        YFinancePriceSource(now=lambda: _AS_OF).get_daily_bars(
+            ["AAPL", "MSFT"], _SESSION, _SESSION
+        )
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_benchmark_closes_are_total_return_adjusted(mock_download):
     columns = pd.MultiIndex.from_product([["Close"], ["SPY", "BIL"]])
     mock_download.return_value = pd.DataFrame(
@@ -107,6 +157,36 @@ def test_benchmark_closes_are_total_return_adjusted(mock_download):
     assert kwargs["auto_adjust"] is True
     assert kwargs["actions"] is False
     assert closes[("SPY", _SESSION)] == Decimal("550.0")
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_multi_symbol_flat_adjusted_close_response_fails_closed(mock_download):
+    mock_download.return_value = pd.DataFrame(
+        [[550.0]],
+        index=pd.DatetimeIndex(["2026-07-31"]),
+        columns=["Close"],
+    )
+
+    with pytest.raises(BarValidationError, match="ambiguous flat columns"):
+        YFinancePriceSource(now=lambda: _AS_OF).get_total_return_closes(
+            ["SPY", "BIL"], _SESSION, _SESSION
+        )
+
+
+@pytest.mark.parametrize("close", [0, -1])
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_nonpositive_adjusted_benchmark_close_fails_closed(mock_download, close):
+    columns = pd.MultiIndex.from_product([["Close"], ["SPY"]])
+    mock_download.return_value = pd.DataFrame(
+        [[close]],
+        index=pd.DatetimeIndex(["2026-07-31"]),
+        columns=columns,
+    )
+
+    with pytest.raises(BarValidationError, match="invalid SPY/2026-07-31 close"):
+        YFinancePriceSource(now=lambda: _AS_OF).get_total_return_closes(
+            ["SPY"], _SESSION, _SESSION
+        )
 
 
 @pytest.mark.parametrize(

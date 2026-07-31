@@ -90,7 +90,7 @@ class YFinancePriceSource:
     def __init__(self, now: Callable[[], datetime] | None = None) -> None:
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._raw_cache: OrderedDict[
-            tuple[tuple[str, ...], date, date, bool], pd.DataFrame
+            tuple[tuple[str, ...], date, date, bool], tuple[pd.DataFrame, datetime]
         ] = OrderedDict()
 
     def get_daily_bars(
@@ -102,12 +102,12 @@ class YFinancePriceSource:
     ) -> dict[tuple[str, date], MarketBar]:
         """Fetch raw daily OHLC bars through an inclusive terminal session."""
         self._validate_range(tickers, start_session, end_session_inclusive)
-        frame = self._raw_frame(
+        frame, fetched_at = self._raw_frame(
             tickers, start_session, end_session_inclusive, adjusted=adjusted
         )
-        fetched_at = self._fetched_at()
         bars: dict[tuple[str, date], MarketBar] = {}
         normalized = normalize_tickers(tickers)
+        _require_flat_frame_provenance(frame, normalized)
         for original, yf_ticker in zip(tickers, normalized):
             for timestamp in frame.index:
                 session = _session_date(timestamp)
@@ -131,7 +131,9 @@ class YFinancePriceSource:
                     fetched_at=fetched_at,
                     adjusted=adjusted,
                 )
-        validate_required_bars(bars, set(tickers), end_session_inclusive, fetched_at)
+        validate_required_bars(
+            bars, set(tickers), end_session_inclusive, self._fetched_at()
+        )
         return bars
 
     def get_corporate_actions(
@@ -139,10 +141,10 @@ class YFinancePriceSource:
     ) -> list[CorporateAction]:
         """Return verified split and cash-dividend terms for exactly *session*."""
         self._validate_range(tickers, session, session)
-        frame = self._raw_frame(tickers, session, session, adjusted=False)
-        fetched_at = self._fetched_at()
+        frame, fetched_at = self._raw_frame(tickers, session, session, adjusted=False)
         actions: list[CorporateAction] = []
         normalized = normalize_tickers(tickers)
+        _require_flat_frame_provenance(frame, normalized)
         for original, yf_ticker in zip(tickers, normalized):
             for field, action_type, target in (
                 ("Stock Splits", "split", "ratio"),
@@ -201,10 +203,11 @@ class YFinancePriceSource:
         )
         closes: dict[tuple[str, date], Decimal] = {}
         normalized = normalize_tickers(symbols)
+        _require_flat_frame_provenance(frame, normalized)
         for original, yf_ticker in zip(symbols, normalized):
             for timestamp in frame.index:
                 session = _session_date(timestamp)
-                close = _decimal_bar_value(
+                close = _decimal_positive_price(
                     _frame_value(frame, "Close", yf_ticker, original, timestamp),
                     original,
                     session,
@@ -227,7 +230,7 @@ class YFinancePriceSource:
         end_session_inclusive: date,
         *,
         adjusted: bool,
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, datetime]:
         key = (tuple(tickers), start_session, end_session_inclusive, adjusted)
         cached = self._raw_cache.get(key)
         if cached is not None:
@@ -242,10 +245,11 @@ class YFinancePriceSource:
             progress=False,
             timeout=30,
         )
-        self._raw_cache[key] = frame
+        cached = (frame, self._fetched_at())
+        self._raw_cache[key] = cached
         if len(self._raw_cache) > self._RAW_CACHE_LIMIT:
             self._raw_cache.popitem(last=False)
-        return frame
+        return cached
 
     @staticmethod
     def _validate_range(
@@ -280,11 +284,16 @@ def _frame_value(
             if key in frame.columns:
                 return frame.loc[index, key]
         return None
-    if len({yf_ticker, original_ticker}) == 1 and field in frame.columns:
-        return frame.loc[index, field]
     if field in frame.columns:
         return frame.loc[index, field]
     return None
+
+
+def _require_flat_frame_provenance(
+    frame: pd.DataFrame, normalized_tickers: list[str]
+) -> None:
+    if not isinstance(frame.columns, pd.MultiIndex) and len(set(normalized_tickers)) != 1:
+        raise BarValidationError("ambiguous flat columns for multiple requested tickers")
 
 
 def _decimal_bar_value(value: object, ticker: str, session: date, field: str) -> Decimal:
@@ -293,6 +302,15 @@ def _decimal_bar_value(value: object, ticker: str, session: date, field: str) ->
     except (InvalidOperation, ValueError) as exc:
         raise BarValidationError(f"invalid {ticker}/{session} {field}") from exc
     if not decimal_value.is_finite():
+        raise BarValidationError(f"invalid {ticker}/{session} {field}")
+    return decimal_value
+
+
+def _decimal_positive_price(
+    value: object, ticker: str, session: date, field: str
+) -> Decimal:
+    decimal_value = _decimal_bar_value(value, ticker, session, field)
+    if decimal_value <= 0:
         raise BarValidationError(f"invalid {ticker}/{session} {field}")
     return decimal_value
 
