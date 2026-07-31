@@ -18,11 +18,18 @@ from tradingagents.strategies.execution import (
     AccountSnapshot,
     AccountState,
     BenchmarkObservation,
+    CorporateAction,
     Fill,
+    LedgerEvent,
     MarketBar,
     OrderIntent,
     SignalRecord,
     stable_id,
+)
+from tradingagents.strategies.execution.cost_model import (
+    PaperCostModel,
+    quantize_cash,
+    validate_new_short_borrow_rate,
 )
 from tradingagents.strategies.execution.price_source import (
     BarValidationError,
@@ -129,6 +136,24 @@ _DDL: tuple[str, ...] = (
         lot_id TEXT NOT NULL REFERENCES lots(lot_id), applied_at TEXT NOT NULL,
         detail TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS intent_action_adjustments (
+        adjustment_id TEXT PRIMARY KEY,
+        action_id TEXT NOT NULL REFERENCES corporate_actions(action_id),
+        intent_id TEXT NOT NULL REFERENCES order_intents(intent_id),
+        original_qty INTEGER NOT NULL, adjusted_qty INTEGER NOT NULL,
+        original_stop_price TEXT, adjusted_stop_price TEXT, applied_at TEXT NOT NULL,
+        UNIQUE(action_id, intent_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS session_invalidations (
+        invalidation_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, session TEXT NOT NULL,
+        reason TEXT NOT NULL, invalidated_at TEXT NOT NULL,
+        UNIQUE(cohort_id, session, reason)
+    )""",
+    """CREATE TABLE IF NOT EXISTS ticker_quarantines (
+        quarantine_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, ticker TEXT NOT NULL,
+        reason TEXT NOT NULL, quarantined_at TEXT NOT NULL,
+        UNIQUE(cohort_id, ticker, reason)
+    )""",
     """CREATE TABLE IF NOT EXISTS cash_events (
         cash_event_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, session TEXT,
         event_type TEXT NOT NULL, amount TEXT NOT NULL, effective_at TEXT NOT NULL,
@@ -192,6 +217,8 @@ _DDL: tuple[str, ...] = (
         ON session_phases(cohort_id, session, phase)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS ux_action_lot_application
         ON lot_action_applications(action_id, lot_id)""",
+    """CREATE INDEX IF NOT EXISTS ix_lots_cohort_ticker_open
+        ON lots(cohort_id, ticker, opened_session, lot_id) WHERE open_qty > 0""",
     """CREATE UNIQUE INDEX IF NOT EXISTS ux_marks_cohort_ticker_session
         ON marks(cohort_id, ticker, session)""",
     """CREATE INDEX IF NOT EXISTS ix_lots_cohort_ticker_direction_open
@@ -537,6 +564,13 @@ class PortfolioLedger:
             }
             if len(policy_ids) != 1:
                 raise ValueError("intent signals must share one policy_id")
+            existing_row = self._connection.execute(
+                "SELECT * FROM order_intents WHERE intent_id = ?", (intent.intent_id,)
+            ).fetchone()
+            if existing_row is not None and self._matches_split_adjusted_intent(
+                intent, self._intent_from_row(existing_row)
+            ):
+                return
             inserted = self._insert_idempotent(
                 "order_intents",
                 "intent_id",
@@ -678,7 +712,250 @@ class PortfolioLedger:
         ).fetchall()
         return [self._fill_from_row(row) for row in rows]
 
-    def apply_fill(self, intent: OrderIntent, fill: Fill) -> AccountState:
+    def accrue_borrow(
+        self,
+        session: date,
+        close_marks: dict[str, MarketBar],
+        rates: dict[str, Decimal | None],
+    ) -> LedgerEvent:
+        """Accrue ACT/365 borrow once per short ticker at that session close."""
+        with self.transaction():
+            lots = self._open_lots_for_direction("short")
+            tickers = sorted({lot["ticker"] for lot in lots})
+            marks = self._validate_accrual_marks(session, close_marks, tickers)
+            events: list[LedgerEvent] = []
+            for ticker in tickers:
+                rate = rates.get(ticker)
+                flagged = rate is None
+                annual_rate = Decimal("0.30") if flagged else rate
+                if (
+                    not isinstance(annual_rate, Decimal)
+                    or not annual_rate.is_finite()
+                    or annual_rate < 0
+                ):
+                    raise ValueError(f"invalid borrow rate for existing short {ticker}")
+                quantity = sum(
+                    (
+                        Decimal(lot["open_qty"])
+                        for lot in lots
+                        if lot["ticker"] == ticker
+                    ),
+                    Decimal("0"),
+                )
+                amount = PaperCostModel().borrow_charge(
+                    quantity * marks[ticker].close, annual_rate
+                )
+                accrual_id = stable_id("borrow", self.cohort_id, session, ticker)
+                event = LedgerEvent(
+                    accrual_id,
+                    session,
+                    "borrow",
+                    amount,
+                    flagged,
+                    "existing short borrow fallback rate"
+                    if flagged
+                    else "short borrow ACT/365",
+                )
+                existing = self._connection.execute(
+                    "SELECT * FROM borrow_accruals WHERE accrual_id = ?", (accrual_id,)
+                ).fetchone()
+                expected = (
+                    accrual_id,
+                    None,
+                    self._encode(session),
+                    self._encode(amount),
+                    self._encode(annual_rate),
+                    self._encode(flagged),
+                )
+                if existing is not None:
+                    columns = (
+                        "accrual_id",
+                        "lot_id",
+                        "session",
+                        "amount",
+                        "annual_rate",
+                        "flagged",
+                    )
+                    if any(
+                        existing[column] != value
+                        for column, value in zip(columns, expected)
+                    ):
+                        raise LedgerConflictError(
+                            f"conflicting borrow accrual {accrual_id}"
+                        )
+                    events.append(event)
+                    continue
+                self._connection.execute(
+                    "INSERT INTO borrow_accruals VALUES (?, ?, ?, ?, ?, ?)", expected
+                )
+                self._insert_named_cash_event(
+                    stable_id("cash", self.cohort_id, "borrow", accrual_id),
+                    session,
+                    "borrow",
+                    -amount,
+                    marks[ticker].fetched_at,
+                    f"borrow {ticker} {accrual_id}",
+                )
+                self._update_accounting_summary(
+                    cash_delta=-amount, borrow_cost_delta=amount
+                )
+                events.append(event)
+        if not events:
+            return LedgerEvent(
+                stable_id("borrow", self.cohort_id, session, "none"),
+                session,
+                "borrow",
+                Decimal("0.0000"),
+                False,
+                "no open short lots",
+            )
+        if len(events) == 1:
+            return events[0]
+        return LedgerEvent(
+            stable_id("borrow_batch", self.cohort_id, session),
+            session,
+            "borrow",
+            sum((event.amount for event in events), Decimal("0.0000")),
+            any(event.flagged for event in events),
+            "per-ticker short borrow ACT/365",
+        )
+
+    def accrue_financing(self, session: date, annual_rate: Decimal) -> LedgerEvent:
+        """Accrue debit-cash financing once; positive idle cash has a zero yield."""
+        if (
+            not isinstance(annual_rate, Decimal)
+            or not annual_rate.is_finite()
+            or annual_rate < 0
+        ):
+            raise ValueError("annual financing rate must be a non-negative Decimal")
+        accrual_id = stable_id("financing", self.cohort_id, session)
+        with self.transaction():
+            debit_balance = max(-self._accounting_summary()["cash"], Decimal("0"))
+            amount = PaperCostModel().financing_charge(debit_balance, annual_rate)
+            event = LedgerEvent(
+                accrual_id,
+                session,
+                "financing",
+                amount,
+                False,
+                "debit financing ACT/365",
+            )
+            existing = self._connection.execute(
+                "SELECT * FROM financing_accruals WHERE accrual_id = ?", (accrual_id,)
+            ).fetchone()
+            expected = (
+                accrual_id,
+                self._encode(session),
+                self._encode(amount),
+                self._encode(annual_rate),
+                0,
+            )
+            if existing is not None:
+                columns = ("accrual_id", "session", "amount", "annual_rate", "flagged")
+                if any(
+                    existing[column] != value
+                    for column, value in zip(columns, expected)
+                ):
+                    raise LedgerConflictError(
+                        f"conflicting financing accrual {accrual_id}"
+                    )
+                return event
+            self._connection.execute(
+                "INSERT INTO financing_accruals VALUES (?, ?, ?, ?, ?)", expected
+            )
+            self._insert_named_cash_event(
+                stable_id("cash", self.cohort_id, "financing", accrual_id),
+                session,
+                "financing",
+                -amount,
+                datetime.combine(session, datetime.min.time()),
+                f"financing {accrual_id}",
+            )
+            self._update_accounting_summary(
+                cash_delta=-amount, financing_cost_delta=amount
+            )
+            return event
+
+    def apply_corporate_actions(
+        self, session: date, actions: list[CorporateAction]
+    ) -> list[LedgerEvent]:
+        """Apply verified actions once, or durably quarantine uncertain inputs."""
+        events: list[LedgerEvent] = []
+        with self.transaction():
+            for action in sorted(actions, key=lambda item: item.action_id):
+                existing = self._connection.execute(
+                    "SELECT * FROM corporate_actions WHERE action_id = ?",
+                    (action.action_id,),
+                ).fetchone()
+                if existing is not None:
+                    if not self._same_corporate_action(existing, action):
+                        events.append(
+                            self._quarantine_action(
+                                session, action, "conflicting corporate action identity"
+                            )
+                        )
+                    continue
+                self._connection.execute(
+                    "INSERT INTO corporate_actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    self._corporate_action_values(action),
+                )
+                if action.session != session:
+                    events.append(
+                        self._quarantine_action(
+                            session, action, "corporate action session mismatch"
+                        )
+                    )
+                elif not action.verified:
+                    events.append(
+                        self._quarantine_action(
+                            session, action, "unverified corporate action"
+                        )
+                    )
+                elif action.action_type == "split":
+                    invalid_reason = self._invalid_split_reason(action)
+                    if invalid_reason is not None:
+                        events.append(
+                            self._quarantine_action(session, action, invalid_reason)
+                        )
+                    else:
+                        events.extend(self._apply_split(action))
+                elif action.action_type == "cash_dividend":
+                    if (
+                        action.cash_per_share is None
+                        or not action.cash_per_share.is_finite()
+                        or action.cash_per_share < 0
+                    ):
+                        events.append(
+                            self._quarantine_action(
+                                session, action, "invalid cash dividend"
+                            )
+                        )
+                    else:
+                        events.extend(self._apply_dividend(action))
+                else:  # defensive against malformed direct construction
+                    events.append(
+                        self._quarantine_action(
+                            session, action, "unsupported corporate action"
+                        )
+                    )
+        return events
+
+    def invalidate_session(self, session: date, reason: str) -> None:
+        with self.transaction():
+            self._invalidate_session(session, reason)
+
+    def quarantine_ticker(self, ticker: str, reason: str) -> None:
+        with self.transaction():
+            self._quarantine_ticker(ticker, reason)
+
+    def apply_fill(
+        self,
+        intent: OrderIntent,
+        fill: Fill,
+        *,
+        borrow_rate: Decimal | None = None,
+        borrow_cost_reject_above: Decimal | None = None,
+    ) -> AccountState:
         """Apply one fully validated fill and every linked mutation atomically."""
         with self.transaction():
             stored_row = self._connection.execute(
@@ -690,9 +967,13 @@ class PortfolioLedger:
             existing_fill = self._connection.execute(
                 "SELECT * FROM fills WHERE fill_id = ?", (fill.fill_id,)
             ).fetchone()
-            if intent != stored_intent and not (
-                existing_fill is not None
-                and self._same_intent_except_status(intent, stored_intent)
+            if (
+                intent != stored_intent
+                and not (
+                    existing_fill is not None
+                    and self._same_intent_except_status(intent, stored_intent)
+                )
+                and not self._matches_split_adjusted_intent(intent, stored_intent)
             ):
                 raise LedgerConflictError(
                     f"conflicting order_intents identity {intent.intent_id}"
@@ -713,6 +994,13 @@ class PortfolioLedger:
                 if stored_intent.status != "pending":
                     raise ValueError(
                         f"order intent {stored_intent.intent_id} is not pending"
+                    )
+                if (
+                    stored_intent.side == "short"
+                    and borrow_cost_reject_above is not None
+                ):
+                    validate_new_short_borrow_rate(
+                        borrow_rate, borrow_cost_reject_above
                     )
                 duplicate_session = self._connection.execute(
                     "SELECT fill_id FROM fills WHERE intent_id = ? AND session = ?",
@@ -897,6 +1185,63 @@ class PortfolioLedger:
             stored.external_order_id,
         )
 
+    def _matches_split_adjusted_intent(
+        self, supplied: OrderIntent, stored: OrderIntent
+    ) -> bool:
+        """Accept an idempotent replay of a pre-split exit intent, not a rewrite.
+
+        Intent IDs intentionally remain tied to their pre-split signal/order
+        payload.  The immutable adjustment rows provide the deterministic bridge
+        to the current executable quantity and stop; a different replay still
+        fails closed.
+        """
+        if (
+            supplied.intent_id,
+            supplied.signal_ids,
+            supplied.cohort_id,
+            supplied.side,
+            supplied.created_at,
+            supplied.eligible_session,
+            supplied.price_rule,
+            supplied.external_order_id,
+        ) != (
+            stored.intent_id,
+            stored.signal_ids,
+            stored.cohort_id,
+            stored.side,
+            stored.created_at,
+            stored.eligible_session,
+            stored.price_rule,
+            stored.external_order_id,
+        ):
+            return False
+        rows = self._connection.execute(
+            """SELECT * FROM intent_action_adjustments WHERE intent_id = ?
+               ORDER BY applied_at, adjustment_id""",
+            (stored.intent_id,),
+        ).fetchall()
+        if not rows:
+            return False
+        quantity = supplied.requested_qty
+        stop = supplied.stop_price
+        for row in rows:
+            if quantity != int(row["original_qty"]):
+                return False
+            old_stop = (
+                _decimal(row["original_stop_price"])
+                if row["original_stop_price"] is not None
+                else None
+            )
+            if stop != old_stop:
+                return False
+            quantity = int(row["adjusted_qty"])
+            stop = (
+                _decimal(row["adjusted_stop_price"])
+                if row["adjusted_stop_price"] is not None
+                else None
+            )
+        return quantity == stored.requested_qty and stop == stored.stop_price
+
     def _insert_fill(self, fill: Fill) -> None:
         self._connection.execute(
             "INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1002,16 +1347,289 @@ class PortfolioLedger:
         }[side]
 
     def _insert_cash_event(self, fill: Fill, amount: Decimal) -> None:
+        self._insert_named_cash_event(
+            stable_id("cash", self.cohort_id, "fill", fill.fill_id),
+            fill.session,
+            "fill",
+            amount,
+            fill.effective_at,
+            f"fill {fill.fill_id}",
+        )
+
+    def _insert_named_cash_event(
+        self,
+        cash_event_id: str,
+        session: date,
+        event_type: str,
+        amount: Decimal,
+        effective_at: datetime,
+        detail: str,
+    ) -> None:
+        """Write a caller-owned immutable cash row inside its active transaction."""
         self._connection.execute(
             "INSERT INTO cash_events VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                stable_id("cash", self.cohort_id, "fill", fill.fill_id),
+                cash_event_id,
                 self.cohort_id,
-                self._encode(fill.session),
-                "fill",
+                self._encode(session),
+                event_type,
                 self._encode(amount),
-                self._encode(fill.effective_at),
-                f"fill {fill.fill_id}",
+                self._encode(effective_at),
+                detail,
+            ),
+        )
+
+    def _open_lots_for_direction(self, direction: str) -> list[sqlite3.Row]:
+        if direction not in {"long", "short"}:
+            raise ValueError("unsupported lot direction")
+        return self._connection.execute(
+            """SELECT * FROM lots WHERE cohort_id = ? AND direction = ? AND open_qty > 0
+               ORDER BY ticker, opened_session, lot_id""",
+            (self.cohort_id, direction),
+        ).fetchall()
+
+    def _validate_accrual_marks(
+        self, session: date, close_marks: dict[str, MarketBar], tickers: list[str]
+    ) -> dict[str, MarketBar]:
+        if not tickers:
+            return {}
+        validated: dict[str, MarketBar] = {}
+        for ticker in tickers:
+            bar = close_marks.get(ticker)
+            if bar is None or bar.ticker != ticker or bar.session != session:
+                raise MissingMarkError(f"missing mark for {ticker}/{session}")
+            self._require_timezone_aware(bar.fetched_at, "bar.fetched_at")
+            validated[ticker] = bar
+        # The exact mark's timestamp is the only available cutoff in this
+        # narrow accrual API; it still enforces rawness and OHLC coherence.
+        valuation_at = max(bar.fetched_at for bar in validated.values())
+        try:
+            validate_required_bars(
+                {(ticker, session): bar for ticker, bar in validated.items()},
+                set(tickers),
+                session,
+                valuation_at,
+            )
+        except BarValidationError as error:
+            raise MissingMarkError(str(error)) from error
+        return validated
+
+    def _corporate_action_values(self, action: CorporateAction) -> tuple[object, ...]:
+        return (
+            action.action_id,
+            action.ticker,
+            self._encode(action.session),
+            action.action_type,
+            self._encode(action.ratio) if action.ratio is not None else None,
+            self._encode(action.cash_per_share)
+            if action.cash_per_share is not None
+            else None,
+            action.source,
+            self._encode(action.fetched_at),
+            self._encode(action.verified),
+        )
+
+    def _same_corporate_action(self, row: sqlite3.Row, action: CorporateAction) -> bool:
+        columns = (
+            "action_id",
+            "ticker",
+            "session",
+            "action_type",
+            "ratio",
+            "cash_per_share",
+            "source",
+            "fetched_at",
+            "verified",
+        )
+        return all(
+            row[column] == value
+            for column, value in zip(columns, self._corporate_action_values(action))
+        )
+
+    def _invalid_split_reason(self, action: CorporateAction) -> str | None:
+        if action.ratio is None or not action.ratio.is_finite() or action.ratio <= 0:
+            return "invalid split ratio"
+        lots = self._connection.execute(
+            "SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND open_qty > 0",
+            (self.cohort_id, action.ticker),
+        ).fetchall()
+        pending = self._pending_exit_rows_for_ticker(action.ticker)
+        for row in [*lots, *pending]:
+            quantity = int(
+                row["open_qty"] if "open_qty" in row.keys() else row["requested_qty"]
+            )
+            if (
+                Decimal(quantity) * action.ratio
+                != (Decimal(quantity) * action.ratio).to_integral_value()
+            ):
+                return "split produces fractional share quantity"
+        return None
+
+    def _apply_split(self, action: CorporateAction) -> list[LedgerEvent]:
+        assert action.ratio is not None
+        lots = self._connection.execute(
+            """SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND open_qty > 0
+               ORDER BY opened_session, lot_id""",
+            (self.cohort_id, action.ticker),
+        ).fetchall()
+        for lot in lots:
+            original_qty = int(lot["original_qty"])
+            open_qty = int(lot["open_qty"])
+            self._connection.execute(
+                """UPDATE lots SET original_qty = ?, open_qty = ?, entry_price = ?,
+                   margin_reserved = ? WHERE lot_id = ?""",
+                (
+                    int(Decimal(original_qty) * action.ratio),
+                    int(Decimal(open_qty) * action.ratio),
+                    self._encode(_decimal(lot["entry_price"]) / action.ratio),
+                    # Margin is total reserved margin, so preserving economic
+                    # exposure requires retaining (and explicitly rewriting) it.
+                    self._encode(_decimal(lot["margin_reserved"])),
+                    lot["lot_id"],
+                ),
+            )
+            self._connection.execute(
+                "INSERT INTO lot_action_applications VALUES (?, ?, ?, ?, ?)",
+                (
+                    stable_id("lot_action", action.action_id, lot["lot_id"]),
+                    action.action_id,
+                    lot["lot_id"],
+                    self._encode(action.fetched_at),
+                    f"split ratio {format(action.ratio, 'f')}",
+                ),
+            )
+        for row in self._pending_exit_rows_for_ticker(action.ticker):
+            old_qty = int(row["requested_qty"])
+            new_qty = int(Decimal(old_qty) * action.ratio)
+            old_stop = (
+                _decimal(row["stop_price"]) if row["stop_price"] is not None else None
+            )
+            new_stop = old_stop / action.ratio if old_stop is not None else None
+            self._connection.execute(
+                "UPDATE order_intents SET requested_qty = ?, stop_price = ? WHERE intent_id = ?",
+                (
+                    new_qty,
+                    self._encode(new_stop) if new_stop is not None else None,
+                    row["intent_id"],
+                ),
+            )
+            self._connection.execute(
+                "INSERT INTO intent_action_adjustments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    stable_id("intent_action", action.action_id, row["intent_id"]),
+                    action.action_id,
+                    row["intent_id"],
+                    old_qty,
+                    new_qty,
+                    self._encode(old_stop) if old_stop is not None else None,
+                    self._encode(new_stop) if new_stop is not None else None,
+                    self._encode(action.fetched_at),
+                ),
+            )
+        return [
+            LedgerEvent(
+                stable_id("split", self.cohort_id, action.action_id),
+                action.session,
+                "split",
+                Decimal("0"),
+                False,
+                f"applied split {action.action_id}",
+            )
+        ]
+
+    def _apply_dividend(self, action: CorporateAction) -> list[LedgerEvent]:
+        assert action.cash_per_share is not None
+        lots = self._connection.execute(
+            """SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND open_qty > 0
+               ORDER BY direction, opened_session, lot_id""",
+            (self.cohort_id, action.ticker),
+        ).fetchall()
+        events: list[LedgerEvent] = []
+        for lot in lots:
+            gross = quantize_cash(Decimal(lot["open_qty"]) * action.cash_per_share)
+            amount = gross if lot["direction"] == "long" else -gross
+            event_id = stable_id("dividend", action.action_id, lot["lot_id"])
+            self._connection.execute(
+                "INSERT INTO dividend_events VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    action.action_id,
+                    lot["lot_id"],
+                    self._encode(action.session),
+                    self._encode(amount),
+                    lot["direction"],
+                ),
+            )
+            self._insert_named_cash_event(
+                stable_id("cash", self.cohort_id, "dividend", event_id),
+                action.session,
+                "dividend",
+                amount,
+                action.fetched_at,
+                f"dividend {action.action_id} {lot['lot_id']}",
+            )
+            self._update_accounting_summary(
+                cash_delta=amount, dividend_cash_delta=amount
+            )
+            events.append(
+                LedgerEvent(
+                    event_id,
+                    action.session,
+                    "dividend",
+                    amount,
+                    False,
+                    lot["direction"],
+                )
+            )
+        return events
+
+    def _pending_exit_rows_for_ticker(self, ticker: str) -> list[sqlite3.Row]:
+        rows = self._connection.execute(
+            """SELECT * FROM order_intents WHERE cohort_id = ? AND status = 'pending'
+               AND side IN ('sell', 'cover') ORDER BY intent_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        return [
+            row for row in rows if self._ticker_for_intent(row["intent_id"]) == ticker
+        ]
+
+    def _quarantine_action(
+        self, session: date, action: CorporateAction, reason: str
+    ) -> LedgerEvent:
+        self._invalidate_session(session, reason)
+        self._quarantine_ticker(action.ticker, reason)
+        return LedgerEvent(
+            stable_id(
+                "action_invalid", self.cohort_id, session, action.action_id, reason
+            ),
+            session,
+            "corporate_action_invalid",
+            Decimal("0"),
+            True,
+            reason,
+        )
+
+    def _invalidate_session(self, session: date, reason: str) -> None:
+        self._connection.execute(
+            "INSERT OR IGNORE INTO session_invalidations VALUES (?, ?, ?, ?, ?)",
+            (
+                stable_id("session_invalid", self.cohort_id, session, reason),
+                self.cohort_id,
+                self._encode(session),
+                reason,
+                self._encode(datetime.combine(session, datetime.min.time())),
+            ),
+        )
+
+    def _quarantine_ticker(self, ticker: str, reason: str) -> None:
+        self._connection.execute(
+            "INSERT OR IGNORE INTO ticker_quarantines VALUES (?, ?, ?, ?, ?)",
+            (
+                stable_id("ticker_quarantine", self.cohort_id, ticker, reason),
+                self.cohort_id,
+                ticker,
+                reason,
+                self._encode(datetime.utcnow()),
             ),
         )
 

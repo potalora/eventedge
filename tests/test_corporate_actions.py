@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+from tradingagents.strategies.execution import (
+    CorporateAction,
+    Fill,
+    OrderIntent,
+    SignalRecord,
+)
+from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+
+UTC = timezone.utc
+SESSION = date(2026, 8, 3)
+COHORT = "horizon_30d_size_5k"
+
+
+def _signal(
+    signal_id: str, ticker: str = "AAPL", direction: str = "long"
+) -> SignalRecord:
+    now = datetime(2026, 8, 1, 22, tzinfo=UTC)
+    return SignalRecord(
+        signal_id,
+        "epoch",
+        "policy",
+        signal_id,
+        "test",
+        ticker,
+        direction,
+        now,
+        now,
+        date(2026, 8, 1),
+        Decimal("100"),
+        now,
+        signal_id,
+    )
+
+
+def _intent(
+    intent_id: str, signal_id: str, side: str, qty: int = 10, stop: str | None = None
+) -> OrderIntent:
+    return OrderIntent(
+        intent_id,
+        (signal_id,),
+        COHORT,
+        side,
+        qty,
+        datetime(2026, 8, 1, 22, tzinfo=UTC),
+        SESSION,
+        "resting_stop" if stop else "next_session_open",
+        "pending",
+        Decimal(stop) if stop else None,
+        None,
+    )
+
+
+def _fill(intent: OrderIntent, price: str = "100") -> Fill:
+    at = datetime(2026, 8, 3, 22, tzinfo=UTC)
+    return Fill(
+        f"fill-{intent.intent_id}",
+        intent.intent_id,
+        intent.side,
+        SESSION,
+        at,
+        at,
+        Decimal(price),
+        Decimal(price),
+        intent.requested_qty,
+        Decimal("0"),
+        Decimal("0"),
+        Decimal("0"),
+    )
+
+
+def _action(
+    action_id: str,
+    action_type: str,
+    *,
+    verified: bool = True,
+    ratio: str | None = None,
+    cash: str | None = None,
+) -> CorporateAction:
+    return CorporateAction(
+        action_id,
+        "AAPL",
+        SESSION,
+        action_type,
+        Decimal(ratio) if ratio else None,
+        Decimal(cash) if cash else None,
+        "fixture",
+        datetime(2026, 8, 3, 22, tzinfo=UTC),
+        verified,
+    )
+
+
+def _opened_long(ledger: PortfolioLedger) -> tuple[OrderIntent, OrderIntent]:
+    entry = _intent("entry", "entry-signal", "buy")
+    exit_ = _intent("exit", "exit-signal", "sell", stop="95")
+    ledger.record_signal(_signal("entry-signal"))
+    ledger.record_signal(_signal("exit-signal"))
+    ledger.stage_intent(entry)
+    ledger.apply_fill(entry, _fill(entry))
+    ledger.stage_intent(exit_)
+    return entry, exit_
+
+
+def test_split_adjusts_lot_and_resting_exit_without_changing_total_basis_and_replays_deterministically(
+    tmp_path,
+):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        _, exit_ = _opened_long(ledger)
+        events = ledger.apply_corporate_actions(
+            SESSION, [_action("split-1", "split", ratio="2")]
+        )
+        lot = ledger.connection.execute(
+            "SELECT original_qty, open_qty, entry_price, margin_reserved FROM lots"
+        ).fetchone()
+        pending = ledger.pending_intents(SESSION)
+        assert tuple(lot) == (20, 20, "50", "0")
+        assert pending == [
+            OrderIntent(
+                **{**exit_.__dict__, "requested_qty": 20, "stop_price": Decimal("47.5")}
+            )
+        ]
+        assert events[0].amount == Decimal("0")
+        assert (
+            ledger.apply_corporate_actions(
+                SESSION, [_action("split-1", "split", ratio="2")]
+            )
+            == []
+        )
+        ledger.stage_intent(exit_)
+        assert ledger.pending_intents(SESSION)[0].requested_qty == 20
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM lot_action_applications"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        ledger.close()
+
+
+def test_cash_dividend_credits_long_debits_short_and_duplicate_is_noop(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        _opened_long(ledger)
+        short = _intent("short", "short-signal", "short")
+        ledger.record_signal(_signal("short-signal", direction="short"))
+        ledger.stage_intent(short)
+        ledger.apply_fill(short, _fill(short))
+        events = ledger.apply_corporate_actions(
+            SESSION, [_action("dividend-1", "cash_dividend", cash="1.25")]
+        )
+        assert [event.amount for event in events] == [
+            Decimal("12.5000"),
+            Decimal("-12.5000"),
+        ]
+        assert ledger.account_state().cash == Decimal("5000.0000")
+        assert (
+            ledger.apply_corporate_actions(
+                SESSION, [_action("dividend-1", "cash_dividend", cash="1.25")]
+            )
+            == []
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM dividend_events"
+            ).fetchone()[0]
+            == 2
+        )
+    finally:
+        ledger.close()
+
+
+def test_unverified_or_conflicting_action_durably_quarantines_without_mutating_lot(
+    tmp_path,
+):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        _opened_long(ledger)
+        before = tuple(
+            ledger.connection.execute(
+                "SELECT open_qty, entry_price FROM lots"
+            ).fetchone()
+        )
+        events = ledger.apply_corporate_actions(
+            SESSION, [_action("unverified", "split", verified=False, ratio="2")]
+        )
+        assert events[0].flagged is True
+        assert (
+            tuple(
+                ledger.connection.execute(
+                    "SELECT open_qty, entry_price FROM lots"
+                ).fetchone()
+            )
+            == before
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM session_invalidations"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM ticker_quarantines"
+            ).fetchone()[0]
+            == 1
+        )
+
+        ledger.apply_corporate_actions(
+            SESSION, [_action("conflict", "split", ratio="2")]
+        )
+        ledger.apply_corporate_actions(
+            SESSION, [_action("conflict", "split", ratio="3")]
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM session_invalidations"
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            ledger.connection.execute("SELECT open_qty FROM lots").fetchone()[0] == 20
+        )
+    finally:
+        ledger.close()
