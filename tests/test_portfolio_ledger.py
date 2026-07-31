@@ -10,12 +10,14 @@ from tradingagents.strategies.execution import (
     AccountSnapshot,
     BenchmarkObservation,
     Fill,
+    MarketBar,
     OrderIntent,
     SignalRecord,
     stable_id,
 )
 from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
+    MissingMarkError,
     PortfolioLedger,
 )
 from tradingagents.strategies.state import portfolio_ledger
@@ -90,6 +92,47 @@ def _intent(
         status="pending",
         stop_price=None,
         external_order_id=None,
+    )
+
+
+def _fill(
+    *,
+    fill_id: str = "fill-1",
+    intent_id: str = "intent-1",
+    side: str = "buy",
+    session: date = date(2026, 8, 3),
+    fill_price: Decimal = Decimal("100.10"),
+    quantity: int = 10,
+    slippage: Decimal = Decimal("1.00"),
+) -> Fill:
+    timestamp = datetime(2026, 8, 3, 22, tzinfo=UTC)
+    return Fill(
+        fill_id,
+        intent_id,
+        side,
+        session,
+        timestamp,
+        timestamp,
+        Decimal("100.00"),
+        fill_price,
+        quantity,
+        slippage,
+        Decimal("0"),
+        Decimal("0"),
+    )
+
+
+def _bar(ticker: str, session: date, close: Decimal) -> MarketBar:
+    return MarketBar(
+        ticker=ticker,
+        session=session,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        source="fixture",
+        fetched_at=datetime(2026, 8, 3, 22, tzinfo=UTC),
+        adjusted=False,
     )
 
 
@@ -461,5 +504,95 @@ def test_typed_ordered_reads_filter_sqlite_rows_by_session_and_epoch(tmp_path):
                 Decimal("0"),
             )
         ]
+    finally:
+        ledger.close()
+
+
+def test_fill_replay_after_restart_is_a_true_noop_and_divergence_conflicts(tmp_path):
+    path = tmp_path / "portfolio.db"
+    intent = _intent()
+    fill = _fill()
+    ledger = PortfolioLedger(path, intent.cohort_id, Decimal("5000"))
+    try:
+        ledger.record_signal(_signal())
+        ledger.stage_intent(intent)
+        first_state = ledger.apply_fill(intent, fill)
+        first_counts = {
+            table: ledger.connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in (
+                "fills",
+                "fill_costs",
+                "lots",
+                "cash_events",
+                "order_status_transitions",
+            )
+        }
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger(path, intent.cohort_id, Decimal("5000"))
+    try:
+        assert reopened.apply_fill(intent, fill) == first_state
+        assert {
+            table: reopened.connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in first_counts
+        } == first_counts
+        with pytest.raises(LedgerConflictError, match="fills identity fill-1"):
+            reopened.apply_fill(
+                intent, Fill(**{**fill.__dict__, "fill_price": Decimal("100.11")})
+            )
+    finally:
+        reopened.close()
+
+
+def test_mark_requires_every_open_lot_to_have_exact_raw_session_bar(tmp_path):
+    ledger = PortfolioLedger(
+        tmp_path / "portfolio.db", "horizon_30d_size_5k", Decimal("5000")
+    )
+    intent = _intent()
+    try:
+        ledger.record_signal(_signal())
+        ledger.stage_intent(intent)
+        ledger.apply_fill(intent, _fill())
+        session = date(2026, 8, 3)
+        with pytest.raises(MissingMarkError, match="AAPL"):
+            ledger.mark(session, {}, "epoch-1", datetime(2026, 8, 3, 22, tzinfo=UTC))
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM account_snapshots"
+            ).fetchone()[0]
+            == 0
+        )
+
+        snapshot = ledger.mark(
+            session,
+            {"AAPL": _bar("AAPL", session, Decimal("105.00"))},
+            "epoch-1",
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        assert snapshot.net_equity == Decimal("5049.00")
+        assert (
+            ledger.mark(
+                session,
+                {"AAPL": _bar("AAPL", session, Decimal("105.00"))},
+                "epoch-1",
+                datetime(2026, 8, 3, 22, tzinfo=UTC),
+            )
+            == snapshot
+        )
+        with pytest.raises(LedgerConflictError):
+            ledger.mark(
+                session,
+                {"AAPL": _bar("AAPL", session, Decimal("104.00"))},
+                "epoch-1",
+                datetime(2026, 8, 3, 22, tzinfo=UTC),
+            )
     finally:
         ledger.close()

@@ -1,7 +1,8 @@
 """Transactional, per-cohort SQLite persistence for the paper ledger.
 
-This module intentionally owns only persistence and typed reads.  Economic
-mutations (fills, marks, and accruals) are added by later P0 tasks.
+All economic mutations in this module are durable SQLite transactions.  The
+ledger deliberately derives instruments from persisted signal provenance: an
+order or fill never carries an independently asserted ticker.
 """
 
 from __future__ import annotations
@@ -15,8 +16,10 @@ from typing import Iterator
 
 from tradingagents.strategies.execution import (
     AccountSnapshot,
+    AccountState,
     BenchmarkObservation,
     Fill,
+    MarketBar,
     OrderIntent,
     SignalRecord,
     stable_id,
@@ -29,6 +32,10 @@ _OPENING_AT = datetime(1970, 1, 1)
 
 class LedgerConflictError(ValueError):
     """A stable ledger identity was reused with different content."""
+
+
+class MissingMarkError(ValueError):
+    """An authoritative valuation was attempted without every required mark."""
 
 
 # All schema statements are complete so initialization is deterministic and
@@ -174,6 +181,13 @@ _DDL: tuple[str, ...] = (
         ON session_phases(cohort_id, session, phase)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS ux_action_lot_application
         ON lot_action_applications(action_id, lot_id)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS ux_marks_cohort_ticker_session
+        ON marks(cohort_id, ticker, session)""",
+    """CREATE INDEX IF NOT EXISTS ix_lots_cohort_ticker_direction_open
+        ON lots(cohort_id, ticker, direction, opened_session, lot_id)
+        WHERE open_qty > 0""",
+    """CREATE INDEX IF NOT EXISTS ix_cash_events_cohort_event
+        ON cash_events(cohort_id, event_type, session)""",
 )
 
 _IDENTITY_COLUMNS = {
@@ -559,6 +573,612 @@ class PortfolioLedger:
             values,
         ).fetchall()
         return [self._fill_from_row(row) for row in rows]
+
+    def apply_fill(self, intent: OrderIntent, fill: Fill) -> AccountState:
+        """Apply one fully validated fill and every linked mutation atomically."""
+        with self.transaction():
+            stored_row = self._connection.execute(
+                "SELECT * FROM order_intents WHERE intent_id = ?", (intent.intent_id,)
+            ).fetchone()
+            if stored_row is None:
+                raise ValueError(f"unknown order intent {intent.intent_id}")
+            stored_intent = self._intent_from_row(stored_row)
+            existing_fill = self._connection.execute(
+                "SELECT * FROM fills WHERE fill_id = ?", (fill.fill_id,)
+            ).fetchone()
+            if intent != stored_intent and not (
+                existing_fill is not None
+                and self._same_intent_except_status(intent, stored_intent)
+            ):
+                raise LedgerConflictError(
+                    f"conflicting order_intents identity {intent.intent_id}"
+                )
+            self._validate_fill(stored_intent, fill)
+            if existing_fill is not None:
+                self._require_identical_fill(existing_fill, fill)
+                stored_status = self._connection.execute(
+                    "SELECT status FROM order_intents WHERE intent_id = ?",
+                    (fill.intent_id,),
+                ).fetchone()
+                if stored_status is None or stored_status["status"] != "filled":
+                    raise LedgerConflictError(
+                        f"fill replay {fill.fill_id} has incomplete intent state"
+                    )
+            else:
+                ticker = self._ticker_for_intent(stored_intent.intent_id)
+                if stored_intent.status != "pending":
+                    raise ValueError(
+                        f"order intent {stored_intent.intent_id} is not pending"
+                    )
+                duplicate_session = self._connection.execute(
+                    "SELECT fill_id FROM fills WHERE intent_id = ? AND session = ?",
+                    (stored_intent.intent_id, self._encode(fill.session)),
+                ).fetchone()
+                if duplicate_session is not None:
+                    raise LedgerConflictError(
+                        "conflicting fills for intent/session "
+                        f"{stored_intent.intent_id}/{fill.session}"
+                    )
+                self._insert_fill(fill)
+                self._insert_fill_costs(fill)
+                if stored_intent.side in {"buy", "short"}:
+                    self._insert_open_lot(stored_intent, fill, ticker)
+                else:
+                    self._close_lots(stored_intent, fill, ticker)
+                self._insert_cash_event(
+                    fill,
+                    self._cash_delta(stored_intent.side, fill),
+                )
+                self._connection.execute(
+                    "UPDATE order_intents SET status = 'filled' WHERE intent_id = ?",
+                    (stored_intent.intent_id,),
+                )
+                self._connection.execute(
+                    """INSERT INTO order_status_transitions
+                    (transition_id, intent_id, status, occurred_at, reason)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        stable_id(
+                            "order_status", stored_intent.intent_id, fill.fill_id
+                        ),
+                        stored_intent.intent_id,
+                        "filled",
+                        self._encode(fill.processed_at),
+                        "authoritative fill applied",
+                    ),
+                )
+        return self.account_state()
+
+    def mark(
+        self,
+        session: date,
+        close_marks: dict[str, MarketBar],
+        epoch_id: str,
+        valuation_at: datetime,
+    ) -> AccountSnapshot:
+        """Persist exact raw marks and an immutable, reconciled snapshot."""
+        with self.transaction():
+            open_lots = self._open_lots()
+            marks_by_ticker = self._validate_marks(session, close_marks, open_lots)
+            for ticker, bar in marks_by_ticker.items():
+                self._insert_mark(ticker, bar)
+            snapshot = self._build_snapshot(
+                session, epoch_id, valuation_at, open_lots, marks_by_ticker
+            )
+            existing = self._connection.execute(
+                "SELECT * FROM account_snapshots WHERE snapshot_id = ?",
+                (snapshot.snapshot_id,),
+            ).fetchone()
+            if existing is not None:
+                self._require_identical_snapshot(existing, snapshot)
+            else:
+                occupied = self._connection.execute(
+                    "SELECT snapshot_id FROM account_snapshots WHERE cohort_id = ? AND session = ?",
+                    (self.cohort_id, self._encode(session)),
+                ).fetchone()
+                if occupied is not None:
+                    raise LedgerConflictError(
+                        f"conflicting account_snapshots session {self.cohort_id}/{session}"
+                    )
+                self._connection.execute(
+                    """INSERT INTO account_snapshots VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )""",
+                    self._snapshot_values(snapshot),
+                )
+        return snapshot
+
+    def account_state(self) -> AccountState:
+        """Return bounded cohort state, using a lot's entry until its first mark."""
+        open_lots = self._open_lots()
+        cash = self._cash_balance()
+        long_value = Decimal("0")
+        short_liability = Decimal("0")
+        margin_used = Decimal("0")
+        for lot in open_lots:
+            mark = self._latest_mark_for_lot(lot)
+            value = _decimal(lot["open_qty"]) * mark
+            if lot["direction"] == "long":
+                long_value += value
+            else:
+                short_liability += value
+                margin_used += _decimal(lot["margin_reserved"])
+        net_equity = cash + long_value - short_liability
+        previous_high_water = self._previous_high_water_mark()
+        return AccountState(
+            self.cohort_id,
+            cash,
+            long_value,
+            short_liability,
+            margin_used,
+            cash - margin_used,
+            net_equity,
+            max(previous_high_water, net_equity),
+        )
+
+    def _validate_fill(self, intent: OrderIntent, fill: Fill) -> None:
+        if fill.intent_id != intent.intent_id:
+            raise ValueError("fill intent_id does not match order intent")
+        if fill.session != intent.eligible_session:
+            raise ValueError("fill session does not match eligible session")
+        if fill.side != intent.side:
+            raise ValueError("fill side does not match order intent")
+        if fill.quantity != intent.requested_qty:
+            raise ValueError("fill quantity does not match requested quantity")
+        if fill.quantity <= 0:
+            raise ValueError("fill quantity must be positive")
+        for label, value, strictly_positive in (
+            ("reference_price", fill.reference_price, True),
+            ("fill_price", fill.fill_price, True),
+            ("slippage", fill.slippage, False),
+            ("commission", fill.commission, False),
+            ("other_fees", fill.other_fees, False),
+        ):
+            if not value.is_finite() or (
+                value <= 0 if strictly_positive else value < 0
+            ):
+                raise ValueError(f"fill {label} is invalid")
+
+    def _ticker_for_intent(self, intent_id: str) -> str:
+        rows = self._connection.execute(
+            """SELECT DISTINCT s.ticker FROM intent_signals isg
+               JOIN signals s ON s.signal_id = isg.signal_id
+               WHERE isg.intent_id = ? ORDER BY s.ticker""",
+            (intent_id,),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ValueError(
+                f"intent {intent_id} must have exactly one unambiguous ticker provenance"
+            )
+        return rows[0]["ticker"]
+
+    @staticmethod
+    def _same_intent_except_status(supplied: OrderIntent, stored: OrderIntent) -> bool:
+        return (
+            supplied.intent_id,
+            supplied.signal_ids,
+            supplied.cohort_id,
+            supplied.side,
+            supplied.requested_qty,
+            supplied.created_at,
+            supplied.eligible_session,
+            supplied.price_rule,
+            supplied.stop_price,
+            supplied.external_order_id,
+        ) == (
+            stored.intent_id,
+            stored.signal_ids,
+            stored.cohort_id,
+            stored.side,
+            stored.requested_qty,
+            stored.created_at,
+            stored.eligible_session,
+            stored.price_rule,
+            stored.stop_price,
+            stored.external_order_id,
+        )
+
+    def _insert_fill(self, fill: Fill) -> None:
+        self._connection.execute(
+            "INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            self._fill_values(fill),
+        )
+
+    def _insert_fill_costs(self, fill: Fill) -> None:
+        for cost_type, amount in (
+            ("slippage", fill.slippage),
+            ("commission", fill.commission),
+            ("other_fees", fill.other_fees),
+        ):
+            self._connection.execute(
+                "INSERT INTO fill_costs VALUES (?, ?, ?, ?)",
+                (
+                    stable_id("fill_cost", fill.fill_id, cost_type),
+                    fill.fill_id,
+                    cost_type,
+                    self._encode(amount),
+                ),
+            )
+
+    def _insert_open_lot(self, intent: OrderIntent, fill: Fill, ticker: str) -> None:
+        direction = "long" if intent.side == "buy" else "short"
+        margin = (
+            fill.fill_price * fill.quantity * Decimal("1.5")
+            if direction == "short"
+            else Decimal("0")
+        )
+        self._connection.execute(
+            "INSERT INTO lots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                stable_id("lot", fill.fill_id),
+                fill.fill_id,
+                self.cohort_id,
+                ticker,
+                direction,
+                self._encode(fill.session),
+                self._encode(fill.fill_price),
+                fill.quantity,
+                fill.quantity,
+                self._encode(margin),
+            ),
+        )
+
+    def _close_lots(self, intent: OrderIntent, fill: Fill, ticker: str) -> None:
+        direction = "long" if intent.side == "sell" else "short"
+        lots = self._connection.execute(
+            """SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND direction = ?
+               AND open_qty > 0 ORDER BY opened_session, lot_id""",
+            (self.cohort_id, ticker, direction),
+        ).fetchall()
+        if sum(int(lot["open_qty"]) for lot in lots) < fill.quantity:
+            raise ValueError("close fill has insufficient matching open lots")
+        remaining = fill.quantity
+        for lot in lots:
+            if remaining == 0:
+                break
+            lot_open_qty = int(lot["open_qty"])
+            close_qty = min(remaining, lot_open_qty)
+            entry_price = _decimal(lot["entry_price"])
+            realized = (
+                (fill.fill_price - entry_price) * close_qty
+                if direction == "long"
+                else (entry_price - fill.fill_price) * close_qty
+            )
+            existing_margin = _decimal(lot["margin_reserved"])
+            released_margin = (
+                existing_margin * Decimal(close_qty) / Decimal(lot_open_qty)
+            )
+            self._connection.execute(
+                "INSERT INTO lot_closures VALUES (?, ?, ?, ?, ?)",
+                (
+                    stable_id("lot_closure", fill.fill_id, lot["lot_id"]),
+                    lot["lot_id"],
+                    fill.fill_id,
+                    close_qty,
+                    self._encode(realized),
+                ),
+            )
+            self._connection.execute(
+                "UPDATE lots SET open_qty = ?, margin_reserved = ? WHERE lot_id = ?",
+                (
+                    lot_open_qty - close_qty,
+                    self._encode(existing_margin - released_margin),
+                    lot["lot_id"],
+                ),
+            )
+            remaining -= close_qty
+
+    @staticmethod
+    def _cash_delta(side: str, fill: Fill) -> Decimal:
+        notional = fill.fill_price * fill.quantity
+        fees = fill.commission + fill.other_fees
+        return {
+            "buy": -notional - fees,
+            "sell": notional - fees,
+            "short": notional - fees,
+            "cover": -notional - fees,
+        }[side]
+
+    def _insert_cash_event(self, fill: Fill, amount: Decimal) -> None:
+        self._connection.execute(
+            "INSERT INTO cash_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                stable_id("cash", self.cohort_id, "fill", fill.fill_id),
+                self.cohort_id,
+                self._encode(fill.session),
+                "fill",
+                self._encode(amount),
+                self._encode(fill.effective_at),
+                f"fill {fill.fill_id}",
+            ),
+        )
+
+    def _open_lots(self) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            """SELECT * FROM lots WHERE cohort_id = ? AND open_qty > 0
+               ORDER BY ticker, direction, opened_session, lot_id""",
+            (self.cohort_id,),
+        ).fetchall()
+
+    def _validate_marks(
+        self,
+        session: date,
+        close_marks: dict[str, MarketBar],
+        open_lots: list[sqlite3.Row],
+    ) -> dict[str, MarketBar]:
+        required_tickers = sorted({lot["ticker"] for lot in open_lots})
+        validated: dict[str, MarketBar] = {}
+        for ticker in required_tickers:
+            bar = close_marks.get(ticker)
+            if bar is None:
+                raise MissingMarkError(f"missing mark for {ticker}/{session}")
+            if bar.ticker != ticker or bar.session != session or bar.adjusted:
+                raise MissingMarkError(f"untrusted mark for {ticker}/{session}")
+            values = (bar.open, bar.high, bar.low, bar.close)
+            if any(not value.is_finite() or value <= 0 for value in values) or not (
+                bar.low <= bar.open <= bar.high and bar.low <= bar.close <= bar.high
+            ):
+                raise MissingMarkError(f"invalid mark for {ticker}/{session}")
+            validated[ticker] = bar
+        return validated
+
+    def _insert_mark(self, ticker: str, bar: MarketBar) -> None:
+        values = (
+            stable_id("mark", self.cohort_id, ticker, bar.session),
+            self.cohort_id,
+            ticker,
+            self._encode(bar.session),
+            self._encode(bar.close),
+            bar.source,
+            self._encode(bar.fetched_at),
+            0,
+        )
+        existing = self._connection.execute(
+            "SELECT * FROM marks WHERE mark_id = ?", (values[0],)
+        ).fetchone()
+        columns = (
+            "mark_id",
+            "cohort_id",
+            "ticker",
+            "session",
+            "close",
+            "source",
+            "observed_at",
+            "adjusted",
+        )
+        if existing is not None:
+            if any(existing[column] != value for column, value in zip(columns, values)):
+                raise LedgerConflictError(f"conflicting marks identity {values[0]}")
+            return
+        self._connection.execute(
+            "INSERT INTO marks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values
+        )
+
+    def _build_snapshot(
+        self,
+        session: date,
+        epoch_id: str,
+        valuation_at: datetime,
+        open_lots: list[sqlite3.Row],
+        marks_by_ticker: dict[str, MarketBar],
+    ) -> AccountSnapshot:
+        cash = self._cash_balance()
+        long_market_value = Decimal("0")
+        short_liability = Decimal("0")
+        unrealized_pnl = Decimal("0")
+        margin_used = Decimal("0")
+        for lot in open_lots:
+            quantity = Decimal(lot["open_qty"])
+            entry = _decimal(lot["entry_price"])
+            close = marks_by_ticker[lot["ticker"]].close
+            if lot["direction"] == "long":
+                long_market_value += quantity * close
+                unrealized_pnl += (close - entry) * quantity
+            else:
+                short_liability += quantity * close
+                unrealized_pnl += (entry - close) * quantity
+                margin_used += _decimal(lot["margin_reserved"])
+        net_equity = cash + long_market_value - short_liability
+        gross_exposure = long_market_value + short_liability
+        net_exposure = long_market_value - short_liability
+        slippage_cost = self._cost_total("slippage")
+        commission_cost = self._cost_total("commission")
+        other_fees = self._cost_total("other_fees")
+        borrow_cost = self._event_total("borrow_accruals")
+        financing_cost = self._event_total("financing_accruals")
+        dividend_cash = self._event_total("dividend_events")
+        cumulative_costs = (
+            slippage_cost + commission_cost + other_fees + borrow_cost + financing_cost
+        )
+        gross_equity = net_equity + cumulative_costs
+        assert net_equity == cash + long_market_value - short_liability
+        assert gross_equity - cumulative_costs == net_equity
+        return AccountSnapshot(
+            stable_id("snapshot", self.cohort_id, epoch_id, session),
+            self.cohort_id,
+            epoch_id,
+            session,
+            valuation_at,
+            cash,
+            long_market_value,
+            short_liability,
+            gross_exposure,
+            net_exposure,
+            margin_used,
+            cash - margin_used,
+            self._realized_pnl(),
+            unrealized_pnl,
+            gross_equity,
+            slippage_cost,
+            commission_cost,
+            other_fees,
+            borrow_cost,
+            financing_cost,
+            dividend_cash,
+            net_equity,
+            max(self._previous_high_water_mark(), net_equity),
+            True,
+            "",
+        )
+
+    def _cash_balance(self) -> Decimal:
+        # SQLite SUM coerces TEXT to float. Sum Decimal rows directly instead.
+        amounts = self._connection.execute(
+            "SELECT amount FROM cash_events WHERE cohort_id = ? ORDER BY effective_at, cash_event_id",
+            (self.cohort_id,),
+        ).fetchall()
+        return sum((_decimal(item["amount"]) for item in amounts), Decimal("0"))
+
+    def _cost_total(self, cost_type: str) -> Decimal:
+        rows = self._connection.execute(
+            "SELECT amount FROM fill_costs WHERE cost_type = ? ORDER BY fill_cost_id",
+            (cost_type,),
+        ).fetchall()
+        return sum((_decimal(row["amount"]) for row in rows), Decimal("0"))
+
+    def _event_total(self, table: str) -> Decimal:
+        if table not in {"borrow_accruals", "financing_accruals", "dividend_events"}:
+            raise ValueError(f"unapproved event table {table}")
+        rows = self._connection.execute(
+            f"SELECT amount FROM {table} ORDER BY 1"
+        ).fetchall()
+        return sum((_decimal(row["amount"]) for row in rows), Decimal("0"))
+
+    def _realized_pnl(self) -> Decimal:
+        rows = self._connection.execute(
+            "SELECT realized_pnl FROM lot_closures ORDER BY closure_id"
+        ).fetchall()
+        return sum((_decimal(row["realized_pnl"]) for row in rows), Decimal("0"))
+
+    def _previous_high_water_mark(self) -> Decimal:
+        rows = self._connection.execute(
+            "SELECT high_water_mark FROM account_snapshots WHERE cohort_id = ? ORDER BY session, snapshot_id",
+            (self.cohort_id,),
+        ).fetchall()
+        opening = self._connection.execute(
+            "SELECT amount FROM cash_events WHERE cohort_id = ? AND event_type = 'opening'",
+            (self.cohort_id,),
+        ).fetchone()
+        values = [_decimal(row["high_water_mark"]) for row in rows]
+        if opening is not None:
+            values.append(_decimal(opening["amount"]))
+        return max(values, default=Decimal("0"))
+
+    def _latest_mark_for_lot(self, lot: sqlite3.Row) -> Decimal:
+        row = self._connection.execute(
+            """SELECT close FROM marks WHERE cohort_id = ? AND ticker = ?
+               AND session >= ? ORDER BY session DESC, mark_id DESC LIMIT 1""",
+            (self.cohort_id, lot["ticker"], lot["opened_session"]),
+        ).fetchone()
+        return (
+            _decimal(row["close"]) if row is not None else _decimal(lot["entry_price"])
+        )
+
+    @classmethod
+    def _fill_values(cls, fill: Fill) -> tuple[object, ...]:
+        return (
+            fill.fill_id,
+            fill.intent_id,
+            fill.side,
+            cls._encode(fill.session),
+            cls._encode(fill.effective_at),
+            cls._encode(fill.processed_at),
+            cls._encode(fill.reference_price),
+            cls._encode(fill.fill_price),
+            fill.quantity,
+            cls._encode(fill.slippage),
+            cls._encode(fill.commission),
+            cls._encode(fill.other_fees),
+        )
+
+    def _require_identical_fill(self, row: sqlite3.Row, fill: Fill) -> None:
+        columns = (
+            "fill_id",
+            "intent_id",
+            "side",
+            "session",
+            "effective_at",
+            "processed_at",
+            "reference_price",
+            "fill_price",
+            "quantity",
+            "slippage",
+            "commission",
+            "other_fees",
+        )
+        if any(
+            row[column] != value
+            for column, value in zip(columns, self._fill_values(fill))
+        ):
+            raise LedgerConflictError(f"conflicting fills identity {fill.fill_id}")
+
+    def _require_identical_snapshot(
+        self, row: sqlite3.Row, snapshot: AccountSnapshot
+    ) -> None:
+        columns = (
+            "snapshot_id",
+            "cohort_id",
+            "epoch_id",
+            "session",
+            "valuation_at",
+            "cash",
+            "long_market_value",
+            "short_liability",
+            "gross_exposure",
+            "net_exposure",
+            "margin_used",
+            "buying_power",
+            "realized_pnl",
+            "unrealized_pnl",
+            "gross_equity",
+            "slippage_cost",
+            "commission_cost",
+            "other_fees",
+            "borrow_cost",
+            "financing_cost",
+            "dividend_cash",
+            "net_equity",
+            "high_water_mark",
+            "valid",
+            "invalid_reason",
+        )
+        if any(
+            row[column] != value
+            for column, value in zip(columns, self._snapshot_values(snapshot))
+        ):
+            raise LedgerConflictError(
+                f"conflicting account_snapshots identity {snapshot.snapshot_id}"
+            )
+
+    @classmethod
+    def _snapshot_values(cls, snapshot: AccountSnapshot) -> tuple[object, ...]:
+        return (
+            snapshot.snapshot_id,
+            snapshot.cohort_id,
+            snapshot.epoch_id,
+            cls._encode(snapshot.session),
+            cls._encode(snapshot.valuation_at),
+            cls._encode(snapshot.cash),
+            cls._encode(snapshot.long_market_value),
+            cls._encode(snapshot.short_liability),
+            cls._encode(snapshot.gross_exposure),
+            cls._encode(snapshot.net_exposure),
+            cls._encode(snapshot.margin_used),
+            cls._encode(snapshot.buying_power),
+            cls._encode(snapshot.realized_pnl),
+            cls._encode(snapshot.unrealized_pnl),
+            cls._encode(snapshot.gross_equity),
+            cls._encode(snapshot.slippage_cost),
+            cls._encode(snapshot.commission_cost),
+            cls._encode(snapshot.other_fees),
+            cls._encode(snapshot.borrow_cost),
+            cls._encode(snapshot.financing_cost),
+            cls._encode(snapshot.dividend_cash),
+            cls._encode(snapshot.net_equity),
+            cls._encode(snapshot.high_water_mark),
+            cls._encode(snapshot.valid),
+            snapshot.invalid_reason,
+        )
 
     def _session_filters(
         self,
