@@ -61,7 +61,10 @@ class GovtContractsStrategy:
     data_sources = ["yfinance", "usaspending", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -71,7 +74,10 @@ class GovtContractsStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -94,8 +100,13 @@ class GovtContractsStrategy:
 
         if contracts:
             for contract in contracts:
-                recipient = (contract.get("recipient_name", "") or contract.get("recipient", "") or "").lower()
+                recipient = (
+                    contract.get("recipient_name", "")
+                    or contract.get("recipient", "")
+                    or ""
+                ).lower()
                 amount = contract.get("amount", 0) or 0
+                award_id = contract.get("award_id", "")
 
                 # Resolve recipient to ticker
                 ticker = None
@@ -104,7 +115,7 @@ class GovtContractsStrategy:
                         ticker = t
                         break
 
-                if not ticker or amount < 10_000_000:  # $10M minimum
+                if not ticker or not award_id or amount < 10_000_000:  # $10M minimum
                     continue
 
                 score = min(amount / 1_000_000_000, 1.0)  # Scale by $1B
@@ -118,6 +129,7 @@ class GovtContractsStrategy:
                             "contractor": recipient,
                             "contract_amount": amount,
                             "source": "usaspending",
+                            "award_id": award_id,
                         },
                     )
                 )
@@ -134,6 +146,12 @@ class GovtContractsStrategy:
                         continue
                     close = df["Close"]
                     momentum = (close.iloc[-1] / close.iloc[-30]) - 1.0
+                    observation = df.index[-1]
+                    observation_date = (
+                        observation.date().isoformat()
+                        if hasattr(observation, "date")
+                        else str(observation)
+                    )
                     candidates.append(
                         Candidate(
                             ticker=ticker,
@@ -144,6 +162,7 @@ class GovtContractsStrategy:
                                 "contractor": name,
                                 "momentum_30d": momentum,
                                 "source": "momentum_fallback",
+                                "observation_date": observation_date,
                             },
                         )
                     )
@@ -156,7 +175,9 @@ class GovtContractsStrategy:
             if isinstance(profile, dict) and c.ticker in profile:
                 c.metadata["sector"] = profile[c.ticker].get("sector", "")
             if isinstance(estimates, dict) and c.ticker in estimates:
-                c.metadata["price_target_mean"] = estimates[c.ticker].get("price_target_mean")
+                c.metadata["price_target_mean"] = estimates[c.ticker].get(
+                    "price_target_mean"
+                )
 
         candidates.sort(key=lambda c: c.score, reverse=True)
         return candidates[: params.get("max_positions", 3)]
@@ -216,7 +237,7 @@ Parameter ranges:
 - max_positions: 2-5 (max concurrent positions)
 
 Recent backtest results:
-{results_text or '  No results yet.'}
+{results_text or "  No results yet."}
 
 Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
@@ -225,10 +246,12 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
         universe = dict(CONTRACTOR_TICKERS)
         if openbb_source and openbb_source.is_available():
             for industry in EXPANSION_INDUSTRIES:
-                result = openbb_source.fetch({
-                    "method": "sector_tickers",
-                    "industry": industry,
-                })
+                result = openbb_source.fetch(
+                    {
+                        "method": "sector_tickers",
+                        "industry": industry,
+                    }
+                )
                 tickers = result.get("tickers", [])
                 for t in tickers:
                     universe[t.lower()] = t

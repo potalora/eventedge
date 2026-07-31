@@ -4,6 +4,7 @@ Wraps the `cot_reports` library to fetch COT positioning data.
 No API key needed — data is public. Graceful ImportError skip
 if cot_reports not installed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -57,12 +58,15 @@ class CFTCSource:
     def is_available(self) -> bool:
         try:
             import cot_reports  # noqa: F401
+
             return True
         except ImportError:
             logger.info("cot_reports not installed — run: pip install cot_reports")
             return False
 
-    def _fetch_raw_report(self, report_type: str = "disaggregated_futures") -> pd.DataFrame:
+    def _fetch_raw_report(
+        self, report_type: str = "disaggregated_futures"
+    ) -> pd.DataFrame:
         """Fetch raw COT report. Cached per session (data is weekly)."""
         if report_type in self._cache:
             return self._cache[report_type]
@@ -80,6 +84,7 @@ class CFTCSource:
             raise ValueError(f"Unknown report type: {report_type}")
 
         from datetime import datetime
+
         year = datetime.now().year
         df = cot.cot_year(year, cot_report_type=cot_type)
 
@@ -116,16 +121,20 @@ class CFTCSource:
             commodity_df = commodity_df.tail(lookback_weeks)
 
             if len(commodity_df) < 4:
-                logger.warning("Insufficient COT data for %s: %d weeks", commodity, len(commodity_df))
+                logger.warning(
+                    "Insufficient COT data for %s: %d weeks",
+                    commodity,
+                    len(commodity_df),
+                )
                 continue
 
-            commodity_df["net_spec"] = (
-                commodity_df[COL_MM_LONG].astype(float)
-                - commodity_df[COL_MM_SHORT].astype(float)
-            )
+            commodity_df["net_spec"] = commodity_df[COL_MM_LONG].astype(
+                float
+            ) - commodity_df[COL_MM_SHORT].astype(float)
 
             latest = commodity_df.iloc[-1]
             net_position = float(latest["net_spec"])
+            report_date = latest["date"].date().isoformat()
 
             all_nets = commodity_df["net_spec"].values
             percentile = float((all_nets < net_position).sum() / len(all_nets))
@@ -148,6 +157,8 @@ class CFTCSource:
                 "percentile": round(percentile, 4),
                 "wow_change": wow_change,
                 "direction_signal": direction_signal,
+                "report_id": f"CFTC:{code}:{report_date}",
+                "window_end": report_date,
             }
 
         return results

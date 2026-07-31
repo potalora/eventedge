@@ -7,6 +7,7 @@ then LLM to identify impacted sectors/tickers.
 Academic basis: regulatory announcements create predictable price
 impacts on affected firms (Binder 1985, JFQA).
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,7 +26,10 @@ class RegulatoryPipelineStrategy:
     data_sources = ["regulations", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -35,7 +39,10 @@ class RegulatoryPipelineStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -59,6 +66,8 @@ class RegulatoryPipelineStrategy:
         candidates = []
 
         for rule in rules:
+            if not rule.get("document_id"):
+                continue
             agency = rule.get("agency_id", "")
             # No agency filter — all agencies can move sectors
 
@@ -87,8 +96,12 @@ class RegulatoryPipelineStrategy:
             for candidate in candidates:
                 ticker = candidate.ticker
                 if ticker in profile_data:
-                    candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
-                    candidate.metadata["industry"] = profile_data[ticker].get("industry", "")
+                    candidate.metadata["sector"] = profile_data[ticker].get(
+                        "sector", ""
+                    )
+                    candidate.metadata["industry"] = profile_data[ticker].get(
+                        "industry", ""
+                    )
 
         return candidates[: params.get("max_positions", 3)]
 

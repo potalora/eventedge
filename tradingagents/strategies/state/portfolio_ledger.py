@@ -74,6 +74,16 @@ _DDL: tuple[str, ...] = (
         session TEXT NOT NULL, phase TEXT NOT NULL, started_at TEXT,
         completed_at TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS session_execution_contexts (
+        execution_context_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
+        session TEXT NOT NULL, epoch_id TEXT NOT NULL,
+        input_digest TEXT NOT NULL, market_digest TEXT NOT NULL,
+        config_digest TEXT NOT NULL,
+        borrow_digest TEXT NOT NULL, required_tickers_json TEXT NOT NULL,
+        economic_inputs_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+        provenance_digest TEXT NOT NULL,
+        bound_at TEXT NOT NULL, UNIQUE(cohort_id, session)
+    )""",
     """CREATE TABLE IF NOT EXISTS staging_runs (
         staging_run_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
         session TEXT NOT NULL, epoch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
@@ -86,6 +96,16 @@ _DDL: tuple[str, ...] = (
         direction TEXT NOT NULL, event_at TEXT, observed_at TEXT NOT NULL,
         reference_session TEXT NOT NULL, reference_close TEXT NOT NULL,
         decision_at TEXT NOT NULL, evidence_hash TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS signal_journal_outbox (
+        signal_id TEXT PRIMARY KEY REFERENCES signals(signal_id),
+        payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
+        state TEXT NOT NULL, journal_offset INTEGER, journal_length INTEGER,
+        queued_at TEXT NOT NULL, mirrored_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS signal_journal_projection (
+        cohort_id TEXT PRIMARY KEY, verified_offset INTEGER NOT NULL,
+        initialized_at TEXT NOT NULL, updated_at TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS order_intents (
         intent_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, side TEXT NOT NULL,
@@ -174,6 +194,12 @@ _DDL: tuple[str, ...] = (
         ticker TEXT NOT NULL, action_id TEXT NOT NULL, content_hash TEXT NOT NULL,
         attempted_payload TEXT NOT NULL, detected_at TEXT NOT NULL,
         UNIQUE(cohort_id, action_id, content_hash)
+    )""",
+    """CREATE TABLE IF NOT EXISTS corporate_action_batch_rejections (
+        batch_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, session TEXT NOT NULL,
+        payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
+        errors_json TEXT NOT NULL, rejected_at TEXT NOT NULL,
+        UNIQUE(cohort_id, session, payload_hash)
     )""",
     """CREATE TABLE IF NOT EXISTS cash_events (
         cash_event_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL, session TEXT,
@@ -374,6 +400,52 @@ class PortfolioLedger:
                     "ALTER TABLE intent_action_adjustments "
                     "ADD COLUMN adjustment_sequence INTEGER NOT NULL DEFAULT 0"
                 )
+            context_columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(session_execution_contexts)"
+                )
+            }
+            if "market_digest" not in context_columns:
+                self._connection.execute(
+                    "ALTER TABLE session_execution_contexts "
+                    "ADD COLUMN market_digest TEXT NOT NULL DEFAULT ''"
+                )
+                rows = self._connection.execute(
+                    "SELECT execution_context_id, input_digest, economic_inputs_json "
+                    "FROM session_execution_contexts"
+                ).fetchall()
+                for row in rows:
+                    economic_inputs = json.loads(row["economic_inputs_json"])
+                    self._connection.execute(
+                        """UPDATE session_execution_contexts
+                           SET market_digest = ?, input_digest = ?
+                           WHERE execution_context_id = ?""",
+                        (
+                            row["input_digest"],
+                            stable_id("session_economic_inputs", economic_inputs),
+                            row["execution_context_id"],
+                        ),
+                    )
+            if "provenance_digest" not in context_columns:
+                self._connection.execute(
+                    "ALTER TABLE session_execution_contexts "
+                    "ADD COLUMN provenance_digest TEXT NOT NULL DEFAULT ''"
+                )
+                rows = self._connection.execute(
+                    "SELECT execution_context_id, provenance_json "
+                    "FROM session_execution_contexts"
+                ).fetchall()
+                for row in rows:
+                    provenance = json.loads(row["provenance_json"])
+                    self._connection.execute(
+                        """UPDATE session_execution_contexts
+                           SET provenance_digest = ? WHERE execution_context_id = ?""",
+                        (
+                            stable_id("session_input_provenance", provenance),
+                            row["execution_context_id"],
+                        ),
+                    )
             self._backfill_adjustment_sequences()
             self._connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_intent_adjustment_sequence "
@@ -432,6 +504,140 @@ class PortfolioLedger:
             (self.cohort_id, self._encode(session), phase),
         ).fetchone()
         return row is not None and row["completed_at"] is not None
+
+    def session_execution_context(self, session: date) -> dict[str, object] | None:
+        """Return the immutable epoch/input binding for a started session."""
+        row = self._connection.execute(
+            """SELECT * FROM session_execution_contexts
+               WHERE cohort_id = ? AND session = ?""",
+            (self.cohort_id, self._encode(session)),
+        ).fetchone()
+        if row is None:
+            return None
+        economic_inputs = json.loads(row["economic_inputs_json"])
+        expected_digest = stable_id("session_economic_inputs", economic_inputs)
+        expected_market_digest = stable_id(
+            "session_market_inputs", economic_inputs.get("market", {})
+        )
+        provenance = json.loads(row["provenance_json"])
+        expected_provenance_digest = stable_id("session_input_provenance", provenance)
+        if (
+            row["input_digest"] != expected_digest
+            or row["market_digest"] != expected_market_digest
+            or row["provenance_digest"] != expected_provenance_digest
+        ):
+            raise LedgerConflictError(
+                f"execution context economic payload conflict for {session}"
+            )
+        return {
+            "epoch_id": row["epoch_id"],
+            "input_digest": row["input_digest"],
+            "market_digest": row["market_digest"],
+            "config_digest": row["config_digest"],
+            "borrow_digest": row["borrow_digest"],
+            "required_tickers": tuple(json.loads(row["required_tickers_json"])),
+            "economic_inputs_json": row["economic_inputs_json"],
+            "provenance_json": row["provenance_json"],
+            "provenance_digest": row["provenance_digest"],
+            "bound_at": _datetime(row["bound_at"]),
+        }
+
+    def execution_starting_state(self, session: date) -> dict[str, object]:
+        """Canonical bounded ledger provenance captured before phase one."""
+        account = self.account_state()
+        due_intents = []
+        for intent in self.pending_intents(session):
+            signals = self.signals_for_intent(intent.intent_id)
+            due_intents.append(
+                {
+                    "intent": intent.__dict__,
+                    "signals": [signal.__dict__ for signal in signals],
+                }
+            )
+        allocations = self._connection.execute(
+            """SELECT eil.intent_id, eil.lot_id, eil.quantity
+               FROM exit_intent_lots eil
+               JOIN order_intents i ON i.intent_id = eil.intent_id
+               WHERE i.cohort_id = ? AND i.status = 'pending'
+               ORDER BY eil.intent_id, eil.lot_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        return {
+            "account": account.__dict__,
+            "due_intents": due_intents,
+            "open_lots": self.open_exit_positions(),
+            "exit_allocations": [dict(row) for row in allocations],
+        }
+
+    def bind_session_execution_context(
+        self,
+        session: date,
+        epoch_id: str,
+        input_digest: str,
+        market_digest: str,
+        config_digest: str,
+        borrow_digest: str,
+        required_tickers: tuple[str, ...],
+        economic_inputs_json: str,
+        provenance_json: str,
+        bound_at: datetime,
+    ) -> None:
+        """Bind all phase commits to one epoch and one economic input digest."""
+        self._require_timezone_aware(bound_at, "bound_at")
+        if (
+            not epoch_id
+            or not input_digest
+            or not market_digest
+            or not config_digest
+            or not borrow_digest
+        ):
+            raise ValueError("epoch and execution-context digests are required")
+        tickers_json = json.dumps(list(required_tickers), separators=(",", ":"))
+        provenance = json.loads(provenance_json)
+        provenance_digest = stable_id("session_input_provenance", provenance)
+        with self.transaction():
+            row = self._connection.execute(
+                """SELECT * FROM session_execution_contexts
+                   WHERE cohort_id = ? AND session = ?""",
+                (self.cohort_id, self._encode(session)),
+            ).fetchone()
+            if row is not None:
+                if row["epoch_id"] != epoch_id:
+                    raise LedgerConflictError(
+                        f"execution context epoch conflict for {session}: "
+                        f"{row['epoch_id']} != {epoch_id}"
+                    )
+                if (
+                    row["input_digest"] != input_digest
+                    or row["market_digest"] != market_digest
+                    or row["config_digest"] != config_digest
+                    or row["borrow_digest"] != borrow_digest
+                    or row["required_tickers_json"] != tickers_json
+                ):
+                    raise LedgerConflictError(
+                        f"execution context input conflict for {session}"
+                    )
+                return
+            self._connection.execute(
+                """INSERT INTO session_execution_contexts VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    stable_id("execution_context", self.cohort_id, session),
+                    self.cohort_id,
+                    self._encode(session),
+                    epoch_id,
+                    input_digest,
+                    market_digest,
+                    config_digest,
+                    borrow_digest,
+                    tickers_json,
+                    economic_inputs_json,
+                    provenance_json,
+                    provenance_digest,
+                    self._encode(bound_at),
+                ),
+            )
 
     def run_session_phase(
         self,
@@ -708,25 +914,148 @@ class PortfolioLedger:
 
     def record_signal(self, signal: SignalRecord) -> None:
         with self.transaction():
-            self._insert_idempotent(
-                "signals",
-                "signal_id",
-                signal.signal_id,
-                {
-                    "signal_id": signal.signal_id,
-                    "epoch_id": signal.epoch_id,
-                    "policy_id": signal.policy_id,
-                    "event_key": signal.event_key,
-                    "strategy": signal.strategy,
-                    "ticker": signal.ticker,
-                    "direction": signal.direction,
-                    "event_at": signal.event_at,
-                    "observed_at": signal.observed_at,
-                    "reference_session": signal.reference_session,
-                    "reference_close": signal.reference_close,
-                    "decision_at": signal.decision_at,
-                    "evidence_hash": signal.evidence_hash,
-                },
+            self._record_signal(signal)
+
+    def _record_signal(self, signal: SignalRecord) -> None:
+        self._insert_idempotent(
+            "signals",
+            "signal_id",
+            signal.signal_id,
+            {
+                "signal_id": signal.signal_id,
+                "epoch_id": signal.epoch_id,
+                "policy_id": signal.policy_id,
+                "event_key": signal.event_key,
+                "strategy": signal.strategy,
+                "ticker": signal.ticker,
+                "direction": signal.direction,
+                "event_at": signal.event_at,
+                "observed_at": signal.observed_at,
+                "reference_session": signal.reference_session,
+                "reference_close": signal.reference_close,
+                "decision_at": signal.decision_at,
+                "evidence_hash": signal.evidence_hash,
+            },
+        )
+
+    def record_signal_with_journal(
+        self, signal: SignalRecord, payload: dict[str, object], queued_at: datetime
+    ) -> None:
+        """Atomically persist a signal and its exact immutable journal payload."""
+        self._require_timezone_aware(queued_at, "queued_at")
+        payload_json = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), default=str
+        )
+        payload_hash = stable_id("signal_journal_payload", payload_json)
+        with self.transaction():
+            self._record_signal(signal)
+            row = self._connection.execute(
+                "SELECT * FROM signal_journal_outbox WHERE signal_id = ?",
+                (signal.signal_id,),
+            ).fetchone()
+            if row is not None:
+                if (
+                    row["payload_json"] != payload_json
+                    or row["payload_hash"] != payload_hash
+                ):
+                    raise LedgerConflictError(
+                        f"conflicting journal payload for signal {signal.signal_id}"
+                    )
+                return
+            self._connection.execute(
+                """INSERT INTO signal_journal_outbox
+                   VALUES (?, ?, ?, 'pending', NULL, NULL, ?, NULL)""",
+                (
+                    signal.signal_id,
+                    payload_json,
+                    payload_hash,
+                    self._encode(queued_at),
+                ),
+            )
+
+    def pending_signal_journal_outbox(
+        self, limit: int = 256
+    ) -> list[dict[str, object]]:
+        """Return one bounded deterministic projection batch."""
+        if limit < 1 or limit > 256:
+            raise ValueError("journal outbox limit must be between 1 and 256")
+        rows = self._connection.execute(
+            """SELECT signal_id, payload_json, payload_hash, state
+               FROM signal_journal_outbox WHERE state = 'pending'
+               ORDER BY queued_at, signal_id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def journal_projection_offset(self) -> int | None:
+        row = self._connection.execute(
+            "SELECT verified_offset FROM signal_journal_projection WHERE cohort_id = ?",
+            (self.cohort_id,),
+        ).fetchone()
+        return None if row is None else int(row["verified_offset"])
+
+    def initialize_journal_projection(
+        self, verified_offset: int, initialized_at: datetime
+    ) -> int:
+        """Record the trusted boundary of a pre-outbox legacy journal once."""
+        self._require_timezone_aware(initialized_at, "initialized_at")
+        if verified_offset < 0:
+            raise ValueError("journal projection offset cannot be negative")
+        with self.transaction():
+            existing = self.journal_projection_offset()
+            if existing is not None:
+                return existing
+            encoded = self._encode(initialized_at)
+            self._connection.execute(
+                "INSERT INTO signal_journal_projection VALUES (?, ?, ?, ?)",
+                (self.cohort_id, verified_offset, encoded, encoded),
+            )
+        return verified_offset
+
+    def mark_signal_journal_mirrored(
+        self,
+        projections: list[tuple[str, str, int, int]],
+        verified_offset: int,
+        mirrored_at: datetime,
+    ) -> None:
+        """Advance outbox rows and projection boundary in one DB transaction."""
+        self._require_timezone_aware(mirrored_at, "mirrored_at")
+        with self.transaction():
+            current = self.journal_projection_offset()
+            if current is None or verified_offset < current:
+                raise LedgerConflictError("journal projection offset regressed")
+            for signal_id, payload_hash, offset, length in projections:
+                row = self._connection.execute(
+                    "SELECT payload_hash, state FROM signal_journal_outbox WHERE signal_id = ?",
+                    (signal_id,),
+                ).fetchone()
+                if row is None or row["payload_hash"] != payload_hash:
+                    raise LedgerConflictError(
+                        f"journal outbox payload conflict for {signal_id}"
+                    )
+                if row["state"] == "mirrored":
+                    stored = self._connection.execute(
+                        "SELECT journal_offset, journal_length FROM signal_journal_outbox WHERE signal_id = ?",
+                        (signal_id,),
+                    ).fetchone()
+                    if (
+                        stored["journal_offset"] != offset
+                        or stored["journal_length"] != length
+                    ):
+                        raise LedgerConflictError(
+                            f"journal outbox offset conflict for {signal_id}"
+                        )
+                    continue
+                self._connection.execute(
+                    """UPDATE signal_journal_outbox SET state = 'mirrored',
+                       journal_offset = ?, journal_length = ?, mirrored_at = ?
+                       WHERE signal_id = ?""",
+                    (offset, length, self._encode(mirrored_at), signal_id),
+                )
+            self._connection.execute(
+                """UPDATE signal_journal_projection SET verified_offset = ?, updated_at = ?
+                   WHERE cohort_id = ?""",
+                (verified_offset, self._encode(mirrored_at), self.cohort_id),
             )
 
     def stage_intent(self, intent: OrderIntent) -> None:
@@ -1260,8 +1589,69 @@ class PortfolioLedger:
         """Public fail-closed state query for policy/entry execution callers."""
         return self._session_invalid_reason(session, ticker) is None
 
-    def session_invalid_reason(self, session: date) -> str:
-        return self._session_invalid_reason(session) or ""
+    def session_invalid_reason(self, session: date, ticker: str | None = None) -> str:
+        return self._session_invalid_reason(session, ticker) or ""
+
+    def reject_corporate_action_batch(
+        self,
+        session: date,
+        actions: tuple[CorporateAction, ...],
+        governed_tickers: tuple[str, ...],
+        errors: tuple[str, ...],
+        rejected_at: datetime,
+    ) -> str:
+        """Reject one complete provider response without applying any member."""
+        self._require_timezone_aware(rejected_at, "rejected_at")
+        if not errors:
+            raise ValueError("corporate action batch rejection requires errors")
+        payload = [
+            {
+                "action_id": action.action_id,
+                "ticker": action.ticker,
+                "session": self._encode(action.session),
+                "action_type": action.action_type,
+                "ratio": self._encode(action.ratio),
+                "cash_per_share": self._encode(action.cash_per_share),
+                "source": action.source,
+                "fetched_at": self._encode(action.fetched_at),
+                "verified": action.verified,
+            }
+            for action in sorted(
+                actions, key=lambda item: (item.action_id, item.ticker)
+            )
+        ]
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload_hash = stable_id("corporate_action_batch_payload", payload)
+        errors_json = json.dumps(sorted(set(errors)), separators=(",", ":"))
+        batch_id = stable_id(
+            "corporate_action_batch_rejection",
+            self.cohort_id,
+            session,
+            payload_hash,
+        )
+        reason = "invalid corporate action batch: " + "; ".join(sorted(set(errors)))
+        governed = set(governed_tickers)
+        affected = sorted(
+            {action.ticker for action in actions if action.ticker in governed}
+        )
+        with self.transaction():
+            self._connection.execute(
+                """INSERT OR IGNORE INTO corporate_action_batch_rejections
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    batch_id,
+                    self.cohort_id,
+                    self._encode(session),
+                    payload_json,
+                    payload_hash,
+                    errors_json,
+                    self._encode(rejected_at),
+                ),
+            )
+            self.invalidate_session_and_cancel_due(session, reason, rejected_at)
+            for ticker in affected:
+                self._quarantine_ticker(ticker, reason, rejected_at)
+        return reason
 
     def invalidate_session_and_cancel_due(
         self, session: date, reason: str, processed_at: datetime
@@ -1835,11 +2225,15 @@ class PortfolioLedger:
         session: date,
         close_marks: dict[str, MarketBar],
         valuation_at: datetime,
+        *,
+        validated_at: datetime | None = None,
     ) -> None:
         """Persist raw closes without publishing a snapshot."""
         self._require_timezone_aware(valuation_at, "valuation_at")
+        validation_time = validated_at or valuation_at
+        self._require_timezone_aware(validation_time, "validated_at")
         with self.transaction():
-            self._record_marks(session, close_marks, valuation_at)
+            self._record_marks(session, close_marks, validation_time)
 
     def snapshot_account(
         self, session: date, epoch_id: str, valuation_at: datetime
@@ -2323,6 +2717,25 @@ class PortfolioLedger:
                 != (Decimal(quantity) * action.ratio).to_integral_value()
             ):
                 return "split produces fractional share quantity"
+        for intent in pending:
+            allocations = self._connection.execute(
+                """SELECT quantity FROM exit_intent_lots
+                   WHERE intent_id = ? ORDER BY lot_id""",
+                (intent["intent_id"],),
+            ).fetchall()
+            scaled_allocations = [
+                Decimal(int(allocation["quantity"])) * action.ratio
+                for allocation in allocations
+            ]
+            if any(
+                quantity != quantity.to_integral_value()
+                for quantity in scaled_allocations
+            ):
+                return "split produces fractional exit lot allocation"
+            if allocations and sum(scaled_allocations) != (
+                Decimal(int(intent["requested_qty"])) * action.ratio
+            ):
+                return "split exit allocation total mismatch"
         return None
 
     def _apply_split(
@@ -2374,6 +2787,12 @@ class PortfolioLedger:
                     self._encode(new_stop) if new_stop is not None else None,
                     row["intent_id"],
                 ),
+            )
+            self._connection.execute(
+                """UPDATE exit_intent_lots
+                   SET quantity = CAST(quantity * ? AS INTEGER)
+                   WHERE intent_id = ?""",
+                (format(action.ratio, "f"), row["intent_id"]),
             )
             self._connection.execute(
                 "INSERT INTO intent_action_adjustments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",

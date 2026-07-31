@@ -99,7 +99,7 @@ class FakeStrategy:
                 date=date,
                 direction="long",
                 score=5.0,
-                metadata={"source": "test"},
+                metadata={"source": "test", "event_key": f"{self.name}:{date}"},
             )
         ]
 
@@ -126,7 +126,7 @@ class FakeStrategy2(FakeStrategy):
                 date=date,
                 direction="long",
                 score=4.0,
-                metadata={"source": "test"},
+                metadata={"source": "test", "event_key": f"{self.name}:{date}"},
             )
         ]
 
@@ -439,6 +439,75 @@ class TestIdempotencyDoubleRun:
             committee.call_count,
         ) == before_replay_calls
 
+    def test_mixed_complete_and_stage_only_replay_skips_execution_inputs(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
+        session = date(2026, 3, 30)
+        second_engine = orchestrator.cohorts[1]["engine"]
+        original_stage = second_engine.screen_and_stage
+        fail_once = True
+
+        def stage_with_one_crash(*args, **kwargs):
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("staging crash")
+            return original_stage(*args, **kwargs)
+
+        second_engine.screen_and_stage = stage_with_one_crash
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            first = orchestrator.run_daily(session.isoformat())
+            before = (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert not first["cohort_0"]["error"]
+        assert first["cohort_1"]["error"]
+        assert replay["cohort_0"]["replayed"]
+        assert not replay["cohort_1"]["error"]
+        assert len(source.raw_calls) == before[0] + 1
+        assert len(source.action_calls) == before[1]
+        assert len(source.benchmark_calls) == before[2]
+
+    def test_partial_execution_resume_uses_stored_bundle_not_provider_refetch(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path)
+        session = date(2026, 3, 30)
+        executor = orchestrator.cohorts[0]["executor"]
+
+        def crash_after_commit(phase):
+            if phase == "validate_market_data":
+                raise RuntimeError("execution crash")
+
+        executor._after_phase_commit = crash_after_commit
+        first = orchestrator.run_daily(session.isoformat())
+        assert first["cohort_0"]["error"]
+        before = (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        )
+
+        executor._after_phase_commit = lambda phase: None
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            resumed = orchestrator.run_daily(session.isoformat())
+
+        assert not resumed["cohort_0"]["error"]
+        assert len(source.raw_calls) == before[0] + 1
+        assert len(source.action_calls) == before[1]
+        assert len(source.benchmark_calls) == before[2]
+
 
 class TestThirtyDayFullLifecycle:
     def test_30_exact_sessions_preserve_delays_exits_and_accounting(self, tmp_path):
@@ -614,14 +683,20 @@ class TestReactivatedStrategies:
             "usaspending": {
                 "data": {
                     "contracts": [
-                        {"recipient": "Lockheed Martin Corp", "amount": 500_000_000},
+                        {
+                            "recipient": "Lockheed Martin Corp",
+                            "amount": 500_000_000,
+                            "award_id": "AWARD-LMT",
+                        },
                         {
                             "recipient": "Northrop Grumman Systems",
                             "amount": 200_000_000,
+                            "award_id": "AWARD-NOC",
                         },
                         {
                             "recipient": "Small Unknown Contractor",
                             "amount": 10_000_000,
+                            "award_id": "AWARD-SMALL",
                         },  # Below threshold
                     ]
                 }

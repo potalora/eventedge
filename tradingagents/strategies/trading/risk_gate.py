@@ -159,6 +159,21 @@ class RiskGate:
         """Set tickers in re-entry cooldown (stopped out within the cooldown window)."""
         self._cooling_tickers = set(tickers)
 
+    @staticmethod
+    def _open_trade_strategies(trade: dict) -> set[str]:
+        """Read new multi-contributor or legacy scalar strategy provenance."""
+        raw = trade.get("strategies")
+        if isinstance(raw, str):
+            strategies = {raw}
+        elif isinstance(raw, (list, tuple, set)):
+            strategies = {str(item) for item in raw if str(item)}
+        else:
+            strategies = set()
+        legacy = trade.get("strategy")
+        if isinstance(legacy, str) and legacy:
+            strategies.add(legacy)
+        return strategies
+
     def check(
         self,
         ticker: str,
@@ -227,7 +242,9 @@ class RiskGate:
         # 3. Per-strategy limit
         for current_strategy in current_strategies:
             strategy_count = sum(
-                1 for trade in open_trades if trade.get("strategy") == current_strategy
+                1
+                for trade in open_trades
+                if current_strategy in self._open_trade_strategies(trade)
             ) + sum(
                 1 for entry in pending_entries if current_strategy in entry.strategies
             )

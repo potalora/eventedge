@@ -327,8 +327,17 @@ class CohortOrchestrator:
         results: dict[str, Any] = {}
 
         complete_replays: dict[str, Any] = {}
+        stage_only: list[dict[str, Any]] = []
+        execution_needed: list[dict[str, Any]] = []
         for cohort in self.cohorts:
             ledger = cohort["ledger"]
+            invalid_reason = ledger.session_invalid_reason(session)
+            if invalid_reason:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": invalid_reason,
+                }
+                continue
             snapshots = ledger.read_snapshots(
                 session, session, epoch_id=self._epoch_id, valid_only=True
             )
@@ -338,11 +347,13 @@ class CohortOrchestrator:
                 .ar_config.get("paper_ledger", {})
                 .get("policy_id", f"foundation-{horizon}")
             )
-            if (
-                len(snapshots) == 1
-                and all(ledger.phase_completed(session, phase) for phase in PHASES)
-                and ledger.staging_completed(session, self._epoch_id, policy_id)
-            ):
+            phases_complete = all(
+                ledger.phase_completed(session, phase) for phase in PHASES
+            )
+            staging_complete = ledger.staging_completed(
+                session, self._epoch_id, policy_id
+            )
+            if len(snapshots) == 1 and phases_complete and staging_complete:
                 fills = ledger.read_fills(session, session)
                 complete_replays[cohort["config"].name] = {
                     "signals": [
@@ -368,72 +379,102 @@ class CohortOrchestrator:
                     "replayed": True,
                     "error": False,
                 }
-        if len(complete_replays) == len(self.cohorts):
-            return complete_replays
+            elif len(snapshots) == 1 and phases_complete:
+                cohort["marked_account"] = snapshots[0]
+                stage_only.append(cohort)
+            else:
+                execution_needed.append(cohort)
         results.update(complete_replays)
-        cohorts_to_run = [
-            cohort
-            for cohort in self.cohorts
-            if cohort["config"].name not in complete_replays
-        ]
-
-        required_tickers = tuple(
-            sorted(
-                {
-                    ticker
-                    for cohort in cohorts_to_run
-                    for ticker in cohort["executor"].required_tickers(session)
-                }
-            )
-        )
-        benchmark_symbols = (
-            cohorts_to_run[0]["executor"].benchmark_symbols
-            if cohorts_to_run
-            else ("SPY", "BIL")
-        )
-        try:
-            bundle = SessionExecutor.fetch_input_bundle(
-                session,
-                required_tickers,
-                self._price_source,
-                benchmark_symbols,
-            )
-            processed_at = datetime.now(timezone.utc)
-        except Exception as error:
-            reason = f"shared session input fetch failed: {error}"
-            for cohort in cohorts_to_run:
-                cohort["ledger"].invalidate_session_and_cancel_due(
-                    session, reason, processed_at
-                )
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                }
+        if not execution_needed and not stage_only:
             return results
 
-        valid_cohorts: list[dict[str, Any]] = []
-        for cohort in cohorts_to_run:
-            name = cohort["config"].name
-            try:
-                lifecycle = cohort["executor"].execute_open_and_mark(
-                    session,
-                    self._epoch_id,
-                    bundle,
-                    {},
-                    processed_at,
+        valid_cohorts: list[dict[str, Any]] = list(stage_only)
+        fresh_execution: list[dict[str, Any]] = []
+        if execution_needed:
+            for cohort in execution_needed:
+                name = cohort["config"].name
+                try:
+                    context = cohort["ledger"].session_execution_context(session)
+                    if context is None:
+                        fresh_execution.append(cohort)
+                        continue
+                    persisted = cohort["executor"].persisted_input_bundle(session)
+                    lifecycle = cohort["executor"].execute_open_and_mark(
+                        session,
+                        self._epoch_id,
+                        persisted,
+                        {},
+                        processed_at,
+                    )
+                except Exception as error:
+                    logger.error("Cohort %s stored resume failed", name, exc_info=True)
+                    results[name] = {"error": True, "invalid_reason": str(error)}
+                    continue
+                if not lifecycle.valid or lifecycle.snapshot is None:
+                    results[name] = {
+                        "error": True,
+                        "invalid_reason": lifecycle.invalid_reason,
+                    }
+                    continue
+                cohort["marked_account"] = lifecycle.snapshot
+                valid_cohorts.append(cohort)
+
+        if fresh_execution:
+            required_tickers = tuple(
+                sorted(
+                    {
+                        ticker
+                        for cohort in fresh_execution
+                        for ticker in cohort["executor"].required_tickers(session)
+                    }
                 )
+            )
+            benchmark_symbols = fresh_execution[0]["executor"].benchmark_symbols
+            try:
+                bundle = SessionExecutor.fetch_input_bundle(
+                    session,
+                    required_tickers,
+                    self._price_source,
+                    benchmark_symbols,
+                )
+                processed_at = datetime.now(timezone.utc)
             except Exception as error:
-                logger.error("Cohort %s execution failed", name, exc_info=True)
-                results[name] = {"error": True, "invalid_reason": str(error)}
-                continue
-            if not lifecycle.valid or lifecycle.snapshot is None:
-                results[name] = {
-                    "error": True,
-                    "invalid_reason": lifecycle.invalid_reason,
-                }
-                continue
-            cohort["marked_account"] = lifecycle.snapshot
-            valid_cohorts.append(cohort)
+                reason = f"shared session input fetch failed: {error}"
+                for cohort in fresh_execution:
+                    cohort["ledger"].invalidate_session_and_cancel_due(
+                        session, reason, processed_at
+                    )
+                    results[cohort["config"].name] = {
+                        "error": True,
+                        "invalid_reason": reason,
+                    }
+                if not valid_cohorts:
+                    return results
+                bundle = None
+
+            if bundle is not None:
+                for cohort in fresh_execution:
+                    name = cohort["config"].name
+                    try:
+                        lifecycle = cohort["executor"].execute_open_and_mark(
+                            session,
+                            self._epoch_id,
+                            bundle,
+                            {},
+                            processed_at,
+                        )
+                    except Exception as error:
+                        logger.error("Cohort %s execution failed", name, exc_info=True)
+                        results[name] = {"error": True, "invalid_reason": str(error)}
+                        continue
+                    if not lifecycle.valid or lifecycle.snapshot is None:
+                        results[name] = {
+                            "error": True,
+                            "invalid_reason": lifecycle.invalid_reason,
+                        }
+                        continue
+                    cohort["marked_account"] = lifecycle.snapshot
+                    valid_cohorts.append(cohort)
 
         if not valid_cohorts:
             return results

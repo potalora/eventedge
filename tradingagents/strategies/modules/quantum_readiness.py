@@ -15,6 +15,7 @@ Academic basis: Filippo Valsorda (2026) CRQC timeline analysis; Google
 
 Data sources: EDGAR (PQC-keyword filings), Finnhub (PQC news), OpenBB (profiles).
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,26 +28,52 @@ logger = logging.getLogger(__name__)
 # -- Keyword sets for signal detection --
 
 PQC_KEYWORDS = [
-    "post-quantum", "post quantum", "quantum-resistant", "quantum resistant",
-    "quantum-safe", "quantum safe", "pqc", "crqc",
-    "ml-kem", "ml-dsa", "slh-dsa", "crystals-kyber", "crystals-dilithium",
-    "fips 203", "fips 204", "fips 205", "cryptographic agility",
+    "post-quantum",
+    "post quantum",
+    "quantum-resistant",
+    "quantum resistant",
+    "quantum-safe",
+    "quantum safe",
+    "pqc",
+    "crqc",
+    "ml-kem",
+    "ml-dsa",
+    "slh-dsa",
+    "crystals-kyber",
+    "crystals-dilithium",
+    "fips 203",
+    "fips 204",
+    "fips 205",
+    "cryptographic agility",
 ]
 
 QUANTUM_THREAT_KEYWORDS = [
-    "quantum computing risk", "quantum threat", "quantum vulnerability",
-    "shor's algorithm", "ecdsa vulnerability", "rsa vulnerability",
+    "quantum computing risk",
+    "quantum threat",
+    "quantum vulnerability",
+    "shor's algorithm",
+    "ecdsa vulnerability",
+    "rsa vulnerability",
 ]
 
 BULL_NEWS_KEYWORDS = [
-    "quantum milestone", "qubit", "error correction breakthrough",
-    "quantum supremacy", "quantum advantage", "nist mandate",
-    "pqc deadline", "quantum-safe migration",
+    "quantum milestone",
+    "qubit",
+    "error correction breakthrough",
+    "quantum supremacy",
+    "quantum advantage",
+    "nist mandate",
+    "pqc deadline",
+    "quantum-safe migration",
 ]
 
 BEAR_NEWS_KEYWORDS = [
-    "quantum delay", "qubit shortage", "decoherence",
-    "quantum setback", "years away", "overhyped",
+    "quantum delay",
+    "qubit shortage",
+    "decoherence",
+    "quantum setback",
+    "years away",
+    "overhyped",
 ]
 
 # -- Ticker baskets --
@@ -69,7 +96,10 @@ class QuantumReadinessStrategy:
     data_sources = ["edgar", "finnhub", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -81,7 +111,10 @@ class QuantumReadinessStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -110,6 +143,26 @@ class QuantumReadinessStrategy:
         finnhub_data = data.get("finnhub", {})
         pqc_news = finnhub_data.get("pqc_news", [])
 
+        source_ids: set[str] = set()
+        for filing in pqc_filings:
+            locator = (
+                filing.get("accession_number")
+                or filing.get("adsh")
+                or filing.get("file_url")
+                or filing.get("url")
+            )
+            if locator:
+                source_ids.add(f"EDGAR:{locator}")
+        for article in pqc_news:
+            locator = (
+                article.get("id") or article.get("article_id") or article.get("url")
+            )
+            if locator:
+                source_ids.add(f"FINNHUB:{locator}")
+        if not source_ids:
+            logger.warning("Quantum readiness: source records lack immutable locators")
+            return []
+
         # Compute regime score from signal balance
         regime_score = self._compute_regime_score(pqc_filings, pqc_news)
         threshold = params.get("regime_threshold", 0.3)
@@ -118,13 +171,20 @@ class QuantumReadinessStrategy:
 
         if regime_score > threshold:
             # BULL regime: CRQC timeline compressing
-            candidates = self._bull_basket(pqc_filings, pqc_news, date, regime_score)
+            candidates = self._bull_basket(
+                pqc_filings, pqc_news, date, regime_score, sorted(source_ids)
+            )
         elif regime_score < -threshold:
             # BEAR regime: CRQC stalling, quantum hype fading
-            candidates = self._bear_basket(pqc_news, date, regime_score)
+            candidates = self._bear_basket(
+                pqc_news, date, regime_score, sorted(source_ids)
+            )
         else:
             # NEUTRAL: sparse signals, sit tight
-            logger.info("Quantum readiness: neutral regime (score=%.2f), no trades", regime_score)
+            logger.info(
+                "Quantum readiness: neutral regime (score=%.2f), no trades",
+                regime_score,
+            )
             return []
 
         # Enrich with OpenBB sector data
@@ -136,10 +196,12 @@ class QuantumReadinessStrategy:
                     c.metadata["sector"] = profile_data[c.ticker].get("sector", "")
                     c.metadata["industry"] = profile_data[c.ticker].get("industry", "")
 
-        return candidates[:params.get("max_positions", 4)]
+        return candidates[: params.get("max_positions", 4)]
 
     def _compute_regime_score(
-        self, filings: list[dict], news: list[dict],
+        self,
+        filings: list[dict],
+        news: list[dict],
     ) -> float:
         """Compute regime score from -1.0 (bear) to +1.0 (bull).
 
@@ -177,10 +239,10 @@ class QuantumReadinessStrategy:
 
         # Check for quantum threat language in filings (bull: companies worried)
         threat_count = sum(
-            1 for f in filings
+            1
+            for f in filings
             if any(
-                kw in f.get("filing_text", "").lower()
-                for kw in QUANTUM_THREAT_KEYWORDS
+                kw in f.get("filing_text", "").lower() for kw in QUANTUM_THREAT_KEYWORDS
             )
         )
         if threat_count >= 2:
@@ -196,6 +258,7 @@ class QuantumReadinessStrategy:
         news: list[dict],
         date: str,
         regime_score: float,
+        source_ids: list[str],
     ) -> list[Candidate]:
         """Bull regime: long PQC vendors, short crypto-exposed laggards."""
         candidates: list[Candidate] = []
@@ -220,6 +283,7 @@ class QuantumReadinessStrategy:
                         "regime_score": regime_score,
                         "needs_llm_analysis": True,
                         "analysis_type": "quantum_readiness",
+                        "source_ids": source_ids,
                     },
                 )
             )
@@ -240,6 +304,7 @@ class QuantumReadinessStrategy:
                             "needs_llm_analysis": True,
                             "analysis_type": "quantum_readiness",
                             "filing_count": len(filings),
+                            "source_ids": source_ids,
                         },
                     )
                 )
@@ -259,6 +324,7 @@ class QuantumReadinessStrategy:
                         "needs_llm_analysis": True,
                         "analysis_type": "quantum_readiness",
                         "rationale": "centralized systems migrate faster than decentralized",
+                        "source_ids": source_ids,
                     },
                 )
             )
@@ -270,6 +336,7 @@ class QuantumReadinessStrategy:
         news: list[dict],
         date: str,
         regime_score: float,
+        source_ids: list[str],
     ) -> list[Candidate]:
         """Bear regime: short quantum hardware (overvalued on timeline compression)."""
         candidates: list[Candidate] = []
@@ -288,6 +355,7 @@ class QuantumReadinessStrategy:
                         "needs_llm_analysis": True,
                         "analysis_type": "quantum_readiness",
                         "rationale": "physics bottleneck skeptics winning, timeline compression unpriced",
+                        "source_ids": source_ids,
                     },
                 )
             )

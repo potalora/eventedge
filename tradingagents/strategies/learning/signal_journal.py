@@ -12,11 +12,14 @@ import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from tradingagents.strategies.execution import SignalRecord
+
+if TYPE_CHECKING:
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +53,17 @@ class SignalJournal:
     File lives at ``{state_dir}/signal_journal.jsonl``.
     """
 
-    def __init__(self, state_dir: str) -> None:
+    def __init__(
+        self,
+        state_dir: str,
+        ledger: "PortfolioLedger | None" = None,
+        *,
+        after_append: Callable[[], None] | None = None,
+    ) -> None:
         self._path = Path(state_dir) / "signal_journal.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ledger = ledger
+        self._after_append = after_append or (lambda: None)
 
     # ------------------------------------------------------------------
     # Write
@@ -97,6 +108,9 @@ class SignalJournal:
         context_by_id: dict[str, dict[str, Any]],
     ) -> None:
         """Mirror persisted ledger records without inventing identity or price."""
+        if self._ledger is not None:
+            self.drain_outbox()
+            return
         entries = []
         for record in records:
             context = context_by_id.get(record.signal_id, {})
@@ -117,6 +131,87 @@ class SignalJournal:
                 )
             )
         self.log_signals(entries)
+
+    def drain_outbox(self, limit: int = 256) -> int:
+        """Project one bounded ledger outbox batch with crash-safe tail recovery."""
+        if self._ledger is None:
+            return 0
+        pending = self._ledger.pending_signal_journal_outbox(limit)
+        if not pending:
+            return 0
+        now = datetime.now(timezone.utc)
+        self._path.touch(exist_ok=True)
+        verified = self._ledger.journal_projection_offset()
+        if verified is None:
+            verified = self._ledger.initialize_journal_projection(
+                self._path.stat().st_size, now
+            )
+
+        expected_lines = [
+            str(row["payload_json"]).encode("utf-8") + b"\n" for row in pending
+        ]
+        max_tail = sum(len(line) for line in expected_lines)
+        projections: list[tuple[str, str, int, int]] = []
+        recovered = 0
+        cursor = verified
+
+        with open(self._path, "r+b") as journal:
+            journal.seek(0, os.SEEK_END)
+            size = journal.tell()
+            if size < verified:
+                raise RuntimeError("signal journal is shorter than verified projection")
+            tail_size = size - verified
+            if tail_size > max_tail:
+                raise RuntimeError("signal journal has an unbounded unverified tail")
+            journal.seek(verified)
+            tail = journal.read(tail_size)
+            consumed = 0
+            for row, expected in zip(pending, expected_lines):
+                remaining = tail[consumed:]
+                if remaining.startswith(expected):
+                    projections.append(
+                        (
+                            str(row["signal_id"]),
+                            str(row["payload_hash"]),
+                            cursor,
+                            len(expected),
+                        )
+                    )
+                    consumed += len(expected)
+                    cursor += len(expected)
+                    recovered += 1
+                    continue
+                if remaining and expected.startswith(remaining):
+                    journal.truncate(cursor)
+                    tail = tail[:consumed]
+                    break
+                if remaining:
+                    raise RuntimeError(
+                        "signal journal tail conflicts with ledger outbox"
+                    )
+                break
+            if consumed != len(tail):
+                raise RuntimeError("signal journal contains an unmatched tail")
+
+            journal.seek(cursor)
+            for row, expected in zip(pending[recovered:], expected_lines[recovered:]):
+                offset = cursor
+                journal.write(expected)
+                cursor += len(expected)
+                projections.append(
+                    (
+                        str(row["signal_id"]),
+                        str(row["payload_hash"]),
+                        offset,
+                        len(expected),
+                    )
+                )
+            journal.flush()
+            os.fsync(journal.fileno())
+
+        self._after_append()
+        self._ledger.mark_signal_journal_mirrored(projections, cursor, now)
+        return len(projections)
 
     @staticmethod
     def _journal_key(entry: dict[str, Any]) -> tuple[str, ...]:

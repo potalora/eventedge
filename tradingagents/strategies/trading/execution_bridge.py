@@ -212,11 +212,15 @@ class ExecutionBridge:
         if not isinstance(processing_at, datetime):
             raise ValueError("risk_context processing_at is required")
         self._require_aware(processing_at, "risk_context processing_at")
+        bar_validation_at = risk_context.get("bar_validation_at", processing_at)
+        if not isinstance(bar_validation_at, datetime):
+            raise ValueError("risk_context bar_validation_at must be a datetime")
+        self._require_aware(bar_validation_at, "risk_context bar_validation_at")
         validate_required_bars(
             {(opening_bar.ticker, opening_bar.session): opening_bar},
             {opening_bar.ticker},
             opening_bar.session,
-            processing_at,
+            bar_validation_at,
         )
         if opening_bar.fetched_at < session_close(opening_bar.session):
             raise ValueError("execution bar was fetched before session close")

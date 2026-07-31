@@ -6,6 +6,7 @@ Signal logic:
 3. Catalyst scan: regulatory/supply chain news for optional boost.
 4. Emit ETF candidates via FUTURES_TO_ETF_MAP.
 """
+
 from __future__ import annotations
 
 import logging
@@ -53,9 +54,24 @@ _LONG_SUBSTITUTIONS = {
 }
 
 _CATALYST_KEYWORDS = [
-    "gold", "silver", "copper", "crude", "oil", "natural gas", "lng",
-    "mining", "metals", "energy", "opec", "pipeline", "refinery",
-    "tariff", "sanctions", "embargo", "supply chain", "commodity",
+    "gold",
+    "silver",
+    "copper",
+    "crude",
+    "oil",
+    "natural gas",
+    "lng",
+    "mining",
+    "metals",
+    "energy",
+    "opec",
+    "pipeline",
+    "refinery",
+    "tariff",
+    "sanctions",
+    "embargo",
+    "supply chain",
+    "commodity",
 ]
 
 
@@ -67,7 +83,10 @@ class CommodityMacroStrategy:
     data_sources = ["yfinance", "cftc", "fred", "regulations", "finnhub"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "cot_extreme_pct": (75, 95),
@@ -78,7 +97,10 @@ class CommodityMacroStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         if not hp.get("commodity_eligible", False):
             eligible = []
@@ -115,11 +137,15 @@ class CommodityMacroStrategy:
 
             percentile = cot.get("percentile", 0.5)
             direction = cot.get("direction_signal", "neutral")
+            report_id = cot.get("report_id")
+            window_end = cot.get("window_end")
 
-            if direction == "neutral":
+            if direction == "neutral" or not report_id or not window_end:
                 continue
 
-            if not (percentile >= cot_extreme_pct or percentile <= (1.0 - cot_extreme_pct)):
+            if not (
+                percentile >= cot_extreme_pct or percentile <= (1.0 - cot_extreme_pct)
+            ):
                 continue
 
             if macro_veto and self._macro_vetoes(commodity, direction, fred_data):
@@ -157,13 +183,17 @@ class CommodityMacroStrategy:
                         "catalyst_found": catalyst_found,
                         "needs_llm_analysis": True,
                         "analysis_type": "commodity_macro",
+                        "report_id": report_id,
+                        "window_end": window_end,
                     },
                 )
             )
 
         return candidates
 
-    def check_exit(self, ticker, entry_price, current_price, holding_days, params, data):
+    def check_exit(
+        self, ticker, entry_price, current_price, holding_days, params, data
+    ):
         hold_days = params.get("hold_days", 90)
         if holding_days >= hold_days:
             return True, "hold_period"
@@ -207,7 +237,7 @@ Parameter ranges:
 - catalyst_boost: 0.0-0.3 (score boost when catalyst present)
 
 Recent results:
-{results_text or '  No results yet.'}
+{results_text or "  No results yet."}
 
 Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
@@ -249,7 +279,9 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
     @staticmethod
     def _scan_catalysts(commodity, data):
-        relevant_keywords = [k for k in _CATALYST_KEYWORDS if k in commodity or commodity in k]
+        relevant_keywords = [
+            k for k in _CATALYST_KEYWORDS if k in commodity or commodity in k
+        ]
         relevant_keywords.extend(["mining", "energy", "opec", "tariff", "sanctions"])
 
         regs = data.get("regulations", {})

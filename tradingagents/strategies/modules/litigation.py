@@ -9,6 +9,7 @@ lead to -38% loss in market-adjusted value. Early detection = edge.
 
 Data source: CourtListener (free API, 5,000 req/hour).
 """
+
 from __future__ import annotations
 
 import logging
@@ -49,7 +50,10 @@ class LitigationStrategy:
         self._edgar_source: Any | None = None
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -59,7 +63,10 @@ class LitigationStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -81,6 +88,8 @@ class LitigationStrategy:
         ranked: list[tuple[int, float, int, Candidate]] = []
 
         for source_index, docket in enumerate(unique_dockets):
+            if not docket.get("docket_id"):
+                continue
             nature = docket.get("nature_of_suit", "")
             case_name = docket.get("case_name", "")
 
@@ -126,6 +135,8 @@ class LitigationStrategy:
         eligible_count = len(ranked)
         for release_index, release in enumerate(sec_releases):
             title = release.get("title", "")
+            if not release.get("url") and not (title and release.get("date")):
+                continue
             candidate = Candidate(
                 ticker="",  # LLM will resolve from title
                 date=date,
@@ -232,6 +243,7 @@ class LitigationStrategy:
         # Resolve via SEC company_tickers.json
         try:
             from tradingagents.strategies.data_sources.edgar_source import EDGARSource
+
             if self._edgar_source is None:
                 self._edgar_source = EDGARSource()
             ticker = self._edgar_source.name_to_ticker(
@@ -241,7 +253,9 @@ class LitigationStrategy:
             if ticker:
                 return ticker
         except Exception:
-            logger.debug("name_to_ticker lookup failed for %r", defendant, exc_info=True)
+            logger.debug(
+                "name_to_ticker lookup failed for %r", defendant, exc_info=True
+            )
 
         return ""
 

@@ -10,6 +10,7 @@ Detects stealth downgrades (lowering without flagging).
 
 Data source: Finnhub (earnings_call_transcripts endpoint).
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,7 +29,10 @@ class EarningsCallStrategy:
     data_sources = ["finnhub", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -38,7 +42,10 @@ class EarningsCallStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -67,58 +74,59 @@ class EarningsCallStrategy:
         candidates = []
         for t in transcripts:
             symbol = t.get("symbol", "")
-            if not symbol:
+            year = t.get("year")
+            quarter = t.get("quarter")
+            if not symbol or year is None or quarter is None:
                 continue
 
-            # --- EPS surprise candidate (quantitative, backtestable) ---
+            # One fiscal period is one source event. Quantitative and text
+            # evidence enrich the same candidate instead of creating colliding
+            # ledger identities with different payloads.
             eps_actual = t.get("eps_actual")
             eps_estimate = t.get("eps_estimate")
-            if eps_actual is not None and eps_estimate is not None and eps_estimate != 0:
+            text = t.get("transcript_text", "")
+            metadata = {
+                "year": year,
+                "quarter": quarter,
+                "analysis_type": "earnings_call",
+            }
+            direction = "long"
+            score = 0.5
+            if (
+                eps_actual is not None
+                and eps_estimate is not None
+                and eps_estimate != 0
+            ):
                 surprise = (eps_actual - eps_estimate) / abs(eps_estimate)
-                # Map surprise magnitude to score: ±10% surprise → 0.7 score
-                eps_score = min(abs(surprise) * 7.0, 1.0)
-                eps_direction = "long" if surprise > 0 else "short"
+                score = round(min(abs(surprise) * 7.0, 1.0), 3)
+                direction = "long" if surprise > 0 else "short"
+                metadata.update(
+                    {
+                        "signal_tier": "backtestable",
+                        "eps_actual": eps_actual,
+                        "eps_estimate": eps_estimate,
+                        "eps_surprise_pct": round(surprise * 100, 2),
+                    }
+                )
+            if text:
+                metadata.update(
+                    {
+                        "analysis_text": text[:5000],
+                        "text_source": t.get("text_source", "earnings_news"),
+                        "needs_llm_analysis": True,
+                    }
+                )
+                metadata.setdefault("signal_tier", "paper_only")
+            if text or (eps_actual is not None and eps_estimate not in (None, 0)):
                 candidates.append(
                     Candidate(
                         ticker=symbol,
                         date=date,
-                        direction=eps_direction,
-                        score=round(eps_score, 3),
-                        metadata={
-                            "signal_tier": "backtestable",
-                            "eps_actual": eps_actual,
-                            "eps_estimate": eps_estimate,
-                            "eps_surprise_pct": round(surprise * 100, 2),
-                            "year": t.get("year"),
-                            "quarter": t.get("quarter"),
-                            "analysis_type": "earnings_call",
-                        },
+                        direction=direction,
+                        score=score,
+                        metadata=metadata,
                     )
                 )
-
-            # --- Text analysis candidate (qualitative, paper_only) ---
-            text = t.get("transcript_text", "")
-            if not text:
-                continue
-            text_source = t.get("text_source", "earnings_news")
-
-            candidates.append(
-                Candidate(
-                    ticker=symbol,
-                    date=date,
-                    direction="long",  # LLM will determine
-                    score=0.5,
-                    metadata={
-                        "signal_tier": "paper_only",
-                        "analysis_text": text[:5000],
-                        "text_source": text_source,
-                        "year": t.get("year"),
-                        "quarter": t.get("quarter"),
-                        "needs_llm_analysis": True,
-                        "analysis_type": "earnings_call",
-                    },
-                )
-            )
 
         # Enrich with analyst consensus if available
         openbb_data = data.get("openbb", {})

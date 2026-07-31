@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import statistics
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
@@ -71,9 +72,11 @@ _MUTABLE_EVIDENCE_KEYS = {
     "llm_conviction",
     "needs_llm_analysis",
 }
-_EVENT_TIME_KEYS = (
+_EVENT_DATETIME_KEYS = (
     "event_at",
     "published_at",
+)
+_EVENT_DATE_ONLY_KEYS = (
     "posted_date",
     "date_filed",
     "release_date",
@@ -102,21 +105,39 @@ def _canonical_signal_evidence(value: object) -> object:
     return str(value)
 
 
-def _metadata_datetime(metadata: dict, key: str) -> datetime | None:
-    value = metadata.get(key)
-    if value in (None, ""):
+def _metadata_timestamp(
+    metadata: dict, key: str, *, allow_date_only: bool
+) -> datetime | None:
+    """Parse supplied provenance strictly; date-only evidence resolves to day end."""
+    if key not in metadata:
         return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
+    value = metadata[key]
+    if value in (None, ""):
+        raise ValueError(f"invalid candidate timestamp {key}")
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        if not allow_date_only:
+            raise ValueError(f"candidate timestamp {key} requires an aware datetime")
+        return datetime.combine(value, datetime.max.time(), tzinfo=timezone.utc)
+    elif isinstance(value, str):
+        if allow_date_only:
+            try:
+                date_value = date.fromisoformat(value)
+            except ValueError:
+                date_value = None
+            if date_value is not None and value == date_value.isoformat():
+                return datetime.combine(
+                    date_value, datetime.max.time(), tzinfo=timezone.utc
+                )
         try:
-            parsed = datetime.combine(
-                date.fromisoformat(str(value)), datetime.min.time()
-            )
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+            raise ValueError(f"invalid candidate timestamp {key}") from None
+    else:
+        raise ValueError(f"invalid candidate timestamp {key}")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"candidate timestamp {key} must be timezone-aware")
     return parsed.astimezone(timezone.utc)
 
 
@@ -225,7 +246,9 @@ class MultiStrategyEngine:
         # Signal journal (shared across methods)
         from tradingagents.strategies.learning.signal_journal import SignalJournal
 
-        self._journal = SignalJournal(self.ar_config.get("state_dir", "data/state"))
+        self._journal = SignalJournal(
+            self.ar_config.get("state_dir", "data/state"), ledger=self.ledger
+        )
 
         # OpenBB availability flag — checked once at startup
         self._openbb_source = self.registry.get("openbb")
@@ -341,6 +364,7 @@ class MultiStrategyEngine:
             SignalRecord,
             stable_id,
         )
+        from tradingagents.strategies.learning.signal_journal import JournalEntry
         from tradingagents.strategies.orchestration.trading_calendar import (
             is_session,
             next_session,
@@ -403,8 +427,7 @@ class MultiStrategyEngine:
         records: list[SignalRecord] = []
         timely: list[tuple[dict, SignalRecord]] = []
         late_ids: list[str] = []
-        journal_context: dict[str, dict] = {}
-        for ordinal, signal in enumerate(shared_signals):
+        for signal in shared_signals:
             ticker = str(signal.get("ticker", "")).strip().upper()
             strategy = str(signal.get("strategy", "")).strip()
             direction = str(signal.get("direction", "")).strip()
@@ -440,20 +463,33 @@ class MultiStrategyEngine:
                 }
             )
             explicit_event_key = metadata.get("event_key")
-            event_key = (
-                str(explicit_event_key)
-                if explicit_event_key
-                else stable_id("event", strategy, ticker, session, direction, evidence)
+            if explicit_event_key:
+                event_key = str(explicit_event_key)
+            else:
+                from tradingagents.strategies.orchestration.event_identity import (
+                    canonical_event_key,
+                )
+
+                event_key = canonical_event_key(strategy, ticker, metadata, session)
+            event_times = [
+                parsed
+                for key in _EVENT_DATETIME_KEYS
+                if (parsed := _metadata_timestamp(metadata, key, allow_date_only=False))
+                is not None
+            ]
+            event_times.extend(
+                parsed
+                for key in _EVENT_DATE_ONLY_KEYS
+                if (parsed := _metadata_timestamp(metadata, key, allow_date_only=True))
+                is not None
             )
-            event_at = next(
-                (
-                    parsed
-                    for key in _EVENT_TIME_KEYS
-                    if (parsed := _metadata_datetime(metadata, key)) is not None
-                ),
-                None,
+            event_at = max(event_times) if event_times else None
+            observed_at = (
+                _metadata_timestamp(metadata, "observed_at", allow_date_only=False)
+                if "observed_at" in metadata
+                else cutoff
             )
-            observed_at = _metadata_datetime(metadata, "observed_at") or cutoff
+            assert observed_at is not None
             decision_at = max(
                 [cutoff, observed_at] + ([event_at] if event_at is not None else [])
             )
@@ -475,7 +511,6 @@ class MultiStrategyEngine:
                 decision_at,
                 stable_id("evidence", evidence),
             )
-            self.ledger.record_signal(record)
             records.append(record)
             is_late = observed_at > cutoff or (
                 event_at is not None and event_at > cutoff
@@ -490,19 +525,31 @@ class MultiStrategyEngine:
                 timely.append((enriched, record))
                 status = "timely"
             llm = metadata.get("llm_analysis")
-            journal_context[signal_id] = {
-                "score": float(signal.get("score", 0) or 0),
-                "llm_conviction": (
-                    float(llm.get("conviction", llm.get("score", 0)) or 0)
-                    if isinstance(llm, dict)
-                    else 0.0
-                ),
-                "regime": (shared_regime or {}).get("overall_regime", ""),
-                "status": status,
-                "metadata": {"candidate_ordinal": ordinal},
-            }
+            journal_payload = asdict(
+                JournalEntry(
+                    timestamp=record.reference_session.isoformat(),
+                    strategy=record.strategy,
+                    ticker=record.ticker,
+                    direction=record.direction,
+                    score=float(signal.get("score", 0) or 0),
+                    signal_id=record.signal_id,
+                    llm_conviction=(
+                        float(llm.get("conviction", llm.get("score", 0)) or 0)
+                        if isinstance(llm, dict)
+                        else 0.0
+                    ),
+                    regime=(shared_regime or {}).get("overall_regime", ""),
+                    traded=False,
+                    entry_price=None,
+                    metadata={},
+                    status=status,
+                )
+            )
+            self.ledger.record_signal_with_journal(
+                record, journal_payload, record.decision_at
+            )
 
-        self._journal.mirror_signals(records, journal_context)
+        self._journal.mirror_signals(records, {})
 
         strategy_confidence = {
             record.strategy: (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -26,7 +27,10 @@ from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     session_close,
 )
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 
 
@@ -45,6 +49,31 @@ PHASES = (
 _SIDE_PRIORITY = {"sell": 0, "cover": 0, "buy": 1, "short": 1}
 
 
+def _canonical_json_value(value: object) -> object:
+    """Convert bounded execution configuration/state to deterministic JSON."""
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_canonical_json_value(item) for item in value)
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        decimal_value = Decimal(str(value))
+        if not decimal_value.is_finite():
+            raise ValueError("execution context contains non-finite configuration")
+        return format(decimal_value, "f")
+    raise TypeError(f"unsupported execution-context value {type(value).__name__}")
+
+
 @dataclass(frozen=True)
 class SessionInputBundle:
     """One shared immutable fetch bundle for a session."""
@@ -57,6 +86,13 @@ class SessionInputBundle:
 
 
 @dataclass(frozen=True)
+class _PersistedSessionInputBundle(SessionInputBundle):
+    """Internal bundle whose freshness was validated when its context was bound."""
+
+    validated_at: datetime
+
+
+@dataclass(frozen=True)
 class SessionExecutionResult:
     """Typed valid/invalid outcome; invalid sessions never fabricate a snapshot."""
 
@@ -65,6 +101,17 @@ class SessionExecutionResult:
     snapshot: AccountSnapshot | None
     invalid_reason: str
     completed_phases: tuple[str, ...]
+
+
+class CorporateActionBatchError(ValueError):
+    """The complete provider action response failed validation."""
+
+    def __init__(
+        self, actions: tuple[CorporateAction, ...], errors: tuple[str, ...]
+    ) -> None:
+        self.actions = actions
+        self.errors = errors
+        super().__init__("; ".join(errors))
 
 
 class SessionExecutor:
@@ -134,6 +181,72 @@ class SessionExecutor:
             session, tuple(sorted(tickers)), bars, actions, benchmarks
         )
 
+    def persisted_input_bundle(self, session: date) -> SessionInputBundle:
+        """Rehydrate bound canonical economics for a partial-session resume."""
+        context = self.ledger.session_execution_context(session)
+        if context is None:
+            raise ValueError(f"session {session} has no bound execution context")
+        economic = json.loads(str(context["economic_inputs_json"]))
+        market = economic.get("market", {})
+        provenance = json.loads(str(context["provenance_json"]))
+        required = tuple(context["required_tickers"])
+        bars = {
+            (str(item["ticker"]), session): MarketBar(
+                str(item["ticker"]),
+                session,
+                Decimal(str(item["open"])),
+                Decimal(str(item["high"])),
+                Decimal(str(item["low"])),
+                Decimal(str(item["close"])),
+                str(item["source"]),
+                datetime.fromisoformat(
+                    str(provenance["raw_bars"][str(item["ticker"])])
+                ),
+                bool(item["adjusted"]),
+            )
+            for item in market.get("raw_bars", [])
+        }
+        actions = tuple(
+            CorporateAction(
+                str(item["action_id"]),
+                str(item["ticker"]),
+                session,
+                str(item["action_type"]),
+                Decimal(str(item["ratio"])) if item.get("ratio") is not None else None,
+                (
+                    Decimal(str(item["cash_per_share"]))
+                    if item.get("cash_per_share") is not None
+                    else None
+                ),
+                str(item["source"]),
+                datetime.fromisoformat(
+                    str(provenance["corporate_actions"][str(item["action_id"])])
+                ),
+                bool(item["verified"]),
+            )
+            for item in market.get("corporate_actions", [])
+        )
+        benchmarks = {
+            (str(item["symbol"]), session): AdjustedClose(
+                str(item["symbol"]),
+                session,
+                Decimal(str(item["close"])),
+                str(item["source"]),
+                datetime.fromisoformat(
+                    str(provenance["benchmarks"][str(item["symbol"])])
+                ),
+            )
+            for item in market.get("benchmarks", [])
+        }
+        return _PersistedSessionInputBundle(
+            session,
+            required,
+            bars,
+            actions,
+            benchmarks,
+            validated_at=context["bound_at"],
+        )
+
     def execute_open_and_mark(
         self,
         session: date,
@@ -149,17 +262,58 @@ class SessionExecutor:
             raise ValueError(
                 f"session {session} already belongs to epoch {existing[0].epoch_id}"
             )
-        if (
-            len(existing) == 1
-            and existing[0].valid
-            and all(self.ledger.phase_completed(session, phase) for phase in PHASES)
-        ):
-            return SessionExecutionResult(session, True, existing[0], "", PHASES)
         invalid_reason = self.ledger.session_invalid_reason(session)
         if invalid_reason:
             return SessionExecutionResult(session, False, None, invalid_reason, ())
 
-        required = self.required_tickers(session)
+        bound_context = self.ledger.session_execution_context(session)
+        if bound_context is not None and bound_context["epoch_id"] != epoch_id:
+            reason = (
+                f"execution context epoch conflict: {bound_context['epoch_id']} "
+                f"!= {epoch_id}"
+            )
+            if not existing:
+                self.ledger.invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
+            return SessionExecutionResult(session, False, None, reason, ())
+        required = (
+            tuple(bound_context["required_tickers"])
+            if bound_context is not None
+            else self.required_tickers(session)
+        )
+        config_inputs, borrow_inputs = self._static_context_documents(
+            required, borrow_rates
+        )
+        config_digest = stable_id("session_execution_config", config_inputs)
+        borrow_digest = stable_id("session_borrow_inputs", borrow_inputs)
+        fully_complete = (
+            len(existing) == 1
+            and existing[0].valid
+            and all(self.ledger.phase_completed(session, phase) for phase in PHASES)
+        )
+        if bound_context is not None and (
+            bound_context["config_digest"] != config_digest
+            or bound_context["borrow_digest"] != borrow_digest
+        ):
+            reason = (
+                "execution context conflict: effective config or borrow inputs changed"
+            )
+            if not existing:
+                self.ledger.invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
+            return SessionExecutionResult(session, False, None, reason, ())
+        if fully_complete and bound_context is not None:
+            return SessionExecutionResult(session, True, existing[0], "", PHASES)
+        for ticker in required:
+            quarantine_reason = self.ledger.session_invalid_reason(session, ticker)
+            if quarantine_reason:
+                reason = f"quarantined {ticker}: {quarantine_reason}"
+                self.ledger.invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
+                return SessionExecutionResult(session, False, None, reason, ())
         try:
             bundle = (
                 price_source
@@ -171,14 +325,78 @@ class SessionExecutor:
             bars, actions, benchmarks = self._validate_bundle(
                 bundle, required, session, processed_at
             )
+            market_inputs, config_inputs, borrow_inputs, provenance = (
+                self._execution_context_documents(
+                    session,
+                    required,
+                    bars,
+                    actions,
+                    benchmarks,
+                    borrow_rates,
+                )
+            )
+            if bound_context is None:
+                economic_inputs = {
+                    "market": market_inputs,
+                    "starting_state": _canonical_json_value(
+                        self.ledger.execution_starting_state(session)
+                    ),
+                }
+                economic_json = json.dumps(
+                    economic_inputs, sort_keys=True, separators=(",", ":")
+                )
+            else:
+                economic_json = str(bound_context["economic_inputs_json"])
+            market_digest = stable_id("session_market_inputs", market_inputs)
+            input_digest = (
+                stable_id("session_economic_inputs", economic_inputs)
+                if bound_context is None
+                else str(bound_context["input_digest"])
+            )
+            self.ledger.bind_session_execution_context(
+                session,
+                epoch_id,
+                input_digest,
+                market_digest,
+                config_digest,
+                borrow_digest,
+                required,
+                economic_json,
+                json.dumps(provenance, sort_keys=True, separators=(",", ":")),
+                processed_at,
+            )
+        except CorporateActionBatchError as error:
+            reason = self.ledger.reject_corporate_action_batch(
+                session,
+                error.actions,
+                required,
+                error.errors,
+                processed_at,
+            )
+            return SessionExecutionResult(session, False, None, reason, ())
+        except LedgerConflictError as error:
+            reason = f"execution context conflict: {error}"
+            if not existing:
+                self.ledger.invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
+            return SessionExecutionResult(session, False, None, reason, ())
         except Exception as error:
             reason = f"market data validation failed: {error}"
             self.ledger.invalidate_session_and_cancel_due(session, reason, processed_at)
             return SessionExecutionResult(session, False, None, reason, ())
 
+        if fully_complete:
+            return SessionExecutionResult(session, True, existing[0], "", PHASES)
+
         completed: list[str] = []
         bridge = ExecutionBridge(self.config, ledger=self.ledger)
         opening_prices = {ticker: bar.open for ticker, bar in bars.items()}
+        market_validated_at = (
+            bundle.validated_at
+            if isinstance(bundle, _PersistedSessionInputBundle)
+            else processed_at
+        )
 
         self._phase(
             session,
@@ -208,6 +426,7 @@ class SessionExecutor:
                 opening_prices,
                 borrow_rates,
                 processed_at,
+                market_validated_at,
             ),
             completed,
         )
@@ -223,6 +442,7 @@ class SessionExecutor:
                 opening_prices,
                 borrow_rates,
                 processed_at,
+                market_validated_at,
             ),
             completed,
         )
@@ -248,7 +468,12 @@ class SessionExecutor:
             session,
             "mark_positions",
             processed_at,
-            lambda: self.ledger.record_marks(session, bars, processed_at),
+            lambda: self.ledger.record_marks(
+                session,
+                bars,
+                processed_at,
+                validated_at=market_validated_at,
+            ),
             completed,
         )
         self._phase(
@@ -280,6 +505,107 @@ class SessionExecutor:
             snapshot = snapshots[0]
         return SessionExecutionResult(session, True, snapshot, "", tuple(completed))
 
+    def _execution_context_documents(
+        self,
+        session: date,
+        required: tuple[str, ...],
+        bars: dict[str, MarketBar],
+        actions: tuple[CorporateAction, ...],
+        benchmarks: dict[str, AdjustedClose],
+        borrow_rates: dict[str, Decimal | None],
+    ) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+    ]:
+        """Canonical economics exclude refetch timestamps; provenance retains them."""
+        market_inputs: dict[str, object] = {
+            "session": session.isoformat(),
+            "required_tickers": list(required),
+            "raw_bars": [
+                {
+                    "ticker": ticker,
+                    "open": format(bars[ticker].open, "f"),
+                    "high": format(bars[ticker].high, "f"),
+                    "low": format(bars[ticker].low, "f"),
+                    "close": format(bars[ticker].close, "f"),
+                    "source": bars[ticker].source,
+                    "adjusted": bars[ticker].adjusted,
+                }
+                for ticker in required
+            ],
+            "corporate_actions": [
+                {
+                    "action_id": action.action_id,
+                    "ticker": action.ticker,
+                    "action_type": action.action_type,
+                    "ratio": (
+                        format(action.ratio, "f") if action.ratio is not None else None
+                    ),
+                    "cash_per_share": (
+                        format(action.cash_per_share, "f")
+                        if action.cash_per_share is not None
+                        else None
+                    ),
+                    "source": action.source,
+                    "verified": action.verified,
+                }
+                for action in sorted(actions, key=lambda item: item.action_id)
+            ],
+            "benchmarks": [
+                {
+                    "symbol": symbol,
+                    "close": format(benchmarks[symbol].close, "f"),
+                    "source": benchmarks[symbol].source,
+                }
+                for symbol in sorted(benchmarks)
+            ],
+        }
+        config_inputs, borrow_inputs = self._static_context_documents(
+            required, borrow_rates
+        )
+        provenance: dict[str, object] = {
+            "raw_bars": {
+                ticker: bars[ticker].fetched_at.isoformat() for ticker in required
+            },
+            "corporate_actions": {
+                action.action_id: action.fetched_at.isoformat() for action in actions
+            },
+            "benchmarks": {
+                symbol: benchmarks[symbol].fetched_at.isoformat()
+                for symbol in sorted(benchmarks)
+            },
+        }
+        return market_inputs, config_inputs, borrow_inputs, provenance
+
+    def _static_context_documents(
+        self,
+        required: tuple[str, ...],
+        borrow_rates: dict[str, Decimal | None],
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Canonical config and borrow inputs available without market I/O."""
+        borrow_inputs: dict[str, object] = {
+            ticker: (
+                format(borrow_rates[ticker], "f")
+                if borrow_rates.get(ticker) is not None
+                else None
+            )
+            for ticker in required
+        }
+        config_inputs = _canonical_json_value(
+            {
+                "execution": {"mode": self.config.get("execution", {}).get("mode")},
+                "paper_ledger": self.ledger_config,
+                "risk_gate": self.ar_config.get("risk_gate", {}),
+                "short_selling": self.ar_config.get("short_selling", {}),
+                "total_capital": self.ar_config.get("total_capital"),
+                "options": self.config.get("options", {}),
+            }
+        )
+        assert isinstance(config_inputs, dict)
+        return config_inputs, borrow_inputs
+
     def _phase(
         self,
         session: date,
@@ -310,6 +636,7 @@ class SessionExecutor:
         opening_prices: dict[str, Decimal],
         borrow_rates: dict[str, Decimal | None],
         processed_at: datetime,
+        market_validated_at: datetime,
     ) -> None:
         intents = sorted(
             (
@@ -335,11 +662,13 @@ class SessionExecutor:
                 self.ledger.account_state(),
                 {
                     "processing_at": processed_at,
+                    "bar_validation_at": market_validated_at,
                     "opening_prices": opening_prices,
                     "borrow_rate": borrow_rates.get(ticker),
                     "open_trades": [
                         {
                             "ticker": position["ticker"],
+                            "strategies": tuple(position["strategies"]),
                             "strategy": (
                                 position["strategies"][0]
                                 if position["strategies"]
@@ -402,14 +731,28 @@ class SessionExecutor:
         max_age = timedelta(
             hours=float(self.ledger_config.get("bar_max_age_hours", 24))
         )
+        validation_at = (
+            bundle.validated_at
+            if isinstance(bundle, _PersistedSessionInputBundle)
+            else processed_at
+        )
+        # The response is one provider batch. Validate it globally before
+        # selecting the governed subset for this cohort.
+        self._validate_actions(
+            bundle.actions,
+            tuple(sorted(set(bundle.tickers))),
+            session,
+            validation_at,
+            max_age,
+        )
         validate_required_bars(
-            bundle.bars, set(required), session, processed_at, max_age
+            bundle.bars, set(required), session, validation_at, max_age
         )
         validate_adjusted_closes(
             bundle.benchmarks,
             set(self.benchmark_symbols),
             session,
-            processed_at,
+            validation_at,
             max_age,
         )
         cutoff = session_close(session)
@@ -422,7 +765,6 @@ class SessionExecutor:
         actions = tuple(
             action for action in bundle.actions if action.ticker in set(required)
         )
-        self._validate_actions(actions, required, session, processed_at, max_age)
         bars = {ticker: bundle.bars[(ticker, session)] for ticker in required}
         benchmarks = {
             symbol: bundle.benchmarks[(symbol, session)]
@@ -439,22 +781,29 @@ class SessionExecutor:
         max_age: timedelta,
     ) -> None:
         seen: dict[str, CorporateAction] = {}
+        errors: list[str] = []
         for action in actions:
             if action.action_id in seen and seen[action.action_id] != action:
-                raise ValueError(f"conflicting corporate action {action.action_id}")
+                errors.append(f"conflicting corporate action {action.action_id}")
             seen[action.action_id] = action
             if action.ticker not in tickers or action.session != session:
-                raise ValueError(f"corporate action scope mismatch {action.action_id}")
+                errors.append(f"corporate action scope mismatch {action.action_id}")
+            if not action.source.strip():
+                errors.append(f"missing source corporate action {action.action_id}")
             if not action.verified:
-                raise ValueError(f"unverified corporate action {action.action_id}")
-            if action.fetched_at.tzinfo is None:
-                raise ValueError(f"naive corporate action {action.action_id}")
-            if action.fetched_at > processed_at:
-                raise ValueError(f"future corporate action {action.action_id}")
-            if action.fetched_at < session_close(session):
-                raise ValueError(f"pre-close corporate action {action.action_id}")
-            if processed_at - action.fetched_at > max_age:
-                raise ValueError(f"stale corporate action {action.action_id}")
+                errors.append(f"unverified corporate action {action.action_id}")
+            if (
+                action.fetched_at.tzinfo is None
+                or action.fetched_at.utcoffset() is None
+            ):
+                errors.append(f"naive corporate action {action.action_id}")
+            else:
+                if action.fetched_at > processed_at:
+                    errors.append(f"future corporate action {action.action_id}")
+                if action.fetched_at < session_close(session):
+                    errors.append(f"pre-close corporate action {action.action_id}")
+                if processed_at - action.fetched_at > max_age:
+                    errors.append(f"stale corporate action {action.action_id}")
             if action.action_type == "split":
                 if (
                     action.ratio is None
@@ -462,7 +811,7 @@ class SessionExecutor:
                     or action.ratio <= 0
                     or action.cash_per_share is not None
                 ):
-                    raise ValueError(f"invalid split {action.action_id}")
+                    errors.append(f"invalid split {action.action_id}")
             elif action.action_type == "cash_dividend":
                 if (
                     action.cash_per_share is None
@@ -470,9 +819,11 @@ class SessionExecutor:
                     or action.cash_per_share < 0
                     or action.ratio is not None
                 ):
-                    raise ValueError(f"invalid dividend {action.action_id}")
+                    errors.append(f"invalid dividend {action.action_id}")
             else:
-                raise ValueError(f"unsupported corporate action {action.action_id}")
+                errors.append(f"unsupported corporate action {action.action_id}")
+        if errors:
+            raise CorporateActionBatchError(actions, tuple(sorted(set(errors))))
 
     @staticmethod
     def _validate_clock(session: date, epoch_id: str, processed_at: datetime) -> None:

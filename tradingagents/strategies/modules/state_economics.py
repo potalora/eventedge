@@ -11,16 +11,16 @@ logger = logging.getLogger(__name__)
 
 # Regional bank / retailer ETFs as proxies for state economic conditions
 REGIONAL_ETFS = {
-    "regional_banks": "KRE",      # SPDR S&P Regional Banking ETF
-    "small_cap_value": "IWN",     # iShares Russell 2000 Value ETF
-    "retail": "XRT",              # SPDR S&P Retail ETF
-    "real_estate": "IYR",         # iShares US Real Estate ETF
-    "homebuilders": "XHB",        # SPDR S&P Homebuilders ETF
+    "regional_banks": "KRE",  # SPDR S&P Regional Banking ETF
+    "small_cap_value": "IWN",  # iShares Russell 2000 Value ETF
+    "retail": "XRT",  # SPDR S&P Retail ETF
+    "real_estate": "IYR",  # iShares US Real Estate ETF
+    "homebuilders": "XHB",  # SPDR S&P Homebuilders ETF
     "homebuilders_focused": "ITB",  # iShares US Home Construction ETF
-    "broad_reit": "VNQ",          # Vanguard Real Estate ETF
-    "semiconductors": "SOXX",     # iShares Semiconductor ETF
-    "industrials": "XLI",         # Industrial Select Sector SPDR
-    "real_estate_sector": "XLRE", # Real Estate Select Sector SPDR
+    "broad_reit": "VNQ",  # Vanguard Real Estate ETF
+    "semiconductors": "SOXX",  # iShares Semiconductor ETF
+    "industrials": "XLI",  # Industrial Select Sector SPDR
+    "real_estate_sector": "XLRE",  # Real Estate Select Sector SPDR
 }
 
 
@@ -47,7 +47,10 @@ class StateEconomicsStrategy:
     data_sources = ["yfinance", "fred", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "lookback_days": (10, 60),
@@ -56,7 +59,10 @@ class StateEconomicsStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "lookback_days": 21,
@@ -75,7 +81,7 @@ class StateEconomicsStrategy:
         top_n = params.get("top_n", 2)
 
         # Compute momentum scores
-        etf_scores: list[tuple[str, str, float]] = []
+        etf_scores: list[tuple[str, str, float, str]] = []
         for name, ticker in REGIONAL_ETFS.items():
             df = prices.get(ticker)
             if df is None or df.empty:
@@ -85,7 +91,13 @@ class StateEconomicsStrategy:
                 continue
             close = df["Close"]
             momentum = (close.iloc[-1] / close.iloc[-lookback]) - 1.0
-            etf_scores.append((name, ticker, momentum))
+            observation = df.index[-1]
+            window_end = (
+                observation.date().isoformat()
+                if hasattr(observation, "date")
+                else str(observation)
+            )
+            etf_scores.append((name, ticker, momentum, window_end))
 
         if not etf_scores:
             return []
@@ -94,6 +106,7 @@ class StateEconomicsStrategy:
         fred_data = data.get("fred", {})
         fred_indicators = fred_data
         econ_boost = {}
+        fred_observation_ids: list[str] = []
         if fred_indicators:
             # Check if unemployment is declining (bullish for regionals)
             unemployment = fred_indicators.get("UNRATE")
@@ -119,23 +132,46 @@ class StateEconomicsStrategy:
                 if recent < prior:  # Declining claims = bullish
                     econ_boost["IWN"] = 0.02  # Small-cap value benefits most
 
+            for series_name in ("UNRATE", "ICSA"):
+                series = fred_indicators.get(series_name)
+                if series is None or len(series) == 0:
+                    continue
+                if isinstance(series, pd.Series):
+                    observed = series.dropna().index[-1]
+                else:
+                    observed = sorted(series)[-1]
+                observed_text = (
+                    observed.date().isoformat()
+                    if hasattr(observed, "date")
+                    else str(observed)
+                )
+                fred_observation_ids.append(f"FRED:{series_name}:{observed_text}")
+
         # Combine momentum + economic boost
         combined_scores = []
-        for name, ticker, momentum in etf_scores:
+        for name, ticker, momentum, window_end in etf_scores:
             boost = econ_boost.get(ticker, 0.0)
             combined = momentum + boost
-            combined_scores.append((name, ticker, combined, momentum, boost))
+            combined_scores.append(
+                (name, ticker, combined, momentum, boost, window_end)
+            )
 
         combined_scores.sort(key=lambda x: x[2], reverse=True)
 
         candidates = []
-        for name, ticker, combined, momentum, boost in combined_scores[:top_n]:
+        for name, ticker, combined, momentum, boost, window_end in combined_scores[
+            :top_n
+        ]:
             # No hard min_return gate — let LLM judge context
             metadata = {
                 "regional_sector": name,
                 "trailing_return": momentum,
                 "econ_boost": boost,
                 "composite_score": combined,
+                "source_observation_ids": sorted(
+                    [f"YFINANCE:{ticker}:{window_end}", *fred_observation_ids]
+                ),
+                "window_end": window_end,
             }
 
             # Add factor context from OpenBB
@@ -200,6 +236,6 @@ Parameter ranges:
 - rebalance_days: 20-45 (rebalance frequency, target ~30 days)
 
 Recent backtest results:
-{results_text or '  No results yet.'}
+{results_text or "  No results yet."}
 
 Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
