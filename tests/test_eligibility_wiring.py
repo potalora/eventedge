@@ -1,26 +1,33 @@
 """Tests for eligibility wiring into pipeline."""
 from __future__ import annotations
 
+from decimal import Decimal
+
 from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 
 
 class TestCohortEligibilityWiring:
-    def test_50k_profile_enables_shorts_on_bridge(self):
+    def test_50k_profile_enables_shorts_on_bridge(self, tmp_path):
         config = {
             "execution": {"mode": "paper"},
             "autoresearch": {"total_capital": 50_000, "risk_gate": {"long_only": True}},
         }
-        bridge = ExecutionBridge(config)
-        profile = SIZE_PROFILES["50k"]
-        # Simulate what MultiStrategyEngine does
-        if profile.short_eligible:
-            bridge.risk_gate.config.long_only = False
-            bridge.risk_gate.config.earnings_blackout_days = 5
-            bridge.risk_gate.config.max_borrow_cost_pct = 0.05
-            bridge.risk_gate.config.max_margin_utilization_pct = 0.70
-        assert bridge.risk_gate.config.long_only is False
-        assert bridge.risk_gate.config.earnings_blackout_days == 5
+        ledger = PortfolioLedger(tmp_path / "ledger.db", "50k", Decimal("50000"))
+        try:
+            bridge = ExecutionBridge(config, ledger=ledger)
+            profile = SIZE_PROFILES["50k"]
+            # Simulate what the Task 7 session orchestrator will wire.
+            if profile.short_eligible:
+                bridge.risk_gate.config.long_only = False
+                bridge.risk_gate.config.earnings_blackout_days = 5
+                bridge.risk_gate.config.max_borrow_cost_pct = 0.05
+                bridge.risk_gate.config.max_margin_utilization_pct = 0.70
+            assert bridge.risk_gate.config.long_only is False
+            assert bridge.risk_gate.config.earnings_blackout_days == 5
+        finally:
+            ledger.close()
 
     def test_5k_profile_stays_long_only(self):
         profile = SIZE_PROFILES["5k"]

@@ -1,11 +1,17 @@
-import pytest
+from unittest.mock import MagicMock
+
+from tradingagents.execution.base_broker import AccountInfo, BaseBroker, OrderResult
 from tradingagents.execution.position_manager import PositionManager
-from tradingagents.execution.paper_broker import PaperBroker
 
 
 class TestPositionManager:
     def _make_pm(self, capital=5000.0):
-        broker = PaperBroker(initial_capital=capital)
+        broker = MagicMock(spec=BaseBroker)
+        broker.get_account.return_value = AccountInfo(capital, capital, capital)
+        broker.get_positions.return_value = []
+        broker.submit_stock_order.return_value = OrderResult(
+            "fixture-order", "filled", 100, 10
+        )
         config = {
             "execution": {
                 "daily_loss_limit_pct": 0.10,

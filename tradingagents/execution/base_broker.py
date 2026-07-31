@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -21,14 +21,28 @@ class AccountInfo:
 
 class BaseBroker(ABC):
     @abstractmethod
-    def submit_stock_order(self, symbol: str, side: str, qty: int,
-                           order_type: str = "market", **kwargs) -> OrderResult:
+    def submit_stock_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: int,
+        order_type: str = "market",
+        client_order_id: str | None = None,
+        **kwargs: object,
+    ) -> OrderResult:
         pass
 
     @abstractmethod
-    def submit_options_order(self, symbol: str, expiry: str, strike: float,
-                             right: str, side: str, qty: int,
-                             **kwargs) -> OrderResult:
+    def submit_options_order(
+        self,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        side: str,
+        qty: int,
+        **kwargs,
+    ) -> OrderResult:
         pass
 
     @abstractmethod
@@ -43,10 +57,25 @@ class BaseBroker(ABC):
     def cancel_order(self, order_id: str) -> bool:
         pass
 
-    def submit_short_sell(self, symbol: str, qty: int, price: float,
-                          stop_loss: float = 0.0, **kwargs) -> OrderResult:
+    @abstractmethod
+    def reconcile_order(self, client_order_id: str) -> OrderResult:
+        pass
+
+    def submit_short_sell(
+        self,
+        symbol: str,
+        qty: int,
+        price: float | None = None,
+        stop_loss: float = 0.0,
+        **kwargs: object,
+    ) -> OrderResult:
         raise NotImplementedError("Short selling not supported by this broker")
 
-    def submit_cover(self, symbol: str, qty: int, price: float,
-                     **kwargs) -> OrderResult:
+    def submit_cover(
+        self,
+        symbol: str,
+        qty: int,
+        price: float | None = None,
+        **kwargs: object,
+    ) -> OrderResult:
         raise NotImplementedError("Short covering not supported by this broker")

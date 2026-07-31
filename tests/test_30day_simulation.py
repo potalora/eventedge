@@ -12,10 +12,8 @@ All LLM and external API calls are mocked. Deterministic via seeded RNG.
 from __future__ import annotations
 
 import copy
-import json
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -27,15 +25,12 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
 )
 from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
-from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.trading.portfolio_committee import (
-    PortfolioCommittee,
     TradeRecommendation,
 )
 from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules.base import Candidate
-from tradingagents.execution.paper_broker import PaperBroker
 
 
 # ---------------------------------------------------------------------------
@@ -194,48 +189,6 @@ def _make_fake_committee(max_per_day: int = 3):
 
 
 # ===========================================================================
-# 1. TestBrokerReconstructionAcrossDays
-# ===========================================================================
-
-
-class TestBrokerReconstructionAcrossDays:
-    """Verify PaperBroker.reconstruct_from_trades restores state."""
-
-    def test_reconstruction_restores_cash_and_positions(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        broker.submit_stock_order("AAPL", "buy", 10, price=150.0)
-        assert broker.cash == pytest.approx(3500.0)
-        assert broker.positions["AAPL"]["quantity"] == 10
-
-        # Fresh broker, reconstruct
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades(
-            [{"ticker": "AAPL", "shares": 10, "entry_price": 150.0}]
-        )
-        assert fresh.cash == pytest.approx(3500.0)
-        assert "AAPL" in fresh.positions
-        assert fresh.positions["AAPL"]["quantity"] == 10
-        assert fresh.positions["AAPL"]["avg_price"] == pytest.approx(150.0)
-
-    def test_reconstruction_multiple_tickers(self):
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades([
-            {"ticker": "AAPL", "shares": 5, "entry_price": 170.0},
-            {"ticker": "MSFT", "shares": 3, "entry_price": 420.0},
-        ])
-        expected_cash = 5000.0 - (5 * 170.0) - (3 * 420.0)
-        assert fresh.cash == pytest.approx(expected_cash)
-        assert fresh.positions["AAPL"]["quantity"] == 5
-        assert fresh.positions["MSFT"]["quantity"] == 3
-
-    def test_reconstruction_empty_trades(self):
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades([])
-        assert fresh.cash == pytest.approx(5000.0)
-        assert len(fresh.positions) == 0
-
-
-# ===========================================================================
 # 2. TestFillOutcomesCorrectPrices
 # ===========================================================================
 
@@ -360,7 +313,7 @@ class TestIdempotencyDoubleRun:
         trading_date = "2026-04-01"
 
         # First run
-        result1 = engine.run_paper_trade_phase(trading_date=trading_date)
+        engine.run_paper_trade_phase(trading_date=trading_date)
         signals_count_1 = len(engine._journal.get_entries())
         open_trades_1 = len(state.load_paper_trades(status="open"))
 
@@ -368,7 +321,7 @@ class TestIdempotencyDoubleRun:
         assert open_trades_1 > 0, "First run should open trades"
 
         # Second run (same date)
-        result2 = engine.run_paper_trade_phase(trading_date=trading_date)
+        engine.run_paper_trade_phase(trading_date=trading_date)
         signals_count_2 = len(engine._journal.get_entries())
         open_trades_2 = len(state.load_paper_trades(status="open"))
 

@@ -2,83 +2,106 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from unittest.mock import patch
 
+from tradingagents.strategies.execution import MarketBar, SignalRecord
+from tradingagents.strategies.execution.cost_model import PaperCostModel
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
-    PortfolioSizeProfile,
     SIZE_PROFILES,
 )
+from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.state.state import StateManager
-from tradingagents.strategies.modules.base import OptionSpec
 
 
 class TestIntegrationShortPipeline:
     """End-to-end: short signal → committee → risk gate → PaperBroker → state."""
 
-    def test_short_trade_full_pipeline(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = StateManager(tmpdir)
-            config = {
-                "execution": {"mode": "paper"},
-                "autoresearch": {
-                    "total_capital": 50_000,
-                    "risk_gate": {"long_only": False},
-                    "paper_trade": {"portfolio_committee_enabled": False},
+    def test_short_trade_full_pipeline(self, tmp_path):
+        state = StateManager(str(tmp_path / "state"))
+        config = {
+            "execution": {"mode": "paper"},
+            "autoresearch": {
+                "total_capital": 50_000,
+                "risk_gate": {
+                    "long_only": False,
+                    "min_position_value": 1,
+                    "max_position_pct": 0.20,
                 },
-            }
-            profile = SIZE_PROFILES["50k"]
+                "short_selling": {"borrow_cost_reject_above": "0.05"},
+                "paper_trade": {"portfolio_committee_enabled": False},
+            },
+        }
+        profile = SIZE_PROFILES["50k"]
 
-            # 1. Signals — two strategies agree on short AAPL
-            signals = [
-                {"ticker": "AAPL", "direction": "short", "score": 0.85, "strategy": "litigation", "metadata": {}},
-                {"ticker": "AAPL", "direction": "short", "score": 0.75, "strategy": "congressional_trades", "metadata": {}},
-            ]
+        # 1. Signals — two strategies agree on short AAPL
+        signals = [
+            {"ticker": "AAPL", "direction": "short", "score": 0.85, "strategy": "litigation", "metadata": {}},
+            {"ticker": "AAPL", "direction": "short", "score": 0.75, "strategy": "congressional_trades", "metadata": {}},
+        ]
 
-            # 2. Committee synthesis (rule-based, LLM disabled)
-            committee = PortfolioCommittee(config, size_profile=profile)
-            recs = committee.synthesize(signals, total_capital=50_000)
-            assert len(recs) >= 1
-            rec = recs[0]
-            assert rec.direction == "short"
-            assert rec.ticker == "AAPL"
+        # 2. Committee synthesis (rule-based, LLM disabled)
+        committee = PortfolioCommittee(config, size_profile=profile)
+        recs = committee.synthesize(signals, total_capital=50_000)
+        assert len(recs) >= 1
+        rec = recs[0]
+        assert rec.direction == "short"
+        assert rec.ticker == "AAPL"
 
-            # 3. Execution bridge
-            bridge = ExecutionBridge(config)
-            bridge.risk_gate.config.long_only = False
-            bridge.risk_gate.config.total_capital = 50_000
-
-            result = bridge.execute_recommendation(
-                ticker=rec.ticker, direction=rec.direction,
-                position_size_pct=rec.position_size_pct,
-                confidence=rec.confidence, strategy="litigation",
-                current_price=150.0,
+        ledger = PortfolioLedger(
+            tmp_path / "ledger.db", "cohort", Decimal("50000"),
+            short_selling_config=config["autoresearch"]["short_selling"],
+        )
+        try:
+            bridge = ExecutionBridge(config, ledger=ledger)
+            decided = datetime(2026, 7, 31, 20, tzinfo=timezone.utc)
+            signal = SignalRecord(
+                "short-signal", "epoch", "policy", "event", "litigation",
+                "AAPL", "short", decided, decided, date(2026, 7, 31),
+                Decimal("150"), decided, "evidence",
             )
-            assert result is not None
+            ledger.record_signal(signal)
+            intent = bridge.stage_intent(
+                rec, (signal,), ledger.account_state(), decided, date(2026, 8, 3)
+            )
+            bar = MarketBar(
+                "AAPL", date(2026, 8, 3), Decimal("150"), Decimal("152"),
+                Decimal("149"), Decimal("151"), "fixture",
+                datetime(2026, 8, 3, 22, tzinfo=timezone.utc), False,
+            )
+            result = bridge.execute_due_intent(
+                intent, bar, ledger.account_state(),
+                {
+                    "strategy": "litigation",
+                    "borrow_rate": Decimal("0.02"),
+                    "processing_at": datetime(2026, 8, 3, 22, tzinfo=timezone.utc),
+                },
+                PaperCostModel(),
+            )
             assert result.status == "filled"
 
-            # 4. Record in state
+            # 3. Compatibility projection is downstream from the ledger fill.
             trader = PaperTrader(state)
             trade_id = trader.open_trade(
                 strategy="litigation", ticker="AAPL", direction="short",
                 entry_price=150.0, entry_date="2026-04-04",
-                shares=result.filled_qty,
-                position_value=result.filled_qty * 150.0,
+                shares=result.fill.quantity,
+                position_value=result.fill.quantity * 150.0,
             )
             assert trade_id
-
-            # 5. Verify state
             open_trades = state.load_paper_trades(status="open")
             assert len(open_trades) == 1
             assert open_trades[0]["direction"] == "short"
-
-            # 6. Close trade with profit (short at 150, cover at 140 = profit)
             trader.close_trade(trade_id, exit_price=140.0, exit_date="2026-04-10", exit_reason="take_profit")
             closed = state.load_paper_trades(status="closed")
             assert len(closed) == 1
             assert closed[0]["pnl"] > 0  # short at 150, cover at 140 = profit
+        finally:
+            ledger.close()
 
     def test_ineligible_cohort_blocks_shorts(self):
         """5k cohort should not produce any short trades."""
@@ -128,7 +151,7 @@ class TestIntegrationShortPipeline:
         assert overlays[0].option_spec.strategy == "covered_call"
         assert overlays[0].option_spec.expiry_target_days == 30
 
-    def test_short_with_borrow_cost_rejection(self):
+    def test_short_with_borrow_cost_rejection(self, tmp_path):
         """High SI% stock should be rejected by risk gate."""
         config = {
             "execution": {"mode": "paper"},
@@ -137,62 +160,19 @@ class TestIntegrationShortPipeline:
                 "risk_gate": {"long_only": False},
             },
         }
-        bridge = ExecutionBridge(config)
-        bridge.risk_gate.config.long_only = False
-        bridge.risk_gate.config.max_borrow_cost_pct = 0.05
-
-        # GME with 35% SI should be rejected
-        passed, reason = bridge.risk_gate.check(
-            "GME", "short", 5000, "litigation",
-            short_interest={"GME": 35.0},
-        )
-        assert not passed
-        assert "borrow_cost" in reason
-
-    def test_short_pipeline_broker_tracks_position(self):
-        """Short execution should register in PaperBroker.short_positions."""
-        config = {
-            "execution": {"mode": "paper"},
-            "autoresearch": {
-                "total_capital": 50_000,
-                "risk_gate": {"long_only": False},
-                "paper_trade": {"portfolio_committee_enabled": False},
-            },
-        }
-        bridge = ExecutionBridge(config)
-
-        result = bridge.execute_recommendation(
-            ticker="TSLA", direction="short", position_size_pct=0.05,
-            confidence=0.80, strategy="litigation", current_price=200.0,
-        )
-        assert result is not None
-        assert result.status == "filled"
-        # Verify PaperBroker short_positions tracking
-        assert "TSLA" in bridge.broker.short_positions
-
-    def test_cover_removes_short_from_broker(self):
-        """Covering a short removes it from PaperBroker.short_positions."""
-        config = {
-            "execution": {"mode": "paper"},
-            "autoresearch": {
-                "total_capital": 50_000,
-                "risk_gate": {"long_only": False},
-            },
-        }
-        bridge = ExecutionBridge(config)
-
-        # Open short
-        open_result = bridge.execute_recommendation(
-            ticker="TSLA", direction="short", position_size_pct=0.05,
-            confidence=0.80, strategy="litigation", current_price=200.0,
-        )
-        assert open_result is not None
-        assert "TSLA" in bridge.broker.short_positions
-
-        qty = bridge.broker.short_positions["TSLA"]["quantity"]
-        cover_result = bridge.close_position("TSLA", shares=qty, current_price=180.0, direction="short")
-        assert cover_result.status == "filled"
-        assert "TSLA" not in bridge.broker.short_positions
+        ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("50000"))
+        try:
+            bridge = ExecutionBridge(config, ledger=ledger)
+            bridge.risk_gate.config.long_only = False
+            bridge.risk_gate.config.max_borrow_cost_pct = 0.05
+            passed, reason = bridge.risk_gate.check(
+                "GME", "short", 5000, "litigation",
+                short_interest={"GME": 35.0},
+            )
+            assert not passed
+            assert "borrow_cost" in reason
+        finally:
+            ledger.close()
 
     def test_short_pnl_computation_in_state(self):
         """PaperTrader.close_trade should compute positive PnL for profitable short."""
@@ -289,7 +269,7 @@ class TestIntegrationShortPipeline:
         assert profile_100k.max_short_exposure_pct >= profile_50k.max_short_exposure_pct
         assert profile_100k.max_correlated_shorts > profile_50k.max_correlated_shorts
 
-    def test_short_trade_rejected_when_position_too_small(self):
+    def test_short_trade_rejected_when_position_too_small(self, tmp_path):
         """Short position rejected when floor exceeds max_position_pct cap."""
         config = {
             "execution": {"mode": "paper"},
@@ -302,14 +282,13 @@ class TestIntegrationShortPipeline:
                 },
             },
         }
-        bridge = ExecutionBridge(config)
-
-        # Floor ($10k) exceeds max_position cap ($500), so trade is rejected
-        result = bridge.execute_recommendation(
-            ticker="AAPL", direction="short", position_size_pct=0.001,
-            confidence=0.80, strategy="litigation", current_price=150.0,
-        )
-        assert result is None
+        ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("50000"))
+        try:
+            bridge = ExecutionBridge(config, ledger=ledger)
+            # Floor ($10k) exceeds max-position cap ($500), so sizing is zero.
+            assert bridge.risk_gate.compute_position_size(0.001, 150.0) == 0
+        finally:
+            ledger.close()
 
     def test_multi_signal_short_aggregation(self):
         """Multiple strategies signaling short on same ticker should aggregate correctly."""

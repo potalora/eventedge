@@ -4,10 +4,8 @@ Covers: paper-trade strategies, state manager, data sources, engine.
 """
 from __future__ import annotations
 
-import json
 import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -803,8 +801,6 @@ class TestPromptOptimizer:
         assert trial["status"] == "active"
 
     def test_commit_revert_restores_baseline(self, optimizer_setup):
-        from tradingagents.strategies.learning.llm_analyzer import _DEFAULT_PROMPTS
-
         optimizer, analyzer, _ = optimizer_setup
         original = analyzer.get_prompt("litigation")
         trial_id = optimizer.start_trial("litigation", "Modified prompt")
@@ -994,12 +990,20 @@ class TestStrategyConfidence:
 class TestRiskGateNoWeights:
     """Test risk gate position sizing without weight scaling."""
 
+    @staticmethod
+    def _broker(capital=5000.0):
+        from tradingagents.execution.base_broker import AccountInfo
+
+        broker = MagicMock()
+        broker.get_account.return_value = AccountInfo(capital, capital, capital)
+        broker.get_positions.return_value = []
+        return broker
+
     def test_basic_sizing(self):
         """Position size from committee pct, no weight."""
         from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-        from tradingagents.execution.paper_broker import PaperBroker
 
-        broker = PaperBroker(initial_capital=5000.0)
+        broker = self._broker()
         gate = RiskGate(RiskGateConfig(), broker)
         # 5% of $5000 = $250, at $50/share = 5 shares
         shares = gate.compute_position_size(0.05, 50.0)
@@ -1008,9 +1012,8 @@ class TestRiskGateNoWeights:
     def test_caps_at_max_position_pct(self):
         """Position capped at 15% of portfolio."""
         from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-        from tradingagents.execution.paper_broker import PaperBroker
 
-        broker = PaperBroker(initial_capital=5000.0)
+        broker = self._broker()
         gate = RiskGate(RiskGateConfig(), broker)
         # 50% request should be capped at 15% = $750, at $50 = 15 shares
         shares = gate.compute_position_size(0.50, 50.0)
@@ -1018,18 +1021,16 @@ class TestRiskGateNoWeights:
 
     def test_zero_price_returns_zero(self):
         from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-        from tradingagents.execution.paper_broker import PaperBroker
 
-        broker = PaperBroker(initial_capital=5000.0)
+        broker = self._broker()
         gate = RiskGate(RiskGateConfig(), broker)
         assert gate.compute_position_size(0.05, 0.0) == 0
 
     def test_min_position_enforced(self):
         """Tiny positions below $100 min are rejected."""
         from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-        from tradingagents.execution.paper_broker import PaperBroker
 
-        broker = PaperBroker(initial_capital=5000.0)
+        broker = self._broker()
         config = RiskGateConfig(min_position_value=1000.0, max_position_pct=0.01)
         gate = RiskGate(config, broker)
         # 1% of $5000 = $50. Floor wants $1000 but max_position_pct cap = $50.
@@ -1046,19 +1047,23 @@ class TestRiskGateNoWeights:
 class TestExecutionBridgeNoWeights:
     """Test execution bridge without weight parameter."""
 
-    def test_execute_without_weight(self):
-        """execute_recommendation no longer takes strategy_weight."""
+    def test_staged_execution_interfaces_have_no_weight_or_direct_price(self):
         import inspect
 
         from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 
-        sig = inspect.signature(ExecutionBridge.execute_recommendation)
-        params = list(sig.parameters.keys())
-        assert "strategy_weight" not in params
-        # Verify expected params are present
-        assert "position_size_pct" in params
-        assert "current_price" in params
-        assert "strategy" in params
+        stage = list(inspect.signature(ExecutionBridge.stage_intent).parameters)
+        execute = list(inspect.signature(ExecutionBridge.execute_due_intent).parameters)
+        assert stage == [
+            "self", "recommendation", "signal_records", "marked_account",
+            "decision_at", "eligible_session",
+        ]
+        assert execute == [
+            "self", "intent", "opening_bar", "marked_account", "risk_context",
+            "cost_model",
+        ]
+        assert "current_price" not in stage + execute
+        assert "strategy_weight" not in stage + execute
 
 
 # ---------------------------------------------------------------------------

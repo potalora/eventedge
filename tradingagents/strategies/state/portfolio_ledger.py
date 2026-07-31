@@ -713,10 +713,314 @@ class PortfolioLedger:
                    (price_rule = 'next_session_open' AND eligible_session = ?)
                    OR (price_rule = 'resting_stop' AND eligible_session <= ?)
                )
-               ORDER BY eligible_session, intent_id""",
+               ORDER BY created_at, intent_id""",
             (self.cohort_id, self._encode(session), self._encode(session)),
         ).fetchall()
         return [self._intent_from_row(row) for row in rows]
+
+    def reject_intent(
+        self, intent_id: str, occurred_at: datetime, reason: str
+    ) -> OrderIntent:
+        """Durably terminalize a pending intent after a current risk rejection."""
+        self._require_timezone_aware(occurred_at, "occurred_at")
+        if not reason:
+            raise ValueError("intent rejection reason is required")
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT * FROM order_intents WHERE intent_id = ? AND cohort_id = ?",
+                (intent_id, self.cohort_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown order intent {intent_id}")
+            if row["status"] == "rejected":
+                transition = self._connection.execute(
+                    """SELECT occurred_at, reason FROM order_status_transitions
+                       WHERE intent_id = ? AND status = 'rejected'""",
+                    (intent_id,),
+                ).fetchone()
+                if (
+                    transition is None
+                    or transition["occurred_at"] != self._encode(occurred_at)
+                    or transition["reason"] != reason
+                ):
+                    raise LedgerConflictError(
+                        f"conflicting rejection replay for intent {intent_id}"
+                    )
+                return self._intent_from_row(row)
+            if row["status"] != "pending":
+                raise ValueError(
+                    f"cannot reject terminal intent {intent_id}/{row['status']}"
+                )
+            self._connection.execute(
+                "UPDATE order_intents SET status = 'rejected' WHERE intent_id = ?",
+                (intent_id,),
+            )
+            self._connection.execute(
+                """INSERT INTO order_status_transitions
+                   (transition_id, intent_id, status, occurred_at, reason)
+                   VALUES (?, ?, 'rejected', ?, ?)""",
+                (
+                    stable_id("order_status", intent_id, "rejected", reason),
+                    intent_id,
+                    self._encode(occurred_at),
+                    reason,
+                ),
+            )
+            updated = self._connection.execute(
+                "SELECT * FROM order_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if updated is None:  # pragma: no cover - same transaction invariant.
+                raise RuntimeError("rejected intent disappeared")
+            return self._intent_from_row(updated)
+
+    def intent(self, intent_id: str) -> OrderIntent | None:
+        """Return one persisted intent, including its ordered signal provenance."""
+        row = self._connection.execute(
+            "SELECT * FROM order_intents WHERE intent_id = ? AND cohort_id = ?",
+            (intent_id, self.cohort_id),
+        ).fetchone()
+        return self._intent_from_row(row) if row is not None else None
+
+    def signals_for_intent(self, intent_id: str) -> tuple[SignalRecord, ...]:
+        """Return the exact persisted signals linked to an intent."""
+        rows = self._connection.execute(
+            """SELECT s.* FROM intent_signals isg
+               JOIN signals s ON s.signal_id = isg.signal_id
+               JOIN order_intents i ON i.intent_id = isg.intent_id
+               WHERE isg.intent_id = ? AND i.cohort_id = ?
+               ORDER BY isg.signal_order, s.signal_id""",
+            (intent_id, self.cohort_id),
+        ).fetchall()
+        return tuple(self._signal_from_row(row) for row in rows)
+
+    def open_positions(self) -> list[dict[str, object]]:
+        """Return a bounded aggregate view over authoritative open lots."""
+        rows = self._connection.execute(
+            """SELECT ticker, direction, open_qty, entry_price
+               FROM lots
+               WHERE cohort_id = ? AND open_qty > 0
+               ORDER BY ticker, direction, opened_session, lot_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        grouped: dict[tuple[str, str], tuple[int, Decimal]] = {}
+        for row in rows:
+            key = (row["ticker"], row["direction"])
+            quantity, basis = grouped.get(key, (0, Decimal("0")))
+            open_qty = int(row["open_qty"])
+            grouped[key] = (
+                quantity + open_qty,
+                basis + _decimal(row["entry_price"]) * open_qty,
+            )
+        return [
+            {
+                "ticker": ticker,
+                "quantity": quantity,
+                "avg_price": basis / quantity,
+                "instrument_type": "stock",
+                "side": direction,
+            }
+            for (ticker, direction), (quantity, basis) in grouped.items()
+        ]
+
+    def external_order_for_intent(self, intent_id: str) -> dict[str, object] | None:
+        """Return the single durable broker order associated with an intent."""
+        row = self._connection.execute(
+            """SELECT eo.* FROM external_orders eo
+               JOIN order_intents i ON i.intent_id = eo.intent_id
+               WHERE eo.intent_id = ? AND i.cohort_id = ?
+               ORDER BY eo.submitted_at DESC, eo.external_order_id
+               LIMIT 1""",
+            (intent_id, self.cohort_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def prepare_external_order(
+        self,
+        *,
+        intent_id: str,
+        broker: str,
+        submitted_at: datetime,
+    ) -> None:
+        """Persist retry authority before making an external submit call."""
+        self._require_timezone_aware(submitted_at, "submitted_at")
+        with self.transaction():
+            intent = self._connection.execute(
+                "SELECT external_order_id FROM order_intents "
+                "WHERE intent_id = ? AND cohort_id = ?",
+                (intent_id, self.cohort_id),
+            ).fetchone()
+            if intent is None:
+                raise ValueError(f"unknown order intent {intent_id}")
+            existing = self.external_order_for_intent(intent_id)
+            if existing is not None:
+                if existing["broker"] != broker:
+                    raise LedgerConflictError(
+                        f"conflicting external broker for intent {intent_id}"
+                    )
+                return
+            self._connection.execute(
+                """INSERT INTO external_orders
+                   (external_order_id, intent_id, broker, status, submitted_at,
+                    reconciled_at, detail)
+                   VALUES (?, ?, ?, 'pending', ?, NULL, ?)""",
+                (
+                    intent_id,
+                    intent_id,
+                    broker,
+                    self._encode(submitted_at),
+                    "prepared before external submit",
+                ),
+            )
+            self._connection.execute(
+                "UPDATE order_intents SET external_order_id = ? WHERE intent_id = ?",
+                (intent_id, intent_id),
+            )
+
+    def record_external_order(
+        self,
+        *,
+        intent_id: str,
+        external_order_id: str,
+        broker: str,
+        status: str,
+        submitted_at: datetime,
+        reconciled_at: datetime | None,
+        detail: str,
+    ) -> None:
+        """Persist initial submission or reconciliation for one broker order."""
+        if not external_order_id:
+            raise ValueError("external_order_id is required")
+        self._require_timezone_aware(submitted_at, "submitted_at")
+        if reconciled_at is not None:
+            self._require_timezone_aware(reconciled_at, "reconciled_at")
+            if reconciled_at < submitted_at:
+                raise ValueError("reconciled_at precedes submitted_at")
+        with self.transaction():
+            intent = self._connection.execute(
+                "SELECT external_order_id FROM order_intents "
+                "WHERE intent_id = ? AND cohort_id = ?",
+                (intent_id, self.cohort_id),
+            ).fetchone()
+            if intent is None:
+                raise ValueError(f"unknown order intent {intent_id}")
+            linked_id = intent["external_order_id"]
+            linked_row = (
+                self._connection.execute(
+                    "SELECT * FROM external_orders WHERE external_order_id = ?",
+                    (linked_id,),
+                ).fetchone()
+                if linked_id is not None
+                else None
+            )
+            row = self._connection.execute(
+                "SELECT * FROM external_orders WHERE external_order_id = ?",
+                (external_order_id,),
+            ).fetchone()
+            values = (
+                intent_id,
+                broker,
+                status,
+                self._encode(submitted_at),
+                self._encode(reconciled_at) if reconciled_at is not None else None,
+                detail,
+                external_order_id,
+            )
+            if (
+                linked_row is not None
+                and linked_id == intent_id
+                and external_order_id != linked_id
+                and row is None
+            ):
+                if linked_row["broker"] != broker:
+                    raise LedgerConflictError(
+                        f"conflicting external broker for intent {intent_id}"
+                    )
+                self._validate_external_status_transition(linked_row["status"], status)
+                self._connection.execute(
+                    """UPDATE external_orders
+                       SET external_order_id = ?, status = ?, reconciled_at = ?,
+                           detail = ?
+                       WHERE external_order_id = ?""",
+                    (
+                        external_order_id,
+                        status,
+                        self._encode(reconciled_at)
+                        if reconciled_at is not None
+                        else None,
+                        detail,
+                        linked_id,
+                    ),
+                )
+                self._connection.execute(
+                    "UPDATE order_intents SET external_order_id = ? "
+                    "WHERE intent_id = ?",
+                    (external_order_id, intent_id),
+                )
+                return
+            if linked_id is not None and linked_id != external_order_id:
+                raise LedgerConflictError(
+                    f"intent {intent_id} already has external order {linked_id}"
+                )
+            if row is None:
+                self._connection.execute(
+                    """INSERT INTO external_orders
+                       (intent_id, broker, status, submitted_at, reconciled_at,
+                        detail, external_order_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    values,
+                )
+                self._connection.execute(
+                    "UPDATE order_intents SET external_order_id = ? "
+                    "WHERE intent_id = ?",
+                    (external_order_id, intent_id),
+                )
+                return
+            if row["intent_id"] != intent_id or row["broker"] != broker:
+                raise LedgerConflictError(
+                    f"conflicting external order identity {external_order_id}"
+                )
+            self._validate_external_status_transition(row["status"], status)
+            self._connection.execute(
+                """UPDATE external_orders SET status = ?, reconciled_at = ?,
+                          detail = ?
+                   WHERE external_order_id = ?""",
+                (
+                    status,
+                    self._encode(reconciled_at)
+                    if reconciled_at is not None
+                    else row["reconciled_at"],
+                    detail,
+                    external_order_id,
+                ),
+            )
+
+    @staticmethod
+    def _validate_external_status_transition(old: str, new: str) -> None:
+        if old == new:
+            return
+        allowed = {
+            "pending": {
+                "accepted",
+                "partially_filled",
+                "filled",
+                "rejected",
+                "cancelled",
+            },
+            "accepted": {
+                "partially_filled",
+                "filled",
+                "rejected",
+                "cancelled",
+            },
+            "partially_filled": {"filled", "rejected", "cancelled"},
+            "filled": set(),
+            "rejected": set(),
+            "cancelled": set(),
+        }
+        if old not in allowed or new not in allowed[old]:
+            raise LedgerConflictError(
+                f"external order status cannot regress from {old} to {new}"
+            )
 
     def session_is_valid(self, session: date, ticker: str | None = None) -> bool:
         """Public fail-closed state query for policy/entry execution callers."""

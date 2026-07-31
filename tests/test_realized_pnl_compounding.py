@@ -9,39 +9,7 @@ portfolio_value from that stale cash.
 """
 import pytest
 
-from tradingagents.execution.paper_broker import PaperBroker
-from tradingagents.strategies.state.equity_snapshot import write_snapshot, load_snapshots
-
-
-class TestReconstructBanksRealizedPnL:
-    def test_realized_gain_added_to_cash(self):
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades(
-            [{"ticker": "AAPL", "shares": 10, "entry_price": 150.0}],
-            realized_pnl=300.0,
-        )
-        # 5000 - 1500 (open cost) + 300 (banked realized gain)
-        assert fresh.cash == pytest.approx(3800.0)
-
-    def test_realized_loss_subtracted_from_cash(self):
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades(
-            [{"ticker": "AAPL", "shares": 10, "entry_price": 150.0}],
-            realized_pnl=-200.0,
-        )
-        assert fresh.cash == pytest.approx(3300.0)
-
-    def test_default_realized_pnl_is_backward_compatible(self):
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades(
-            [{"ticker": "AAPL", "shares": 10, "entry_price": 150.0}]
-        )
-        assert fresh.cash == pytest.approx(3500.0)
-
-    def test_realized_pnl_with_no_open_positions(self):
-        fresh = PaperBroker(initial_capital=5000.0)
-        fresh.reconstruct_from_trades([], realized_pnl=250.0)
-        assert fresh.cash == pytest.approx(5250.0)
+from tradingagents.strategies.state.equity_snapshot import write_snapshot
 
 
 class TestSnapshotIncludesRealizedPnL:
