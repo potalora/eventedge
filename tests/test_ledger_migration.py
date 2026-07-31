@@ -339,6 +339,76 @@ def test_initialize_clean_rejects_symlinked_sqlite_sidecar(tmp_path):
     assert "sidecar" in failed.stdout + failed.stderr
 
 
+@pytest.mark.parametrize("orphan_suffix", ["-shm", "-wal"])
+def test_initialize_clean_rejects_orphan_regular_sqlite_sidecar(
+    tmp_path, orphan_suffix
+):
+    legacy = _legacy_tree(tmp_path)
+    output = tmp_path / "clean"
+    initialized = _run_migration(legacy, output, "--initialize-clean")
+    assert initialized.returncode == 0, initialized.stderr
+    database = next(iter(sorted(output.glob("*/portfolio.db"))))
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{database}{suffix}")
+        if os.path.lexists(sidecar):
+            sidecar.unlink()
+    orphan = Path(f"{database}{orphan_suffix}")
+    orphan.write_bytes(b"\0" * 32768 if orphan_suffix == "-shm" else b"")
+
+    failed = _run_migration(legacy, output, "--initialize-clean")
+
+    assert failed.returncode != 0
+    assert "sidecar pair" in failed.stdout + failed.stderr
+
+
+def test_initialize_clean_accepts_legitimate_paired_zero_wal_sidecars(tmp_path):
+    legacy = _legacy_tree(tmp_path)
+    output = tmp_path / "clean"
+    initialized = _run_migration(legacy, output, "--initialize-clean")
+    assert initialized.returncode == 0, initialized.stderr
+    database = next(iter(sorted(output.glob("*/portfolio.db"))))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        assert Path(f"{database}-wal").stat().st_size == 0
+        assert Path(f"{database}-shm").is_file()
+
+        repeated = _run_migration(legacy, output, "--initialize-clean")
+    finally:
+        connection.close()
+
+    assert repeated.returncode == 0, repeated.stderr
+
+
+def test_initialize_clean_consults_paired_live_wal_and_rejects_hidden_history(
+    tmp_path,
+):
+    legacy = _legacy_tree(tmp_path)
+    output = tmp_path / "clean"
+    initialized = _run_migration(legacy, output, "--initialize-clean")
+    assert initialized.returncode == 0, initialized.stderr
+    database = next(iter(sorted(output.glob("*/portfolio.db"))))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA wal_autocheckpoint=0")
+        connection.execute(
+            "INSERT INTO metric_epochs VALUES (?, ?, ?, ?, ?, ?)",
+            ("hidden-epoch", "gen-test", 1, "active", "2026-07-31", None),
+        )
+        connection.commit()
+        assert Path(f"{database}-wal").stat().st_size > 0
+        assert Path(f"{database}-shm").is_file()
+
+        failed = _run_migration(legacy, output, "--initialize-clean")
+    finally:
+        connection.close()
+
+    assert failed.returncode != 0
+    assert "metric_epochs=1" in failed.stdout + failed.stderr
+
+
 @pytest.mark.parametrize(
     "tamper",
     [

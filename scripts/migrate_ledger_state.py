@@ -41,7 +41,7 @@ def _expected_user_tables() -> frozenset[str]:
 
 
 def _validate_sidecars(path: Path) -> bool:
-    """Reject unsafe sidecars and report whether a live WAL must be consulted."""
+    """Reject unsafe sidecars and report whether a WAL/SHM pair must be read."""
     sidecars = {suffix: Path(f"{path}{suffix}") for suffix in ("-wal", "-shm")}
     for sidecar in sidecars.values():
         if os.path.lexists(sidecar) and (
@@ -50,11 +50,14 @@ def _validate_sidecars(path: Path) -> bool:
             raise RuntimeError(
                 f"existing SQLite sidecar is not a regular file: {sidecar}"
             )
-    wal = sidecars["-wal"]
-    live_wal = os.path.lexists(wal) and wal.stat().st_size > 0
-    if live_wal and not os.path.lexists(sidecars["-shm"]):
-        raise RuntimeError(f"nonempty SQLite WAL has no SHM sidecar: {wal}")
-    return live_wal
+    wal_exists = os.path.lexists(sidecars["-wal"])
+    shm_exists = os.path.lexists(sidecars["-shm"])
+    if wal_exists != shm_exists:
+        raise RuntimeError(
+            f"inconsistent SQLite sidecar pair for {path}: "
+            f"wal={wal_exists}, shm={shm_exists}"
+        )
+    return wal_exists
 
 
 def _validate_output_topology(
@@ -250,10 +253,10 @@ def _assert_clean_existing_ledger(
         return
     if path.is_symlink() or not path.is_file():
         raise RuntimeError(f"existing ledger path is not a regular file: {path}")
-    live_wal = _validate_sidecars(path)
+    has_sidecar_pair = _validate_sidecars(path)
     try:
         uri = path.resolve().as_uri()
-        if live_wal:
+        if has_sidecar_pair:
             uri += "?mode=ro"
         else:
             uri += "?mode=ro&immutable=1"
