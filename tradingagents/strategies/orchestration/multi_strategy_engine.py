@@ -4,13 +4,15 @@ Screens event-driven strategies for signals, synthesizes through a
 portfolio committee, gates through risk controls, and executes via
 PaperBroker or AlpacaBroker.
 """
+
 from __future__ import annotations
 
 import logging
 import math
 import os
 import statistics
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable
 
 import pandas as pd
@@ -22,6 +24,7 @@ from tradingagents.strategies.data_sources.registry import (
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.modules.base import Candidate
+from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,60 @@ def _positions_to_price(
     return sorted(wanted - set(price_cache or {}))
 
 
+_MUTABLE_EVIDENCE_KEYS = {
+    "llm_analysis",
+    "llm_conviction",
+    "needs_llm_analysis",
+}
+_EVENT_TIME_KEYS = (
+    "event_at",
+    "published_at",
+    "posted_date",
+    "date_filed",
+    "release_date",
+    "file_date",
+)
+
+
+def _canonical_signal_evidence(value: object) -> object:
+    """Normalize heterogeneous metadata without mutable LLM annotations."""
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_signal_evidence(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _MUTABLE_EVIDENCE_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_signal_evidence(item) for item in value]
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("signal evidence contains a non-finite float")
+        return format(Decimal(str(value)), "f")
+    if value is None or isinstance(value, (str, int, bool, Decimal)):
+        return value
+    return str(value)
+
+
+def _metadata_datetime(metadata: dict, key: str) -> datetime | None:
+    value = metadata.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.combine(
+                date.fromisoformat(str(value)), datetime.min.time()
+            )
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _gather_with_timeout(
     api_fetches: dict[str, tuple],
     timeout_s: float,
@@ -91,8 +148,7 @@ def _gather_with_timeout(
     pool = ThreadPoolExecutor(max_workers=max_workers)
     try:
         futures = {
-            pool.submit(fn, *args): name
-            for name, (fn, args) in api_fetches.items()
+            pool.submit(fn, *args): name for name, (fn, args) in api_fetches.items()
         }
         try:
             for future in as_completed(futures, timeout=timeout_s):
@@ -106,7 +162,8 @@ def _gather_with_timeout(
             stuck = sorted(futures[f] for f in futures if not f.done())
             logger.error(
                 "Data fetch exceeded %.0fs; abandoning slow sources: %s",
-                timeout_s, stuck,
+                timeout_s,
+                stuck,
             )
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -132,6 +189,7 @@ class MultiStrategyEngine:
         on_event: Callable | None = None,
         use_llm: bool = False,
         adaptive_confidence: bool = False,
+        ledger: PortfolioLedger | None = None,
     ):
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
@@ -154,6 +212,7 @@ class MultiStrategyEngine:
         self._analyzer = None
         if use_llm:
             from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
+
             self._analyzer = LLMAnalyzer(self.config)
 
         # Price cache: ticker -> DataFrame
@@ -161,9 +220,11 @@ class MultiStrategyEngine:
 
         # Adaptive confidence: journal-derived (True) or fixed 0.5 (False)
         self._adaptive_confidence = adaptive_confidence
+        self.ledger = ledger
 
         # Signal journal (shared across methods)
         from tradingagents.strategies.learning.signal_journal import SignalJournal
+
         self._journal = SignalJournal(self.ar_config.get("state_dir", "data/state"))
 
         # OpenBB availability flag — checked once at startup
@@ -181,6 +242,7 @@ class MultiStrategyEngine:
     def set_cycle_tracker(self, gen_start_date: str) -> None:
         """Initialize cycle tracking for this engine's state directory."""
         from tradingagents.strategies.state.cycle_tracker import CycleTracker
+
         state_dir = self.ar_config.get("state_dir", "data/state")
         self._cycle_tracker = CycleTracker(gen_start_date, state_dir)
 
@@ -227,373 +289,407 @@ class MultiStrategyEngine:
             params = strategy.get_default_params(horizon=horizon)
             candidates = strategy.screen(data, trading_date, params)
             if candidates:
-                candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model)
+                candidates = self._enrich_with_llm(
+                    candidates, strategy.name, regime_context=regime_model
+                )
             for c in candidates:
-                all_signals.append({
-                    "ticker": c.ticker,
-                    "direction": c.direction,
-                    "score": c.score,
-                    "strategy": strategy.name,
-                    "metadata": c.metadata,
-                })
+                all_signals.append(
+                    {
+                        "ticker": c.ticker,
+                        "direction": c.direction,
+                        "score": c.score,
+                        "strategy": strategy.name,
+                        "metadata": c.metadata,
+                    }
+                )
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))
 
-        # Collapse same-(strategy, ticker) candidates to the highest-conviction one.
-        deduped_signals = MultiStrategyEngine._resolve_signals(all_signals)
+        # Preserve every event identity. Committee synthesis may aggregate a
+        # decision view, but the authoritative ledger must retain each catalyst.
+        deduped_signals = [
+            signal for signal in all_signals if signal.get("ticker", "").strip()
+        ]
 
         # Filter blocked tickers
         blocked = set(t.upper() for t in self.ar_config.get("blocked_tickers", []))
         if blocked:
             before = len(deduped_signals)
-            deduped_signals = [s for s in deduped_signals if s["ticker"].upper() not in blocked]
+            deduped_signals = [
+                signal
+                for signal in deduped_signals
+                if signal["ticker"].upper() not in blocked
+            ]
             removed = before - len(deduped_signals)
             if removed:
                 logger.info("Blocked %d signals for tickers: %s", removed, blocked)
 
         return deduped_signals, regime_model
 
-    def run_paper_trade_phase(
+    def screen_and_stage(
         self,
-        trading_date: str | None = None,
-        data: dict | None = None,
-        shared_signals: list[dict] | None = None,
-        shared_regime: dict | None = None,
-        enrichment: dict | None = None,
-        size_profile: Any = None,
+        trading_date: str,
+        data: dict,
+        shared_signals: list[dict],
+        shared_regime: dict,
+        enrichment: dict,
+        size_profile: Any,
+        marked_account: Any,
     ) -> dict:
-        """Paper trading loop: screen → committee → risk gate → execute.
-
-        Signals flow through:
-        1. Strategy screen (deterministic filtering)
-        2. LLM enrichment (classification, not prediction)
-        3. Portfolio committee (synthesis, sizing)
-        4. Risk gate (hard limits, position sizing)
-        5. Execution (PaperBroker or AlpacaBroker)
-        6. Signal journal (all signals logged, outcomes tracked)
-
-        Args:
-            trading_date: Date to trade (default: today).
-            data: Pre-fetched data dict. If provided, skips data fetch
-                  (used by CohortOrchestrator to share data across cohorts).
-            shared_signals: Pre-computed enriched signals from screen_and_enrich().
-                           If provided, skips steps 1-2 (used by orchestrator).
-            shared_regime: Pre-computed regime model from screen_and_enrich().
-        """
-        if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
-
-        lookback_start = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=90)).strftime("%Y-%m-%d")
-
-        # Use shared signals if provided (from orchestrator), otherwise run locally
-        if shared_signals is not None:
-            import copy
-            deduped_signals = copy.deepcopy(shared_signals)
-            regime_model = shared_regime or {}
-            self.state.save_regime_snapshot(regime_model)
-        else:
-            if data is None:
-                data = self._fetch_all_data(lookback_start, trading_date)
-            deduped_signals, regime_model = self.screen_and_enrich(trading_date, data)
-
-        # Compute strategy confidence (this IS cohort-specific)
-        strategy_confidence: dict[str, float] = {}
-        strategies_in_signals = {s["strategy"] for s in deduped_signals}
-        for strat_name in strategies_in_signals:
-            if self._adaptive_confidence:
-                strategy_confidence[strat_name] = self._compute_strategy_confidence(strat_name)
-            else:
-                strategy_confidence[strat_name] = 0.5
-
-        # ------------------------------------------------------------------
-        # 3. Fetch prices for signal tickers AND open positions
-        # ------------------------------------------------------------------
-        # Open positions are included so held longs and shorts are marked to
-        # market in the daily snapshot even when they are no longer signaled.
-        missing_tickers = _positions_to_price(
-            deduped_signals,
-            self.state.load_paper_trades(status="open"),
-            self._price_cache,
+        """Persist cutoff-safe signals and next-session intents without economics."""
+        from tradingagents.strategies.execution import (
+            AccountSnapshot,
+            SignalRecord,
+            stable_id,
         )
-        if missing_tickers:
-            self._fetch_missing_prices(missing_tickers, lookback_start, trading_date)
-
-        # ------------------------------------------------------------------
-        # 4. Portfolio committee synthesis → sized recommendations
-        # ------------------------------------------------------------------
+        from tradingagents.strategies.orchestration.trading_calendar import (
+            is_session,
+            next_session,
+            session_close,
+        )
         from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
-        from tradingagents.strategies.trading.paper_trader import PaperTrader
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        from tradingagents.strategies.learning.signal_journal import JournalEntry
-
-        bridge = ExecutionBridge(self.config)
-        if size_profile is not None:
-            bridge.risk_gate.config.max_positions = size_profile.max_positions
-            bridge.risk_gate.config.max_position_pct = size_profile.max_position_pct
-            bridge.risk_gate.config.min_position_value = size_profile.min_position_value
-            bridge.risk_gate.config.total_capital = size_profile.total_capital
-            bridge.risk_gate.config.cash_reserve_pct = size_profile.cash_reserve_pct
-            # Wire short/options eligibility from size profile
-            if size_profile.short_eligible:
-                bridge.risk_gate.config.long_only = False
-                bridge.risk_gate.config.earnings_blackout_days = 5
-                bridge.risk_gate.config.max_borrow_cost_pct = 0.05
-                bridge.risk_gate.config.max_margin_utilization_pct = 0.70
-        bridge.risk_gate.reset_daily(trading_date)
-        bridge.risk_gate.update_high_water_mark()
-
-        # Reconstruct broker state from persistent trades. Realized P&L from
-        # closed trades is banked into cash so the capital base compounds across
-        # runs (a take-profit winner adds buying power; a stop-loss loser removes
-        # it). Without this, closed-trade gains/losses silently vanish each run.
-        open_trades_for_broker = self.state.load_paper_trades(status="open")
-        closed_trades_for_broker = self.state.load_paper_trades(status="closed")
-        realized_pnl = sum(
-            float(t.get("pnl", 0.0) or 0.0) for t in closed_trades_for_broker
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
         )
-        if (open_trades_for_broker or realized_pnl) and hasattr(
-            bridge.broker, "reconstruct_from_trades"
+
+        if self.ledger is None:
+            raise ValueError("screen_and_stage requires an authoritative ledger")
+        session = date.fromisoformat(trading_date)
+        if not is_session(session):
+            raise ValueError(f"{session} is not an XNYS session")
+        if not isinstance(marked_account, AccountSnapshot):
+            raise TypeError("marked_account must be AccountSnapshot")
+        if (
+            not marked_account.valid
+            or marked_account.session != session
+            or marked_account.cohort_id != self.ledger.cohort_id
         ):
-            bridge.broker.reconstruct_from_trades(
-                open_trades_for_broker, realized_pnl=realized_pnl
-            )
-            logger.info(
-                "Reconstructed broker: cash=$%.2f, %d positions, realized P&L=$%.2f",
-                bridge.broker.cash, len(bridge.broker.positions), realized_pnl,
-            )
+            raise ValueError("marked_account is not the valid current cohort snapshot")
+        account_state = self.ledger.account_state()
+        if (
+            account_state.cash != marked_account.cash
+            or account_state.net_equity != marked_account.net_equity
+            or account_state.buying_power != marked_account.buying_power
+            or account_state.high_water_mark != marked_account.high_water_mark
+        ):
+            raise ValueError("marked_account does not match authoritative ledger")
 
-        # Re-entry cooldown: block names stopped out within the cooldown window
-        from tradingagents.strategies.trading.risk_gate import compute_cooling_tickers
-        cooling = compute_cooling_tickers(
-            closed_trades_for_broker,
-            trading_date,
-            bridge.risk_gate.config.reentry_cooldown_days,
+        horizon = str(self.ar_config.get("horizon", "30d"))
+        policy_id = str(
+            self.ar_config.get("paper_ledger", {}).get(
+                "policy_id", f"foundation-{horizon}"
+            )
         )
-        bridge.risk_gate.set_cooling_tickers(cooling)
-        if cooling:
-            logger.info(
-                "Re-entry cooldown active for %d tickers: %s",
-                len(cooling), sorted(cooling),
+        epoch_id = marked_account.epoch_id
+        cutoff = session_close(session)
+        eligible_session = next_session(session)
+        if self.ledger.staging_completed(session, epoch_id, policy_id):
+            records = self.ledger.read_signals(
+                session, session, epoch_id=epoch_id, policy_id=policy_id
             )
+            return {
+                "signals": [record.__dict__ for record in records],
+                "recommendations": [],
+                "intents_staged": [],
+                "cutoff_late": [],
+                "regime": shared_regime,
+                "account": marked_account.__dict__,
+                "replayed": True,
+            }
 
+        raw_bars = data.get("_execution_reference_bars", {})
+        if not isinstance(raw_bars, dict):
+            raise ValueError("_execution_reference_bars must be a mapping")
+
+        records: list[SignalRecord] = []
+        timely: list[tuple[dict, SignalRecord]] = []
+        late_ids: list[str] = []
+        journal_context: dict[str, dict] = {}
+        for ordinal, signal in enumerate(shared_signals):
+            ticker = str(signal.get("ticker", "")).strip().upper()
+            strategy = str(signal.get("strategy", "")).strip()
+            direction = str(signal.get("direction", "")).strip()
+            if (
+                not ticker
+                or not strategy
+                or direction not in {"long", "short", "neutral"}
+            ):
+                raise ValueError("candidate identity is incomplete")
+            bar = raw_bars.get(ticker)
+            if (
+                bar is None
+                or bar.ticker != ticker
+                or bar.session != session
+                or bar.adjusted
+                or bar.fetched_at < cutoff
+            ):
+                raise ValueError(
+                    f"missing exact raw reference bar for {ticker}/{session}"
+                )
+            metadata = (
+                signal.get("metadata")
+                if isinstance(signal.get("metadata"), dict)
+                else {}
+            )
+            evidence = _canonical_signal_evidence(
+                {
+                    "metadata": metadata,
+                    "score": signal.get("score", 0),
+                    "ticker": ticker,
+                    "strategy": strategy,
+                    "direction": direction,
+                }
+            )
+            explicit_event_key = metadata.get("event_key")
+            event_key = (
+                str(explicit_event_key)
+                if explicit_event_key
+                else stable_id("event", strategy, ticker, session, direction, evidence)
+            )
+            event_at = next(
+                (
+                    parsed
+                    for key in _EVENT_TIME_KEYS
+                    if (parsed := _metadata_datetime(metadata, key)) is not None
+                ),
+                None,
+            )
+            observed_at = _metadata_datetime(metadata, "observed_at") or cutoff
+            decision_at = max(
+                [cutoff, observed_at] + ([event_at] if event_at is not None else [])
+            )
+            signal_id = stable_id(
+                "signal", epoch_id, strategy, horizon, direction, event_key
+            )
+            record = SignalRecord(
+                signal_id,
+                epoch_id,
+                policy_id,
+                event_key,
+                strategy,
+                ticker,
+                direction,
+                event_at,
+                observed_at,
+                session,
+                bar.close,
+                decision_at,
+                stable_id("evidence", evidence),
+            )
+            self.ledger.record_signal(record)
+            records.append(record)
+            is_late = observed_at > cutoff or (
+                event_at is not None and event_at > cutoff
+            )
+            if is_late:
+                late_ids.append(signal_id)
+                status = "cutoff-late"
+            else:
+                enriched = dict(signal)
+                enriched["ticker"] = ticker
+                enriched["_signal_id"] = signal_id
+                timely.append((enriched, record))
+                status = "timely"
+            llm = metadata.get("llm_analysis")
+            journal_context[signal_id] = {
+                "score": float(signal.get("score", 0) or 0),
+                "llm_conviction": (
+                    float(llm.get("conviction", llm.get("score", 0)) or 0)
+                    if isinstance(llm, dict)
+                    else 0.0
+                ),
+                "regime": (shared_regime or {}).get("overall_regime", ""),
+                "status": status,
+                "metadata": {"candidate_ordinal": ordinal},
+            }
+
+        self._journal.mirror_signals(records, journal_context)
+
+        strategy_confidence = {
+            record.strategy: (
+                self._compute_strategy_confidence(record.strategy)
+                if self._adaptive_confidence
+                else 0.5
+            )
+            for _, record in timely
+        }
+        committee_signals = [signal for signal, _ in timely]
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
         recommendations = committee.synthesize(
-            signals=deduped_signals,
-            regime_context=regime_model,
+            signals=committee_signals,
+            regime_context=shared_regime or {},
             strategy_confidence=strategy_confidence,
-            current_positions=bridge.get_positions(),
-            total_capital=bridge.get_account().portfolio_value,
-            enrichment=enrichment,
+            current_positions=self.ledger.open_positions(),
+            total_capital=float(marked_account.net_equity),
+            enrichment=enrichment or {},
         )
-
-        # ------------------------------------------------------------------
-        # 5. Execute through risk gate (sized, gated trades)
-        # ------------------------------------------------------------------
-        trader = PaperTrader(self.state)
-        trades_opened = []
-        traded_tickers: set[str] = set()
-        open_trades = self.state.load_paper_trades(status="open")
-
-        # Idempotency: skip tickers already traded today
-        already_traded_today = {
-            t["ticker"] for t in open_trades
-            if t.get("entry_date") == trading_date
-        }
-
-        for rec in recommendations:
-            if rec.ticker in already_traded_today or rec.ticker in traded_tickers:
-                continue
-
-            # Get current price
-            ticker_prices = self._price_cache.get(rec.ticker)
-            if ticker_prices is None:
-                continue
-            try:
-                current_price = float(ticker_prices["Close"].iloc[-1])
-            except (KeyError, IndexError):
-                continue
-            if not (current_price > 0) or math.isnan(current_price):
-                continue
-
-            primary_strategy = rec.contributing_strategies[0] if rec.contributing_strategies else ""
-
-            # Execute through bridge (size → gate → broker)
-            result = bridge.execute_recommendation(
-                ticker=rec.ticker,
-                direction=rec.direction,
-                position_size_pct=rec.position_size_pct,
-                confidence=rec.confidence,
-                strategy=primary_strategy,
-                current_price=current_price,
-                open_trades=open_trades,
-            )
-
-            if result and result.status == "filled":
-                # Record in PaperTrader for journal/state tracking
-                trade_id = trader.open_trade(
-                    strategy=primary_strategy,
-                    ticker=rec.ticker,
-                    direction=rec.direction,
-                    entry_price=result.filled_price,
-                    entry_date=trading_date,
-                    shares=result.filled_qty,
-                    position_value=result.filled_qty * result.filled_price,
+        bridge = ExecutionBridge(self.config, ledger=self.ledger)
+        rec_specs: list[tuple[Any, tuple[SignalRecord, ...]]] = []
+        for recommendation in recommendations:
+            contributors = set(recommendation.contributing_strategies)
+            contributor_records = tuple(
+                sorted(
+                    (
+                        record
+                        for signal, record in timely
+                        if record.ticker == recommendation.ticker
+                        and record.strategy in contributors
+                    ),
+                    key=lambda record: record.signal_id,
                 )
-                trades_opened.append(trade_id)
-                traded_tickers.add(rec.ticker)
-
-        # ------------------------------------------------------------------
-        # 6. Log all signals to journal (traded and untraded)
-        # ------------------------------------------------------------------
-        regime_label = regime_model.get("overall_regime", "") if regime_model else ""
-        journal_entries = []
-        for signal in deduped_signals:
-            ticker_prices = self._price_cache.get(signal["ticker"])
-            price = 0.0
-            if ticker_prices is not None and not ticker_prices.empty:
-                try:
-                    p = float(ticker_prices["Close"].iloc[-1])
-                    if not math.isnan(p):
-                        price = p
-                except (KeyError, IndexError):
-                    pass
-
-            was_traded = signal["ticker"] in traded_tickers
-            llm_analysis = signal.get("metadata", {}).get("llm_analysis", {}) if isinstance(signal.get("metadata"), dict) else {}
-
-            # Track which prompt version generated this signal
-            prompt_version = ""
-            if self._analyzer:
-                from tradingagents.strategies.learning.prompt_optimizer import PromptOptimizer
-                po = PromptOptimizer(self.ar_config.get("state_dir", "data/state"), self._analyzer)
-                prompt_version = po.get_prompt_version(signal["strategy"])
-
-            journal_entries.append(JournalEntry(
-                timestamp=trading_date,
-                strategy=signal["strategy"],
-                ticker=signal["ticker"],
-                direction=signal["direction"],
-                score=signal["score"],
-                llm_conviction=llm_analysis.get("conviction", llm_analysis.get("score", 0.0)),
-                regime=regime_label,
-                traded=was_traded,
-                entry_price=price,
-                prompt_version=prompt_version,
-                openbb_available=self._openbb_available,
-            ))
-
-        if journal_entries:
-            self._journal.log_signals(journal_entries)
-            logger.info("Signal journal: logged %d signals (%d traded)", len(journal_entries), len(trades_opened))
-
-        # Convergence detection
-        convergence = self._journal.get_convergence_signals(trading_date, min_strategies=2)
-        if convergence:
-            logger.info("Convergence signals: %s", [(c["ticker"], c["direction"], c["strategies"]) for c in convergence])
-
-        # Back-fill outcomes for past entries
-        outcomes_filled = self._journal.fill_outcomes(self._price_cache, trading_date)
-        if outcomes_filled:
-            logger.info("Signal journal: filled outcomes for %d past entries", outcomes_filled)
-
-        # ------------------------------------------------------------------
-        # 7. Check exits on open positions (strategy rules + stop loss)
-        # ------------------------------------------------------------------
-        trades_closed = []
-        open_trades = self.state.load_paper_trades(status="open")
-
-        # Force-close positions hitting global stop loss
-        force_close_ids = bridge.risk_gate.enforce_stop_losses(open_trades, self._price_cache)
-        for trade_id in force_close_ids:
-            trade = next((t for t in open_trades if t.get("trade_id") == trade_id), None)
-            if trade:
-                ticker_prices = self._price_cache.get(trade["ticker"])
-                if ticker_prices is not None and not ticker_prices.empty:
-                    try:
-                        exit_price = float(ticker_prices["Close"].iloc[-1])
-                        trader.close_trade(trade_id, exit_price=exit_price, exit_date=trading_date, exit_reason="stop_loss")
-                        trades_closed.append(trade_id)
-                        # Track daily losses for risk gate
-                        pnl = (exit_price - trade.get("entry_price", 0)) * trade.get("shares", 1)
-                        if pnl < 0:
-                            bridge.risk_gate.record_daily_loss(abs(pnl))
-                    except (KeyError, IndexError):
-                        pass
-
-        # Check strategy-specific exit rules
-        still_open = [t for t in open_trades if t.get("trade_id") not in set(force_close_ids)]
-        for trade in still_open:
-            ticker = trade.get("ticker", "")
-            strat_name = trade.get("strategy", "")
-            strategy = next((s for s in self.paper_trade_strategies if s.name == strat_name), None)
-            if not strategy:
-                continue
-
-            ticker_prices = self._price_cache.get(ticker)
-            if ticker_prices is None or ticker_prices.empty:
-                continue
-
-            try:
-                current_price = float(ticker_prices["Close"].iloc[-1])
-            except (KeyError, IndexError):
-                continue
-
-            entry_price = trade.get("entry_price", 0)
-            entry_date = trade.get("entry_date", trading_date)
-            holding_days = (pd.Timestamp(trading_date) - pd.Timestamp(entry_date)).days
-
-            params = strategy.get_default_params()
-            should_exit, reason = strategy.check_exit(
-                ticker=ticker,
-                entry_price=entry_price,
-                current_price=current_price,
-                holding_days=holding_days,
-                params=params,
-                data=data,
             )
-            if should_exit:
-                trader.close_trade(trade["trade_id"], exit_price=current_price, exit_date=trading_date, exit_reason=reason)
-                trades_closed.append(trade["trade_id"])
-
-        # Update cycle tracker
-        if self._cycle_tracker:
-            account = bridge.get_account()
-            portfolio_value = account.portfolio_value if hasattr(account, 'portfolio_value') else self.ar_config.get("total_capital", 10000)
-            open_positions = self.state.load_paper_trades(status="open")
-            self._cycle_tracker.update_daily(trading_date, open_positions, portfolio_value)
-            if self._cycle_tracker.is_boundary(trading_date):
-                cycle_num = self._cycle_tracker.current_cycle(trading_date)
-                closed = self.state.load_paper_trades(status="closed")
-                self._cycle_tracker.snapshot_cycle(cycle_num, open_positions, closed, portfolio_value)
-                logger.info("Cycle %d boundary — snapshot generated", cycle_num)
-
-        # Persist daily equity snapshot (mark-to-market) per cohort
-        try:
-            from tradingagents.strategies.state.equity_snapshot import write_snapshot
-            state_dir = self.ar_config.get("state_dir", "data/state")
-            total_capital = (
-                size_profile.total_capital if size_profile is not None
-                else self.ar_config.get("total_capital", 10000)
+            if not contributor_records:
+                continue
+            recommendation.contributing_signal_ids = tuple(
+                record.signal_id for record in contributor_records
             )
-            write_snapshot(
-                state_dir=state_dir,
-                trading_date=trading_date,
-                cash=bridge.broker.cash,
-                open_trades=self.state.load_paper_trades(status="open"),
-                closed_trades=self.state.load_paper_trades(status="closed"),
-                price_cache=self._price_cache,
-                total_capital=total_capital,
-            )
-        except Exception:
-            logger.warning("Equity snapshot write failed", exc_info=True)
+            rec_specs.append((recommendation, contributor_records))
 
+        exit_specs, cancellations = self._build_exit_specs(
+            session, cutoff, eligible_session, raw_bars, data, horizon
+        )
+        staged_ids: list[str] = []
+
+        def persist_staging() -> None:
+            for intent in cancellations:
+                self.ledger.cancel_intent(
+                    intent.intent_id, cutoff, "strategy exit superseded resting stop"
+                )
+            for intent, lot_quantities in exit_specs:
+                self.ledger.stage_exit_intent(intent, lot_quantities)
+                staged_ids.append(intent.intent_id)
+            held = {
+                str(position["ticker"]) for position in self.ledger.open_positions()
+            }
+            for recommendation, contributor_records in rec_specs:
+                if recommendation.ticker in held or self.ledger.pending_exit_intents(
+                    recommendation.ticker
+                ):
+                    continue
+                intent = bridge.stage_intent(
+                    recommendation,
+                    contributor_records,
+                    self.ledger.account_state(),
+                    cutoff,
+                    eligible_session,
+                )
+                staged_ids.append(intent.intent_id)
+
+        executed, _ = self.ledger.complete_staging(
+            session, epoch_id, policy_id, cutoff, persist_staging
+        )
+        if not executed:
+            staged_ids = []
         return {
-            "signals": deduped_signals,
-            "recommendations": [r.__dict__ if hasattr(r, '__dict__') else r for r in recommendations],
-            "regime": regime_model,
-            "trades_opened": trades_opened,
-            "trades_closed": trades_closed,
-            "account": bridge.get_account().__dict__,
+            "signals": [record.__dict__ for record in records],
+            "recommendations": [
+                recommendation.__dict__ for recommendation, _ in rec_specs
+            ],
+            "intents_staged": staged_ids,
+            "cutoff_late": late_ids,
+            "regime": shared_regime,
+            "account": marked_account.__dict__,
+            "replayed": not executed,
         }
+
+    def _build_exit_specs(
+        self,
+        session: date,
+        cutoff: datetime,
+        eligible_session: date,
+        raw_bars: dict[str, Any],
+        data: dict,
+        horizon: str,
+    ) -> tuple[list[tuple[Any, tuple[tuple[str, int], ...]]], list[Any]]:
+        """Build deterministic next-open exits or one persistent stop per lot."""
+        from tradingagents.strategies.execution import OrderIntent, stable_id
+
+        exit_specs: list[tuple[OrderIntent, tuple[tuple[str, int], ...]]] = []
+        cancellations: list[OrderIntent] = []
+        risk = self.config.get("autoresearch", {}).get("risk_gate", {})
+        long_stop = Decimal(str(risk.get("global_stop_loss_pct", "0.08")))
+        short_stop = Decimal(str(risk.get("short_squeeze_stop_pct", "0.15")))
+        for position in self.ledger.open_exit_positions():
+            ticker = str(position["ticker"])
+            bar = raw_bars.get(ticker)
+            if bar is None or bar.session != session or bar.adjusted:
+                raise ValueError(
+                    f"missing exact exit reference bar for {ticker}/{session}"
+                )
+            pending = self.ledger.pending_exit_intents(ticker, str(position["lot_id"]))
+            should_exit = False
+            for strategy_name in position["strategies"]:
+                strategy = next(
+                    (
+                        item
+                        for item in self.paper_trade_strategies
+                        if item.name == strategy_name
+                    ),
+                    None,
+                )
+                if strategy is None:
+                    continue
+                should_exit, _ = strategy.check_exit(
+                    ticker=ticker,
+                    entry_price=float(position["entry_price"]),
+                    current_price=float(bar.close),
+                    holding_days=(session - position["opened_session"]).days,
+                    params=strategy.get_default_params(horizon=horizon),
+                    data=data,
+                )
+                if should_exit:
+                    break
+            if should_exit:
+                cancellations.extend(
+                    intent for intent in pending if intent.price_rule == "resting_stop"
+                )
+                pending = [
+                    intent for intent in pending if intent.price_rule != "resting_stop"
+                ]
+                price_rule = "next_session_open"
+                stop_price = None
+            elif pending:
+                continue
+            else:
+                price_rule = "resting_stop"
+                if position["direction"] == "short":
+                    stop_price = position["entry_price"] * (Decimal("1") + short_stop)
+                else:
+                    stop_price = position["entry_price"] * (Decimal("1") - long_stop)
+            if pending:
+                continue
+            side = "cover" if position["direction"] == "short" else "sell"
+            signal_ids = tuple(sorted(position["signal_ids"]))
+            intent = OrderIntent(
+                stable_id(
+                    "intent",
+                    self.ledger.cohort_id,
+                    signal_ids,
+                    side,
+                    position["quantity"],
+                    cutoff,
+                    eligible_session,
+                    price_rule,
+                    stop_price,
+                    position["lot_id"],
+                ),
+                signal_ids,
+                self.ledger.cohort_id,
+                side,
+                int(position["quantity"]),
+                cutoff,
+                eligible_session,
+                price_rule,
+                "pending",
+                stop_price,
+                None,
+            )
+            exit_specs.append(
+                (
+                    intent,
+                    ((str(position["lot_id"]), int(position["quantity"])),),
+                )
+            )
+        return exit_specs, cancellations
 
     def run_learning_loop(self) -> dict:
         """Phase 2 learning loop: Evaluate strategy performance and optimize prompts."""
@@ -604,7 +700,9 @@ class MultiStrategyEngine:
         trade_counts: dict[str, int] = {}
 
         for strategy in self.paper_trade_strategies:
-            trades = self.state.load_paper_trades(strategy=strategy.name, status="closed")
+            trades = self.state.load_paper_trades(
+                strategy=strategy.name, status="closed"
+            )
             trade_counts[strategy.name] = len(trades)
 
             if not trades:
@@ -639,7 +737,9 @@ class MultiStrategyEngine:
         # ------------------------------------------------------------------
         prompt_optimization_result: dict[str, Any] = {}
         if self._analyzer:
-            from tradingagents.strategies.learning.prompt_optimizer import PromptOptimizer
+            from tradingagents.strategies.learning.prompt_optimizer import (
+                PromptOptimizer,
+            )
 
             state_dir = self.ar_config.get("state_dir", "data/state")
             optimizer = PromptOptimizer(state_dir, self._analyzer)
@@ -651,7 +751,8 @@ class MultiStrategyEngine:
                 if decision in ("keep", "revert"):
                     optimizer.commit_or_revert(trial_id, decision)
                     prompt_optimization_result["trial_completed"] = {
-                        "trial_id": trial_id, "decision": decision,
+                        "trial_id": trial_id,
+                        "decision": decision,
                     }
                 else:
                     prompt_optimization_result["trial_ongoing"] = trial_id
@@ -661,13 +762,18 @@ class MultiStrategyEngine:
                 worst = optimizer.identify_worst_prompt(prompt_scores)
                 if worst:
                     current_prompt = self._analyzer.get_prompt(worst)
-                    failures = self._journal.get_high_conviction_failures(worst, limit=10)
+                    failures = self._journal.get_high_conviction_failures(
+                        worst, limit=10
+                    )
                     if failures:
-                        new_prompt = optimizer.propose_modification(worst, current_prompt, failures)
+                        new_prompt = optimizer.propose_modification(
+                            worst, current_prompt, failures
+                        )
                         if new_prompt != current_prompt:
                             new_trial_id = optimizer.start_trial(worst, new_prompt)
                             prompt_optimization_result["trial_started"] = {
-                                "trial_id": new_trial_id, "strategy": worst,
+                                "trial_id": new_trial_id,
+                                "strategy": worst,
                             }
                 prompt_optimization_result["prompt_scores"] = {
                     k: {"hit_rate": v["hit_rate"], "n_signals": v["n_signals"]}
@@ -705,7 +811,8 @@ class MultiStrategyEngine:
             return 0.5  # neutral until proven
 
         hits = sum(
-            1 for e in with_outcomes
+            1
+            for e in with_outcomes
             if (e["direction"] == "long" and e["return_5d"] > 0)
             or (e["direction"] == "short" and e["return_5d"] < 0)
         )
@@ -729,23 +836,53 @@ class MultiStrategyEngine:
         hy_spread = fred.get("hy_spread")
         credit_bps = 0.0
         if hy_spread is not None and hasattr(hy_spread, "iloc") and len(hy_spread) > 0:
-            credit_bps = float(hy_spread.iloc[-1]) * 100 if not pd.isna(hy_spread.iloc[-1]) else 0.0
+            credit_bps = (
+                float(hy_spread.iloc[-1]) * 100
+                if not pd.isna(hy_spread.iloc[-1])
+                else 0.0
+            )
 
         yield_curve = fred.get("yield_curve")
         yc_slope = 0.0
-        if yield_curve is not None and hasattr(yield_curve, "iloc") and len(yield_curve) > 0:
-            yc_slope = float(yield_curve.iloc[-1]) if not pd.isna(yield_curve.iloc[-1]) else 0.0
+        if (
+            yield_curve is not None
+            and hasattr(yield_curve, "iloc")
+            and len(yield_curve) > 0
+        ):
+            yc_slope = (
+                float(yield_curve.iloc[-1])
+                if not pd.isna(yield_curve.iloc[-1])
+                else 0.0
+            )
 
         overall = self._classify_regime(vix_level, credit_bps, yc_slope)
-        stressed_vix = self.ar_config.get("risk_discipline", {}).get("regime_vix_stressed", 25.0)
+        stressed_vix = self.ar_config.get("risk_discipline", {}).get(
+            "regime_vix_stressed", 25.0
+        )
 
         return {
             "vix_level": vix_level,
-            "vix_regime": "crisis" if vix_level > 35 else "elevated" if vix_level > stressed_vix else "normal" if vix_level > 15 else "low",
+            "vix_regime": "crisis"
+            if vix_level > 35
+            else "elevated"
+            if vix_level > stressed_vix
+            else "normal"
+            if vix_level > 15
+            else "low",
             "credit_spread_bps": credit_bps,
-            "credit_regime": "crisis" if credit_bps > 600 else "stressed" if credit_bps > 400 else "normal",
+            "credit_regime": "crisis"
+            if credit_bps > 600
+            else "stressed"
+            if credit_bps > 400
+            else "normal",
             "yield_curve_slope": yc_slope,
-            "yield_regime": "inverted" if yc_slope < -0.2 else "flat" if yc_slope < 0.5 else "normal" if yc_slope < 1.5 else "steep",
+            "yield_regime": "inverted"
+            if yc_slope < -0.2
+            else "flat"
+            if yc_slope < 0.5
+            else "normal"
+            if yc_slope < 1.5
+            else "steep",
             "overall_regime": overall,
             "timestamp": datetime.now().isoformat(),
             "thresholds": {
@@ -757,7 +894,9 @@ class MultiStrategyEngine:
 
     def _classify_regime(self, vix: float, credit_bps: float, yc_slope: float) -> str:
         """Classify overall market regime."""
-        stressed_vix = self.ar_config.get("risk_discipline", {}).get("regime_vix_stressed", 25.0)
+        stressed_vix = self.ar_config.get("risk_discipline", {}).get(
+            "regime_vix_stressed", 25.0
+        )
         crisis_signals = 0
         if vix > 35:
             crisis_signals += 1
@@ -808,7 +947,10 @@ class MultiStrategyEngine:
     # ------------------------------------------------------------------
 
     def _fetch_missing_prices(
-        self, tickers: list[str], start_date: str, end_date: str,
+        self,
+        tickers: list[str],
+        start_date: str,
+        end_date: str,
     ) -> None:
         """Fetch prices for tickers not already in cache."""
         from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
@@ -912,7 +1054,9 @@ class MultiStrategyEngine:
 
         # Earnings calendar: who reported recently? (P1/P2)
         date_to = trading_date
-        date_from = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+        date_from = (
+            datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)
+        ).strftime("%Y-%m-%d")
         earnings = source.fetch_recent_earnings(
             date_from,
             date_to,
@@ -937,16 +1081,18 @@ class MultiStrategyEngine:
                         f"[{n.get('source', 'Unknown')}]: {n.get('headline', '')} — {n.get('summary', '')}"
                         for n in news[:5]
                     )
-                    transcripts.append({
-                        "symbol": symbol,
-                        "year": e.get("year"),
-                        "quarter": e.get("quarter"),
-                        "transcript_text": news_text,
-                        "eps_actual": e.get("epsActual"),
-                        "eps_estimate": e.get("epsEstimate"),
-                        "revenue_actual": e.get("revenueActual"),
-                        "revenue_estimate": e.get("revenueEstimate"),
-                    })
+                    transcripts.append(
+                        {
+                            "symbol": symbol,
+                            "year": e.get("year"),
+                            "quarter": e.get("quarter"),
+                            "transcript_text": news_text,
+                            "eps_actual": e.get("epsActual"),
+                            "eps_estimate": e.get("epsEstimate"),
+                            "revenue_actual": e.get("revenueActual"),
+                            "revenue_estimate": e.get("revenueEstimate"),
+                        }
+                    )
             result["transcripts"] = transcripts
         logger.info(
             "Finnhub strategy fetch strategy=earnings_call candidate_count=%d "
@@ -983,8 +1129,18 @@ class MultiStrategyEngine:
             result["supply_chains"] = chains
 
         # PQC migration news for quantum_readiness strategy
-        pqc_tickers = ["CRWD", "PANW", "ZS", "FTNT", "IBM", "CSCO", "MSFT",
-                        "IONQ", "RGTI", "COIN"]
+        pqc_tickers = [
+            "CRWD",
+            "PANW",
+            "ZS",
+            "FTNT",
+            "IBM",
+            "CSCO",
+            "MSFT",
+            "IONQ",
+            "RGTI",
+            "COIN",
+        ]
         pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
         pqc_news = []
         for symbol in pqc_tickers[:6]:  # Rate limit: 6 tickers max
@@ -995,7 +1151,9 @@ class MultiStrategyEngine:
                 deadline=deadline,
             )
             for article in news:
-                text = (article.get("headline", "") + " " + article.get("summary", "")).lower()
+                text = (
+                    article.get("headline", "") + " " + article.get("summary", "")
+                ).lower()
                 if any(kw in text for kw in pqc_kw):
                     article["symbol"] = symbol
                     pqc_news.append(article)
@@ -1060,7 +1218,12 @@ class MultiStrategyEngine:
         # PQC keyword filings for quantum_readiness strategy
         pqc_filings = monitor.poll_keyword_filings(
             form_types=["8-K", "10-K", "10-Q"],
-            keywords=["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"],
+            keywords=[
+                "post-quantum",
+                "quantum-resistant",
+                "quantum-safe",
+                "cryptographic agility",
+            ],
             days_back=30,
         )
         if pqc_filings:
@@ -1106,7 +1269,9 @@ class MultiStrategyEngine:
         # Credit spreads for regime model
         try:
             spreads = source.fetch_credit_spreads(start_date, end_date)
-            result.update(spreads)  # Keys are FRED series IDs (BAMLH0A0HYM2, BAMLC0A4CBBB)
+            result.update(
+                spreads
+            )  # Keys are FRED series IDs (BAMLH0A0HYM2, BAMLC0A4CBBB)
         except Exception:
             logger.error("Failed to fetch FRED credit spreads", exc_info=True)
 
@@ -1119,6 +1284,7 @@ class MultiStrategyEngine:
 
         # Map friendly names for strategies that use them
         from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
+
         for friendly_name, series_id in SERIES_MAP.items():
             if series_id in result:
                 result[friendly_name] = result[series_id]
@@ -1150,7 +1316,9 @@ class MultiStrategyEngine:
 
         try:
             contracts = source.get_recent_large_contracts(
-                min_amount=50_000_000, days_back=30, as_of=trading_date,
+                min_amount=50_000_000,
+                days_back=30,
+                as_of=trading_date,
             )
             result = {"contracts": contracts}
             logger.info("USASpending fetch: %d large contracts", len(contracts))
@@ -1165,11 +1333,13 @@ class MultiStrategyEngine:
         if source is None:
             return {}
 
-        return source.fetch({
-            "method": "cot_positioning",
-            "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
-            "lookback_weeks": 52,
-        })
+        return source.fetch(
+            {
+                "method": "cot_positioning",
+                "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
+                "lookback_weeks": 52,
+            }
+        )
 
     def _fetch_noaa_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
@@ -1191,6 +1361,7 @@ class MultiStrategyEngine:
 
         try:
             from datetime import datetime
+
             year = datetime.strptime(trading_date, "%Y-%m-%d").year
             crop_progress = {}
             for commodity in ("CORN", "SOYBEANS", "WHEAT"):
@@ -1210,8 +1381,11 @@ class MultiStrategyEngine:
 
         try:
             from datetime import datetime, timedelta
+
             end = trading_date
-            start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+            start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime(
+                "%Y-%m-%d"
+            )
             severity = source.fetch_drought_severity(start=start, end=end)
             composite = source.fetch_composite_score(date=trading_date)
             return {"composite_score": composite, "states": severity}
@@ -1225,11 +1399,13 @@ class MultiStrategyEngine:
         if source is None:
             return {}
 
-        return source.fetch({
-            "method": "cot_positioning",
-            "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
-            "lookback_weeks": 52,
-        })
+        return source.fetch(
+            {
+                "method": "cot_positioning",
+                "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
+                "lookback_weeks": 52,
+            }
+        )
 
     def _fetch_yfinance_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch all yfinance data needed by strategies."""
@@ -1246,14 +1422,46 @@ class MultiStrategyEngine:
         # Includes ag ETFs for weather_ag strategy
         core_tickers = [
             # Market + regime model
-            "SPY", "SHY", "TLT",
+            "SPY",
+            "SHY",
+            "TLT",
             # Ag ETFs for weather_ag
-            "DBA", "WEAT", "CORN", "MOO", "SOYB", "ADM", "BG", "CTVA", "DE", "FMC",
+            "DBA",
+            "WEAT",
+            "CORN",
+            "MOO",
+            "SOYB",
+            "ADM",
+            "BG",
+            "CTVA",
+            "DE",
+            "FMC",
             # Regional ETFs for state_economics
-            "KRE", "IWN", "XRT", "IYR", "XHB", "ITB", "VNQ", "SOXX", "XLI", "XLRE",
+            "KRE",
+            "IWN",
+            "XRT",
+            "IYR",
+            "XHB",
+            "ITB",
+            "VNQ",
+            "SOXX",
+            "XLI",
+            "XLRE",
             # Defense contractors for govt_contracts (momentum fallback)
-            "LMT", "RTX", "NOC", "GD", "BA", "LHX", "LDOS", "SAIC", "BAH",
-            "PLTR", "KTOS", "CACI", "HEI", "TDG",
+            "LMT",
+            "RTX",
+            "NOC",
+            "GD",
+            "BA",
+            "LHX",
+            "LDOS",
+            "SAIC",
+            "BAH",
+            "PLTR",
+            "KTOS",
+            "CACI",
+            "HEI",
+            "TDG",
         ]
 
         logger.info("Fetching prices for %d core tickers", len(core_tickers))
@@ -1287,7 +1495,9 @@ class MultiStrategyEngine:
     # ------------------------------------------------------------------
 
     def _enrich_with_llm(
-        self, candidates: list[Candidate], strategy_name: str,
+        self,
+        candidates: list[Candidate],
+        strategy_name: str,
         regime_context: dict | None = None,
     ) -> list[Candidate]:
         """Run LLM analysis on candidates that have needs_llm_analysis=True."""
@@ -1303,7 +1513,9 @@ class MultiStrategyEngine:
             try:
                 if analysis_type == "earnings_call":
                     llm_result = self._analyzer.analyze_earnings_call(
-                        c.metadata.get("analysis_text", c.metadata.get("transcript_text", "")),
+                        c.metadata.get(
+                            "analysis_text", c.metadata.get("transcript_text", "")
+                        ),
                         c.ticker,
                         regime_context=regime_context,
                         text_source=c.metadata.get("text_source", "earnings_news"),
@@ -1373,7 +1585,12 @@ class MultiStrategyEngine:
                         regime_context=regime_context,
                     )
             except Exception:
-                logger.error("LLM analysis failed for %s/%s", strategy_name, c.ticker, exc_info=True)
+                logger.error(
+                    "LLM analysis failed for %s/%s",
+                    strategy_name,
+                    c.ticker,
+                    exc_info=True,
+                )
 
             if llm_result:
                 # Update candidate with LLM results
@@ -1393,7 +1610,8 @@ class MultiStrategyEngine:
                         if not edgar.validate_ticker(c.ticker):
                             logger.warning(
                                 "LLM returned invalid ticker %s for %s, dropping",
-                                c.ticker, strategy_name,
+                                c.ticker,
+                                strategy_name,
                             )
                             c.ticker = ""
 

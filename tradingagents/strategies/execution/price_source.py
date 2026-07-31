@@ -1,7 +1,9 @@
 """Fail-closed market-data adapters for execution, marking, and benchmarks."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Protocol
@@ -20,6 +22,21 @@ class BarValidationError(ValueError):
 
 class CorporateActionValidationError(ValueError):
     """Raised when a nonzero corporate action cannot be verified."""
+
+
+@dataclass(frozen=True)
+class AdjustedClose:
+    """One provenance-bearing total-return-adjusted benchmark close."""
+
+    symbol: str
+    session: date
+    close: Decimal
+    source: str
+    fetched_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.close, Decimal):
+            raise TypeError("close must be Decimal")
 
 
 class PriceSource(Protocol):
@@ -42,7 +59,7 @@ class PriceSource(Protocol):
         symbols: list[str],
         start_session: date,
         end_session_inclusive: date,
-    ) -> dict[tuple[str, date], Decimal]: ...
+    ) -> dict[tuple[str, date], AdjustedClose]: ...
 
 
 def validate_required_bars(
@@ -53,26 +70,68 @@ def validate_required_bars(
     max_fetch_age: timedelta = timedelta(hours=24),
 ) -> None:
     """Reject missing, unsafe, or non-raw bars before any ledger mutation."""
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise BarValidationError("as_of must be timezone-aware")
     errors: list[str] = []
     for ticker in sorted(tickers):
         bar = bars.get((ticker, session))
         if bar is None:
             errors.append(f"missing {ticker}/{session}")
             continue
+        if bar.ticker != ticker or bar.session != session:
+            errors.append(f"mismatched {ticker}/{session}")
         values = (bar.open, bar.high, bar.low, bar.close)
         if bar.adjusted:
             errors.append(f"adjusted {ticker}/{session}")
+        if not bar.source:
+            errors.append(f"missing source {ticker}/{session}")
         if any(not value.is_finite() or value <= 0 for value in values):
             errors.append(f"invalid {ticker}/{session}")
-        if bar.fetched_at > as_of:
+        if bar.fetched_at.tzinfo is None or bar.fetched_at.utcoffset() is None:
+            errors.append(f"naive {ticker}/{session}")
+        elif bar.fetched_at > as_of:
             errors.append(f"future {ticker}/{session}")
-        if as_of - bar.fetched_at > max_fetch_age:
+        elif as_of - bar.fetched_at > max_fetch_age:
             errors.append(f"stale {ticker}/{session}")
         if all(value.is_finite() for value in values) and not (
-            bar.low <= bar.open <= bar.high
-            and bar.low <= bar.close <= bar.high
+            bar.low <= bar.open <= bar.high and bar.low <= bar.close <= bar.high
         ):
             errors.append(f"incoherent {ticker}/{session}")
+    if errors:
+        raise BarValidationError("; ".join(errors))
+
+
+def validate_adjusted_closes(
+    closes: dict[tuple[str, date], AdjustedClose],
+    symbols: set[str],
+    session: date,
+    as_of: datetime,
+    max_fetch_age: timedelta = timedelta(hours=24),
+) -> None:
+    """Reject missing or time-unsafe adjusted benchmark observations."""
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise BarValidationError("as_of must be timezone-aware")
+    errors: list[str] = []
+    for symbol in sorted(symbols):
+        observation = closes.get((symbol, session))
+        if observation is None:
+            errors.append(f"missing {symbol}/{session}")
+            continue
+        if observation.symbol != symbol or observation.session != session:
+            errors.append(f"mismatched {symbol}/{session}")
+        if not observation.close.is_finite() or observation.close <= 0:
+            errors.append(f"invalid {symbol}/{session}")
+        if not observation.source:
+            errors.append(f"missing source {symbol}/{session}")
+        if (
+            observation.fetched_at.tzinfo is None
+            or observation.fetched_at.utcoffset() is None
+        ):
+            errors.append(f"naive {symbol}/{session}")
+        elif observation.fetched_at > as_of:
+            errors.append(f"future {symbol}/{session}")
+        elif as_of - observation.fetched_at > max_fetch_age:
+            errors.append(f"stale {symbol}/{session}")
     if errors:
         raise BarValidationError("; ".join(errors))
 
@@ -189,7 +248,7 @@ class YFinancePriceSource:
         symbols: list[str],
         start_session: date,
         end_session_inclusive: date,
-    ) -> dict[tuple[str, date], Decimal]:
+    ) -> dict[tuple[str, date], AdjustedClose]:
         """Fetch adjusted close-only data reserved for benchmark observations."""
         self._validate_range(symbols, start_session, end_session_inclusive)
         frame = yf.download(
@@ -201,7 +260,8 @@ class YFinancePriceSource:
             progress=False,
             timeout=30,
         )
-        closes: dict[tuple[str, date], Decimal] = {}
+        fetched_at = self._fetched_at()
+        closes: dict[tuple[str, date], AdjustedClose] = {}
         normalized = normalize_tickers(symbols)
         _require_flat_frame_provenance(frame, normalized)
         for original, yf_ticker in zip(symbols, normalized):
@@ -213,14 +273,12 @@ class YFinancePriceSource:
                     session,
                     "close",
                 )
-                closes[(original, session)] = close
-        missing = [
-            f"missing {symbol}/{end_session_inclusive}"
-            for symbol in sorted(symbols)
-            if (symbol, end_session_inclusive) not in closes
-        ]
-        if missing:
-            raise BarValidationError("; ".join(missing))
+                closes[(original, session)] = AdjustedClose(
+                    original, session, close, "yfinance-adjusted", fetched_at
+                )
+        validate_adjusted_closes(
+            closes, set(symbols), end_session_inclusive, self._fetched_at()
+        )
         return closes
 
     def _raw_frame(
@@ -292,11 +350,18 @@ def _frame_value(
 def _require_flat_frame_provenance(
     frame: pd.DataFrame, normalized_tickers: list[str]
 ) -> None:
-    if not isinstance(frame.columns, pd.MultiIndex) and len(set(normalized_tickers)) != 1:
-        raise BarValidationError("ambiguous flat columns for multiple requested tickers")
+    if (
+        not isinstance(frame.columns, pd.MultiIndex)
+        and len(set(normalized_tickers)) != 1
+    ):
+        raise BarValidationError(
+            "ambiguous flat columns for multiple requested tickers"
+        )
 
 
-def _decimal_bar_value(value: object, ticker: str, session: date, field: str) -> Decimal:
+def _decimal_bar_value(
+    value: object, ticker: str, session: date, field: str
+) -> Decimal:
     try:
         decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

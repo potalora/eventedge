@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,15 +22,13 @@ def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
 
     A cohort is considered failed when its result is a mapping carrying a truthy
     ``"error"`` (cohort_orchestrator records ``{"error": True}`` for any cohort
-    whose ``run_paper_trade_phase`` raised). Used to surface masked failures —
+    whose execution or staging lifecycle raised). Used to surface masked failures —
     a run where cohorts errored must never be recorded as a clean success.
 
     Returns ``(n_failed, n_total, sorted_failed_names)``.
     """
     failed = sorted(
-        name
-        for name, r in results.items()
-        if isinstance(r, dict) and r.get("error")
+        name for name, r in results.items() if isinstance(r, dict) and r.get("error")
     )
     return len(failed), len(results), failed
 
@@ -37,24 +37,25 @@ def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
 # Lookup tables
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PortfolioSizeProfile:
     """Position-sizing and concentration parameters for a portfolio tier."""
 
-    name: str                          # "5k", "10k", "50k", "100k"
-    total_capital: float               # e.g. 5000.0
-    max_position_pct: float            # max single-position weight
-    min_position_value: float          # floor for position value
-    max_positions: int                 # max concurrent positions
-    sector_concentration_cap: float    # max weight in one sector
-    cash_reserve_pct: float            # cash held back from allocation
+    name: str  # "5k", "10k", "50k", "100k"
+    total_capital: float  # e.g. 5000.0
+    max_position_pct: float  # max single-position weight
+    min_position_value: float  # floor for position value
+    max_positions: int  # max concurrent positions
+    sector_concentration_cap: float  # max weight in one sector
+    cash_reserve_pct: float  # cash held back from allocation
 
     # Short selling eligibility
     short_eligible: bool = False
-    max_short_exposure_pct: float = 0.0   # max total short exposure as % of capital
-    max_single_short_pct: float = 0.05    # max single short position as % of capital
-    margin_cash_buffer_pct: float = 0.0   # cash buffer required for margin
-    max_correlated_shorts: int = 0        # max simultaneous correlated short positions
+    max_short_exposure_pct: float = 0.0  # max total short exposure as % of capital
+    max_single_short_pct: float = 0.05  # max single short position as % of capital
+    margin_cash_buffer_pct: float = 0.0  # cash buffer required for margin
+    max_correlated_shorts: int = 0  # max simultaneous correlated short positions
 
     # Options eligibility
     options_eligible: list[str] = field(default_factory=list)  # e.g. ["covered_call"]
@@ -174,42 +175,80 @@ HORIZON_PARAMS: dict[str, dict] = {
 # Cohort configuration
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CohortConfig:
     """Configuration for a single cohort."""
 
-    name: str                           # "horizon_30d_size_5k"
-    state_dir: str                      # Unique per cohort
-    horizon: str                        # "30d", "3m", "6m", "1y"
-    size_profile: str                   # "5k", "10k", "50k", "100k"
+    name: str  # "horizon_30d_size_5k"
+    state_dir: str  # Unique per cohort
+    horizon: str  # "30d", "3m", "6m", "1y"
+    size_profile: str  # "5k", "10k", "50k", "100k"
     use_llm: bool = True
-    adaptive_confidence: bool = False   # dormant
-    learning_enabled: bool = False      # dormant
+    adaptive_confidence: bool = False  # dormant
+    learning_enabled: bool = False  # dormant
 
 
 class CohortOrchestrator:
     """Run paper portfolios in parallel with shared data fetch."""
 
-    def __init__(self, cohort_configs: list[CohortConfig], base_config: dict):
+    def __init__(
+        self,
+        cohort_configs: list[CohortConfig],
+        base_config: dict,
+        *,
+        price_source: Any | None = None,
+    ):
         """
         Args:
             cohort_configs: List of CohortConfig (one per cohort).
             base_config: Base config dict (DEFAULT_CONFIG with env vars applied).
                          Per-cohort state_dir overrides are applied automatically.
         """
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
+        from tradingagents.strategies.orchestration.session_executor import (
+            SessionExecutor,
+        )
+        from tradingagents.strategies.execution.price_source import YFinancePriceSource
+        from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
         self.cohorts: list[dict[str, Any]] = []
+        if base_config.get("execution", {}).get("mode", "paper") != "paper":
+            raise ValueError("CohortOrchestrator is paper-only")
         strategies = get_paper_trade_strategies()
 
         for cfg in cohort_configs:
+            cfg = replace(cfg, adaptive_confidence=False, learning_enabled=False)
             cohort_config = copy.deepcopy(base_config)
             cohort_config.setdefault("autoresearch", {})["state_dir"] = cfg.state_dir
+            cohort_config["autoresearch"]["horizon"] = cfg.horizon
             profile = SIZE_PROFILES.get(cfg.size_profile)
             if profile:
-                cohort_config.setdefault("autoresearch", {})["total_capital"] = profile.total_capital
+                cohort_config.setdefault("autoresearch", {})["total_capital"] = (
+                    profile.total_capital
+                )
+                risk = cohort_config["autoresearch"].setdefault("risk_gate", {})
+                risk.update(
+                    {
+                        "max_positions": profile.max_positions,
+                        "max_position_pct": profile.max_position_pct,
+                        "min_position_value": profile.min_position_value,
+                        "cash_reserve_pct": profile.cash_reserve_pct,
+                        "long_only": not profile.short_eligible,
+                    }
+                )
+
+            ledger = PortfolioLedger(
+                Path(cfg.state_dir) / "portfolio.db",
+                cfg.name,
+                Decimal(str(profile.total_capital if profile else 5000)),
+                paper_ledger_config=cohort_config["autoresearch"].get("paper_ledger"),
+                short_selling_config=cohort_config["autoresearch"].get("short_selling"),
+            )
 
             state = StateManager(cfg.state_dir)
             engine = MultiStrategyEngine(
@@ -217,22 +256,32 @@ class CohortOrchestrator:
                 strategies=strategies,
                 state_manager=state,
                 use_llm=cfg.use_llm,
-                adaptive_confidence=cfg.adaptive_confidence,
+                adaptive_confidence=False,
+                ledger=ledger,
             )
-            self.cohorts.append({
-                "config": cfg,
-                "engine": engine,
-                "state": state,
-                "size_profile": SIZE_PROFILES.get(cfg.size_profile),
-            })
+            executor = SessionExecutor(ledger, cohort_config)
+            self.cohorts.append(
+                {
+                    "config": cfg,
+                    "engine": engine,
+                    "state": state,
+                    "size_profile": SIZE_PROFILES.get(cfg.size_profile),
+                    "ledger": ledger,
+                    "executor": executor,
+                }
+            )
 
         self._base_config = base_config
+        self._price_source = price_source or YFinancePriceSource()
+        self._epoch_id = str(
+            base_config.get("autoresearch", {})
+            .get("paper_ledger", {})
+            .get("epoch_id", "foundation-v1")
+        )
 
         # OpenBB availability check — warn loudly if unavailable
         first_engine = self.cohorts[0]["engine"] if self.cohorts else None
-        openbb_source = (
-            first_engine.registry.get("openbb") if first_engine else None
-        )
+        openbb_source = first_engine.registry.get("openbb") if first_engine else None
         if openbb_source is not None and openbb_source.is_available():
             self.openbb_degraded = False
             logger.info("OpenBB: available — sector enforcement and enrichment active")
@@ -244,26 +293,151 @@ class CohortOrchestrator:
             )
 
     def _screen_for_horizon(
-        self, data: dict, trading_date: str, horizon: str,
+        self,
+        data: dict,
+        trading_date: str,
+        horizon: str,
     ) -> tuple[list[dict], dict]:
         """Screen all strategies with horizon-specific params."""
         first_engine = self.cohorts[0]["engine"]
         return first_engine.screen_and_enrich(trading_date, data, horizon=horizon)
 
     def run_daily(self, trading_date: str | None = None) -> dict[str, Any]:
-        """Run all cohorts with shared data fetch and per-horizon screening.
+        """Execute/mark every cohort, then share four screens and stage intents."""
+        from tradingagents.strategies.orchestration.session_executor import (
+            PHASES,
+            SessionExecutor,
+            ensure_reference_bars,
+        )
+        from tradingagents.strategies.orchestration.trading_calendar import (
+            is_session,
+            session_close,
+        )
 
-        1. Fetch data ONCE.
-        2. Screen once per horizon (4 passes).
-        3. OpenBB enrichment once (deduped tickers across horizons).
-        4. Dispatch to all 16 cohorts.
-        """
         if not trading_date:
             trading_date = datetime.now().strftime("%Y-%m-%d")
+        session = date.fromisoformat(trading_date)
+        processed_at = datetime.now(timezone.utc)
+        if not is_session(session):
+            raise ValueError(f"{session} is not an XNYS session")
+        if processed_at < session_close(session):
+            raise ValueError("daily cohort run cannot precede the exact XNYS close")
 
         logger.info("=== Cohort daily run: %s ===", trading_date)
+        results: dict[str, Any] = {}
 
-        # Fetch data once
+        complete_replays: dict[str, Any] = {}
+        for cohort in self.cohorts:
+            ledger = cohort["ledger"]
+            snapshots = ledger.read_snapshots(
+                session, session, epoch_id=self._epoch_id, valid_only=True
+            )
+            horizon = cohort["config"].horizon
+            policy_id = str(
+                cohort["engine"]
+                .ar_config.get("paper_ledger", {})
+                .get("policy_id", f"foundation-{horizon}")
+            )
+            if (
+                len(snapshots) == 1
+                and all(ledger.phase_completed(session, phase) for phase in PHASES)
+                and ledger.staging_completed(session, self._epoch_id, policy_id)
+            ):
+                fills = ledger.read_fills(session, session)
+                complete_replays[cohort["config"].name] = {
+                    "signals": [
+                        signal.__dict__
+                        for signal in ledger.read_signals(
+                            session,
+                            session,
+                            epoch_id=self._epoch_id,
+                            policy_id=policy_id,
+                        )
+                    ],
+                    "recommendations": [],
+                    "intents_staged": [],
+                    "cutoff_late": [],
+                    "regime": {},
+                    "account": snapshots[0].__dict__,
+                    "trades_opened": [
+                        fill.fill_id for fill in fills if fill.side in {"buy", "short"}
+                    ],
+                    "trades_closed": [
+                        fill.fill_id for fill in fills if fill.side in {"sell", "cover"}
+                    ],
+                    "replayed": True,
+                    "error": False,
+                }
+        if len(complete_replays) == len(self.cohorts):
+            return complete_replays
+        results.update(complete_replays)
+        cohorts_to_run = [
+            cohort
+            for cohort in self.cohorts
+            if cohort["config"].name not in complete_replays
+        ]
+
+        required_tickers = tuple(
+            sorted(
+                {
+                    ticker
+                    for cohort in cohorts_to_run
+                    for ticker in cohort["executor"].required_tickers(session)
+                }
+            )
+        )
+        benchmark_symbols = (
+            cohorts_to_run[0]["executor"].benchmark_symbols
+            if cohorts_to_run
+            else ("SPY", "BIL")
+        )
+        try:
+            bundle = SessionExecutor.fetch_input_bundle(
+                session,
+                required_tickers,
+                self._price_source,
+                benchmark_symbols,
+            )
+            processed_at = datetime.now(timezone.utc)
+        except Exception as error:
+            reason = f"shared session input fetch failed: {error}"
+            for cohort in cohorts_to_run:
+                cohort["ledger"].invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                }
+            return results
+
+        valid_cohorts: list[dict[str, Any]] = []
+        for cohort in cohorts_to_run:
+            name = cohort["config"].name
+            try:
+                lifecycle = cohort["executor"].execute_open_and_mark(
+                    session,
+                    self._epoch_id,
+                    bundle,
+                    {},
+                    processed_at,
+                )
+            except Exception as error:
+                logger.error("Cohort %s execution failed", name, exc_info=True)
+                results[name] = {"error": True, "invalid_reason": str(error)}
+                continue
+            if not lifecycle.valid or lifecycle.snapshot is None:
+                results[name] = {
+                    "error": True,
+                    "invalid_reason": lifecycle.invalid_reason,
+                }
+                continue
+            cohort["marked_account"] = lifecycle.snapshot
+            valid_cohorts.append(cohort)
+
+        if not valid_cohorts:
+            return results
+
         first_engine = self.cohorts[0]["engine"]
         lookback_start = (
             datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=90)
@@ -271,48 +445,78 @@ class CohortOrchestrator:
         shared_data = first_engine._fetch_all_data(lookback_start, trading_date)
         logger.info("Shared data fetched: %s", list(shared_data.keys()))
 
-        # Screen once per horizon (4 passes, cached)
-        horizons = sorted({c["config"].horizon for c in self.cohorts})
+        horizons = sorted({cohort["config"].horizon for cohort in valid_cohorts})
         horizon_signals: dict[str, tuple[list[dict], dict]] = {}
         for horizon in horizons:
-            signals, regime = self._screen_for_horizon(shared_data, trading_date, horizon)
+            signals, regime = self._screen_for_horizon(
+                shared_data, trading_date, horizon
+            )
             horizon_signals[horizon] = (signals, regime)
             logger.info("Horizon %s: %d signals", horizon, len(signals))
 
-        # OpenBB enrichment once (dedupe tickers across all horizons)
-        all_signals = []
-        for signals, _ in horizon_signals.values():
-            all_signals.extend(signals)
+        all_signals = [
+            signal for signals, _ in horizon_signals.values() for signal in signals
+        ]
         enrichment = self._fetch_openbb_enrichment(all_signals)
+        reference_tickers = {
+            str(signal.get("ticker", "")).strip().upper()
+            for signal in all_signals
+            if signal.get("ticker")
+        }
+        reference_tickers.update(
+            str(position["ticker"])
+            for cohort in valid_cohorts
+            for position in cohort["ledger"].open_positions()
+        )
+        try:
+            shared_data["_execution_reference_bars"] = ensure_reference_bars(
+                self._price_source,
+                reference_tickers,
+                session,
+                processed_at,
+                timedelta(
+                    hours=float(
+                        self._base_config.get("autoresearch", {})
+                        .get("paper_ledger", {})
+                        .get("bar_max_age_hours", 24)
+                    )
+                ),
+            )
+        except Exception as error:
+            reason = f"candidate reference-bar validation failed: {error}"
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                }
+            return results
 
-        # Dispatch to all cohorts
-        results: dict[str, Any] = {}
-        for cohort in self.cohorts:
+        for cohort in valid_cohorts:
             cfg = cohort["config"]
             name = cfg.name
-            logger.info("--- Running cohort: %s ---", name)
-
             signals, regime = horizon_signals[cfg.horizon]
-
             try:
-                result = cohort["engine"].run_paper_trade_phase(
+                staged = cohort["engine"].screen_and_stage(
                     trading_date=trading_date,
+                    data=shared_data,
                     shared_signals=signals,
                     shared_regime=regime,
                     enrichment=enrichment,
                     size_profile=cohort.get("size_profile"),
+                    marked_account=cohort["marked_account"],
                 )
-                results[name] = result
-                n_signals = len(result.get("signals", []))
-                n_trades = len(result.get("trades_opened", []))
-                account = result.get("account", {})
-                logger.info(
-                    "Cohort %s: %d signals, %d trades, portfolio=$%.0f",
-                    name, n_signals, n_trades, account.get("portfolio_value", 0),
-                )
-            except Exception:
-                logger.error("Cohort %s failed", name, exc_info=True)
-                results[name] = {"error": True}
+                fills = cohort["ledger"].read_fills(session, session)
+                staged["trades_opened"] = [
+                    fill.fill_id for fill in fills if fill.side in {"buy", "short"}
+                ]
+                staged["trades_closed"] = [
+                    fill.fill_id for fill in fills if fill.side in {"sell", "cover"}
+                ]
+                staged["error"] = False
+                results[name] = staged
+            except Exception as error:
+                logger.error("Cohort %s staging failed", name, exc_info=True)
+                results[name] = {"error": True, "invalid_reason": str(error)}
 
         return results
 
@@ -348,7 +552,9 @@ class CohortOrchestrator:
         # Fetch short interest for all tickers
         short_interest = {}
         for ticker in tickers:
-            result = openbb_source.fetch({"method": "equity_short_interest", "ticker": ticker})
+            result = openbb_source.fetch(
+                {"method": "equity_short_interest", "ticker": ticker}
+            )
             if "error" not in result:
                 short_interest[ticker] = result
         if short_interest:
@@ -360,7 +566,10 @@ class CohortOrchestrator:
             enrichment["factors"] = factors.get("factors", {})
 
         # Fetch commodity futures curves for commodity signals
-        from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
+        from tradingagents.strategies.modules.commodity_macro import (
+            ETF_TO_FUTURES_UNDERLYING,
+        )
+
         commodity_tickers = [t for t in tickers if t in ETF_TO_FUTURES_UNDERLYING]
         if commodity_tickers:
             curves = {}
@@ -368,10 +577,12 @@ class CohortOrchestrator:
                 underlying = ETF_TO_FUTURES_UNDERLYING.get(ticker)
                 if underlying is None:
                     continue
-                result = openbb_source.fetch({
-                    "method": "commodity_futures_curve",
-                    "symbol": underlying,
-                })
+                result = openbb_source.fetch(
+                    {
+                        "method": "commodity_futures_curve",
+                        "symbol": underlying,
+                    }
+                )
                 if "error" not in result:
                     curves[underlying] = result
             if curves:
@@ -415,9 +626,7 @@ def build_default_cohorts(base_config: dict) -> list[CohortConfig]:
     Produces one cohort for each combination of 4 horizons x 4 portfolio sizes.
     All cohorts start with adaptive_confidence=False and learning_enabled=False.
     """
-    base_state_dir = base_config.get("autoresearch", {}).get(
-        "state_dir", "data/state"
-    )
+    base_state_dir = base_config.get("autoresearch", {}).get("state_dir", "data/state")
     horizons = ["30d", "3m", "6m", "1y"]
     sizes = ["5k", "10k", "50k", "100k"]
     cohorts: list[CohortConfig] = []

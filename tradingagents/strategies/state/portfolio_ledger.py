@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Callable, Iterator, Mapping, TypeVar
 
 from tradingagents.strategies.execution import (
     AccountSnapshot,
@@ -41,6 +41,7 @@ from tradingagents.strategies.orchestration.trading_calendar import session_clos
 
 SCHEMA_VERSION = 1
 _OPENING_AT = datetime(1970, 1, 1)
+_T = TypeVar("_T")
 
 
 class LedgerConflictError(ValueError):
@@ -73,6 +74,12 @@ _DDL: tuple[str, ...] = (
         session TEXT NOT NULL, phase TEXT NOT NULL, started_at TEXT,
         completed_at TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS staging_runs (
+        staging_run_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
+        session TEXT NOT NULL, epoch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        UNIQUE(cohort_id, session, epoch_id, policy_id)
+    )""",
     """CREATE TABLE IF NOT EXISTS signals (
         signal_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
         event_key TEXT NOT NULL, strategy TEXT NOT NULL, ticker TEXT NOT NULL,
@@ -92,6 +99,11 @@ _DDL: tuple[str, ...] = (
         signal_order INTEGER NOT NULL,
         PRIMARY KEY(intent_id, signal_id),
         UNIQUE(intent_id, signal_order)
+    )""",
+    """CREATE TABLE IF NOT EXISTS exit_intent_lots (
+        intent_id TEXT NOT NULL REFERENCES order_intents(intent_id),
+        lot_id TEXT NOT NULL REFERENCES lots(lot_id), quantity INTEGER NOT NULL,
+        PRIMARY KEY(intent_id, lot_id), UNIQUE(lot_id, intent_id)
     )""",
     """CREATE TABLE IF NOT EXISTS order_status_transitions (
         transition_id TEXT PRIMARY KEY,
@@ -400,6 +412,9 @@ class PortfolioLedger:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        if self._connection.in_transaction:
+            yield self._connection
+            return
         self._connection.execute("BEGIN IMMEDIATE")
         try:
             yield self._connection
@@ -408,6 +423,95 @@ class PortfolioLedger:
             raise
         else:
             self._connection.execute("COMMIT")
+
+    def phase_completed(self, session: date, phase: str) -> bool:
+        """Whether a session phase was durably committed."""
+        row = self._connection.execute(
+            """SELECT completed_at FROM session_phases
+               WHERE cohort_id = ? AND session = ? AND phase = ?""",
+            (self.cohort_id, self._encode(session), phase),
+        ).fetchone()
+        return row is not None and row["completed_at"] is not None
+
+    def run_session_phase(
+        self,
+        session: date,
+        phase: str,
+        processed_at: datetime,
+        operation: Callable[[], _T],
+    ) -> tuple[bool, _T | None]:
+        """Run one phase and its completion marker in one outer transaction."""
+        self._require_timezone_aware(processed_at, "processed_at")
+        if not phase:
+            raise ValueError("phase is required")
+        with self.transaction():
+            row = self._connection.execute(
+                """SELECT completed_at FROM session_phases
+                   WHERE cohort_id = ? AND session = ? AND phase = ?""",
+                (self.cohort_id, self._encode(session), phase),
+            ).fetchone()
+            if row is not None and row["completed_at"] is not None:
+                return False, None
+            phase_id = stable_id("session_phase", self.cohort_id, session, phase)
+            if row is None:
+                self._connection.execute(
+                    "INSERT INTO session_phases VALUES (?, ?, ?, ?, ?, NULL)",
+                    (
+                        phase_id,
+                        self.cohort_id,
+                        self._encode(session),
+                        phase,
+                        self._encode(processed_at),
+                    ),
+                )
+            else:
+                self._connection.execute(
+                    "UPDATE session_phases SET started_at = ? WHERE session_phase_id = ?",
+                    (self._encode(processed_at), phase_id),
+                )
+            value = operation()
+            self._connection.execute(
+                "UPDATE session_phases SET completed_at = ? WHERE session_phase_id = ?",
+                (self._encode(processed_at), phase_id),
+            )
+            return True, value
+
+    def staging_completed(self, session: date, epoch_id: str, policy_id: str) -> bool:
+        row = self._connection.execute(
+            """SELECT 1 FROM staging_runs WHERE cohort_id = ? AND session = ?
+               AND epoch_id = ? AND policy_id = ?""",
+            (self.cohort_id, self._encode(session), epoch_id, policy_id),
+        ).fetchone()
+        return row is not None
+
+    def complete_staging(
+        self,
+        session: date,
+        epoch_id: str,
+        policy_id: str,
+        completed_at: datetime,
+        operation: Callable[[], _T],
+    ) -> tuple[bool, _T | None]:
+        """Atomically persist every staged intent and the staging completion."""
+        self._require_timezone_aware(completed_at, "completed_at")
+        with self.transaction():
+            if self.staging_completed(session, epoch_id, policy_id):
+                return False, None
+            value = operation()
+            self._connection.execute(
+                "INSERT INTO staging_runs VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    stable_id(
+                        "staging_run", self.cohort_id, session, epoch_id, policy_id
+                    ),
+                    self.cohort_id,
+                    self._encode(session),
+                    epoch_id,
+                    policy_id,
+                    self._encode(completed_at),
+                ),
+            )
+            return True, value
 
     def _insert_idempotent(
         self,
@@ -706,6 +810,57 @@ class PortfolioLedger:
                     (intent.intent_id, signal_id, signal_order),
                 )
 
+    def stage_exit_intent(
+        self, intent: OrderIntent, lot_quantities: tuple[tuple[str, int], ...]
+    ) -> None:
+        """Stage an exit with exact, durable lot ownership."""
+        if intent.side not in {"sell", "cover"}:
+            raise ValueError("exit intent must be sell or cover")
+        if (
+            not lot_quantities
+            or sum(quantity for _, quantity in lot_quantities) != intent.requested_qty
+        ):
+            raise ValueError("exit lot quantities must exactly cover requested_qty")
+        if len({lot_id for lot_id, _ in lot_quantities}) != len(lot_quantities):
+            raise ValueError("exit lot IDs must be unique")
+        with self.transaction():
+            for lot_id, quantity in lot_quantities:
+                row = self._connection.execute(
+                    """SELECT direction, open_qty FROM lots
+                       WHERE lot_id = ? AND cohort_id = ?""",
+                    (lot_id, self.cohort_id),
+                ).fetchone()
+                if row is None or quantity <= 0 or quantity > int(row["open_qty"]):
+                    raise ValueError(f"invalid exit lot allocation {lot_id}")
+                expected_direction = "long" if intent.side == "sell" else "short"
+                if row["direction"] != expected_direction:
+                    raise ValueError(f"exit side does not match lot {lot_id}")
+                occupied = self._connection.execute(
+                    """SELECT eil.intent_id FROM exit_intent_lots eil
+                       JOIN order_intents i ON i.intent_id = eil.intent_id
+                       WHERE eil.lot_id = ? AND i.status = 'pending'""",
+                    (lot_id,),
+                ).fetchone()
+                if occupied is not None and occupied["intent_id"] != intent.intent_id:
+                    raise ValueError(f"lot {lot_id} already has a pending exit")
+            self.stage_intent(intent)
+            for lot_id, quantity in lot_quantities:
+                existing = self._connection.execute(
+                    """SELECT quantity FROM exit_intent_lots
+                       WHERE intent_id = ? AND lot_id = ?""",
+                    (intent.intent_id, lot_id),
+                ).fetchone()
+                if existing is not None:
+                    if int(existing["quantity"]) != quantity:
+                        raise LedgerConflictError(
+                            f"conflicting exit lot ownership {intent.intent_id}/{lot_id}"
+                        )
+                    continue
+                self._connection.execute(
+                    "INSERT INTO exit_intent_lots VALUES (?, ?, ?)",
+                    (intent.intent_id, lot_id, quantity),
+                )
+
     def pending_intents(self, session: date) -> list[OrderIntent]:
         rows = self._connection.execute(
             """SELECT * FROM order_intents
@@ -842,6 +997,64 @@ class PortfolioLedger:
             }
             for (ticker, direction), (quantity, basis) in grouped.items()
         ]
+
+    def open_exit_positions(self) -> list[dict[str, object]]:
+        """Return bounded lot-level exit state with original signal provenance."""
+        rows = self._connection.execute(
+            """SELECT l.lot_id, l.ticker, l.direction, l.open_qty,
+                      l.entry_price, l.opened_session, f.intent_id
+               FROM lots l JOIN fills f ON f.fill_id = l.fill_id
+               WHERE l.cohort_id = ? AND l.open_qty > 0
+               ORDER BY l.ticker, l.direction, l.opened_session, l.lot_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        positions: list[dict[str, object]] = []
+        for row in rows:
+            signals = self.signals_for_intent(row["intent_id"])
+            if not signals:
+                raise LedgerConflictError(
+                    f"open lot {row['lot_id']} has no signal provenance"
+                )
+            positions.append(
+                {
+                    "lot_id": row["lot_id"],
+                    "ticker": row["ticker"],
+                    "direction": row["direction"],
+                    "quantity": int(row["open_qty"]),
+                    "entry_price": _decimal(row["entry_price"]),
+                    "opened_session": _date(row["opened_session"]),
+                    "signal_ids": tuple(signal.signal_id for signal in signals),
+                    "strategies": tuple(
+                        sorted({signal.strategy for signal in signals})
+                    ),
+                    "epoch_id": signals[0].epoch_id,
+                    "policy_id": signals[0].policy_id,
+                }
+            )
+        return positions
+
+    def pending_exit_intents(
+        self, ticker: str, lot_id: str | None = None
+    ) -> list[OrderIntent]:
+        """Return pending exits for one ticker, optionally one owned lot."""
+        lot_clause = " AND eil.lot_id = ?" if lot_id is not None else ""
+        values: tuple[object, ...] = (
+            (self.cohort_id, ticker, lot_id)
+            if lot_id is not None
+            else (self.cohort_id, ticker)
+        )
+        rows = self._connection.execute(
+            """SELECT DISTINCT i.* FROM order_intents i
+               JOIN intent_signals isg ON isg.intent_id = i.intent_id
+               JOIN signals s ON s.signal_id = isg.signal_id
+               JOIN exit_intent_lots eil ON eil.intent_id = i.intent_id
+               WHERE i.cohort_id = ? AND i.status = 'pending'
+                 AND i.side IN ('sell', 'cover') AND s.ticker = ?"""
+            + lot_clause
+            + " ORDER BY i.created_at, i.intent_id",
+            values,
+        ).fetchall()
+        return [self._intent_from_row(row) for row in rows]
 
     def external_order_for_intent(self, intent_id: str) -> dict[str, object] | None:
         """Return the single durable broker order associated with an intent."""
@@ -1046,6 +1259,78 @@ class PortfolioLedger:
     def session_is_valid(self, session: date, ticker: str | None = None) -> bool:
         """Public fail-closed state query for policy/entry execution callers."""
         return self._session_invalid_reason(session, ticker) is None
+
+    def session_invalid_reason(self, session: date) -> str:
+        return self._session_invalid_reason(session) or ""
+
+    def invalidate_session_and_cancel_due(
+        self, session: date, reason: str, processed_at: datetime
+    ) -> None:
+        """Persist invalidation and terminalize stranded next-open intents."""
+        self._require_timezone_aware(processed_at, "processed_at")
+        if not reason:
+            raise ValueError("session invalidation reason is required")
+        with self.transaction():
+            self._invalidate_session(session, reason, processed_at)
+            run_id = stable_id("session_run", self.cohort_id, session)
+            existing = self._connection.execute(
+                "SELECT * FROM session_runs WHERE session_run_id = ?", (run_id,)
+            ).fetchone()
+            values = (
+                run_id,
+                self.cohort_id,
+                self._encode(session),
+                0,
+                reason,
+                self._encode(processed_at),
+                self._encode(processed_at),
+            )
+            if existing is None:
+                self._connection.execute(
+                    "INSERT INTO session_runs VALUES (?, ?, ?, ?, ?, ?, ?)", values
+                )
+            elif existing["valid"] != 0 or existing["invalid_reason"] != reason:
+                raise LedgerConflictError(
+                    f"conflicting invalid session run {self.cohort_id}/{session}"
+                )
+            due = self._connection.execute(
+                """SELECT intent_id FROM order_intents
+                   WHERE cohort_id = ? AND status = 'pending'
+                     AND price_rule = 'next_session_open' AND eligible_session = ?
+                   ORDER BY created_at, intent_id""",
+                (self.cohort_id, self._encode(session)),
+            ).fetchall()
+            for row in due:
+                self._terminalize_intent(
+                    row["intent_id"],
+                    "cancelled",
+                    processed_at,
+                    f"session invalid: {reason}",
+                )
+
+    def record_session_complete(self, session: date, processed_at: datetime) -> None:
+        """Mark a valid session complete inside the caller's snapshot transaction."""
+        self._require_timezone_aware(processed_at, "processed_at")
+        run_id = stable_id("session_run", self.cohort_id, session)
+        row = self._connection.execute(
+            "SELECT * FROM session_runs WHERE session_run_id = ?", (run_id,)
+        ).fetchone()
+        if row is not None:
+            if row["valid"] != 1 or row["invalid_reason"]:
+                raise LedgerConflictError(
+                    f"conflicting completed session run {self.cohort_id}/{session}"
+                )
+            return
+        self._connection.execute(
+            "INSERT INTO session_runs VALUES (?, ?, ?, 1, '', ?, ?)",
+            (
+                run_id,
+                self.cohort_id,
+                self._encode(session),
+                self._encode(processed_at),
+                self._encode(processed_at),
+            ),
+        )
 
     def assert_session_tradeable(
         self, session: date, ticker: str | None = None
@@ -1542,54 +1827,84 @@ class PortfolioLedger:
         """Persist exact raw marks and an immutable, reconciled snapshot."""
         self._require_timezone_aware(valuation_at, "valuation_at")
         with self.transaction():
-            open_lots = self._open_lots()
-            marks_by_ticker = self._validate_marks(
-                session, close_marks, open_lots, valuation_at
-            )
-            for ticker, bar in marks_by_ticker.items():
-                self._insert_mark(ticker, bar)
-            invalid_reason = self._session_invalid_reason(session)
-            if invalid_reason is None:
-                for ticker in sorted({lot["ticker"] for lot in open_lots}):
-                    ticker_reason = self._session_invalid_reason(session, ticker)
-                    if ticker_reason is not None:
-                        invalid_reason = f"quarantined {ticker}: {ticker_reason}"
-                        break
-            snapshot = self._build_snapshot(
-                session,
-                epoch_id,
-                valuation_at,
-                open_lots,
-                marks_by_ticker,
-                valid=invalid_reason is None,
-                invalid_reason=invalid_reason or "",
-            )
-            existing = self._connection.execute(
-                "SELECT * FROM account_snapshots WHERE snapshot_id = ?",
-                (snapshot.snapshot_id,),
+            self._record_marks(session, close_marks, valuation_at)
+            return self._snapshot_account(session, epoch_id, valuation_at)
+
+    def record_marks(
+        self,
+        session: date,
+        close_marks: dict[str, MarketBar],
+        valuation_at: datetime,
+    ) -> None:
+        """Persist raw closes without publishing a snapshot."""
+        self._require_timezone_aware(valuation_at, "valuation_at")
+        with self.transaction():
+            self._record_marks(session, close_marks, valuation_at)
+
+    def snapshot_account(
+        self, session: date, epoch_id: str, valuation_at: datetime
+    ) -> AccountSnapshot:
+        """Publish a snapshot only from already persisted exact-session marks."""
+        self._require_timezone_aware(valuation_at, "valuation_at")
+        with self.transaction():
+            return self._snapshot_account(session, epoch_id, valuation_at)
+
+    def record_benchmark_observation(self, observation: BenchmarkObservation) -> None:
+        """Persist one conflict-safe adjusted benchmark observation."""
+        if observation.cohort_id != self.cohort_id:
+            raise ValueError("benchmark cohort_id does not match ledger")
+        if observation.return_basis != "total_return_adjusted":
+            raise ValueError("benchmark return basis must be total_return_adjusted")
+        if (
+            not observation.close.is_finite()
+            or observation.close <= 0
+            or not observation.source
+        ):
+            raise ValueError("invalid benchmark observation")
+        self._require_timezone_aware(observation.observed_at, "observed_at")
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT * FROM benchmark_observations WHERE observation_id = ?",
+                (observation.observation_id,),
             ).fetchone()
-            if existing is not None:
-                self._require_identical_snapshot(existing, snapshot)
-            else:
-                occupied = self._connection.execute(
-                    "SELECT snapshot_id FROM account_snapshots WHERE cohort_id = ? AND session = ?",
-                    (self.cohort_id, self._encode(session)),
-                ).fetchone()
-                if occupied is not None:
-                    raise LedgerConflictError(
-                        f"conflicting account_snapshots session {self.cohort_id}/{session}"
-                    )
-                self._connection.execute(
-                    """INSERT INTO account_snapshots VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    )""",
-                    self._snapshot_values(snapshot),
+            values = self._benchmark_values(observation)
+            if row is not None:
+                columns = (
+                    "observation_id",
+                    "cohort_id",
+                    "epoch_id",
+                    "session",
+                    "symbol",
+                    "close",
+                    "return_basis",
+                    "source",
+                    "observed_at",
+                    "valid",
+                    "invalid_reason",
                 )
-                if snapshot.valid:
-                    self._update_accounting_summary(
-                        high_water_mark=snapshot.high_water_mark
+                if any(row[column] != value for column, value in zip(columns, values)):
+                    raise LedgerConflictError(
+                        f"conflicting benchmark identity {observation.observation_id}"
                     )
-        return snapshot
+                return
+            occupied = self._connection.execute(
+                """SELECT observation_id FROM benchmark_observations
+                   WHERE cohort_id = ? AND epoch_id = ? AND session = ? AND symbol = ?""",
+                (
+                    self.cohort_id,
+                    observation.epoch_id,
+                    self._encode(observation.session),
+                    observation.symbol,
+                ),
+            ).fetchone()
+            if occupied is not None:
+                raise LedgerConflictError(
+                    f"conflicting benchmark session {observation.symbol}/{observation.session}"
+                )
+            self._connection.execute(
+                "INSERT INTO benchmark_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
 
     def account_state(self) -> AccountState:
         """Return bounded cohort state, using a lot's entry until its first mark."""
@@ -1804,20 +2119,50 @@ class PortfolioLedger:
 
     def _close_lots(self, intent: OrderIntent, fill: Fill, ticker: str) -> Decimal:
         direction = "long" if intent.side == "sell" else "short"
-        lots = self._connection.execute(
-            """SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND direction = ?
-               AND open_qty > 0 ORDER BY opened_session, lot_id""",
-            (self.cohort_id, ticker, direction),
+        ownership = self._connection.execute(
+            """SELECT lot_id, quantity FROM exit_intent_lots
+               WHERE intent_id = ? ORDER BY lot_id""",
+            (intent.intent_id,),
         ).fetchall()
-        if sum(int(lot["open_qty"]) for lot in lots) < fill.quantity:
-            raise ValueError("close fill has insufficient matching open lots")
-        remaining = fill.quantity
+        allocations: list[tuple[sqlite3.Row, int]] = []
+        if ownership:
+            if sum(int(row["quantity"]) for row in ownership) != fill.quantity:
+                raise ValueError("exit fill does not match owned lot quantity")
+            for allocation in ownership:
+                lot = self._connection.execute(
+                    """SELECT * FROM lots WHERE lot_id = ? AND cohort_id = ?
+                       AND ticker = ? AND direction = ?""",
+                    (
+                        allocation["lot_id"],
+                        self.cohort_id,
+                        ticker,
+                        direction,
+                    ),
+                ).fetchone()
+                close_qty = int(allocation["quantity"])
+                if lot is None or int(lot["open_qty"]) < close_qty:
+                    raise ValueError(
+                        f"exit fill has insufficient owned lot {allocation['lot_id']}"
+                    )
+                allocations.append((lot, close_qty))
+        else:
+            lots = self._connection.execute(
+                """SELECT * FROM lots WHERE cohort_id = ? AND ticker = ? AND direction = ?
+                   AND open_qty > 0 ORDER BY opened_session, lot_id""",
+                (self.cohort_id, ticker, direction),
+            ).fetchall()
+            if sum(int(lot["open_qty"]) for lot in lots) < fill.quantity:
+                raise ValueError("close fill has insufficient matching open lots")
+            remaining = fill.quantity
+            for lot in lots:
+                if remaining == 0:
+                    break
+                close_qty = min(remaining, int(lot["open_qty"]))
+                allocations.append((lot, close_qty))
+                remaining -= close_qty
         realized_total = Decimal("0")
-        for lot in lots:
-            if remaining == 0:
-                break
+        for lot, close_qty in allocations:
             lot_open_qty = int(lot["open_qty"])
-            close_qty = min(remaining, lot_open_qty)
             entry_price = _decimal(lot["entry_price"])
             realized = (
                 (fill.fill_price - entry_price) * close_qty
@@ -1846,7 +2191,6 @@ class PortfolioLedger:
                     lot["lot_id"],
                 ),
             )
-            remaining -= close_qty
             realized_total += realized
         return realized_total
 
@@ -2310,6 +2654,86 @@ class PortfolioLedger:
             "INSERT INTO marks VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values
         )
 
+    def _record_marks(
+        self,
+        session: date,
+        close_marks: dict[str, MarketBar],
+        valuation_at: datetime,
+    ) -> None:
+        open_lots = self._open_lots()
+        marks_by_ticker = self._validate_marks(
+            session, close_marks, open_lots, valuation_at
+        )
+        for ticker, bar in marks_by_ticker.items():
+            self._insert_mark(ticker, bar)
+
+    def _snapshot_account(
+        self, session: date, epoch_id: str, valuation_at: datetime
+    ) -> AccountSnapshot:
+        open_lots = self._open_lots()
+        tickers = sorted({lot["ticker"] for lot in open_lots})
+        marks_by_ticker: dict[str, MarketBar] = {}
+        for ticker in tickers:
+            row = self._connection.execute(
+                """SELECT * FROM marks WHERE cohort_id = ? AND ticker = ?
+                   AND session = ?""",
+                (self.cohort_id, ticker, self._encode(session)),
+            ).fetchone()
+            if row is None:
+                raise MissingMarkError(f"missing persisted mark for {ticker}/{session}")
+            close = _decimal(row["close"])
+            marks_by_ticker[ticker] = MarketBar(
+                ticker,
+                session,
+                close,
+                close,
+                close,
+                close,
+                row["source"],
+                _datetime(row["observed_at"]),
+                bool(row["adjusted"]),
+            )
+        invalid_reason = self._session_invalid_reason(session)
+        if invalid_reason is None:
+            for ticker in tickers:
+                ticker_reason = self._session_invalid_reason(session, ticker)
+                if ticker_reason is not None:
+                    invalid_reason = f"quarantined {ticker}: {ticker_reason}"
+                    break
+        snapshot = self._build_snapshot(
+            session,
+            epoch_id,
+            valuation_at,
+            open_lots,
+            marks_by_ticker,
+            valid=invalid_reason is None,
+            invalid_reason=invalid_reason or "",
+        )
+        existing = self._connection.execute(
+            "SELECT * FROM account_snapshots WHERE snapshot_id = ?",
+            (snapshot.snapshot_id,),
+        ).fetchone()
+        if existing is not None:
+            self._require_identical_snapshot(existing, snapshot)
+            return snapshot
+        occupied = self._connection.execute(
+            "SELECT snapshot_id FROM account_snapshots WHERE cohort_id = ? AND session = ?",
+            (self.cohort_id, self._encode(session)),
+        ).fetchone()
+        if occupied is not None:
+            raise LedgerConflictError(
+                f"conflicting account_snapshots session {self.cohort_id}/{session}"
+            )
+        self._connection.execute(
+            """INSERT INTO account_snapshots VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )""",
+            self._snapshot_values(snapshot),
+        )
+        if snapshot.valid:
+            self._update_accounting_summary(high_water_mark=snapshot.high_water_mark)
+        return snapshot
+
     def _build_snapshot(
         self,
         session: date,
@@ -2570,6 +2994,22 @@ class PortfolioLedger:
             cls._encode(snapshot.high_water_mark),
             cls._encode(snapshot.valid),
             snapshot.invalid_reason,
+        )
+
+    @classmethod
+    def _benchmark_values(cls, observation: BenchmarkObservation) -> tuple[object, ...]:
+        return (
+            observation.observation_id,
+            observation.cohort_id,
+            observation.epoch_id,
+            cls._encode(observation.session),
+            observation.symbol,
+            cls._encode(observation.close),
+            observation.return_basis,
+            observation.source,
+            cls._encode(observation.observed_at),
+            cls._encode(observation.valid),
+            observation.invalid_reason,
         )
 
     def _session_filters(

@@ -9,22 +9,28 @@ Validates the entire pipeline end-to-end with synthetic data:
 
 All LLM and external API calls are mocked. Deterministic via seeded RNG.
 """
+
 from __future__ import annotations
 
-import copy
-from datetime import datetime, timedelta
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+from tradingagents.strategies.execution import MarketBar
+from tradingagents.strategies.execution.price_source import AdjustedClose
+
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortConfig,
     CohortOrchestrator,
 )
-from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+from tradingagents.strategies.orchestration.multi_strategy_engine import (
+    MultiStrategyEngine,
+)
+from tradingagents.strategies.orchestration.trading_calendar import next_session
 from tradingagents.strategies.trading.portfolio_committee import (
     TradeRecommendation,
 )
@@ -66,8 +72,7 @@ def _build_price_cache(days: int = 60) -> dict[str, pd.DataFrame]:
     """Build deterministic price cache for all test tickers."""
     bases = {"AAPL": 170.0, "MSFT": 420.0, "AMZN": 190.0, "TSLA": 250.0, "NVDA": 130.0}
     return {
-        ticker: _make_price_df(ticker, bp, days=days)
-        for ticker, bp in bases.items()
+        ticker: _make_price_df(ticker, bp, days=days) for ticker, bp in bases.items()
     }
 
 
@@ -98,7 +103,9 @@ class FakeStrategy:
             )
         ]
 
-    def check_exit(self, ticker, entry_price, current_price, holding_days, params, data):
+    def check_exit(
+        self, ticker, entry_price, current_price, holding_days, params, data
+    ):
         hold = params.get("hold_days", self._hold_days)
         if holding_days >= hold:
             return True, "holding_period"
@@ -292,574 +299,301 @@ class TestFillOutcomesCorrectPrices:
 # ===========================================================================
 
 
+class AuthoritativePriceSource:
+    """Exact raw/action/adjusted fixture with call accounting."""
+
+    def __init__(self):
+        self.raw_calls: list[tuple[tuple[str, ...], date]] = []
+        self.action_calls: list[tuple[tuple[str, ...], date]] = []
+        self.benchmark_calls: list[date] = []
+
+    def get_daily_bars(
+        self, tickers, start_session, end_session_inclusive, adjusted=False
+    ):
+        assert start_session == end_session_inclusive
+        assert adjusted is False
+        session = start_session
+        self.raw_calls.append((tuple(sorted(tickers)), session))
+        fetched_at = datetime.now(timezone.utc)
+        return {
+            (ticker, session): MarketBar(
+                ticker,
+                session,
+                Decimal("100"),
+                Decimal("102"),
+                Decimal("99"),
+                Decimal("101"),
+                "fixture-raw",
+                fetched_at,
+                False,
+            )
+            for ticker in tickers
+        }
+
+    def get_corporate_actions(self, tickers, session):
+        self.action_calls.append((tuple(sorted(tickers)), session))
+        return []
+
+    def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
+        assert start_session == end_session_inclusive
+        session = start_session
+        self.benchmark_calls.append(session)
+        fetched_at = datetime.now(timezone.utc)
+        return {
+            (symbol, session): AdjustedClose(
+                symbol,
+                session,
+                Decimal("650") if symbol == "SPY" else Decimal("91"),
+                "fixture-adjusted",
+                fetched_at,
+            )
+            for symbol in symbols
+        }
+
+
+def _authoritative_orchestrator(tmp_path, cohorts=1, hold_days=2):
+    source = AuthoritativePriceSource()
+    configs = [
+        CohortConfig(
+            name=f"cohort_{index}",
+            state_dir=str(tmp_path / f"cohort_{index}"),
+            horizon="30d",
+            size_profile="5k",
+            adaptive_confidence=True,
+            learning_enabled=True,
+            use_llm=False,
+        )
+        for index in range(cohorts)
+    ]
+    config = {
+        "execution": {"mode": "paper"},
+        "autoresearch": {
+            "state_dir": str(tmp_path / "base"),
+            "total_capital": 5000,
+            "paper_trade": {"portfolio_committee_enabled": False},
+            "paper_ledger": {
+                "benchmark_symbols": ["SPY", "BIL"],
+                "bar_max_age_hours": 24,
+            },
+            "risk_gate": {
+                "min_position_value": 1,
+                "max_position_pct": 0.5,
+                "max_positions": 5,
+            },
+        },
+    }
+    with patch(
+        "tradingagents.strategies.modules.get_paper_trade_strategies",
+        return_value=[FakeStrategy(hold_days=hold_days), FakeStrategy2()],
+    ):
+        orchestrator = CohortOrchestrator(configs, config, price_source=source)
+    for cohort in orchestrator.cohorts:
+        cohort["engine"]._fetch_all_data = lambda start, end: {}
+    orchestrator._fetch_openbb_enrichment = lambda signals: {}
+    return orchestrator, source
+
+
+def _authoritative_committee(signals, **kwargs):
+    if not signals:
+        return []
+    signal = signals[0]
+    return [
+        TradeRecommendation(
+            ticker=signal["ticker"],
+            direction=signal["direction"],
+            position_size_pct=0.20,
+            confidence=0.6,
+            rationale="fixture",
+            contributing_strategies=[signal["strategy"]],
+        )
+    ]
+
+
 class TestIdempotencyDoubleRun:
-    """Running the same date twice must not duplicate signals or trades."""
+    def test_double_run_no_duplicates(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(tmp_path)
+        session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ) as committee:
+            first = orchestrator.run_daily(session.isoformat())
+            before_replay_calls = (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+                committee.call_count,
+            )
+            second = orchestrator.run_daily(session.isoformat())
 
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
-    )
-    @patch(
-        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
-    )
-    def test_double_run_no_duplicates(self, mock_committee, mock_fetch, tmp_path):
-        state_dir = str(tmp_path / "idem")
-        engine, state = _build_engine(state_dir)
-
-        prices = _build_price_cache(days=30)
-        mock_fetch.return_value = {"yfinance": {"prices": prices}}
-        mock_committee.side_effect = _make_fake_committee(max_per_day=2)
-        engine._price_cache = prices
-
-        trading_date = "2026-04-01"
-
-        # First run
-        engine.run_paper_trade_phase(trading_date=trading_date)
-        signals_count_1 = len(engine._journal.get_entries())
-        open_trades_1 = len(state.load_paper_trades(status="open"))
-
-        assert signals_count_1 > 0, "First run should produce signals"
-        assert open_trades_1 > 0, "First run should open trades"
-
-        # Second run (same date)
-        engine.run_paper_trade_phase(trading_date=trading_date)
-        signals_count_2 = len(engine._journal.get_entries())
-        open_trades_2 = len(state.load_paper_trades(status="open"))
-
-        # Journal deduplication: same strategy+ticker+timestamp should not duplicate
-        assert signals_count_2 == signals_count_1, (
-            f"Signal count changed: {signals_count_1} -> {signals_count_2}"
-        )
-        # Idempotency guard: already_traded_today prevents duplicate trade opens
-        assert open_trades_2 == open_trades_1, (
-            f"Open trade count changed: {open_trades_1} -> {open_trades_2}"
-        )
-
-
-# ===========================================================================
-# 4. TestThirtyDayFullLifecycle
-# ===========================================================================
+        ledger = orchestrator.cohorts[0]["ledger"]
+        assert first["cohort_0"]["intents_staged"]
+        assert second["cohort_0"]["replayed"]
+        assert len(ledger.read_signals(session, session)) == 2
+        assert len(ledger.pending_intents(next_session(session))) == 1
+        assert ledger.read_fills() == []
+        assert (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+            committee.call_count,
+        ) == before_replay_calls
 
 
 class TestThirtyDayFullLifecycle:
-    """Full 30-day simulation with synthetic data."""
-
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
-    )
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
-    )
-    @patch(
-        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
-    )
-    def test_30_day_full_lifecycle(
-        self, mock_committee, mock_fetch_prices, mock_fetch_data, tmp_path
-    ):
-        state_dir = str(tmp_path / "sim30")
-        strategies = [FakeStrategy(hold_days=5), FakeStrategy2()]
-        engine, state = _build_engine(state_dir, strategies=strategies)
-
-        prices = _build_price_cache(days=60)
-        mock_fetch_data.return_value = {"yfinance": {"prices": prices}}
-        mock_fetch_prices.return_value = None
-        engine._price_cache = copy.deepcopy(prices)
-
-        # Track which tickers are signaled each day (rotate through TICKERS)
-        day_ticker_map = {}
-        for day in range(30):
-            day_ticker_map[day] = TICKERS[day % len(TICKERS)]
-
-        def fake_synthesize(
-            signals,
-            regime_context=None,
-            strategy_confidence=None,
-            current_positions=None,
-            total_capital=None,
-            **kwargs,
-        ):
-            recs = []
-            seen: set[str] = set()
-            for s in signals[:3]:
-                if s["ticker"] not in seen:
-                    recs.append(
-                        TradeRecommendation(
-                            ticker=s["ticker"],
-                            direction=s["direction"],
-                            position_size_pct=0.08,
-                            confidence=0.6,
-                            rationale="sim test",
-                            contributing_strategies=[s["strategy"]],
-                        )
-                    )
-                    seen.add(s["ticker"])
-            return recs
-
-        mock_committee.side_effect = fake_synthesize
-
-        journal = engine._journal
-        results_by_day: list[dict] = []
-
-        for day in range(30):
-            trading_date = (BASE_DATE + timedelta(days=day)).strftime("%Y-%m-%d")
-            result = engine.run_paper_trade_phase(trading_date=trading_date)
-            results_by_day.append(result)
-
-        # --- Checkpoint: Day 1 ---
-        assert len(results_by_day[0]["trades_opened"]) >= 1, (
-            "Day 1 should open at least 1 trade"
+    def test_30_exact_sessions_preserve_delays_exits_and_accounting(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, hold_days=2
         )
-        day1_entries = journal.get_entries()
-        assert len(day1_entries) > 0, "Journal should be non-empty after day 1"
+        sessions = [date(2026, 3, 30)]
+        for _ in range(29):
+            sessions.append(next_session(sessions[-1]))
 
-        # --- Checkpoint: Day 7 ---
-        closed_by_day7 = state.load_paper_trades(status="closed")
-        assert len(closed_by_day7) > 0, (
-            "By day 7, some trades should have closed (hold_days=5)"
-        )
-        for t in closed_by_day7:
-            assert "pnl" in t, f"Closed trade {t.get('trade_id')} missing pnl"
-            assert "pnl_pct" in t, f"Closed trade {t.get('trade_id')} missing pnl_pct"
-
-        # Day-1 signals should have return_5d filled by day 7
-        entries_after_7 = journal.get_entries()
-        day1_ts = (BASE_DATE + timedelta(days=0)).strftime("%Y-%m-%d")
-        day1_signals = [
-            e for e in entries_after_7 if e["timestamp"] == day1_ts
-        ]
-        day1_with_5d = [e for e in day1_signals if e.get("return_5d") is not None]
-        assert len(day1_with_5d) > 0, (
-            "Day-1 signals should have return_5d by day 7"
-        )
-
-        # --- Checkpoint: Day 15 - Learning loop ---
-        state.save_learning_loop_state({"last_run": "2020-01-01T00:00:00"})
-        learn_result = engine.run_learning_loop()
-        assert learn_result["triggered"] is True, "Learning loop should trigger"
-
-        # --- Checkpoint: Day 30 - Final assertions ---
-        all_entries = journal.get_entries()
-
-        # No duplicate journal entries
-        keys = set()
-        for e in all_entries:
-            key = (e["strategy"], e["ticker"], e["timestamp"])
-            assert key not in keys, f"Duplicate journal entry: {key}"
-            keys.add(key)
-
-        # All closed trades have pnl fields
-        all_closed = state.load_paper_trades(status="closed")
-        for t in all_closed:
-            assert "pnl" in t
-            assert "pnl_pct" in t
-
-        # Day-1 signals have return_5d and return_10d filled
-        final_entries = journal.get_entries()
-        day1_final = [e for e in final_entries if e["timestamp"] == day1_ts]
-        for e in day1_final:
-            if e.get("entry_price", 0) > 0:
-                assert e.get("return_5d") is not None, (
-                    f"Day-1 signal {e['strategy']}:{e['ticker']} missing return_5d"
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ) as committee:
+            results = [
+                orchestrator.run_daily(session.isoformat()) for session in sessions
+            ]
+            before_replay = [
+                (
+                    len(cohort["ledger"].read_signals()),
+                    cohort["ledger"]
+                    .connection.execute("SELECT COUNT(*) FROM order_intents")
+                    .fetchone()[0],
+                    len(cohort["ledger"].read_fills()),
                 )
-                assert e.get("return_10d") is not None, (
-                    f"Day-1 signal {e['strategy']}:{e['ticker']} missing return_10d"
-                )
+                for cohort in orchestrator.cohorts
+            ]
+            before_replay_calls = (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+                committee.call_count,
+            )
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
 
-        # Capital conservation: cash + positions_value ~ initial capital
-        # (not exact due to realized PnL, but should be in the same ballpark)
-        from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
+        assert results[0]["cohort_0"]["trades_opened"] == []
+        for index, cohort in enumerate(orchestrator.cohorts):
+            ledger = cohort["ledger"]
+            fills = ledger.read_fills()
+            snapshots = ledger.read_snapshots(valid_only=True)
+            after_replay = (
+                len(ledger.read_signals()),
+                ledger.connection.execute(
+                    "SELECT COUNT(*) FROM order_intents"
+                ).fetchone()[0],
+                len(fills),
+            )
+            assert fills[0].session == sessions[1]
+            assert (fills[0].effective_at.hour, fills[0].effective_at.minute) == (
+                13,
+                30,
+            )
+            assert sum(fill.side == "buy" for fill in fills) >= 3
+            assert sum(fill.side == "sell" for fill in fills) >= 2
+            assert (
+                ledger.connection.execute(
+                    "SELECT COUNT(*) FROM order_intents WHERE price_rule = 'resting_stop'"
+                ).fetchone()[0]
+                >= 1
+            )
+            assert len(snapshots) == 30
+            assert all(snapshot.valid for snapshot in snapshots)
+            assert all(
+                snapshot.net_equity
+                == snapshot.cash + snapshot.long_market_value - snapshot.short_liability
+                for snapshot in snapshots
+            )
+            assert after_replay == before_replay[index]
+            assert replay[f"cohort_{index}"]["replayed"]
 
-        bridge = ExecutionBridge(_base_config(state_dir))
-        open_trades = state.load_paper_trades(status="open")
-        if open_trades and hasattr(bridge.broker, "reconstruct_from_trades"):
-            bridge.broker.reconstruct_from_trades(open_trades)
-        account = bridge.get_account()
-
-        # Total value should be within 30% of initial (generous, but prevents
-        # catastrophic accounting errors like double-counting)
-        assert account.portfolio_value > 0, "Portfolio value should be positive"
-        assert account.portfolio_value < 10000, (
-            "Portfolio value should not exceed 2x initial"
-        )
-
-
-# ===========================================================================
-# 5. TestThirtyDayCohortDivergence
-# ===========================================================================
+        assert len(source.benchmark_calls) == 30
+        assert len(source.raw_calls) <= 2 * 30
+        assert committee.call_count <= 2 * 30
+        assert (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+            committee.call_count,
+        ) == before_replay_calls
 
 
 class TestThirtyDayCohortDivergence:
-    """Run 30 days through CohortOrchestrator with 2 cohorts."""
-
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
-    )
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
-    )
-    @patch(
-        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
-    )
-    @patch(
-        "tradingagents.strategies.modules.get_paper_trade_strategies"
-    )
-    def test_cohort_divergence_30_days(
-        self,
-        mock_get_strategies,
-        mock_committee,
-        mock_fetch_prices,
-        mock_fetch_data,
-        tmp_path,
-    ):
-        # Use our fake strategies
-        strategies = [FakeStrategy(hold_days=5), FakeStrategy2()]
-        mock_get_strategies.return_value = strategies
-
-        prices = _build_price_cache(days=60)
-        mock_fetch_data.return_value = {"yfinance": {"prices": prices}}
-        mock_fetch_prices.return_value = None
-
-        # Build separate cohort configs in separate temp dirs
-        control_dir = str(tmp_path / "control")
-        adaptive_dir = str(tmp_path / "adaptive")
-
-        cohort_configs = [
-            CohortConfig(
-                name="control",
-                state_dir=control_dir,
-                horizon="30d",
-                size_profile="5k",
-                adaptive_confidence=False,
-                learning_enabled=False,
-                use_llm=False,
-            ),
-            CohortConfig(
-                name="adaptive",
-                state_dir=adaptive_dir,
-                horizon="30d",
-                size_profile="5k",
-                adaptive_confidence=True,
-                learning_enabled=True,
-                use_llm=False,
-            ),
-        ]
-
-        base_config = {
-            "autoresearch": {
-                "state_dir": str(tmp_path / "base"),
-                "total_capital": 5000,
-                "paper_trade": {
-                    "min_trades_for_evaluation": 2,
-                    "portfolio_committee_enabled": False,
-                },
-            },
-            "execution": {"mode": "paper"},
-        }
-
-        def fake_synthesize(
-            signals,
-            regime_context=None,
-            strategy_confidence=None,
-            current_positions=None,
-            total_capital=None,
-            **kwargs,
+    def test_cohorts_share_inputs_and_learning_stays_disabled(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
+        session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
         ):
-            recs = []
-            seen: set[str] = set()
-            # Pass through confidence so adaptive differs from control
-            for s in signals[:3]:
-                if s["ticker"] not in seen:
-                    conf = (
-                        strategy_confidence.get(s["strategy"], 0.5)
-                        if strategy_confidence
-                        else 0.5
-                    )
-                    recs.append(
-                        TradeRecommendation(
-                            ticker=s["ticker"],
-                            direction=s["direction"],
-                            position_size_pct=0.08,
-                            confidence=conf,
-                            rationale="cohort test",
-                            contributing_strategies=[s["strategy"]],
-                        )
-                    )
-                    seen.add(s["ticker"])
-            return recs
+            result = orchestrator.run_daily(session.isoformat())
 
-        mock_committee.side_effect = fake_synthesize
-
-        orchestrator = CohortOrchestrator(cohort_configs, base_config)
-
-        # Inject price caches into each cohort's engine
-        for cohort in orchestrator.cohorts:
-            cohort["engine"]._price_cache = copy.deepcopy(prices)
-
-        # Seed the adaptive cohort journal with history so confidence diverges
-        adaptive_journal = orchestrator.cohorts[1]["engine"]._journal
-        for i in range(15):
-            ret = 0.05 if i < 12 else -0.05  # 80% hit rate
-            adaptive_journal.log_signal(
-                JournalEntry(
-                    timestamp=f"2026-03-{i + 1:02d}",
-                    strategy="fake_strat",
-                    ticker="AAPL",
-                    direction="long",
-                    score=5.0,
-                    traded=True,
-                    entry_price=170.0,
-                    return_5d=ret,
-                )
-            )
-
-        # Run 30 days
-        for day in range(30):
-            trading_date = (BASE_DATE + timedelta(days=day)).strftime("%Y-%m-%d")
-            orchestrator.run_daily(trading_date=trading_date)
-
-        # --- Assertions ---
-
-        # Both cohorts have journal entries (shared signals)
-        control_journal = SignalJournal(control_dir)
-        adaptive_journal_final = SignalJournal(adaptive_dir)
-        control_entries = control_journal.get_entries()
-        adaptive_entries = adaptive_journal_final.get_entries()
-        assert len(control_entries) > 0, "Control cohort should have journal entries"
-        assert len(adaptive_entries) > 0, "Adaptive cohort should have journal entries"
-
-        # Cohort A (control) confidence stays at 0.5
-        control_engine = orchestrator.cohorts[0]["engine"]
-        assert control_engine._adaptive_confidence is False
-
-        # State dirs are separate (no contamination)
-        control_trades = StateManager(control_dir).load_paper_trades()
-        adaptive_trades = StateManager(adaptive_dir).load_paper_trades()
-        # Both should have trades but trade_ids should be different
-        if control_trades and adaptive_trades:
-            control_ids = {t["trade_id"] for t in control_trades}
-            adaptive_ids = {t["trade_id"] for t in adaptive_trades}
-            assert control_ids.isdisjoint(adaptive_ids), (
-                "Cohort trade IDs should not overlap"
-            )
-
-        # CohortComparison.compare() returns valid structure
-        comparison = CohortComparison({
-            "control": control_dir,
-            "adaptive": adaptive_dir,
-        })
-        result = comparison.compare()
-
-        assert "cohorts" in result
-        assert "control" in result["cohorts"]
-        assert "adaptive" in result["cohorts"]
-        assert "per_strategy" in result
-        assert result["cohorts"]["control"]["total_signals"] > 0
-        assert result["cohorts"]["adaptive"]["total_signals"] > 0
-
-        # Verify the report can be generated without error
-        report = comparison.format_report()
-        assert isinstance(report, str)
-        assert len(report) > 100
+        assert not result["cohort_0"]["error"]
+        assert not result["cohort_1"]["error"]
+        assert len(source.benchmark_calls) == 1
+        assert len(source.raw_calls) == 1
+        assert all(
+            cohort["engine"]._adaptive_confidence is False
+            and cohort["config"].learning_enabled is False
+            for cohort in orchestrator.cohorts
+        )
+        assert all(
+            item["reason"] == "learning_disabled"
+            for item in orchestrator.run_learning().values()
+        )
 
 
 class TestOpenBBEnrichment:
-    """Verify OpenBB enrichment works across 30-day simulation."""
+    def test_enrichment_is_shared_and_passed_after_mark(self, tmp_path):
+        orchestrator, _ = _authoritative_orchestrator(tmp_path, cohorts=2)
+        session = date(2026, 3, 30)
+        enrichment = {"profiles": {"AAPL": {"sector": "Technology"}}}
+        observed: list[dict] = []
 
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
-    )
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
-    )
-    @patch(
-        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
-    )
-    @patch(
-        "tradingagents.strategies.modules.get_paper_trade_strategies"
-    )
-    def test_enrichment_30_days_with_openbb(
-        self,
-        mock_get_strategies,
-        mock_committee,
-        mock_fetch_prices,
-        mock_fetch_data,
-        tmp_path,
-    ):
-        """Run 30 days with mocked OpenBB enrichment. Verify enrichment is passed to committee."""
-        strategies = [FakeStrategy(hold_days=5), FakeStrategy2()]
-        mock_get_strategies.return_value = strategies
+        def committee(signals, **kwargs):
+            observed.append(kwargs["enrichment"])
+            return _authoritative_committee(signals)
 
-        prices = _build_price_cache(days=60)
-        mock_fetch_data.return_value = {"yfinance": {"prices": prices}}
-        mock_fetch_prices.return_value = None
+        with (
+            patch.object(
+                orchestrator, "_fetch_openbb_enrichment", return_value=enrichment
+            ),
+            patch(
+                "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+                side_effect=committee,
+            ),
+        ):
+            orchestrator.run_daily(session.isoformat())
 
-        control_dir = str(tmp_path / "control")
-        adaptive_dir = str(tmp_path / "adaptive")
+        assert observed == [enrichment, enrichment]
+        assert all(
+            cohort["ledger"].read_snapshots(session, session)[0].valid
+            for cohort in orchestrator.cohorts
+        )
 
-        cohort_configs = [
-            CohortConfig(name="control", state_dir=control_dir, horizon="30d", size_profile="5k", adaptive_confidence=False, learning_enabled=False, use_llm=False),
-            CohortConfig(name="adaptive", state_dir=adaptive_dir, horizon="30d", size_profile="5k", adaptive_confidence=True, learning_enabled=True, use_llm=False),
-        ]
+    def test_graceful_degradation_without_openbb(self, tmp_path):
+        orchestrator, _ = _authoritative_orchestrator(tmp_path)
+        session = date(2026, 3, 30)
+        observed: list[dict] = []
 
-        base_config = {
-            "autoresearch": {
-                "state_dir": str(tmp_path / "base"),
-                "total_capital": 5000,
-                "paper_trade": {"min_trades_for_evaluation": 2, "portfolio_committee_enabled": False},
-            },
-            "execution": {"mode": "paper"},
-        }
+        def committee(signals, **kwargs):
+            observed.append(kwargs["enrichment"])
+            return _authoritative_committee(signals)
 
-        # Track enrichment values passed to synthesize
-        enrichment_values = []
+        with (
+            patch.object(orchestrator, "_fetch_openbb_enrichment", return_value={}),
+            patch(
+                "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+                side_effect=committee,
+            ),
+        ):
+            result = orchestrator.run_daily(session.isoformat())
 
-        def fake_synthesize(signals, regime_context=None, strategy_confidence=None,
-                            current_positions=None, total_capital=None, **kwargs):
-            enrichment_values.append(kwargs.get("enrichment"))
-            recs = []
-            seen = set()
-            for s in signals[:3]:
-                if s["ticker"] not in seen:
-                    recs.append(TradeRecommendation(
-                        ticker=s["ticker"], direction=s["direction"],
-                        position_size_pct=0.12, confidence=0.6,
-                        rationale="enrichment test",
-                        contributing_strategies=[s["strategy"]],
-                    ))
-                    seen.add(s["ticker"])
-            return recs
-
-        mock_committee.side_effect = fake_synthesize
-
-        orchestrator = CohortOrchestrator(cohort_configs, base_config)
-
-        # Inject price caches
-        for cohort in orchestrator.cohorts:
-            cohort["engine"]._price_cache = copy.deepcopy(prices)
-
-        # Mock the OpenBB enrichment to return synthetic data
-        mock_enrichment = {
-            "profiles": {
-                "AAPL": {"sector": "Technology", "industry": "Consumer Electronics", "market_cap": 3e12, "name": "Apple"},
-                "MSFT": {"sector": "Technology", "industry": "Software", "market_cap": 2.8e12, "name": "Microsoft"},
-                "AMZN": {"sector": "Consumer Cyclical", "industry": "Internet Retail", "market_cap": 1.8e12, "name": "Amazon"},
-            },
-            "short_interest": {
-                "TSLA": {"short_interest": 50000000, "short_pct_of_float": 3.2, "days_to_cover": 1.5, "date": "2026-03-15"},
-            },
-            "factors": {"Mkt-RF": 0.02, "SMB": -0.01, "HML": 0.005},
-        }
-        with patch.object(orchestrator, "_fetch_openbb_enrichment", return_value=mock_enrichment):
-            for day in range(30):
-                trading_date = (BASE_DATE + timedelta(days=day)).strftime("%Y-%m-%d")
-                orchestrator.run_daily(trading_date=trading_date)
-
-        # Assertions
-        # 1. Both cohorts received enrichment (2 cohorts * 30 days = 60 calls)
-        assert len(enrichment_values) == 60, f"Expected 60 synthesize calls, got {len(enrichment_values)}"
-
-        # 2. Enrichment was passed (not None) for all calls
-        non_none_enrichments = [e for e in enrichment_values if e is not None]
-        assert len(non_none_enrichments) == 60, "All synthesize calls should receive enrichment"
-
-        # 3. Enrichment contains expected keys
-        sample = non_none_enrichments[0]
-        assert "profiles" in sample
-        assert "short_interest" in sample
-        assert "factors" in sample
-        assert "AAPL" in sample["profiles"]
-        assert sample["profiles"]["AAPL"]["sector"] == "Technology"
-
-        # 4. Both cohorts still produce trades
-        control_trades = StateManager(control_dir).load_paper_trades()
-        adaptive_trades = StateManager(adaptive_dir).load_paper_trades()
-        assert len(control_trades) > 0, "Control should have trades with enrichment"
-        assert len(adaptive_trades) > 0, "Adaptive should have trades with enrichment"
-
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_all_data"
-    )
-    @patch(
-        "tradingagents.strategies.orchestration.multi_strategy_engine.MultiStrategyEngine._fetch_missing_prices"
-    )
-    @patch(
-        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize"
-    )
-    @patch(
-        "tradingagents.strategies.modules.get_paper_trade_strategies"
-    )
-    def test_graceful_degradation_without_openbb(
-        self,
-        mock_get_strategies,
-        mock_committee,
-        mock_fetch_prices,
-        mock_fetch_data,
-        tmp_path,
-    ):
-        """Run 30 days with OpenBB unavailable. Verify identical behavior to baseline."""
-        strategies = [FakeStrategy(hold_days=5), FakeStrategy2()]
-        mock_get_strategies.return_value = strategies
-
-        prices = _build_price_cache(days=60)
-        mock_fetch_data.return_value = {"yfinance": {"prices": prices}}
-        mock_fetch_prices.return_value = None
-
-        control_dir = str(tmp_path / "control")
-        adaptive_dir = str(tmp_path / "adaptive")
-
-        cohort_configs = [
-            CohortConfig(name="control", state_dir=control_dir, horizon="30d", size_profile="5k", adaptive_confidence=False, learning_enabled=False, use_llm=False),
-            CohortConfig(name="adaptive", state_dir=adaptive_dir, horizon="30d", size_profile="5k", adaptive_confidence=True, learning_enabled=True, use_llm=False),
-        ]
-
-        base_config = {
-            "autoresearch": {
-                "state_dir": str(tmp_path / "base"),
-                "total_capital": 5000,
-                "paper_trade": {"min_trades_for_evaluation": 2, "portfolio_committee_enabled": False},
-            },
-            "execution": {"mode": "paper"},
-        }
-
-        enrichment_values = []
-
-        def fake_synthesize(signals, regime_context=None, strategy_confidence=None,
-                            current_positions=None, total_capital=None, **kwargs):
-            enrichment_values.append(kwargs.get("enrichment"))
-            recs = []
-            seen = set()
-            for s in signals[:3]:
-                if s["ticker"] not in seen:
-                    recs.append(TradeRecommendation(
-                        ticker=s["ticker"], direction=s["direction"],
-                        position_size_pct=0.12, confidence=0.6,
-                        rationale="degradation test",
-                        contributing_strategies=[s["strategy"]],
-                    ))
-                    seen.add(s["ticker"])
-            return recs
-
-        mock_committee.side_effect = fake_synthesize
-
-        orchestrator = CohortOrchestrator(cohort_configs, base_config)
-
-        for cohort in orchestrator.cohorts:
-            cohort["engine"]._price_cache = copy.deepcopy(prices)
-
-        # Mock enrichment to return empty dict (OpenBB unavailable)
-        with patch.object(orchestrator, "_fetch_openbb_enrichment", return_value={}):
-            for day in range(30):
-                trading_date = (BASE_DATE + timedelta(days=day)).strftime("%Y-%m-%d")
-                orchestrator.run_daily(trading_date=trading_date)
-
-        # Assertions
-        # 1. All enrichment values should be empty dict (graceful degradation)
-        for e in enrichment_values:
-            assert e == {} or e is None or (isinstance(e, dict) and len(e) == 0), \
-                f"Expected empty enrichment, got {e}"
-
-        # 2. System still produces trades without OpenBB
-        control_trades = StateManager(control_dir).load_paper_trades()
-        assert len(control_trades) > 0, "System should still trade without OpenBB"
+        assert observed == [{}]
+        assert not result["cohort_0"]["error"]
+        assert result["cohort_0"]["intents_staged"]
 
 
 class TestReactivatedStrategies:
@@ -867,7 +601,9 @@ class TestReactivatedStrategies:
 
     def test_govt_contracts_with_usaspending_data(self):
         """govt_contracts screen() produces candidates from contract data."""
-        from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
+        from tradingagents.strategies.modules.govt_contracts import (
+            GovtContractsStrategy,
+        )
 
         strategy = GovtContractsStrategy()
         assert strategy.track == "paper_trade"
@@ -879,8 +615,14 @@ class TestReactivatedStrategies:
                 "data": {
                     "contracts": [
                         {"recipient": "Lockheed Martin Corp", "amount": 500_000_000},
-                        {"recipient": "Northrop Grumman Systems", "amount": 200_000_000},
-                        {"recipient": "Small Unknown Contractor", "amount": 10_000_000},  # Below threshold
+                        {
+                            "recipient": "Northrop Grumman Systems",
+                            "amount": 200_000_000,
+                        },
+                        {
+                            "recipient": "Small Unknown Contractor",
+                            "amount": 10_000_000,
+                        },  # Below threshold
                     ]
                 }
             },
@@ -898,7 +640,9 @@ class TestReactivatedStrategies:
 
     def test_govt_contracts_momentum_fallback(self):
         """govt_contracts falls back to momentum when no contract data."""
-        from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
+        from tradingagents.strategies.modules.govt_contracts import (
+            GovtContractsStrategy,
+        )
 
         strategy = GovtContractsStrategy()
 
@@ -907,10 +651,14 @@ class TestReactivatedStrategies:
         prices = {}
         # LMT with strong upward momentum
         lmt_close = [400 + i * 2 for i in range(40)]  # rising
-        prices["LMT"] = pd.DataFrame({"Close": lmt_close, "Volume": [1e6] * 40}, index=dates)
+        prices["LMT"] = pd.DataFrame(
+            {"Close": lmt_close, "Volume": [1e6] * 40}, index=dates
+        )
         # BA with flat/declining
         ba_close = [200 - i * 0.1 for i in range(40)]
-        prices["BA"] = pd.DataFrame({"Close": ba_close, "Volume": [1e6] * 40}, index=dates)
+        prices["BA"] = pd.DataFrame(
+            {"Close": ba_close, "Volume": [1e6] * 40}, index=dates
+        )
 
         data = {
             "usaspending": {},  # No contract data
@@ -927,7 +675,9 @@ class TestReactivatedStrategies:
 
     def test_govt_contracts_exit_logic(self):
         """govt_contracts exit logic works correctly."""
-        from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
+        from tradingagents.strategies.modules.govt_contracts import (
+            GovtContractsStrategy,
+        )
 
         strategy = GovtContractsStrategy()
         params = strategy.get_default_params()
@@ -953,7 +703,9 @@ class TestReactivatedStrategies:
 
     def test_state_economics_with_fred_data(self):
         """state_economics screen() combines FRED indicators with momentum."""
-        from tradingagents.strategies.modules.state_economics import StateEconomicsStrategy
+        from tradingagents.strategies.modules.state_economics import (
+            StateEconomicsStrategy,
+        )
 
         strategy = StateEconomicsStrategy()
         assert strategy.track == "paper_trade"
@@ -965,16 +717,23 @@ class TestReactivatedStrategies:
         prices = {}
         # KRE (regional banks) with positive momentum
         kre_close = [50 + i * 0.5 for i in range(30)]
-        prices["KRE"] = pd.DataFrame({"Close": kre_close, "Volume": [1e6] * 30}, index=dates)
+        prices["KRE"] = pd.DataFrame(
+            {"Close": kre_close, "Volume": [1e6] * 30}, index=dates
+        )
         # IWN with slight positive
         iwn_close = [160 + i * 0.2 for i in range(30)]
-        prices["IWN"] = pd.DataFrame({"Close": iwn_close, "Volume": [1e6] * 30}, index=dates)
+        prices["IWN"] = pd.DataFrame(
+            {"Close": iwn_close, "Volume": [1e6] * 30}, index=dates
+        )
 
         data = {
             "yfinance": {"prices": prices},
             "fred": {
                 "UNRATE": {"2026-01": 4.2, "2026-02": 4.0},  # Declining = bullish
-                "ICSA": {"2026-02-15": 220000, "2026-02-22": 210000},  # Declining = bullish
+                "ICSA": {
+                    "2026-02-15": 220000,
+                    "2026-02-22": 210000,
+                },  # Declining = bullish
             },
         }
 
@@ -987,14 +746,18 @@ class TestReactivatedStrategies:
 
     def test_state_economics_momentum_only_fallback(self):
         """state_economics falls back to pure momentum when no FRED data."""
-        from tradingagents.strategies.modules.state_economics import StateEconomicsStrategy
+        from tradingagents.strategies.modules.state_economics import (
+            StateEconomicsStrategy,
+        )
 
         strategy = StateEconomicsStrategy()
 
         dates = pd.date_range("2026-02-01", periods=30, freq="B")
         prices = {}
         kre_close = [50 + i * 0.5 for i in range(30)]
-        prices["KRE"] = pd.DataFrame({"Close": kre_close, "Volume": [1e6] * 30}, index=dates)
+        prices["KRE"] = pd.DataFrame(
+            {"Close": kre_close, "Volume": [1e6] * 30}, index=dates
+        )
 
         data = {
             "yfinance": {"prices": prices},
@@ -1008,7 +771,9 @@ class TestReactivatedStrategies:
 
     def test_state_economics_exit_logic(self):
         """state_economics exit logic: rebalance schedule (30-day default)."""
-        from tradingagents.strategies.modules.state_economics import StateEconomicsStrategy
+        from tradingagents.strategies.modules.state_economics import (
+            StateEconomicsStrategy,
+        )
 
         strategy = StateEconomicsStrategy()
         params = strategy.get_default_params()
@@ -1025,6 +790,7 @@ class TestReactivatedStrategies:
     def test_twelve_strategies_registered(self):
         """Verify 12 strategies are registered (including quantum_readiness)."""
         from tradingagents.strategies.modules import get_paper_trade_strategies
+
         strategies = get_paper_trade_strategies()
         assert len(strategies) == 12
         names = [s.name for s in strategies]

@@ -1,4 +1,5 @@
 """Contract tests for authoritative XNYS market-data boundaries."""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -54,9 +55,7 @@ def test_xnys_weekend_holiday_and_early_close():
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_yfinance_end_is_inclusive_and_raw(mock_download):
-    columns = pd.MultiIndex.from_product(
-        [["Open", "High", "Low", "Close"], ["AAPL"]]
-    )
+    columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
     mock_download.return_value = pd.DataFrame(
         [[100, 103, 99, 102]],
         index=pd.DatetimeIndex(["2026-07-31"]),
@@ -76,9 +75,7 @@ def test_yfinance_end_is_inclusive_and_raw(mock_download):
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_yfinance_rejects_terminal_session_absence(mock_download):
-    columns = pd.MultiIndex.from_product(
-        [["Open", "High", "Low", "Close"], ["AAPL"]]
-    )
+    columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
     mock_download.return_value = pd.DataFrame(
         [[100, 103, 99, 102]],
         index=pd.DatetimeIndex(["2026-07-30"]),
@@ -93,9 +90,7 @@ def test_yfinance_rejects_terminal_session_absence(mock_download):
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_cached_raw_bars_retain_download_timestamp_and_fail_stale(mock_download):
-    columns = pd.MultiIndex.from_product(
-        [["Open", "High", "Low", "Close"], ["AAPL"]]
-    )
+    columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
     mock_download.return_value = pd.DataFrame(
         [[100, 103, 99, 102]],
         index=pd.DatetimeIndex(["2026-07-31"]),
@@ -156,7 +151,10 @@ def test_benchmark_closes_are_total_return_adjusted(mock_download):
     assert kwargs["end"] == "2026-08-01"
     assert kwargs["auto_adjust"] is True
     assert kwargs["actions"] is False
-    assert closes[("SPY", _SESSION)] == Decimal("550.0")
+    observation = closes[("SPY", _SESSION)]
+    assert observation.close == Decimal("550.0")
+    assert observation.source == "yfinance-adjusted"
+    assert observation.fetched_at == _AS_OF
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
@@ -193,8 +191,10 @@ def test_nonpositive_adjusted_benchmark_close_fails_closed(mock_download, close)
     ("bar", "error"),
     [
         (_bar(adjusted=True), "adjusted"),
+        (_bar(fetched_at=datetime(2026, 7, 31, 22)), "naive"),
         (_bar(fetched_at=_AS_OF + timedelta(seconds=1)), "future"),
         (_bar(fetched_at=_AS_OF - timedelta(hours=24, seconds=1)), "stale"),
+        (_bar(ticker="MSFT"), "mismatched"),
         (_bar(close=Decimal("0")), "invalid"),
         (_bar(close=Decimal("NaN")), "invalid"),
         (_bar(open=Decimal("104")), "incoherent"),
@@ -202,9 +202,7 @@ def test_nonpositive_adjusted_benchmark_close_fails_closed(mock_download, close)
 )
 def test_invalid_required_bars_fail_closed(bar: MarketBar, error: str):
     with pytest.raises(BarValidationError, match=error):
-        validate_required_bars(
-            {("AAPL", _SESSION): bar}, {"AAPL"}, _SESSION, _AS_OF
-        )
+        validate_required_bars({("AAPL", _SESSION): bar}, {"AAPL"}, _SESSION, _AS_OF)
 
 
 def test_missing_required_bar_fails_closed():
@@ -214,9 +212,7 @@ def test_missing_required_bar_fails_closed():
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_corporate_actions_are_verified_and_stably_identified(mock_download):
-    columns = pd.MultiIndex.from_product(
-        [["Stock Splits", "Dividends"], ["AAPL"]]
-    )
+    columns = pd.MultiIndex.from_product([["Stock Splits", "Dividends"], ["AAPL"]])
     mock_download.return_value = pd.DataFrame(
         [[2.0, 0.24]],
         index=pd.DatetimeIndex(["2026-07-31"]),
@@ -227,12 +223,16 @@ def test_corporate_actions_are_verified_and_stably_identified(mock_download):
     first = source.get_corporate_actions(["AAPL"], _SESSION)
     second = source.get_corporate_actions(["AAPL"], _SESSION)
 
-    assert [(action.action_type, action.ratio, action.cash_per_share) for action in first] == [
+    assert [
+        (action.action_type, action.ratio, action.cash_per_share) for action in first
+    ] == [
         ("split", Decimal("2.0"), None),
         ("cash_dividend", None, Decimal("0.24")),
     ]
     assert all(action.verified for action in first)
-    assert [action.action_id for action in first] == [action.action_id for action in second]
+    assert [action.action_id for action in first] == [
+        action.action_id for action in second
+    ]
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
