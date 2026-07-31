@@ -16,6 +16,7 @@ from tradingagents.strategies.execution.cost_model import (
     validate_new_short_borrow_rate,
 )
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.orchestration.trading_calendar import session_close
 
 
 UTC = timezone.utc
@@ -173,6 +174,33 @@ def test_daily_borrow_and_financing_are_exactly_once_across_restart(tmp_path):
         )
     finally:
         reopened.close()
+
+
+def test_financing_default_audit_time_is_aware_and_after_session_close(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        ledger.accrue_financing(SESSION, Decimal("0.10"))
+        effective_at = ledger.connection.execute(
+            "SELECT effective_at FROM cash_events WHERE event_type = 'financing'"
+        ).fetchone()[0]
+        timestamp = datetime.fromisoformat(effective_at)
+        assert timestamp.tzinfo is not None
+        assert timestamp == session_close(SESSION)
+    finally:
+        ledger.close()
+
+
+def test_financing_default_audit_time_uses_xnys_early_close(tmp_path):
+    early_close = date(2026, 11, 27)
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        ledger.accrue_financing(early_close, Decimal("0.10"))
+        effective_at = ledger.connection.execute(
+            "SELECT effective_at FROM cash_events WHERE event_type = 'financing'"
+        ).fetchone()[0]
+        assert datetime.fromisoformat(effective_at) == session_close(early_close)
+    finally:
+        ledger.close()
 
 
 def test_existing_short_missing_rate_uses_flagged_fallback_and_new_short_is_rejected(

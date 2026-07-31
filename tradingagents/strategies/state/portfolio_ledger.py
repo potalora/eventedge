@@ -36,6 +36,7 @@ from tradingagents.strategies.execution.price_source import (
     BarValidationError,
     validate_required_bars,
 )
+from tradingagents.strategies.orchestration.trading_calendar import session_close
 
 
 SCHEMA_VERSION = 1
@@ -361,6 +362,11 @@ class PortfolioLedger:
                     "ALTER TABLE intent_action_adjustments "
                     "ADD COLUMN adjustment_sequence INTEGER NOT NULL DEFAULT 0"
                 )
+            self._backfill_adjustment_sequences()
+            self._connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_intent_adjustment_sequence "
+                "ON intent_action_adjustments(intent_id, adjustment_sequence)"
+            )
             self._insert_idempotent(
                 "schema_metadata",
                 "metadata_key",
@@ -431,6 +437,57 @@ class PortfolioLedger:
             f"INSERT INTO {table} ({columns}) VALUES ({marks})", tuple(encoded.values())
         )
         return True
+
+    def _backfill_adjustment_sequences(self) -> None:
+        """Recover each legacy intent's only causal split chain or fail closed."""
+        intents = self._connection.execute(
+            "SELECT DISTINCT intent_id FROM intent_action_adjustments ORDER BY intent_id"
+        ).fetchall()
+        for item in intents:
+            intent_id = item["intent_id"]
+            rows = self._connection.execute(
+                "SELECT * FROM intent_action_adjustments WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchall()
+            sequence = [int(row["adjustment_sequence"]) for row in rows]
+            if sequence and min(sequence) >= 1 and len(set(sequence)) == len(rows):
+                continue
+
+            def endpoint(row: sqlite3.Row, prefix: str) -> tuple[int, str | None]:
+                return int(row[f"{prefix}_qty"]), row[f"{prefix}_stop_price"]
+
+            outgoing: dict[tuple[int, str | None], list[sqlite3.Row]] = {}
+            targets: set[tuple[int, str | None]] = set()
+            for row in rows:
+                outgoing.setdefault(endpoint(row, "original"), []).append(row)
+                targets.add(endpoint(row, "adjusted"))
+            roots = [state for state in outgoing if state not in targets]
+            if len(roots) != 1 or any(len(edges) != 1 for edges in outgoing.values()):
+                raise LedgerConflictError(
+                    f"intent adjustment migration ambiguous chain for {intent_id}"
+                )
+            ordered: list[sqlite3.Row] = []
+            visited: set[str] = set()
+            state = roots[0]
+            while state in outgoing:
+                row = outgoing[state][0]
+                if row["adjustment_id"] in visited:
+                    raise LedgerConflictError(
+                        f"intent adjustment migration cyclic chain for {intent_id}"
+                    )
+                ordered.append(row)
+                visited.add(row["adjustment_id"])
+                state = endpoint(row, "adjusted")
+            if len(ordered) != len(rows):
+                raise LedgerConflictError(
+                    f"intent adjustment migration disconnected chain for {intent_id}"
+                )
+            for value, row in enumerate(ordered, 1):
+                self._connection.execute(
+                    "UPDATE intent_action_adjustments SET adjustment_sequence = ? "
+                    "WHERE adjustment_id = ?",
+                    (value, row["adjustment_id"]),
+                )
 
     def _initialize_accounting_state(self) -> None:
         """Create or deterministically migrate the one-row cohort summary."""
@@ -897,7 +954,7 @@ class PortfolioLedger:
             or annual_rate < 0
         ):
             raise ValueError("annual financing rate must be a non-negative Decimal")
-        effective_at = processed_at or self._session_timestamp(session)
+        effective_at = processed_at or self._session_close_timestamp(session)
         self._require_timezone_aware(effective_at, "processed_at")
         accrual_id = stable_id("financing", self.cohort_id, session)
         with self.transaction():
@@ -954,8 +1011,13 @@ class PortfolioLedger:
         processed_at: datetime | None = None,
     ) -> list[LedgerEvent]:
         """Apply verified actions once, or durably quarantine uncertain inputs."""
-        processed = processed_at or self._session_timestamp(session)
+        processed = processed_at or max(
+            (action.fetched_at for action in actions),
+            default=self._session_close_timestamp(session),
+        )
         self._require_timezone_aware(processed, "processed_at")
+        if any(processed < action.fetched_at for action in actions):
+            raise ValueError("processed_at precedes corporate action observation")
         events: list[LedgerEvent] = []
         with self.transaction():
             for action in sorted(actions, key=lambda item: item.action_id):
@@ -1150,6 +1212,12 @@ class PortfolioLedger:
             for ticker, bar in marks_by_ticker.items():
                 self._insert_mark(ticker, bar)
             invalid_reason = self._session_invalid_reason(session)
+            if invalid_reason is None:
+                for ticker in sorted({lot["ticker"] for lot in open_lots}):
+                    ticker_reason = self._session_invalid_reason(session, ticker)
+                    if ticker_reason is not None:
+                        invalid_reason = f"quarantined {ticker}: {ticker_reason}"
+                        break
             snapshot = self._build_snapshot(
                 session,
                 epoch_id,
@@ -1821,6 +1889,10 @@ class PortfolioLedger:
     @staticmethod
     def _session_timestamp(session: date) -> datetime:
         return datetime.combine(session, time.min, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _session_close_timestamp(session: date) -> datetime:
+        return session_close(session)
 
     def _open_lots(self, *, include_latest_mark: bool = False) -> list[sqlite3.Row]:
         mark_column = (

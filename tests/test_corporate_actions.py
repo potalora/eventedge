@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import sqlite3
 
 import pytest
 
@@ -269,6 +270,54 @@ def test_quarantine_publishes_invalid_snapshot_and_fail_closed_session_check(tmp
         ledger.close()
 
 
+def test_unresolved_ticker_quarantine_invalidates_later_marks_across_restart(tmp_path):
+    path = tmp_path / "ledger.db"
+    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        _opened_long(ledger)
+        ledger.apply_corporate_actions(
+            SESSION,
+            [_action("quarantined", "split", verified=False, ratio="2")],
+        )
+        next_session = date(2026, 8, 4)
+        value = Decimal("100")
+        later = MarketBar(
+            "AAPL",
+            next_session,
+            value,
+            value,
+            value,
+            value,
+            "fixture",
+            datetime(2026, 8, 4, 23, tzinfo=UTC),
+            False,
+        )
+        assert (
+            ledger.mark(
+                next_session,
+                {"AAPL": later},
+                "epoch",
+                datetime(2026, 8, 4, 23, tzinfo=UTC),
+            ).valid
+            is False
+        )
+    finally:
+        ledger.close()
+    reopened = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        assert (
+            reopened.mark(
+                next_session,
+                {"AAPL": later},
+                "epoch",
+                datetime(2026, 8, 4, 23, tzinfo=UTC),
+            ).valid
+            is False
+        )
+    finally:
+        reopened.close()
+
+
 def test_same_timestamp_split_chain_replays_in_persisted_causal_order_across_restart(
     tmp_path,
 ):
@@ -321,3 +370,98 @@ def test_each_conflicting_action_payload_is_persisted_as_immutable_evidence(tmp_
         assert all("ratio" in row[2] for row in rows)
     finally:
         ledger.close()
+
+
+def test_corporate_action_default_audit_time_is_causal_and_earlier_time_rejects(
+    tmp_path,
+):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", COHORT, Decimal("5000"))
+    try:
+        _opened_long(ledger)
+        action = _action("timed", "split", ratio="2")
+        ledger.apply_corporate_actions(SESSION, [action])
+        applied_at = ledger.connection.execute(
+            "SELECT applied_at FROM lot_action_applications"
+        ).fetchone()[0]
+        assert datetime.fromisoformat(applied_at) >= action.fetched_at
+        bad = _action("too-early", "split", ratio="2")
+        with pytest.raises(ValueError, match="precedes"):
+            ledger.apply_corporate_actions(
+                SESSION, [bad], action.fetched_at.replace(hour=1)
+            )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_actions WHERE action_id = 'too-early'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        ledger.close()
+
+
+def test_prefixed_adjustment_schema_backfills_reversed_physical_chain(tmp_path):
+    path = tmp_path / "legacy.db"
+    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        _, original_exit = _opened_long(ledger)
+        ledger.apply_corporate_actions(
+            SESSION,
+            [_action("a", "split", ratio="2"), _action("b", "split", ratio="3")],
+        )
+        ledger.connection.execute("DROP INDEX ux_intent_adjustment_sequence")
+        ledger.connection.execute(
+            "ALTER TABLE intent_action_adjustments RENAME TO modern_adjustments"
+        )
+        ledger.connection.execute(
+            """CREATE TABLE intent_action_adjustments (
+        adjustment_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, intent_id TEXT NOT NULL,
+        original_qty INTEGER NOT NULL, adjusted_qty INTEGER NOT NULL,
+        original_stop_price TEXT, adjusted_stop_price TEXT, applied_at TEXT NOT NULL,
+        UNIQUE(action_id, intent_id))"""
+        )
+        ledger.connection.execute(
+            """INSERT INTO intent_action_adjustments
+               SELECT adjustment_id, action_id, intent_id, original_qty, adjusted_qty,
+                      original_stop_price, adjusted_stop_price, applied_at
+               FROM modern_adjustments ORDER BY adjustment_sequence DESC"""
+        )
+        ledger.connection.execute("DROP TABLE modern_adjustments")
+    finally:
+        ledger.close()
+    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
+    try:
+        assert [
+            row[0]
+            for row in ledger.connection.execute(
+                "SELECT adjustment_sequence FROM intent_action_adjustments ORDER BY adjustment_sequence"
+            )
+        ] == [1, 2]
+        ledger.stage_intent(original_exit)
+        current = ledger.pending_intents(SESSION)[0]
+        assert current.requested_qty == 60
+        assert current.stop_price == Decimal("15.83333333333333333333333333")
+    finally:
+        ledger.close()
+
+
+def test_prefixed_adjustment_schema_ambiguous_chain_fails_closed(tmp_path):
+    path = tmp_path / "ambiguous.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """CREATE TABLE intent_action_adjustments (
+        adjustment_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, intent_id TEXT NOT NULL,
+        original_qty INTEGER NOT NULL, adjusted_qty INTEGER NOT NULL,
+        original_stop_price TEXT, adjusted_stop_price TEXT, applied_at TEXT NOT NULL,
+        UNIQUE(action_id, intent_id))"""
+    )
+    connection.executemany(
+        "INSERT INTO intent_action_adjustments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("a", "a", "exit", 10, 20, "95", "47.5", "x"),
+            ("b", "b", "exit", 10, 30, "95", "31.6", "x"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(ValueError, match="ambiguous chain"):
+        PortfolioLedger(path, COHORT, Decimal("5000"))
