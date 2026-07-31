@@ -3,7 +3,10 @@ from decimal import Decimal
 from typing import Any, Dict, List
 
 from tradingagents.strategies.execution import Fill, OrderIntent
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 
 from .base_broker import BaseBroker, OrderResult, AccountInfo
 
@@ -20,9 +23,6 @@ except ImportError:
     OrderSide = None
     TimeInForce = None
     _ALPACA_AVAILABLE = False
-
-
-_UNRESOLVED_STATUSES = {"pending", "accepted", "partially_filled"}
 
 
 class AlpacaBroker(BaseBroker):
@@ -56,42 +56,25 @@ class AlpacaBroker(BaseBroker):
         submitted_at: datetime | None = None
         if self.ledger is not None and client_order_id is not None:
             existing = self.ledger.external_order_for_intent(client_order_id)
-            if (
-                existing is not None
-                and str(existing["status"]).lower() in _UNRESOLVED_STATUSES
-            ):
+            if existing is not None:
                 submitted_at = datetime.fromisoformat(str(existing["submitted_at"]))
-                try:
-                    result = self.reconcile_order(client_order_id)
-                except Exception as error:
-                    provisional_not_found = (
-                        existing["external_order_id"] == client_order_id
-                        and str(existing["status"]).lower() == "pending"
-                        and self._is_order_not_found(error)
-                    )
-                    if not provisional_not_found:
-                        raise
-                else:
-                    self.ledger.record_external_order(
-                        intent_id=client_order_id,
-                        external_order_id=result.order_id,
-                        broker="alpaca",
-                        status=result.status,
-                        submitted_at=submitted_at,
-                        reconciled_at=datetime.now(timezone.utc),
-                        detail=self._result_detail(result),
-                    )
-                    self._apply_confirmed_fill(
-                        client_order_id, result, intent, fill, borrow_rate
-                    )
-                    return result
-            if existing is None:
-                submitted_at = datetime.now(timezone.utc)
-                self.ledger.prepare_external_order(
-                    intent_id=client_order_id,
-                    broker="alpaca",
-                    submitted_at=submitted_at,
+                result = self.reconcile_order(client_order_id)
+                self._persist_external_result(
+                    client_order_id,
+                    result,
+                    submitted_at,
+                    datetime.now(timezone.utc),
+                    intent,
+                    fill,
+                    borrow_rate,
                 )
+                return result
+            submitted_at = datetime.now(timezone.utc)
+            self.ledger.prepare_external_order(
+                intent_id=client_order_id,
+                broker="alpaca",
+                submitted_at=submitted_at,
+            )
 
         order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
 
@@ -123,17 +106,14 @@ class AlpacaBroker(BaseBroker):
         if self.ledger is not None and client_order_id is not None:
             if submitted_at is None:  # pragma: no cover - guarded preparation path.
                 raise RuntimeError("external order was not prepared before submit")
-            self.ledger.record_external_order(
-                intent_id=client_order_id,
-                external_order_id=result.order_id,
-                broker="alpaca",
-                status=result.status,
-                submitted_at=submitted_at,
-                reconciled_at=None,
-                detail=self._result_detail(result),
-            )
-            self._apply_confirmed_fill(
-                client_order_id, result, intent, fill, borrow_rate
+            self._persist_external_result(
+                client_order_id,
+                result,
+                submitted_at,
+                None,
+                intent,
+                fill,
+                borrow_rate,
             )
         return result
 
@@ -212,7 +192,11 @@ class AlpacaBroker(BaseBroker):
         value = getattr(status, "value", status)
         normalized = str(value).lower()
         normalized = normalized.rsplit(".", 1)[-1]
-        return "pending" if normalized == "new" else normalized
+        if normalized == "new":
+            return "pending"
+        if normalized == "canceled":
+            return "cancelled"
+        return normalized
 
     @staticmethod
     def _result_detail(result: OrderResult) -> str:
@@ -221,12 +205,47 @@ class AlpacaBroker(BaseBroker):
             f"filled_price={result.filled_price}"
         )
 
-    @staticmethod
-    def _is_order_not_found(error: Exception) -> bool:
-        if getattr(error, "status_code", None) == 404:
-            return True
-        response = getattr(error, "response", None)
-        return getattr(response, "status_code", None) == 404
+    def _persist_external_result(
+        self,
+        client_order_id: str,
+        result: OrderResult,
+        submitted_at: datetime,
+        reconciled_at: datetime | None,
+        intent: object,
+        fill: object,
+        borrow_rate: object,
+    ) -> None:
+        if self.ledger is None:  # pragma: no cover - caller guard.
+            raise ValueError("external result persistence requires a ledger")
+        if result.status == "filled":
+            self._apply_confirmed_fill(
+                client_order_id, result, intent, fill, borrow_rate
+            )
+        elif result.status in {"rejected", "cancelled"}:
+            stored = self.ledger.intent(client_order_id)
+            if stored is None:
+                raise ValueError(f"unknown order intent {client_order_id}")
+            if stored.status == "pending":
+                occurred_at = reconciled_at or datetime.now(timezone.utc)
+                reason = f"alpaca {self._result_detail(result)}"
+                if result.status == "rejected":
+                    self.ledger.reject_intent(client_order_id, occurred_at, reason)
+                else:
+                    self.ledger.cancel_intent(client_order_id, occurred_at, reason)
+            elif stored.status != result.status:
+                raise LedgerConflictError(
+                    f"broker {result.status} conflicts with local {stored.status} "
+                    f"for intent {client_order_id}"
+                )
+        self.ledger.record_external_order(
+            intent_id=client_order_id,
+            external_order_id=result.order_id,
+            broker="alpaca",
+            status=result.status,
+            submitted_at=submitted_at,
+            reconciled_at=reconciled_at,
+            detail=self._result_detail(result),
+        )
 
     def _validate_fill_candidate(
         self,
@@ -257,10 +276,10 @@ class AlpacaBroker(BaseBroker):
         fill: object,
         borrow_rate: object,
     ) -> None:
-        if result.status != "filled" or intent is None or fill is None:
+        if result.status != "filled":
             return
         if not isinstance(intent, OrderIntent) or not isinstance(fill, Fill):
-            raise ValueError("invalid Alpaca fill candidate")
+            raise ValueError("broker-confirmed fill requires an exact fill candidate")
         if (
             result.filled_qty != intent.requested_qty
             or Decimal(str(result.filled_price)) != fill.fill_price

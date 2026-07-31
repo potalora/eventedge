@@ -29,7 +29,11 @@ from tradingagents.strategies.orchestration.trading_calendar import (
 )
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
-from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
+from tradingagents.strategies.trading.risk_gate import (
+    PendingRiskEntry,
+    RiskGate,
+    RiskGateConfig,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -75,8 +79,8 @@ class ExecutionBridge:
             raise ValueError("marked_account cohort does not match ledger")
 
         signals = tuple(sorted(signal_records, key=lambda signal: signal.signal_id))
-        persisted = {signal.signal_id: signal for signal in self.ledger.read_signals()}
-        if any(persisted.get(signal.signal_id) != signal for signal in signals):
+        signal_ids = tuple(signal.signal_id for signal in signals)
+        if self.ledger.signals_by_ids(signal_ids) != signals:
             raise ValueError("all intent signals must already be persisted exactly")
         if len({signal.epoch_id for signal in signals}) != 1:
             raise ValueError("intent signals must share one epoch")
@@ -92,8 +96,13 @@ class ExecutionBridge:
             raise ValueError("recommendation ticker does not match signals")
         if recommendation.direction not in {"long", "short"}:
             raise ValueError("recommendation direction must be long or short")
-        if any(signal.direction != recommendation.direction for signal in signals):
-            raise ValueError("recommendation direction does not match signals")
+        contributors = recommendation.contributing_strategies
+        if len(contributors) != len(set(contributors)) or set(contributors) != {
+            signal.strategy for signal in signals
+        }:
+            raise ValueError(
+                "recommendation contributing strategies do not match signals"
+            )
 
         reference_session = signals[0].reference_session
         cutoff = session_close(reference_session)
@@ -140,7 +149,6 @@ class ExecutionBridge:
             raise ValueError("approved recommendation sizes to zero shares")
 
         side = "short" if recommendation.direction == "short" else "buy"
-        signal_ids = tuple(signal.signal_id for signal in signals)
         intent = OrderIntent(
             stable_id(
                 "intent",
@@ -240,20 +248,10 @@ class ExecutionBridge:
                 if pending.intent_id == intent.intent_id:
                     break
                 prior_entries.append(pending)
-            positions = self.broker.get_positions()
-            if (
-                len(positions) + len(prior_entries)
-                >= self.risk_gate.config.max_positions
-            ):
-                return self._reject(
-                    intent,
-                    processing_at,
-                    "max_positions: open positions and pending intents reach limit",
-                )
             opening_prices = risk_context.get("opening_prices", {})
             if not isinstance(opening_prices, dict):
                 raise ValueError("risk_context opening_prices must be a mapping")
-            pending_reservation = Decimal("0")
+            pending_risk_entries: list[PendingRiskEntry] = []
             for pending in prior_entries:
                 pending_signals = self.ledger.signals_for_intent(pending.intent_id)
                 pending_tickers = {signal.ticker for signal in pending_signals}
@@ -269,24 +267,33 @@ class ExecutionBridge:
                     raise ValueError(
                         f"invalid opening price for pending {pending_ticker}"
                     )
-                pending_reservation += pending.requested_qty * pending_price
-            position_value = reference_price * intent.requested_qty
-            available_after_pending = marked_account.buying_power - pending_reservation
-            if position_value > available_after_pending:
-                return self._reject(
-                    intent,
-                    processing_at,
-                    "pending buying power: due intents reserve "
-                    f"{pending_reservation} leaving {available_after_pending}",
+                pending_value = pending.requested_qty * pending_price
+                pending_risk_entries.append(
+                    PendingRiskEntry(
+                        pending_ticker,
+                        tuple(sorted({signal.strategy for signal in pending_signals})),
+                        float(pending_value),
+                        float(pending_value * cost_model.margin_requirement)
+                        if pending.side == "short"
+                        else 0.0,
+                    )
                 )
+            position_value = reference_price * intent.requested_qty
             passed, reason = self.risk_gate.check(
                 opening_bar.ticker,
                 direction,
                 float(position_value),
-                str(risk_context.get("strategy", signals[0].strategy)),
+                tuple(sorted({signal.strategy for signal in signals})),
                 risk_context.get("open_trades"),
                 risk_context.get("earnings_dates"),
                 risk_context.get("short_interest"),
+                authoritative_account=marked_account,
+                pending_entries=tuple(pending_risk_entries),
+                proposed_margin=(
+                    float(position_value * cost_model.margin_requirement)
+                    if intent.side == "short"
+                    else 0.0
+                ),
             )
             if not passed:
                 return self._reject(intent, processing_at, reason)

@@ -204,6 +204,44 @@ def test_intent_duplicate_with_different_signal_provenance_conflicts(tmp_path):
         ledger.close()
 
 
+def test_signals_by_ids_uses_bounded_primary_key_lookup(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    wanted = [
+        _signal(signal_id="wanted-b"),
+        _signal(signal_id="wanted-a"),
+    ]
+    unrelated = [
+        _signal(signal_id=f"unrelated-{index:03d}") for index in range(100)
+    ]
+    statements: list[str] = []
+    try:
+        for signal in [*wanted, *unrelated]:
+            ledger.record_signal(signal)
+        ledger.connection.set_trace_callback(statements.append)
+
+        result = ledger.signals_by_ids(("wanted-b", "wanted-a"))
+
+        assert tuple(signal.signal_id for signal in result) == (
+            "wanted-a",
+            "wanted-b",
+        )
+        selects = [
+            statement
+            for statement in statements
+            if statement.startswith("SELECT * FROM signals")
+        ]
+        assert len(selects) == 1
+        assert "WHERE signal_id IN" in selects[0]
+        plan = ledger.connection.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM signals WHERE signal_id IN (?, ?)",
+            ("wanted-a", "wanted-b"),
+        ).fetchall()
+        assert any("SEARCH signals USING INDEX" in row[3] for row in plan)
+    finally:
+        ledger.connection.set_trace_callback(None)
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     ("signal_ids", "signals", "message"),
     [

@@ -722,9 +722,26 @@ class PortfolioLedger:
         self, intent_id: str, occurred_at: datetime, reason: str
     ) -> OrderIntent:
         """Durably terminalize a pending intent after a current risk rejection."""
+        return self._terminalize_intent(intent_id, "rejected", occurred_at, reason)
+
+    def cancel_intent(
+        self, intent_id: str, occurred_at: datetime, reason: str
+    ) -> OrderIntent:
+        """Durably terminalize an intent after broker-confirmed cancellation."""
+        return self._terminalize_intent(intent_id, "cancelled", occurred_at, reason)
+
+    def _terminalize_intent(
+        self,
+        intent_id: str,
+        status: str,
+        occurred_at: datetime,
+        reason: str,
+    ) -> OrderIntent:
         self._require_timezone_aware(occurred_at, "occurred_at")
+        if status not in {"rejected", "cancelled"}:
+            raise ValueError(f"unsupported terminal intent status {status}")
         if not reason:
-            raise ValueError("intent rejection reason is required")
+            raise ValueError(f"intent {status} reason is required")
         with self.transaction():
             row = self._connection.execute(
                 "SELECT * FROM order_intents WHERE intent_id = ? AND cohort_id = ?",
@@ -732,36 +749,40 @@ class PortfolioLedger:
             ).fetchone()
             if row is None:
                 raise ValueError(f"unknown order intent {intent_id}")
-            if row["status"] == "rejected":
+            if row["status"] == status:
                 transition = self._connection.execute(
                     """SELECT occurred_at, reason FROM order_status_transitions
-                       WHERE intent_id = ? AND status = 'rejected'""",
-                    (intent_id,),
+                       WHERE intent_id = ? AND status = ?""",
+                    (intent_id, status),
                 ).fetchone()
                 if (
                     transition is None
                     or transition["occurred_at"] != self._encode(occurred_at)
                     or transition["reason"] != reason
                 ):
+                    replay_label = (
+                        "rejection" if status == "rejected" else "cancellation"
+                    )
                     raise LedgerConflictError(
-                        f"conflicting rejection replay for intent {intent_id}"
+                        f"conflicting {replay_label} replay for intent {intent_id}"
                     )
                 return self._intent_from_row(row)
             if row["status"] != "pending":
                 raise ValueError(
-                    f"cannot reject terminal intent {intent_id}/{row['status']}"
+                    f"cannot {status} terminal intent {intent_id}/{row['status']}"
                 )
             self._connection.execute(
-                "UPDATE order_intents SET status = 'rejected' WHERE intent_id = ?",
-                (intent_id,),
+                "UPDATE order_intents SET status = ? WHERE intent_id = ?",
+                (status, intent_id),
             )
             self._connection.execute(
                 """INSERT INTO order_status_transitions
                    (transition_id, intent_id, status, occurred_at, reason)
-                   VALUES (?, ?, 'rejected', ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?)""",
                 (
-                    stable_id("order_status", intent_id, "rejected", reason),
+                    stable_id("order_status", intent_id, status, reason),
                     intent_id,
+                    status,
                     self._encode(occurred_at),
                     reason,
                 ),
@@ -770,7 +791,7 @@ class PortfolioLedger:
                 "SELECT * FROM order_intents WHERE intent_id = ?", (intent_id,)
             ).fetchone()
             if updated is None:  # pragma: no cover - same transaction invariant.
-                raise RuntimeError("rejected intent disappeared")
+                raise RuntimeError(f"{status} intent disappeared")
             return self._intent_from_row(updated)
 
     def intent(self, intent_id: str) -> OrderIntent | None:
@@ -1099,6 +1120,18 @@ class PortfolioLedger:
             values,
         ).fetchall()
         return [self._signal_from_row(row) for row in rows]
+
+    def signals_by_ids(self, signal_ids: tuple[str, ...]) -> tuple[SignalRecord, ...]:
+        """Read only the requested signal identities in deterministic order."""
+        if not signal_ids:
+            return ()
+        placeholders = ", ".join("?" for _ in signal_ids)
+        rows = self._connection.execute(
+            f"SELECT * FROM signals WHERE signal_id IN ({placeholders}) "
+            "ORDER BY signal_id",
+            signal_ids,
+        ).fetchall()
+        return tuple(self._signal_from_row(row) for row in rows)
 
     def read_fills(
         self,

@@ -64,9 +64,19 @@ class TestIntegrationShortPipeline:
                 "AAPL", "short", decided, decided, date(2026, 7, 31),
                 Decimal("150"), decided, "evidence",
             )
+            second_signal = SignalRecord(
+                "congress-short-signal", "epoch", "policy", "congress-event",
+                "congressional_trades", "AAPL", "short", decided, decided,
+                date(2026, 7, 31), Decimal("150"), decided, "congress-evidence",
+            )
             ledger.record_signal(signal)
+            ledger.record_signal(second_signal)
             intent = bridge.stage_intent(
-                rec, (signal,), ledger.account_state(), decided, date(2026, 8, 3)
+                rec,
+                (signal, second_signal),
+                ledger.account_state(),
+                decided,
+                date(2026, 8, 3),
             )
             bar = MarketBar(
                 "AAPL", date(2026, 8, 3), Decimal("150"), Decimal("152"),
