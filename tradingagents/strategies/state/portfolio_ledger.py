@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -50,6 +51,31 @@ class LedgerConflictError(ValueError):
 
 class MissingMarkError(ValueError):
     """An authoritative valuation was attempted without every required mark."""
+
+
+@dataclass(frozen=True)
+class TradeProjectionRecord:
+    """Typed, read-only lot/fill view for compatibility projections."""
+
+    trade_id: str
+    signal_ids: tuple[str, ...]
+    intent_id: str
+    execution_id: str
+    exit_fill_ids: tuple[str, ...]
+    strategy: str
+    ticker: str
+    direction: str
+    entry_session: date
+    entry_price: Decimal
+    shares: int
+    open_shares: int
+    status: str
+    exit_session: date | None
+    exit_price: Decimal | None
+    realized_pnl: Decimal
+    slippage_cost: Decimal
+    commission_cost: Decimal
+    other_fees: Decimal
 
 
 # All schema statements are complete so initialization is deterministic and
@@ -387,6 +413,34 @@ class PortfolioLedger:
     def connection(self) -> sqlite3.Connection:
         """Expose the connection for bounded administrative inspection/tests."""
         return self._connection
+
+    @classmethod
+    def open_existing(cls, path: Path) -> PortfolioLedger:
+        """Open an initialized ledger using its persisted cohort and opening cash."""
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            cohort_row = connection.execute(
+                "SELECT metadata_value FROM schema_metadata WHERE metadata_key = 'cohort_id'"
+            ).fetchone()
+            if cohort_row is None:
+                raise ValueError(f"not an initialized PortfolioLedger: {path}")
+            cohort_id = str(cohort_row["metadata_value"])
+            cash_row = connection.execute(
+                """SELECT amount FROM cash_events
+                   WHERE cohort_id = ? AND event_type = 'opening'
+                   ORDER BY cash_event_id LIMIT 1""",
+                (cohort_id,),
+            ).fetchone()
+            if cash_row is None:
+                raise ValueError(f"ledger has no opening cash event: {path}")
+            initial_cash = Decimal(str(cash_row["amount"]))
+        finally:
+            connection.close()
+        return cls(path, cohort_id, initial_cash)
 
     def close(self) -> None:
         self._connection.close()
@@ -2206,6 +2260,157 @@ class PortfolioLedger:
             values,
         ).fetchall()
         return [self._fill_from_row(row) for row in rows]
+
+    def opening_cash(self) -> Decimal:
+        """Return the immutable opening allocation for this cohort."""
+        row = self._connection.execute(
+            """SELECT amount FROM cash_events
+               WHERE cohort_id = ? AND event_type = 'opening'
+               ORDER BY cash_event_id LIMIT 1""",
+            (self.cohort_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerConflictError(f"missing opening cash for {self.cohort_id}")
+        return _decimal(row["amount"])
+
+    def read_trade_projections(self) -> list[TradeProjectionRecord]:
+        """Return deterministic joined lot/fill records without exposing SQLite."""
+        lot_rows = self._connection.execute(
+            """SELECT l.*, f.fill_id AS entry_fill_id,
+                      f.session AS entry_fill_session,
+                      f.fill_price AS entry_fill_price,
+                      f.slippage AS entry_slippage,
+                      f.commission AS entry_commission,
+                      f.other_fees AS entry_other_fees,
+                      i.intent_id AS opening_intent_id
+               FROM lots l
+               JOIN fills f ON f.fill_id = l.fill_id
+               JOIN order_intents i ON i.intent_id = f.intent_id
+               WHERE l.cohort_id = ?
+               ORDER BY f.session, f.fill_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        if not lot_rows:
+            return []
+
+        signal_rows = self._connection.execute(
+            """SELECT isg.intent_id, isg.signal_id, isg.signal_order,
+                      s.strategy, s.ticker
+               FROM intent_signals isg
+               JOIN signals s ON s.signal_id = isg.signal_id
+               JOIN order_intents i ON i.intent_id = isg.intent_id
+               WHERE i.cohort_id = ?
+               ORDER BY isg.intent_id, isg.signal_order, isg.signal_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        signals_by_intent: dict[str, list[sqlite3.Row]] = {}
+        for row in signal_rows:
+            signals_by_intent.setdefault(row["intent_id"], []).append(row)
+
+        closure_rows = self._connection.execute(
+            """SELECT lc.closure_id, lc.lot_id, lc.quantity, lc.realized_pnl,
+                      f.fill_id, f.session, f.effective_at, f.fill_price,
+                      f.quantity AS fill_quantity, f.slippage, f.commission,
+                      f.other_fees
+               FROM lot_closures lc
+               JOIN lots l ON l.lot_id = lc.lot_id
+               JOIN fills f ON f.fill_id = lc.fill_id
+               WHERE l.cohort_id = ?
+               ORDER BY f.session, f.fill_id, lc.lot_id, lc.closure_id""",
+            (self.cohort_id,),
+        ).fetchall()
+        closures_by_lot: dict[str, list[sqlite3.Row]] = {}
+        closures_by_fill: dict[str, list[sqlite3.Row]] = {}
+        for row in closure_rows:
+            closures_by_lot.setdefault(row["lot_id"], []).append(row)
+            closures_by_fill.setdefault(row["fill_id"], []).append(row)
+
+        allocated_costs: dict[tuple[str, str], tuple[Decimal, Decimal, Decimal]] = {}
+        for fill_id, rows in closures_by_fill.items():
+            allocated = [Decimal("0"), Decimal("0"), Decimal("0")]
+            totals = [
+                _decimal(rows[0]["slippage"]),
+                _decimal(rows[0]["commission"]),
+                _decimal(rows[0]["other_fees"]),
+            ]
+            fill_quantity = int(rows[0]["fill_quantity"])
+            for index, row in enumerate(rows):
+                if index == len(rows) - 1:
+                    amounts = tuple(
+                        total - used for total, used in zip(totals, allocated)
+                    )
+                else:
+                    ratio = Decimal(int(row["quantity"])) / Decimal(fill_quantity)
+                    amounts = tuple(total * ratio for total in totals)
+                    allocated = [
+                        used + amount for used, amount in zip(allocated, amounts)
+                    ]
+                allocated_costs[(fill_id, row["lot_id"])] = amounts
+
+        records: list[TradeProjectionRecord] = []
+        for lot in lot_rows:
+            intent_id = str(lot["opening_intent_id"])
+            signals = signals_by_intent.get(intent_id, [])
+            if not signals:
+                raise LedgerConflictError(f"opening intent {intent_id} has no signals")
+            ticker = str(lot["ticker"])
+            if any(str(signal["ticker"]) != ticker for signal in signals):
+                raise LedgerConflictError(
+                    f"ambiguous ticker provenance for {intent_id}"
+                )
+
+            closures = closures_by_lot.get(lot["lot_id"], [])
+            realized_pnl = sum(
+                (_decimal(row["realized_pnl"]) for row in closures), Decimal("0")
+            )
+            closed_qty = sum(int(row["quantity"]) for row in closures)
+            exit_price = None
+            exit_session = None
+            if closed_qty:
+                exit_price = sum(
+                    (
+                        _decimal(row["fill_price"]) * Decimal(int(row["quantity"]))
+                        for row in closures
+                    ),
+                    Decimal("0"),
+                ) / Decimal(closed_qty)
+                exit_session = _date(closures[-1]["session"])
+
+            costs = [
+                _decimal(lot["entry_slippage"]),
+                _decimal(lot["entry_commission"]),
+                _decimal(lot["entry_other_fees"]),
+            ]
+            for closure in closures:
+                amounts = allocated_costs[(closure["fill_id"], lot["lot_id"])]
+                costs = [total + amount for total, amount in zip(costs, amounts)]
+
+            records.append(
+                TradeProjectionRecord(
+                    trade_id=str(lot["entry_fill_id"]),
+                    signal_ids=tuple(str(row["signal_id"]) for row in signals),
+                    intent_id=intent_id,
+                    execution_id=str(lot["entry_fill_id"]),
+                    exit_fill_ids=tuple(
+                        dict.fromkeys(str(row["fill_id"]) for row in closures)
+                    ),
+                    strategy=str(signals[0]["strategy"]),
+                    ticker=ticker,
+                    direction=str(lot["direction"]),
+                    entry_session=_date(lot["opened_session"]),
+                    entry_price=_decimal(lot["entry_price"]),
+                    shares=int(lot["original_qty"]),
+                    open_shares=int(lot["open_qty"]),
+                    status="open" if int(lot["open_qty"]) else "closed",
+                    exit_session=exit_session,
+                    exit_price=exit_price,
+                    realized_pnl=realized_pnl,
+                    slippage_cost=costs[0],
+                    commission_cost=costs[1],
+                    other_fees=costs[2],
+                )
+            )
+        return records
 
     def accrue_borrow(
         self,

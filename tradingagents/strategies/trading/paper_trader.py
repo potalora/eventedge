@@ -3,6 +3,7 @@
 Records paper trades from paper-trade strategies, tracks them against
 real prices, and computes performance metrics.
 """
+
 from __future__ import annotations
 
 import logging
@@ -23,6 +24,16 @@ class PaperTrader:
     def __init__(self, state: StateManager) -> None:
         self.state = state
 
+    def _require_legacy_accounting(self) -> None:
+        if self.state.has_portfolio_ledger:
+            raise RuntimeError(
+                "PaperTrader is read-only when PortfolioLedger is authoritative"
+            )
+
+    def project(self) -> list[dict]:
+        """Return the current ledger-backed compatibility trade view."""
+        return self.state.load_paper_trades()
+
     def open_trade(
         self,
         strategy: str,
@@ -39,6 +50,7 @@ class PaperTrader:
         is_exploration: bool = False,
     ) -> str:
         """Open a new paper trade and return its trade_id."""
+        self._require_legacy_accounting()
         trade = {
             "strategy": strategy,
             "ticker": ticker,
@@ -78,6 +90,7 @@ class PaperTrader:
         Returns:
             List of trades that were closed.
         """
+        self._require_legacy_accounting()
         if current_date is None:
             current_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -133,15 +146,17 @@ class PaperTrader:
                     exit_date=current_date,
                     exit_reason=reason,
                 )
-                closed.append({
-                    "trade_id": trade["trade_id"],
-                    "strategy": strategy_name,
-                    "ticker": ticker,
-                    "exit_reason": reason,
-                    "pnl_pct": (current_price - entry_price) / entry_price
-                    if entry_price > 0
-                    else 0,
-                })
+                closed.append(
+                    {
+                        "trade_id": trade["trade_id"],
+                        "strategy": strategy_name,
+                        "ticker": ticker,
+                        "exit_reason": reason,
+                        "pnl_pct": (current_price - entry_price) / entry_price
+                        if entry_price > 0
+                        else 0,
+                    }
+                )
 
         return closed
 
@@ -153,6 +168,7 @@ class PaperTrader:
         exit_reason: str,
     ) -> None:
         """Close a paper trade, computing PnL fields for the learning loop."""
+        self._require_legacy_accounting()
         # Look up the trade to compute PnL
         all_trades = self.state.load_paper_trades(status="open")
         trade = next((t for t in all_trades if t.get("trade_id") == trade_id), None)
@@ -182,7 +198,10 @@ class PaperTrader:
         )
         logger.info(
             "Closed paper trade %s: reason=%s pnl=%.2f (%.2f%%)",
-            trade_id, exit_reason, pnl, pnl_pct * 100,
+            trade_id,
+            exit_reason,
+            pnl,
+            pnl_pct * 100,
         )
 
     def get_performance(self, strategy: str | None = None) -> dict:
@@ -293,7 +312,9 @@ class PaperTrader:
             "avg_pnl_pct": mean_r,
             "sharpe": mean_r / std_r if std_r > 0 else 0.0,
             "total_return": sum(returns),
-            "avg_holding_days": statistics.mean(holding_days_list) if holding_days_list else 0.0,
+            "avg_holding_days": statistics.mean(holding_days_list)
+            if holding_days_list
+            else 0.0,
         }
 
     def get_strategy_vintage_summary(self, strategy: str) -> list[dict]:
@@ -325,26 +346,28 @@ class PaperTrader:
                         pnl_pct = -pnl_pct
                     returns.append(pnl_pct)
 
-            win_rate = sum(1 for r in returns if r > 0) / len(returns) if returns else 0.0
+            win_rate = (
+                sum(1 for r in returns if r > 0) / len(returns) if returns else 0.0
+            )
             mean_r = statistics.mean(returns) if returns else 0.0
             std_r = statistics.stdev(returns) if len(returns) > 1 else 0.0
 
             # Get created_at from the earliest trade's opened_at
-            created_at = min(
-                (t.get("opened_at", "") for t in trades), default=""
-            )
+            created_at = min((t.get("opened_at", "") for t in trades), default="")
 
-            summaries.append({
-                "vintage_id": vid,
-                "strategy": strategy,
-                "num_trades": len(trades),
-                "num_completed": len(closed),
-                "win_rate": win_rate,
-                "sharpe": mean_r / std_r if std_r > 0 else 0.0,
-                "avg_pnl_pct": mean_r,
-                "created_at": created_at,
-                "is_exploration": trades[0].get("is_exploration", False),
-            })
+            summaries.append(
+                {
+                    "vintage_id": vid,
+                    "strategy": strategy,
+                    "num_trades": len(trades),
+                    "num_completed": len(closed),
+                    "win_rate": win_rate,
+                    "sharpe": mean_r / std_r if std_r > 0 else 0.0,
+                    "avg_pnl_pct": mean_r,
+                    "created_at": created_at,
+                    "is_exploration": trades[0].get("is_exploration", False),
+                }
+            )
 
         summaries.sort(key=lambda s: s["created_at"], reverse=True)
         return summaries

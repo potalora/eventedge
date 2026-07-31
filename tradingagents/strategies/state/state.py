@@ -4,6 +4,7 @@ Stores paper trades, generation results, and leaderboards
 as JSON files. SQLite is still used for historical strategy DB, but runtime
 state uses simple JSON for simplicity and debuggability.
 """
+
 from __future__ import annotations
 
 import json
@@ -90,8 +91,25 @@ class StateManager:
     def _paper_trades_path(self) -> Path:
         return self.state_dir / "paper_trades.json"
 
+    @property
+    def portfolio_ledger_path(self) -> Path:
+        return self.state_dir / "portfolio.db"
+
+    @property
+    def has_portfolio_ledger(self) -> bool:
+        return self.portfolio_ledger_path.is_file()
+
+    @staticmethod
+    def _ledger_mutation_error() -> RuntimeError:
+        return RuntimeError(
+            "PortfolioLedger is authoritative; legacy JSON accounting mutations "
+            "are disabled"
+        )
+
     def save_paper_trade(self, trade: dict) -> None:
         """Append a paper trade to the paper trades file."""
+        if self.has_portfolio_ledger:
+            raise self._ledger_mutation_error()
         trades = self.load_paper_trades()
         if "trade_id" not in trade:
             trade["trade_id"] = str(uuid.uuid4())
@@ -101,13 +119,27 @@ class StateManager:
             trade["status"] = "open"
         trades.append(trade)
         _atomic_write(self._paper_trades_path, trades)
-        logger.info("Saved paper trade %s for %s", trade["trade_id"], trade.get("ticker", "?"))
+        logger.info(
+            "Saved paper trade %s for %s", trade["trade_id"], trade.get("ticker", "?")
+        )
 
     def load_paper_trades(
         self, strategy: str | None = None, status: str | None = None
     ) -> list[dict]:
         """Load paper trades, optionally filtered by strategy and/or status."""
-        trades = _load_json(self._paper_trades_path, [])
+        if self.has_portfolio_ledger:
+            from tradingagents.strategies.state.compatibility_projection import (
+                project_paper_trades,
+            )
+            from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+            ledger = PortfolioLedger.open_existing(self.portfolio_ledger_path)
+            try:
+                trades = project_paper_trades(ledger, self._paper_trades_path)
+            finally:
+                ledger.close()
+        else:
+            trades = _load_json(self._paper_trades_path, [])
         if strategy is not None:
             trades = [t for t in trades if t.get("strategy") == strategy]
         if status is not None:
@@ -116,6 +148,8 @@ class StateManager:
 
     def update_paper_trade(self, trade_id: str, updates: dict) -> None:
         """Update a specific paper trade (e.g., close it)."""
+        if self.has_portfolio_ledger:
+            raise self._ledger_mutation_error()
         trades = _load_json(self._paper_trades_path, [])
         found = False
         for trade in trades:
