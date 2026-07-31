@@ -3,6 +3,7 @@
 Free tier: 60 calls/min. Used by P1/P2 (earnings call analysis)
 and P6 (supply chain disruption news).
 """
+
 from __future__ import annotations
 
 import logging
@@ -13,6 +14,7 @@ import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -65,6 +67,32 @@ _DEFAULT_RELIABILITY: dict[str, Any] = {
         "jitter_s": 0.5,
     },
 }
+
+
+def _company_news_publication_time(value: object) -> str | None:
+    """Normalize Finnhub's epoch publication value to one aware UTC timestamp."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return None
+        return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, str) and not value.isdigit():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc).isoformat()
+    try:
+        epoch_seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(epoch_seconds) or epoch_seconds <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -204,9 +232,7 @@ class FinnhubSource:
         self._cache: dict[str, Any] = {}
         self._client = None
         reliability = (
-            reliability_config
-            if isinstance(reliability_config, Mapping)
-            else {}
+            reliability_config if isinstance(reliability_config, Mapping) else {}
         )
         self._policies = {
             endpoint: _build_policy(reliability, endpoint)
@@ -236,6 +262,7 @@ class FinnhubSource:
     def _get_client(self):
         if self._client is None:
             import finnhub
+
             self._client = finnhub.Client(api_key=self._api_key)
         return self._client
 
@@ -332,7 +359,9 @@ class FinnhubSource:
             seen.add(id(current))
             status = getattr(current, "status_code", None)
             if status is None:
-                status = getattr(getattr(current, "response", None), "status_code", None)
+                status = getattr(
+                    getattr(current, "response", None), "status_code", None
+                )
             try:
                 if status is not None:
                     return int(status)
@@ -362,17 +391,18 @@ class FinnhubSource:
     def _is_retryable(cls, exc: BaseException, policy: _RetryPolicy) -> bool:
         status = cls._status_code(exc)
         message = str(exc).lower()
-        if status == 429 or (status is None and ("429" in message or "limit reached" in message)):
-            return True
-        if (
-            policy.retry_server_errors
-            and status in _RETRYABLE_SERVER_STATUS_CODES
+        if status == 429 or (
+            status is None and ("429" in message or "limit reached" in message)
         ):
+            return True
+        if policy.retry_server_errors and status in _RETRYABLE_SERVER_STATUS_CODES:
             return True
         return policy.retry_transport and cls._is_transport_error(exc)
 
     @staticmethod
-    def _request_timeout(policy: _RetryPolicy, remaining_s: float) -> tuple[float, float]:
+    def _request_timeout(
+        policy: _RetryPolicy, remaining_s: float
+    ) -> tuple[float, float]:
         """Cap inactivity timeouts to the remaining cooperative budget.
 
         These values do not form a total request deadline. In particular,
@@ -483,7 +513,9 @@ class FinnhubSource:
                 self._sleep(delay)
 
         if last_exc is None:
-            last_exc = TimeoutError("Finnhub request deadline elapsed before an attempt")
+            last_exc = TimeoutError(
+                "Finnhub request deadline elapsed before an attempt"
+            )
         logger.error(
             "Finnhub request exhausted strategy=%s endpoint=%s symbol=%s "
             "attempt=%d/%d status=%s error_type=%s error_message=%s elapsed_s=%.3f",
@@ -558,10 +590,7 @@ class FinnhubSource:
             )
             events = result.get("earningsCalendar", [])
             # Filter to those with actual results (already reported)
-            reported = [
-                e for e in events
-                if e.get("epsActual") is not None
-            ]
+            reported = [e for e in events if e.get("epsActual") is not None]
             self._cache[cache_key] = reported
             logger.info(
                 "Finnhub fetch complete strategy=earnings_call endpoint=earnings_calendar "
@@ -646,8 +675,9 @@ class FinnhubSource:
                 symbol=symbol,
                 deadline=workflow_deadline,
             )
-            result = [
-                {
+            result = []
+            for n in news or []:
+                item = {
                     "headline": n.get("headline", ""),
                     "summary": n.get("summary", ""),
                     "source": n.get("source", ""),
@@ -655,8 +685,10 @@ class FinnhubSource:
                     "url": n.get("url", ""),
                     "category": n.get("category", ""),
                 }
-                for n in (news or [])
-            ]
+                published_at = _company_news_publication_time(n.get("datetime"))
+                if published_at is not None:
+                    item["published_at"] = published_at
+                result.append(item)
             self._cache[cache_key] = result
             return result
         except Exception as exc:  # noqa: BLE001 - graceful source degradation boundary
@@ -745,8 +777,8 @@ class FinnhubSource:
             if peers:
                 chains[symbol] = peers
 
-        deadline_exhausted = (
-            attempted < len(unique_symbols) or not self._has_budget(workflow_deadline)
+        deadline_exhausted = attempted < len(unique_symbols) or not self._has_budget(
+            workflow_deadline
         )
         logger.info(
             "Finnhub batch complete strategy=supply_chain endpoint=company_peers "
@@ -761,7 +793,10 @@ class FinnhubSource:
         return chains
 
     def fetch_earnings_transcript(
-        self, symbol: str, year: int, quarter: int,
+        self,
+        symbol: str,
+        year: int,
+        quarter: int,
     ) -> str | None:
         """Fetch real earnings call transcript from Finnhub.
 
@@ -778,7 +813,11 @@ class FinnhubSource:
         except Exception as exc:
             # 403 / payment-required / network errors
             logger.debug(
-                "Transcript unavailable for %s %dQ%d: %s", symbol, year, quarter, exc,
+                "Transcript unavailable for %s %dQ%d: %s",
+                symbol,
+                year,
+                quarter,
+                exc,
             )
             return None
 
@@ -786,7 +825,9 @@ class FinnhubSource:
             return None
 
         # Response is a list of segments: [{name, speech}, ...]
-        transcript = result if isinstance(result, list) else result.get("transcript", [])
+        transcript = (
+            result if isinstance(result, list) else result.get("transcript", [])
+        )
         if not transcript:
             return None
 

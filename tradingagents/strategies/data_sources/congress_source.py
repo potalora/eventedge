@@ -106,6 +106,7 @@ def _normalize_trade(raw: dict[str, Any]) -> dict[str, Any]:
         "party": politician.get("party", ""),
         "state": politician.get("_stateId", ""),
         "pub_date": raw.get("pubDate", ""),
+        "publication_date": raw.get("pubDate", ""),
         "owner": raw.get("owner", ""),
         "comment": raw.get("comment", ""),
     }
@@ -132,6 +133,7 @@ def _normalize_fmp_trade(raw: dict[str, Any], chamber: str) -> dict[str, Any]:
         "party": "",
         "state": raw.get("district", ""),
         "pub_date": raw.get("disclosureDate", ""),
+        "publication_date": raw.get("disclosureDate", ""),
         "owner": raw.get("owner", ""),
         "comment": raw.get("comment", ""),
         "source_url": raw.get("link", ""),
@@ -183,6 +185,7 @@ class CongressSource:
         """Congress data is available if requests is installed."""
         try:
             import requests  # noqa: F401
+
             return True
         except ImportError:
             return False
@@ -231,7 +234,9 @@ class CongressSource:
                     continue
                 trades.extend(_normalize_fmp_trade(item, chamber) for item in payload)
             except Exception:
-                logger.error("Failed to fetch FMP %s disclosures", chamber, exc_info=True)
+                logger.error(
+                    "Failed to fetch FMP %s disclosures", chamber, exc_info=True
+                )
 
         if trades:
             self._cache["fmp_latest"] = trades
@@ -292,10 +297,14 @@ class CongressSource:
             all_trades.extend(trades)
 
         self._cache["all_trades"] = all_trades
-        logger.info("Loaded %d congressional trades from CapitolTrades", len(all_trades))
+        logger.info(
+            "Loaded %d congressional trades from CapitolTrades", len(all_trades)
+        )
         return all_trades
 
-    def get_recent_trades(self, days_back: int = 30, as_of: str | None = None) -> list[dict[str, Any]]:
+    def get_recent_trades(
+        self, days_back: int = 30, as_of: str | None = None
+    ) -> list[dict[str, Any]]:
         """Filter trades to only those within *days_back* days of *as_of* (or today).
 
         Args:

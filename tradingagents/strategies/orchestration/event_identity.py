@@ -77,11 +77,13 @@ def _availability_timestamp(value: object, *, date_only: bool, field: str) -> da
 
 def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
     """Resolve when source evidence became available without using economic dates."""
-    if metadata.get("observed_at") not in (None, ""):
-        return _availability_timestamp(
-            metadata["observed_at"], date_only=False, field="observed_at"
-        )
     values: list[datetime] = []
+    if metadata.get("observed_at") not in (None, ""):
+        values.append(
+            _availability_timestamp(
+                metadata["observed_at"], date_only=False, field="observed_at"
+            )
+        )
     for field, date_only in _AVAILABILITY_FIELDS.get(strategy, ()):
         if metadata.get(field) not in (None, ""):
             values.append(

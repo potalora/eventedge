@@ -93,7 +93,10 @@ class CongressionalTradesStrategy:
                 trade.get("transaction_date", ""),
                 trade.get("amount", ""),
                 trade.get("owner", ""),
-                trade.get("publication_date") or trade.get("disclosure_date", ""),
+                trade.get("publication_date")
+                or trade.get("disclosure_date")
+                or trade.get("filing_date")
+                or trade.get("pub_date", ""),
                 ticker,
                 tx_type,
             )
@@ -131,7 +134,8 @@ class CongressionalTradesStrategy:
                     "date": trade.get("transaction_date", ""),
                     "publication_date": trade.get("publication_date")
                     or trade.get("disclosure_date")
-                    or trade.get("filing_date", ""),
+                    or trade.get("filing_date")
+                    or trade.get("pub_date", ""),
                     "trade_key": trade_key,
                 }
             )
@@ -166,7 +170,8 @@ class CongressionalTradesStrategy:
                     "date": trade.get("transaction_date", ""),
                     "publication_date": trade.get("publication_date")
                     or trade.get("disclosure_date")
-                    or trade.get("filing_date", ""),
+                    or trade.get("filing_date")
+                    or trade.get("pub_date", ""),
                     "trade_key": trade_key,
                 }
             )

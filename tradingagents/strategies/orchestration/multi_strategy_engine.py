@@ -1195,6 +1195,11 @@ class MultiStrategyEngine:
                         f"[{n.get('source', 'Unknown')}]: {n.get('headline', '')} — {n.get('summary', '')}"
                         for n in news[:5]
                     )
+                    publication_times = [
+                        str(article["published_at"])
+                        for article in news[:5]
+                        if article.get("published_at")
+                    ]
                     transcripts.append(
                         {
                             "symbol": symbol,
@@ -1205,6 +1210,11 @@ class MultiStrategyEngine:
                             "eps_estimate": e.get("epsEstimate"),
                             "revenue_actual": e.get("revenueActual"),
                             "revenue_estimate": e.get("revenueEstimate"),
+                            **(
+                                {"published_at": max(publication_times)}
+                                if publication_times
+                                else {}
+                            ),
                         }
                     )
             result["transcripts"] = transcripts

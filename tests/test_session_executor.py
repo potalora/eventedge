@@ -4,7 +4,7 @@ import json
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -223,6 +223,47 @@ def _open_long(
         Decimal("0"),
     )
     ledger.apply_fill(intent, fill)
+    return intent
+
+
+def _resting_stop(
+    ledger,
+    ticker,
+    eligible_session,
+    qty,
+    *,
+    reference_session=date(2026, 7, 30),
+):
+    signal = _signal(ticker, reference_session)
+    ledger.record_signal(signal)
+    lot = ledger.connection.execute(
+        """SELECT lot_id, open_qty FROM lots
+           WHERE cohort_id = ? AND ticker = ? AND open_qty >= ?
+           ORDER BY opened_session, lot_id LIMIT 1""",
+        (ledger.cohort_id, ticker, qty),
+    ).fetchone()
+    assert lot is not None
+    intent = OrderIntent(
+        stable_id(
+            "resting_stop",
+            ledger.cohort_id,
+            ticker,
+            eligible_session,
+            qty,
+            reference_session,
+        ),
+        (signal.signal_id,),
+        ledger.cohort_id,
+        "sell",
+        qty,
+        session_close(reference_session),
+        eligible_session,
+        "resting_stop",
+        "pending",
+        Decimal("101"),
+        None,
+    )
+    ledger.stage_exit_intent(intent, ((str(lot["lot_id"]), qty),))
     return intent
 
 
@@ -639,6 +680,66 @@ def test_resume_rejects_due_intent_inserted_after_bound_phase_commit(
         assert not resumed.valid
         assert "governed session state conflict" in resumed.invalid_reason
         assert ledger.intent(injected.intent_id).status != "filled"
+        assert ledger.read_snapshots(MONDAY, MONDAY) == []
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("crash_phase", "scenario"),
+    [
+        ("apply_corporate_actions", "action"),
+        ("execute_exits", "exit"),
+        ("execute_entries", "entry"),
+    ],
+)
+def test_resume_rejects_prior_session_allocated_resting_stop_and_cancels_it(
+    tmp_path, crash_phase, scenario
+):
+    ledger = _ledger(tmp_path, cash="3000")
+    try:
+        _open_long(ledger, "AAPL", 4)
+        actions = []
+        if scenario == "action":
+            actions = [
+                CorporateAction(
+                    "dividend-aapl-prior-stop",
+                    "AAPL",
+                    MONDAY,
+                    "cash_dividend",
+                    None,
+                    Decimal("1"),
+                    "fixture-action",
+                    PROCESSED,
+                    True,
+                )
+            ]
+        elif scenario == "exit":
+            _intent(ledger, "AAPL", "sell", MONDAY, 1)
+        else:
+            _intent(ledger, "AAPL", "buy", MONDAY, 1)
+        source = FakePriceSource(
+            {("AAPL", MONDAY): _bar("AAPL", open_="100", close="101")},
+            actions=actions,
+        )
+
+        def crash_after_commit(phase):
+            if phase == crash_phase:
+                raise RuntimeError(f"crash after {phase}")
+
+        with pytest.raises(RuntimeError, match=f"crash after {crash_phase}"):
+            SessionExecutor(
+                ledger, _config(), after_phase_commit=crash_after_commit
+            ).execute_open_and_mark(MONDAY, "epoch", source, {}, PROCESSED)
+
+        injected = _resting_stop(ledger, "AAPL", FRIDAY, 1)
+        resumed = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", source, {}, PROCESSED
+        )
+
+        assert not resumed.valid
+        assert "governed session state conflict" in resumed.invalid_reason
+        assert ledger.intent(injected.intent_id).status == "cancelled"
         assert ledger.read_snapshots(MONDAY, MONDAY) == []
     finally:
         ledger.close()
@@ -1576,6 +1677,69 @@ def test_split_scales_every_owned_exit_allocation_and_replays(
         ledger.close()
 
 
+def test_identical_duplicate_three_for_two_split_applies_once_and_replays(tmp_path):
+    ledger = _ledger(tmp_path, cash="3000")
+    try:
+        _open_long(ledger, "AAPL", 2)
+        split = CorporateAction(
+            "split-aapl-3-for-2-once",
+            "AAPL",
+            MONDAY,
+            "split",
+            Decimal("1.5"),
+            None,
+            "fixture-action",
+            PROCESSED,
+            True,
+        )
+        source = FakePriceSource(
+            {("AAPL", MONDAY): _bar("AAPL", open_="66", close="67")},
+            actions=[split, split],
+        )
+
+        first = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", source, {}, PROCESSED
+        )
+
+        assert first.valid
+        assert first.snapshot is not None
+        lot = ledger.connection.execute(
+            "SELECT original_qty, open_qty, entry_price FROM lots"
+        ).fetchone()
+        assert (lot["original_qty"], lot["open_qty"]) == (3, 3)
+        assert Decimal(lot["entry_price"]) == Decimal("100") / Decimal("1.5")
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_actions"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM lot_action_applications"
+            ).fetchone()[0]
+            == 1
+        )
+
+        replay = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", source, {}, PROCESSED
+        )
+        replay_lot = ledger.connection.execute(
+            "SELECT original_qty, open_qty, entry_price FROM lots"
+        ).fetchone()
+        assert replay.valid
+        assert replay.snapshot == first.snapshot
+        assert tuple(replay_lot) == tuple(lot)
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM lot_action_applications"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        ledger.close()
+
+
 def test_split_rejects_fractional_per_lot_allocation_even_when_total_is_integral(
     tmp_path,
 ):
@@ -1733,6 +1897,222 @@ class _NeverExitStrategy:
 
     def check_exit(self, **kwargs):
         return False, ""
+
+
+def _production_finnhub_payload(tmp_path):
+    from tradingagents.strategies.data_sources.finnhub_source import FinnhubSource
+    from tradingagents.strategies.data_sources.registry import DataSourceRegistry
+
+    published_at = datetime(2026, 7, 31, 19, tzinfo=UTC)
+    raw_news = {
+        "headline": "Quantum milestone after supply chain disruption closes factory",
+        "summary": "PQC deadline and quantum-safe migration after shortage",
+        "source": "fixture-wire",
+        "datetime": int(published_at.timestamp()),
+        "url": "https://example.test/production-news-1",
+        "category": "company",
+    }
+    adapter = FinnhubSource(api_key="fixture-key")
+    with (
+        patch.object(adapter, "_wait_for_request_slot", return_value=True),
+        patch.object(adapter, "_call_with_retry", return_value=[raw_news]),
+    ):
+        normalized_news = adapter.fetch_company_news(
+            "CRWD", "2026-07-24", FRIDAY.isoformat()
+        )
+
+    source = MagicMock()
+    source.name = "finnhub"
+    source.is_available.return_value = True
+    source.new_workflow_deadline.return_value = 30.0
+    source.fetch_recent_earnings.return_value = [
+        {
+            "symbol": "AAPL",
+            "date": FRIDAY.isoformat(),
+            "year": 2026,
+            "quarter": 2,
+            "epsActual": 2.0,
+            "epsEstimate": 1.0,
+        }
+    ]
+    source.fetch_earnings_news.side_effect = lambda *args, **kwargs: [
+        dict(item) for item in normalized_news
+    ]
+    source.fetch_company_news.side_effect = lambda *args, **kwargs: [
+        dict(item) for item in normalized_news
+    ]
+    source.fetch_supply_chains.return_value = {}
+    registry = DataSourceRegistry()
+    registry.register(source)
+    fetch_engine = MultiStrategyEngine(
+        config={
+            "autoresearch": {
+                "state_dir": str(tmp_path / "fetch-state"),
+                "total_capital": 1000,
+            }
+        },
+        strategies=[_NeverExitStrategy()],
+        registry=registry,
+        state_manager=StateManager(str(tmp_path / "fetch-state")),
+    )
+    return fetch_engine._fetch_finnhub_data(FRIDAY.isoformat()), normalized_news
+
+
+def _stage_real_strategy_candidate(tmp_path, strategy_name, data):
+    from tradingagents.strategies.modules import get_paper_trade_strategies
+
+    strategy = next(
+        item for item in get_paper_trade_strategies() if item.name == strategy_name
+    )
+    candidates = strategy.screen(
+        data, FRIDAY.isoformat(), strategy.get_default_params("30d")
+    )
+    assert candidates, f"production-shaped {strategy_name} data produced no candidate"
+    candidate = candidates[0]
+    state_dir = str(tmp_path / f"stage-{strategy_name}")
+    config = _config()
+    config["autoresearch"].update({"state_dir": state_dir, "horizon": "30d"})
+    ledger = PortfolioLedger(
+        Path(state_dir) / "portfolio.db", "cohort", Decimal("1000")
+    )
+    try:
+        lifecycle = SessionExecutor(ledger, config).execute_open_and_mark(
+            FRIDAY,
+            "epoch",
+            FakePriceSource(
+                adjusted={
+                    ("SPY", FRIDAY): Decimal("649"),
+                    ("BIL", FRIDAY): Decimal("91"),
+                }
+            ),
+            {},
+            datetime(2026, 7, 31, 22, tzinfo=UTC),
+        )
+        assert lifecycle.snapshot is not None
+        engine = MultiStrategyEngine(
+            config=config,
+            strategies=[strategy],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        shared_signal = {
+            "ticker": candidate.ticker,
+            "direction": candidate.direction,
+            "score": candidate.score,
+            "strategy": strategy_name,
+            "metadata": candidate.metadata,
+        }
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            return_value=[],
+        ):
+            result = engine.screen_and_stage(
+                FRIDAY.isoformat(),
+                {
+                    "_execution_reference_bars": {
+                        candidate.ticker: _bar(candidate.ticker, FRIDAY)
+                    }
+                },
+                [shared_signal],
+                {},
+                {},
+                None,
+                lifecycle.snapshot,
+            )
+        assert len(result["signals"]) == 1
+        assert result["signals"][0]["strategy"] == strategy_name
+    finally:
+        ledger.close()
+
+
+def test_production_finnhub_earnings_normalization_stages_real_candidate(tmp_path):
+    payload, _ = _production_finnhub_payload(tmp_path)
+
+    assert payload["transcripts"][0]["published_at"] == "2026-07-31T19:00:00+00:00"
+    _stage_real_strategy_candidate(tmp_path, "earnings_call", {"finnhub": payload})
+
+
+def test_production_finnhub_supply_chain_normalization_stages_real_candidate(
+    tmp_path,
+):
+    payload, normalized_news = _production_finnhub_payload(tmp_path)
+
+    assert normalized_news[0]["published_at"] == "2026-07-31T19:00:00+00:00"
+    _stage_real_strategy_candidate(tmp_path, "supply_chain", {"finnhub": payload})
+
+
+def test_production_finnhub_quantum_normalization_stages_real_candidate(tmp_path):
+    payload, _ = _production_finnhub_payload(tmp_path)
+
+    assert payload["pqc_news"][0]["published_at"] == "2026-07-31T19:00:00+00:00"
+    _stage_real_strategy_candidate(tmp_path, "quantum_readiness", {"finnhub": payload})
+
+
+def test_production_congress_pub_date_normalization_stages_real_candidate(tmp_path):
+    from tradingagents.strategies.data_sources.congress_source import (
+        _normalize_fmp_trade,
+    )
+
+    normalized = _normalize_fmp_trade(
+        {
+            "symbol": "AAPL",
+            "assetDescription": "Apple Inc.",
+            "transactionDate": "2026-07-25",
+            "disclosureDate": "2026-07-30",
+            "type": "Purchase",
+            "amount": "$15,001 - $50,000",
+            "office": "Member One",
+            "link": "https://example.test/disclosure-1",
+        },
+        "house",
+    )
+
+    assert normalized["publication_date"] == normalized["pub_date"]
+    _stage_real_strategy_candidate(
+        tmp_path,
+        "congressional_trades",
+        {"congress": {"recent_trades": [normalized]}},
+    )
+
+
+def test_production_usaspending_availability_stages_real_candidate(tmp_path):
+    from tradingagents.strategies.data_sources.usaspending_source import (
+        USASpendingSource,
+    )
+
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "results": [
+            {
+                "Award ID": "AWARD-1",
+                "Recipient Name": "Lockheed Martin",
+                "Award Amount": 50_000_000,
+                "Awarding Agency": "DOD",
+                "Start Date": "2026-07-01",
+                "Last Modified Date": "2026-07-30",
+                "Description": "Production contract",
+            }
+        ]
+    }
+    source = USASpendingSource()
+    with patch("requests.post", return_value=response):
+        contracts = source.search_contracts(
+            date_from="2026-07-01", date_to=FRIDAY.isoformat()
+        )
+
+    assert contracts[0]["last_modified_date"] == "2026-07-30"
+    registry = MagicMock()
+    registry.get.side_effect = lambda name: source if name == "usaspending" else None
+    source.get_recent_large_contracts = MagicMock(return_value=contracts)
+    fetch_engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path / "usa-fetch")}},
+        strategies=[_NeverExitStrategy()],
+        registry=registry,
+        state_manager=StateManager(str(tmp_path / "usa-fetch")),
+    )
+    payload = fetch_engine._fetch_usaspending_data(FRIDAY.isoformat())
+    _stage_real_strategy_candidate(tmp_path, "govt_contracts", {"usaspending": payload})
 
 
 def test_exit_specs_cover_each_lot_once_and_replay_without_duplicates(tmp_path):

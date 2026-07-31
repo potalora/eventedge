@@ -597,11 +597,7 @@ class PortfolioLedger:
         """Canonical bounded state governed by the execution phase machine."""
         account = self.account_state()
         due_intents = []
-        intent_rows = self._connection.execute(
-            """SELECT * FROM order_intents
-               WHERE cohort_id = ? AND eligible_session = ? ORDER BY intent_id""",
-            (self.cohort_id, self._encode(session)),
-        ).fetchall()
+        intent_rows = self._due_intent_rows(session)
         for row in intent_rows:
             intent = self._intent_from_row(row)
             signals = self.signals_for_intent(intent.intent_id)
@@ -611,14 +607,15 @@ class PortfolioLedger:
                     "signals": [signal.__dict__ for signal in signals],
                 }
             )
-        allocations = self._connection.execute(
-            """SELECT eil.intent_id, eil.lot_id, eil.quantity
-               FROM exit_intent_lots eil
-               JOIN order_intents i ON i.intent_id = eil.intent_id
-               WHERE i.cohort_id = ? AND i.eligible_session = ?
-               ORDER BY eil.intent_id, eil.lot_id""",
-            (self.cohort_id, self._encode(session)),
-        ).fetchall()
+        allocations = [
+            allocation
+            for intent_row in intent_rows
+            for allocation in self._connection.execute(
+                """SELECT intent_id, lot_id, quantity FROM exit_intent_lots
+                   WHERE intent_id = ? ORDER BY lot_id""",
+                (intent_row["intent_id"],),
+            ).fetchall()
+        ]
 
         def rows(sql: str, parameters: tuple[object, ...]) -> list[dict[str, object]]:
             return [dict(row) for row in self._connection.execute(sql, parameters)]
@@ -1417,8 +1414,9 @@ class PortfolioLedger:
                     (intent.intent_id, lot_id, quantity),
                 )
 
-    def pending_intents(self, session: date) -> list[OrderIntent]:
-        rows = self._connection.execute(
+    def _due_intent_rows(self, session: date) -> list[sqlite3.Row]:
+        """Return the one canonical set of intents executable in ``session``."""
+        return self._connection.execute(
             """SELECT * FROM order_intents
                WHERE cohort_id = ? AND status = 'pending' AND (
                    (price_rule = 'next_session_open' AND eligible_session = ?)
@@ -1427,6 +1425,9 @@ class PortfolioLedger:
                ORDER BY created_at, intent_id""",
             (self.cohort_id, self._encode(session), self._encode(session)),
         ).fetchall()
+
+    def pending_intents(self, session: date) -> list[OrderIntent]:
+        rows = self._due_intent_rows(session)
         return [self._intent_from_row(row) for row in rows]
 
     def reject_intent(
@@ -1893,10 +1894,22 @@ class PortfolioLedger:
     ) -> tuple[str, ...]:
         """Validate a complete action batch against live lot/intent state."""
         errors: list[str] = []
+        unique_actions: list[CorporateAction] = []
+        seen_actions: dict[str, CorporateAction] = {}
+        for action in sorted(actions, key=lambda item: item.action_id):
+            existing_action = seen_actions.get(action.action_id)
+            if existing_action is not None:
+                if existing_action != action:
+                    errors.append(
+                        f"conflicting corporate action identity {action.action_id}"
+                    )
+                continue
+            seen_actions[action.action_id] = action
+            unique_actions.append(action)
         lot_quantities: dict[str, list[Decimal]] = {}
         intent_quantities: dict[str, list[Decimal]] = {}
         allocation_quantities: dict[str, list[Decimal]] = {}
-        for action in actions:
+        for action in unique_actions:
             ticker = action.ticker
             if ticker in lot_quantities:
                 continue
@@ -1922,7 +1935,7 @@ class PortfolioLedger:
                     (intent["intent_id"],),
                 )
             ]
-        for action in sorted(actions, key=lambda item: item.action_id):
+        for action in unique_actions:
             existing = self._connection.execute(
                 "SELECT * FROM corporate_actions WHERE action_id = ?",
                 (action.action_id,),
@@ -2046,13 +2059,7 @@ class PortfolioLedger:
                 raise LedgerConflictError(
                     f"conflicting invalid session run {self.cohort_id}/{session}"
                 )
-            due = self._connection.execute(
-                """SELECT intent_id FROM order_intents
-                   WHERE cohort_id = ? AND status = 'pending'
-                     AND price_rule = 'next_session_open' AND eligible_session = ?
-                   ORDER BY created_at, intent_id""",
-                (self.cohort_id, self._encode(session)),
-            ).fetchall()
+            due = self._due_intent_rows(session)
             for row in due:
                 self._terminalize_intent(
                     row["intent_id"],
@@ -2431,7 +2438,11 @@ class PortfolioLedger:
                         reason,
                     )
                 ]
-            for action in sorted(actions, key=lambda item: item.action_id):
+            unique_actions = {
+                action.action_id: action
+                for action in sorted(actions, key=lambda item: item.action_id)
+            }
+            for action in unique_actions.values():
                 existing = self._connection.execute(
                     "SELECT * FROM corporate_actions WHERE action_id = ?",
                     (action.action_id,),

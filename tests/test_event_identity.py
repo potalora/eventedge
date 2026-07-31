@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
@@ -153,6 +153,18 @@ def test_congressional_transaction_date_cannot_prove_source_availability():
         },
     )
     assert observed.date() == date(2026, 7, 1)
+
+
+def test_active_observation_uses_latest_caller_and_native_availability():
+    observed = canonical_observation_time(
+        "earnings_call",
+        {
+            "observed_at": "2026-07-31T19:00:00+00:00",
+            "published_at": "2026-07-31T20:30:00+00:00",
+        },
+    )
+
+    assert observed == datetime(2026, 7, 31, 20, 30, tzinfo=timezone.utc)
 
 
 def test_all_active_strategy_outputs_carry_usable_source_native_identity():
