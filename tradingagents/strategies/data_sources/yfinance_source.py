@@ -23,7 +23,9 @@ def normalize_tickers(tickers: list[str]) -> list[str]:
 class YFinanceSource:
     """Data source backed by the yfinance library.
 
-    Provides price history, ETF returns, VIX data, and earnings dates.
+    Provides raw price history, ETF returns, VIX data, and earnings dates.
+    Execution and ledger code must use ``YFinancePriceSource.get_daily_bars``
+    rather than this strategy-screen DataFrame interface.
     All results are cached in-memory for the duration of one generation run;
     call ``clear_cache()`` between generations.
     """
@@ -98,7 +100,12 @@ class YFinanceSource:
         try:
             yf_tickers = normalize_tickers(tickers)
             df = yf.download(
-                yf_tickers, start=start, end=end, progress=False, timeout=30,
+                yf_tickers,
+                start=start,
+                end=end,
+                auto_adjust=False,
+                progress=False,
+                timeout=30,
             )
             if df.empty:
                 logger.warning("yfinance returned empty DataFrame for %s", tickers)
@@ -176,7 +183,14 @@ class YFinanceSource:
         import yfinance as yf
 
         try:
-            df = yf.download("^VIX", start=start, end=end, progress=False, timeout=30)
+            df = yf.download(
+                "^VIX",
+                start=start,
+                end=end,
+                auto_adjust=False,
+                progress=False,
+                timeout=30,
+            )
             # Flatten MultiIndex if present (single ticker)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)

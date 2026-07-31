@@ -1,0 +1,320 @@
+"""Fail-closed market-data adapters for execution, marking, and benchmarks."""
+from __future__ import annotations
+
+from collections import OrderedDict
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Callable, Protocol
+
+import pandas as pd
+import yfinance as yf
+
+from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
+from tradingagents.strategies.execution.ids import stable_id
+from tradingagents.strategies.execution.models import CorporateAction, MarketBar
+
+
+class BarValidationError(ValueError):
+    """Raised when data cannot safely be used for execution or valuation."""
+
+
+class CorporateActionValidationError(ValueError):
+    """Raised when a nonzero corporate action cannot be verified."""
+
+
+class PriceSource(Protocol):
+    """Inclusive daily market-data boundary for the authoritative ledger."""
+
+    def get_daily_bars(
+        self,
+        tickers: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+        adjusted: bool = False,
+    ) -> dict[tuple[str, date], MarketBar]: ...
+
+    def get_corporate_actions(
+        self, tickers: list[str], session: date
+    ) -> list[CorporateAction]: ...
+
+    def get_total_return_closes(
+        self,
+        symbols: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+    ) -> dict[tuple[str, date], Decimal]: ...
+
+
+def validate_required_bars(
+    bars: dict[tuple[str, date], MarketBar],
+    tickers: set[str],
+    session: date,
+    as_of: datetime,
+    max_fetch_age: timedelta = timedelta(hours=24),
+) -> None:
+    """Reject missing, unsafe, or non-raw bars before any ledger mutation."""
+    errors: list[str] = []
+    for ticker in sorted(tickers):
+        bar = bars.get((ticker, session))
+        if bar is None:
+            errors.append(f"missing {ticker}/{session}")
+            continue
+        values = (bar.open, bar.high, bar.low, bar.close)
+        if bar.adjusted:
+            errors.append(f"adjusted {ticker}/{session}")
+        if any(not value.is_finite() or value <= 0 for value in values):
+            errors.append(f"invalid {ticker}/{session}")
+        if bar.fetched_at > as_of:
+            errors.append(f"future {ticker}/{session}")
+        if as_of - bar.fetched_at > max_fetch_age:
+            errors.append(f"stale {ticker}/{session}")
+        if all(value.is_finite() for value in values) and not (
+            bar.low <= bar.open <= bar.high
+            and bar.low <= bar.close <= bar.high
+        ):
+            errors.append(f"incoherent {ticker}/{session}")
+    if errors:
+        raise BarValidationError("; ".join(errors))
+
+
+class YFinancePriceSource:
+    """yfinance adapter with raw execution bars and separate adjusted benchmarks.
+
+    The bounded raw-frame cache only deduplicates an immediately repeated
+    price/action request. It never stores adjusted benchmark data or grows
+    without limit.
+    """
+
+    _RAW_CACHE_LIMIT = 8
+
+    def __init__(self, now: Callable[[], datetime] | None = None) -> None:
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._raw_cache: OrderedDict[
+            tuple[tuple[str, ...], date, date, bool], pd.DataFrame
+        ] = OrderedDict()
+
+    def get_daily_bars(
+        self,
+        tickers: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+        adjusted: bool = False,
+    ) -> dict[tuple[str, date], MarketBar]:
+        """Fetch raw daily OHLC bars through an inclusive terminal session."""
+        self._validate_range(tickers, start_session, end_session_inclusive)
+        frame = self._raw_frame(
+            tickers, start_session, end_session_inclusive, adjusted=adjusted
+        )
+        fetched_at = self._fetched_at()
+        bars: dict[tuple[str, date], MarketBar] = {}
+        normalized = normalize_tickers(tickers)
+        for original, yf_ticker in zip(tickers, normalized):
+            for timestamp in frame.index:
+                session = _session_date(timestamp)
+                values = tuple(
+                    _decimal_bar_value(
+                        _frame_value(frame, field, yf_ticker, original, timestamp),
+                        original,
+                        session,
+                        field.lower(),
+                    )
+                    for field in ("Open", "High", "Low", "Close")
+                )
+                bars[(original, session)] = MarketBar(
+                    ticker=original,
+                    session=session,
+                    open=values[0],
+                    high=values[1],
+                    low=values[2],
+                    close=values[3],
+                    source="yfinance",
+                    fetched_at=fetched_at,
+                    adjusted=adjusted,
+                )
+        validate_required_bars(bars, set(tickers), end_session_inclusive, fetched_at)
+        return bars
+
+    def get_corporate_actions(
+        self, tickers: list[str], session: date
+    ) -> list[CorporateAction]:
+        """Return verified split and cash-dividend terms for exactly *session*."""
+        self._validate_range(tickers, session, session)
+        frame = self._raw_frame(tickers, session, session, adjusted=False)
+        fetched_at = self._fetched_at()
+        actions: list[CorporateAction] = []
+        normalized = normalize_tickers(tickers)
+        for original, yf_ticker in zip(tickers, normalized):
+            for field, action_type, target in (
+                ("Stock Splits", "split", "ratio"),
+                ("Dividends", "cash_dividend", "cash_per_share"),
+            ):
+                value = _frame_value(
+                    frame, field, yf_ticker, original, pd.Timestamp(session)
+                )
+                action_value = _optional_action_decimal(value, original, session, field)
+                if action_value is None:
+                    continue
+                if action_value <= 0:
+                    raise CorporateActionValidationError(
+                        f"invalid {original}/{session} {field}"
+                    )
+                ratio = action_value if target == "ratio" else None
+                cash_per_share = action_value if target == "cash_per_share" else None
+                actions.append(
+                    CorporateAction(
+                        action_id=stable_id(
+                            "corporate_action",
+                            original,
+                            session,
+                            action_type,
+                            action_value,
+                            "yfinance",
+                        ),
+                        ticker=original,
+                        session=session,
+                        action_type=action_type,
+                        ratio=ratio,
+                        cash_per_share=cash_per_share,
+                        source="yfinance",
+                        fetched_at=fetched_at,
+                        verified=True,
+                    )
+                )
+        return actions
+
+    def get_total_return_closes(
+        self,
+        symbols: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+    ) -> dict[tuple[str, date], Decimal]:
+        """Fetch adjusted close-only data reserved for benchmark observations."""
+        self._validate_range(symbols, start_session, end_session_inclusive)
+        frame = yf.download(
+            normalize_tickers(symbols),
+            start=start_session.isoformat(),
+            end=(end_session_inclusive + timedelta(days=1)).isoformat(),
+            auto_adjust=True,
+            actions=False,
+            progress=False,
+            timeout=30,
+        )
+        closes: dict[tuple[str, date], Decimal] = {}
+        normalized = normalize_tickers(symbols)
+        for original, yf_ticker in zip(symbols, normalized):
+            for timestamp in frame.index:
+                session = _session_date(timestamp)
+                close = _decimal_bar_value(
+                    _frame_value(frame, "Close", yf_ticker, original, timestamp),
+                    original,
+                    session,
+                    "close",
+                )
+                closes[(original, session)] = close
+        missing = [
+            f"missing {symbol}/{end_session_inclusive}"
+            for symbol in sorted(symbols)
+            if (symbol, end_session_inclusive) not in closes
+        ]
+        if missing:
+            raise BarValidationError("; ".join(missing))
+        return closes
+
+    def _raw_frame(
+        self,
+        tickers: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+        *,
+        adjusted: bool,
+    ) -> pd.DataFrame:
+        key = (tuple(tickers), start_session, end_session_inclusive, adjusted)
+        cached = self._raw_cache.get(key)
+        if cached is not None:
+            self._raw_cache.move_to_end(key)
+            return cached
+        frame = yf.download(
+            normalize_tickers(tickers),
+            start=start_session.isoformat(),
+            end=(end_session_inclusive + timedelta(days=1)).isoformat(),
+            auto_adjust=adjusted,
+            actions=True,
+            progress=False,
+            timeout=30,
+        )
+        self._raw_cache[key] = frame
+        if len(self._raw_cache) > self._RAW_CACHE_LIMIT:
+            self._raw_cache.popitem(last=False)
+        return frame
+
+    @staticmethod
+    def _validate_range(
+        tickers: list[str], start_session: date, end_session_inclusive: date
+    ) -> None:
+        if not tickers:
+            raise ValueError("tickers must not be empty")
+        if end_session_inclusive < start_session:
+            raise ValueError("end_session_inclusive precedes start_session")
+
+    def _fetched_at(self) -> datetime:
+        fetched_at = self._now()
+        if fetched_at.tzinfo is None:
+            raise ValueError("now must return a timezone-aware datetime")
+        return fetched_at.astimezone(timezone.utc)
+
+
+def _session_date(value: object) -> date:
+    return pd.Timestamp(value).date()
+
+
+def _frame_value(
+    frame: pd.DataFrame,
+    field: str,
+    yf_ticker: str,
+    original_ticker: str,
+    index: object,
+) -> object:
+    if isinstance(frame.columns, pd.MultiIndex):
+        for ticker in (yf_ticker, original_ticker):
+            key = (field, ticker)
+            if key in frame.columns:
+                return frame.loc[index, key]
+        return None
+    if len({yf_ticker, original_ticker}) == 1 and field in frame.columns:
+        return frame.loc[index, field]
+    if field in frame.columns:
+        return frame.loc[index, field]
+    return None
+
+
+def _decimal_bar_value(value: object, ticker: str, session: date, field: str) -> Decimal:
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise BarValidationError(f"invalid {ticker}/{session} {field}") from exc
+    if not decimal_value.is_finite():
+        raise BarValidationError(f"invalid {ticker}/{session} {field}")
+    return decimal_value
+
+
+def _optional_action_decimal(
+    value: object, ticker: str, session: date, field: str
+) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise CorporateActionValidationError(
+            f"invalid {ticker}/{session} {field}"
+        ) from exc
+    if not decimal_value.is_finite() or decimal_value == 0:
+        if decimal_value == 0:
+            return None
+        raise CorporateActionValidationError(f"invalid {ticker}/{session} {field}")
+    return decimal_value

@@ -1,49 +1,66 @@
-"""Trading calendar utility for resolving dates to trading days."""
+"""XNYS trading-session utilities used by the authoritative execution clock."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
-import numpy as np
+import exchange_calendars
+import pandas as pd
 
 
-# US market holidays (NYSE/NASDAQ) for 2025-2027.
-_US_MARKET_HOLIDAYS = [
-    # 2025
-    "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18",
-    "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01",
-    "2025-11-27", "2025-12-25",
-    # 2026
-    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
-    "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
-    "2026-11-26", "2026-12-25",
-    # 2027
-    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26",
-    "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
-    "2027-11-25", "2027-12-24",
-]
+_XNYS = exchange_calendars.get_calendar("XNYS")
+_ET = ZoneInfo("America/New_York")
+_UTC = ZoneInfo("UTC")
 
-_HOLIDAYS = np.busdaycalendar(
-    weekmask="1111100",
-    holidays=[np.datetime64(d) for d in _US_MARKET_HOLIDAYS],
-)
+
+def _label(session: date) -> pd.Timestamp:
+    """Return a UTC-normalized, timezone-naive exchange session label.
+
+    exchange-calendars 4.x requires a naive midnight label.  Constructing the
+    label in UTC first prevents a local timezone from changing its calendar day
+    before removing the timezone for that API boundary.
+    """
+    return pd.Timestamp(session, tz=_UTC).tz_localize(None)
+
+
+def is_session(session: date) -> bool:
+    """Whether *session* is an XNYS trading session."""
+    return bool(_XNYS.is_session(_label(session)))
+
+
+def next_session(session: date) -> date:
+    """Return the XNYS session after *session*, or the next session on/after it."""
+    label = _label(session)
+    if is_session(session):
+        return _XNYS.next_session(label).date()
+    return _XNYS.date_to_session(label, direction="next").date()
+
+
+def previous_session(session: date) -> date:
+    """Return the XNYS session before *session*, or the prior session on/before it."""
+    label = _label(session)
+    if is_session(session):
+        return _XNYS.previous_session(label).date()
+    return _XNYS.date_to_session(label, direction="previous").date()
+
+
+def session_open(session: date) -> datetime:
+    """Return the exact UTC opening timestamp for an XNYS session."""
+    if not is_session(session):
+        raise ValueError(f"{session} is not an XNYS session")
+    return _XNYS.session_open(_label(session)).to_pydatetime()
+
+
+def session_close(session: date) -> datetime:
+    """Return the exact UTC closing timestamp for an XNYS session."""
+    if not is_session(session):
+        raise ValueError(f"{session} is not an XNYS session")
+    return _XNYS.session_close(_label(session)).to_pydatetime()
 
 
 def resolve_trading_date(date_str: str | None = None) -> str:
-    """Resolve a date to the most recent US market trading day.
-
-    - Weekdays that are not holidays pass through unchanged.
-    - Weekends roll back to the preceding Friday (or Thursday if Friday is a holiday).
-    - Holidays roll back to the previous trading day.
-    - If date_str is None, uses today.
-
-    Returns:
-        YYYY-MM-DD string for the resolved trading day.
-    """
-    if date_str is None:
-        dt = datetime.now()
-    else:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-
-    d = np.datetime64(dt.strftime("%Y-%m-%d"))
-    resolved = np.busday_offset(d, 0, roll="preceding", busdaycal=_HOLIDAYS)
-    return str(resolved)
+    """Resolve a date to the current or prior XNYS session in New York time."""
+    local = datetime.now(_ET).date() if date_str is None else date.fromisoformat(date_str)
+    if is_session(local):
+        return local.isoformat()
+    return _XNYS.date_to_session(_label(local), direction="previous").date().isoformat()
