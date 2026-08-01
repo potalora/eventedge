@@ -215,7 +215,17 @@ def test_daily_returns_do_not_bridge_missing_xnys_session_or_duplicate_session()
 
 def test_matched_benchmark_uses_previous_session_exposure_and_target_scope() -> None:
     snapshots = [
-        _snapshot(date(2026, 8, 3), "100", gross_exposure="80", net_exposure="60"),
+        replace(
+            _snapshot(
+                date(2026, 8, 3),
+                "100",
+                gross_exposure="80",
+                net_exposure="60",
+            ),
+            cash=Decimal("40"),
+            long_market_value=Decimal("70"),
+            short_liability=Decimal("10"),
+        ),
         _snapshot(date(2026, 8, 4), "110"),
     ]
     observations = _benchmarks(
@@ -283,6 +293,101 @@ def test_reconcile_costs_rejects_mismatch() -> None:
         )
     with pytest.raises(ValueError, match="positive finite"):
         reconcile_costs(_snapshot(date(2026, 8, 3), "100", gross_equity="NaN"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cash", Decimal("NaN")),
+        ("cash", Decimal("Infinity")),
+        ("long_market_value", Decimal("NaN")),
+        ("long_market_value", Decimal("Infinity")),
+        ("long_market_value", Decimal("-1")),
+        ("short_liability", Decimal("NaN")),
+        ("short_liability", Decimal("Infinity")),
+        ("short_liability", Decimal("-1")),
+        ("gross_exposure", Decimal("NaN")),
+        ("gross_exposure", Decimal("Infinity")),
+        ("gross_exposure", Decimal("-1")),
+        ("net_exposure", Decimal("NaN")),
+        ("net_exposure", Decimal("Infinity")),
+    ],
+)
+def test_portfolio_metrics_rejects_nonfinite_or_negative_historical_account_fields(
+    field: str, value: Decimal
+) -> None:
+    snapshots = [
+        _snapshot(date(2026, 8, 3), "100"),
+        _snapshot(date(2026, 8, 4), "101"),
+        _snapshot(date(2026, 8, 5), "102"),
+    ]
+    snapshots[1] = replace(snapshots[1], **{field: value})
+    observations = _benchmarks(
+        (date(2026, 8, 3), "100", "100"),
+        (date(2026, 8, 4), "101", "100.1"),
+        (date(2026, 8, 5), "102", "100.2"),
+    )
+
+    with pytest.raises(ValueError):
+        portfolio_metrics(
+            cohort_id=COHORT,
+            epoch_id=EPOCH,
+            snapshots=snapshots,
+            benchmark_observations=observations,
+            signals=[],
+            fills=[],
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"cash": Decimal("52")}, "net equity does not reconcile"),
+        ({"gross_exposure": Decimal("49")}, "gross exposure does not reconcile"),
+        ({"net_exposure": Decimal("49")}, "net exposure does not reconcile"),
+    ],
+)
+def test_every_metric_path_rejects_exact_decimal_identity_corruption(
+    changes: dict[str, Decimal], message: str
+) -> None:
+    snapshots = [
+        _snapshot(date(2026, 8, 3), "100"),
+        replace(_snapshot(date(2026, 8, 4), "101"), **changes),
+        _snapshot(date(2026, 8, 5), "102"),
+    ]
+    observations = _benchmarks(
+        (date(2026, 8, 3), "100", "100"),
+        (date(2026, 8, 4), "101", "100.1"),
+        (date(2026, 8, 5), "102", "100.2"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        daily_net_returns(snapshots)
+    with pytest.raises(ValueError, match=message):
+        matched_benchmark_returns(snapshots, observations)
+    with pytest.raises(ValueError, match=message):
+        portfolio_metrics(
+            cohort_id=COHORT,
+            epoch_id=EPOCH,
+            snapshots=snapshots,
+            benchmark_observations=observations,
+            signals=[],
+            fills=[],
+        )
+
+
+def test_matched_benchmark_rejects_latest_snapshot_weight_corruption() -> None:
+    snapshots = [
+        _snapshot(date(2026, 8, 3), "100"),
+        replace(_snapshot(date(2026, 8, 4), "101"), net_exposure=Decimal("99")),
+    ]
+    observations = _benchmarks(
+        (date(2026, 8, 3), "100", "100"),
+        (date(2026, 8, 4), "101", "100.1"),
+    )
+
+    with pytest.raises(ValueError, match="net exposure does not reconcile"):
+        matched_benchmark_returns(snapshots, observations)
 
 
 def test_portfolio_metrics_fails_closed_on_invalid_or_missing_session_gap() -> None:

@@ -1325,6 +1325,11 @@ git commit -m "feat(metrics): compute exact XNYS-session outcomes"
   metrics therefore have zero missing/stale-mark counts. Sharpe visibility is
   based on 30 actual daily return observations (31 snapshots), not row count
   alone.
+- Before any daily, benchmark, or aggregate metric is emitted, every target
+  snapshot must use finite Decimal account fields and satisfy exactly:
+  `net_equity = cash + long_market_value - short_liability`,
+  `gross_exposure = long_market_value + short_liability`, and
+  `net_exposure = long_market_value - short_liability`.
 
 - [ ] **Step 1: Write failing known-sequence tests**
 

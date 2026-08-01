@@ -56,6 +56,8 @@ conflicts, not first-record wins.
 - Drawdown uses the running peak of net equity in that complete window.
 - Successful full-window metrics have zero missing/stale-mark counts; consumers
   must surface unavailable metrics instead of bridging a gap.
+- Every target snapshot must satisfy the exact P0 Decimal identities for net
+  equity, gross exposure, and net exposure before any return is emitted.
 - Strategy contribution uses actual size, marks, and costs.
 - Candidate comparisons use paired common-session returns.
 

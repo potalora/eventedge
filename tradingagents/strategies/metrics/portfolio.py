@@ -112,17 +112,31 @@ def _ordered_snapshots(snapshots: Iterable[AccountSnapshot]) -> list[AccountSnap
 
 
 def _valid_snapshot(row: AccountSnapshot) -> None:
-    _finite(row.net_equity, name="net equity", positive=True)
-    _finite(row.gross_equity, name="gross equity", positive=True)
-    gross = _finite(row.gross_exposure, name="gross exposure")
-    if gross < 0.0:
-        raise ValueError("gross exposure must be nonnegative")
+    for value, name in (
+        (row.cash, "cash"),
+        (row.long_market_value, "long market value"),
+        (row.short_liability, "short liability"),
+        (row.gross_exposure, "gross exposure"),
+        (row.net_exposure, "net exposure"),
+    ):
+        if not value.is_finite():
+            raise ValueError(f"{name} must be finite")
     for value, name in (
         (row.long_market_value, "long market value"),
         (row.short_liability, "short liability"),
+        (row.gross_exposure, "gross exposure"),
     ):
-        if _finite(value, name=name) < 0.0:
+        if value < 0:
             raise ValueError(f"{name} must be nonnegative")
+    if row.net_equity != row.cash + row.long_market_value - row.short_liability:
+        raise ValueError("net equity does not reconcile")
+    if row.gross_exposure != row.long_market_value + row.short_liability:
+        raise ValueError("gross exposure does not reconcile")
+    if row.net_exposure != row.long_market_value - row.short_liability:
+        raise ValueError("net exposure does not reconcile")
+    _finite(row.net_equity, name="net equity", positive=True)
+    _finite(row.gross_equity, name="gross equity", positive=True)
+    _finite(row.gross_exposure, name="gross exposure")
     _finite(row.net_exposure, name="net exposure")
 
 
