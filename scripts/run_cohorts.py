@@ -93,16 +93,25 @@ def main():
     args = parser.parse_args()
 
     if not (args.learning or args.compare or args.reset):
-        from tradingagents.strategies.orchestration.trading_calendar import is_session
-
         requested = args.date or date.today().isoformat()
         try:
             trading_session = date.fromisoformat(requested)
         except ValueError:
             parser.error(f"invalid ISO trading date: {requested}")
+        exact_trading_date = trading_session.isoformat()
+
+    generation_id = os.environ.get("EVENTEDGE_GENERATION_ID", "").strip()
+    generation_commit = os.environ.get("EVENTEDGE_GENERATION_COMMIT", "").strip()
+    if not generation_id or not generation_commit:
+        parser.error(
+            "EVENTEDGE_GENERATION_ID and EVENTEDGE_GENERATION_COMMIT are required"
+        )
+
+    if not (args.learning or args.compare or args.reset):
+        from tradingagents.strategies.orchestration.trading_calendar import is_session
+
         if not is_session(trading_session):
             parser.error(f"{requested} is not an XNYS session")
-        exact_trading_date = trading_session.isoformat()
 
     from dotenv import load_dotenv
 
@@ -154,7 +163,12 @@ def main():
         for cc in cohort_configs:
             cc.use_llm = False
 
-    orchestrator = CohortOrchestrator(cohort_configs, config)
+    orchestrator = CohortOrchestrator(
+        cohort_configs,
+        config,
+        generation_id=generation_id,
+        generation_commit=generation_commit,
+    )
 
     # Route to the right action
     if args.compare:

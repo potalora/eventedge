@@ -73,6 +73,8 @@ def test_run_cohorts_rejects_non_xnys_date_exactly(tmp_path):
     env = os.environ.copy()
     state = tmp_path / "state"
     env["AUTORESEARCH_STATE_DIR"] = str(state)
+    env["EVENTEDGE_GENERATION_ID"] = "gen_test"
+    env["EVENTEDGE_GENERATION_COMMIT"] = "test-commit"
     result = subprocess.run(
         [sys.executable, str(RUN_COHORTS), "--date", "2026-07-03", "--no-llm"],
         cwd=REPO_ROOT,

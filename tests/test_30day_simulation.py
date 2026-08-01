@@ -12,7 +12,8 @@ All LLM and external API calls are mocked. Deterministic via seeded RNG.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
@@ -23,6 +24,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.strategies.execution import (
+    CorporateAction,
     MarketBar,
     OrderIntent,
     SignalRecord,
@@ -341,7 +343,9 @@ class AuthoritativePriceSource:
         }
 
 
-def _authoritative_orchestrator(tmp_path, cohorts=1, hold_days=2):
+def _authoritative_orchestrator(
+    tmp_path, cohorts=1, hold_days=2, strategy_modules=None, model="sonnet"
+):
     source = AuthoritativePriceSource()
     configs = [
         CohortConfig(
@@ -359,6 +363,7 @@ def _authoritative_orchestrator(tmp_path, cohorts=1, hold_days=2):
         "execution": {"mode": "paper"},
         "autoresearch": {
             "state_dir": str(tmp_path / "base"),
+            "autoresearch_model": model,
             "total_capital": 5000,
             "paper_trade": {"portfolio_committee_enabled": False},
             "paper_ledger": {
@@ -374,9 +379,19 @@ def _authoritative_orchestrator(tmp_path, cohorts=1, hold_days=2):
     }
     with patch(
         "tradingagents.strategies.modules.get_paper_trade_strategies",
-        return_value=[FakeStrategy(hold_days=hold_days), FakeStrategy2()],
+        return_value=(
+            strategy_modules
+            if strategy_modules is not None
+            else [FakeStrategy(hold_days=hold_days), FakeStrategy2()]
+        ),
     ):
-        orchestrator = CohortOrchestrator(configs, config, price_source=source)
+        orchestrator = CohortOrchestrator(
+            configs,
+            config,
+            generation_id="gen_test",
+            generation_commit="test-commit",
+            price_source=source,
+        )
     for cohort in orchestrator.cohorts:
         cohort["engine"]._fetch_all_data = lambda start, end: {}
     orchestrator._fetch_openbb_enrichment = lambda signals: {}
@@ -400,6 +415,438 @@ def _authoritative_committee(signals, **kwargs):
 
 
 class TestIdempotencyDoubleRun:
+    def test_registered_metric_epoch_is_shared_p0_and_v2_identity(self, tmp_path):
+        from tradingagents.strategies.metrics.identity import signal_id
+
+        orchestrator, _ = _authoritative_orchestrator(tmp_path, cohorts=2)
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions:
+                result = orchestrator.run_daily(session.isoformat())
+
+        assert all(not row["error"] for row in result.values())
+        stores = {id(cohort["executor"].metric_store) for cohort in orchestrator.cohorts}
+        assert len(stores) == 1
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        epoch = store.current_epoch()
+        assert epoch is not None
+        assert epoch.epoch_id == orchestrator._epoch_id
+        for cohort in orchestrator.cohorts:
+            ledger = cohort["ledger"]
+            snapshots = ledger.read_snapshots(sessions[0], sessions[-1])
+            benchmarks = ledger.read_benchmark_observations(
+                sessions[0], sessions[-1]
+            )
+            signals = ledger.read_signals(sessions[0], sessions[-1])
+            assert snapshots and benchmarks and signals
+            assert {row.epoch_id for row in snapshots} == {epoch.epoch_id}
+            assert {row.epoch_id for row in benchmarks} == {epoch.epoch_id}
+            assert {row.epoch_id for row in signals} == {epoch.epoch_id}
+            for row in signals:
+                assert row.signal_id == signal_id(
+                    epoch.epoch_id,
+                    row.strategy,
+                    row.policy_id,
+                    row.direction,
+                    row.event_key,
+                )
+        outcomes = store.read_outcomes(epoch.epoch_id)
+        assert outcomes
+        assert {row.epoch_id for row in outcomes} == {epoch.epoch_id}
+
+    def test_later_model_change_rotates_before_new_ledger_write(self, tmp_path):
+        first, _ = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()], model="sonnet"
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            first.run_daily(first_session.isoformat())
+        store = first.cohorts[0]["executor"].metric_store
+        old_epoch = store.current_epoch()
+        assert old_epoch is not None
+        for cohort in first.cohorts:
+            cohort["ledger"].close()
+
+        changed, _ = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()], model="opus"
+        )
+        next_day = next_session(first_session)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            result = changed.run_daily(next_day.isoformat())
+
+        assert not result["cohort_0"]["error"]
+        new_epoch = store.current_epoch()
+        assert new_epoch is not None
+        assert new_epoch.epoch_id != old_epoch.epoch_id
+        assert new_epoch.start_session == next_day
+        assert store.load_epoch(old_epoch.epoch_id).end_session == first_session
+        snapshots = changed.cohorts[0]["ledger"].read_snapshots(next_day, next_day)
+        assert {row.epoch_id for row in snapshots} == {new_epoch.epoch_id}
+
+    @pytest.mark.parametrize(
+        ("gap", "expected_reason"),
+        (("missing", "missing_exit_bar"), ("stale", "stale_exit_bar")),
+    )
+    def test_due_exit_gap_persists_invalid_then_invalidates_and_replays_read_only(
+        self, tmp_path, gap, expected_reason
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions[:-1]:
+                orchestrator.run_daily(session.isoformat())
+
+            original_get = source.get_daily_bars
+
+            def gap_bars(tickers, start, end, adjusted=False):
+                bars = original_get(tickers, start, end, adjusted=adjusted)
+                if start == sessions[-1] and ("AAPL", start) in bars:
+                    if gap == "missing":
+                        bars.pop(("AAPL", start))
+                    else:
+                        bars[("AAPL", start)] = replace(
+                            bars[("AAPL", start)],
+                            fetched_at=datetime.now(timezone.utc)
+                            - timedelta(hours=48),
+                        )
+                return bars
+
+            source.get_daily_bars = gap_bars
+            calls_before = (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+            )
+            result = orchestrator.run_daily(sessions[-1].isoformat())
+            calls_after = (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+            )
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
+
+        ledger = orchestrator.cohorts[0]["ledger"]
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        invalid_epoch = store.current_epoch()
+        assert result["cohort_0"]["error"]
+        assert ledger.session_invalid_reason(sessions[-1])
+        assert invalid_epoch is not None and invalid_epoch.status == "invalid"
+        rows = store.read_outcomes(invalid_epoch.epoch_id)
+        assert len(rows) == 1
+        assert rows[0].status == "invalid"
+        assert rows[0].entry_price is not None
+        assert rows[0].exit_price is None
+        assert rows[0].signed_return is None
+        assert rows[0].invalid_reason == expected_reason
+        assert calls_after == (
+            calls_before[0] + 1,
+            calls_before[1] + 1,
+            calls_before[2] + 1,
+        )
+        assert replay["cohort_0"]["error"]
+        assert (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        ) == calls_after
+        assert store.current_epoch() == invalid_epoch
+        assert store.read_outcomes(invalid_epoch.epoch_id) == rows
+
+        original_context = orchestrator._metric_epoch_context
+        orchestrator._metric_epoch_context = replace(
+            original_context, config_hash="same-session-conflict"
+        )
+        with pytest.raises(ValueError, match="invalidated session context conflict"):
+            orchestrator.run_daily(sessions[-1].isoformat())
+        assert (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        ) == calls_after
+        assert store.current_epoch() == invalid_epoch
+        orchestrator._metric_epoch_context = original_context
+
+        source.get_daily_bars = original_get
+        next_day = next_session(sessions[-1])
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            clean = orchestrator.run_daily(next_day.isoformat())
+        replacement = store.current_epoch()
+        assert not clean["cohort_0"]["error"]
+        assert replacement is not None
+        assert replacement.status == "open"
+        assert replacement.epoch_id != invalid_epoch.epoch_id
+        assert replacement.start_session == next_day
+
+    def test_multi_cohort_due_gap_writes_before_one_shared_invalidation(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions[:-1]:
+                orchestrator.run_daily(session.isoformat())
+            original_get = source.get_daily_bars
+
+            def missing_bars(tickers, start, end, adjusted=False):
+                bars = original_get(tickers, start, end, adjusted=adjusted)
+                bars.pop(("AAPL", start), None)
+                return bars
+
+            source.get_daily_bars = missing_bars
+            store = orchestrator.cohorts[0]["executor"].metric_store
+            original_upsert = store.upsert_outcome
+            original_invalidate = orchestrator.cohorts[0][
+                "executor"
+            ].invalidate_metric_epoch
+            events = []
+
+            def recording_upsert(outcome):
+                events.append(("outcome", outcome.signal_id))
+                return original_upsert(outcome)
+
+            def recording_invalidate(*args, **kwargs):
+                events.append(("invalidate", "shared"))
+                return original_invalidate(*args, **kwargs)
+
+            store.upsert_outcome = recording_upsert
+            orchestrator.cohorts[0]["executor"].invalidate_metric_epoch = (
+                recording_invalidate
+            )
+            orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("screening must stop after critical gap")
+            )
+            result = orchestrator.run_daily(sessions[-1].isoformat())
+
+        assert all(row["error"] for row in result.values())
+        assert [event[0] for event in events] == [
+            "outcome",
+            "outcome",
+            "invalidate",
+        ]
+        assert len(store.read_outcomes(orchestrator._epoch_id)) == 1
+
+    def test_shared_fetch_failure_without_due_outcomes_invalidates_and_stops(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        session = date(2026, 3, 30)
+        executor = orchestrator.cohorts[0]["executor"]
+        invalidations = []
+        original_invalidate = executor.invalidate_metric_epoch
+
+        def recording_invalidate(*args, **kwargs):
+            invalidations.append(args[0])
+            return original_invalidate(*args, **kwargs)
+
+        executor.invalidate_metric_epoch = recording_invalidate
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("benchmark fetch failed")
+        )
+        orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("screening must stop after shared fetch failure")
+        )
+
+        result = orchestrator.run_daily(session.isoformat())
+
+        epoch = executor.metric_store.current_epoch()
+        assert result["cohort_0"]["error"]
+        assert invalidations == [session]
+        assert epoch is not None and epoch.status == "invalid"
+        assert executor.metric_store.read_outcomes(epoch.epoch_id) == ()
+
+    def test_execution_only_missing_required_bar_invalidates_shared_epoch(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        execution_session = next_session(first_session)
+        original_get = source.get_daily_bars
+
+        def missing_required(tickers, start, end, adjusted=False):
+            bars = original_get(tickers, start, end, adjusted=adjusted)
+            bars.pop(("AAPL", start), None)
+            return bars
+
+        source.get_daily_bars = missing_required
+        orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("screening must stop after execution bundle failure")
+        )
+        result = orchestrator.run_daily(execution_session.isoformat())
+
+        epoch = orchestrator.cohorts[0]["executor"].metric_store.current_epoch()
+        assert result["cohort_0"]["error"]
+        assert epoch is not None and epoch.status == "invalid"
+        assert epoch.end_session == execution_session
+
+    def test_corporate_action_batch_error_invalidates_and_stops(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        execution_session = next_session(first_session)
+        invalid_action = CorporateAction(
+            "bad-scope-action",
+            "MSFT",
+            execution_session,
+            "split",
+            Decimal("2"),
+            None,
+            "fixture",
+            datetime.now(timezone.utc),
+            True,
+        )
+        source.get_corporate_actions = lambda tickers, session: (invalid_action,)
+        orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("screening must stop after corporate action gap")
+        )
+
+        result = orchestrator.run_daily(execution_session.isoformat())
+
+        epoch = orchestrator.cohorts[0]["executor"].metric_store.current_epoch()
+        assert result["cohort_0"]["error"]
+        assert epoch is not None and epoch.status == "invalid"
+        assert epoch.end_session == execution_session
+
+    def test_completed_valid_cohort_is_preserved_when_fresh_peer_has_critical_gap(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+        fresh_executor = orchestrator.cohorts[1]["executor"]
+        original_execute = fresh_executor.execute_open_and_mark
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions[:-1]:
+                orchestrator.run_daily(session.isoformat())
+            fresh_executor.execute_open_and_mark = lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("fresh peer crash")
+            )
+            first_exit = orchestrator.run_daily(sessions[-1].isoformat())
+            fresh_executor.execute_open_and_mark = original_execute
+
+            completed_ledger = orchestrator.cohorts[0]["ledger"]
+            completed_snapshot = completed_ledger.read_snapshots(
+                sessions[-1], sessions[-1]
+            )[0]
+            store = orchestrator.cohorts[0]["executor"].metric_store
+            valid_outcome = store.read_outcomes(orchestrator._epoch_id)[0]
+            completed_executor = orchestrator.cohorts[0]["executor"]
+            original_record_due = completed_executor.record_due_outcomes
+            committed_due_calls = []
+
+            def recording_record_due(*args, **kwargs):
+                committed_due_calls.append(kwargs.get("preserve_existing_valid", False))
+                return original_record_due(*args, **kwargs)
+
+            completed_executor.record_due_outcomes = recording_record_due
+            original_get = source.get_daily_bars
+
+            def missing_exit(tickers, start, end, adjusted=False):
+                bars = original_get(tickers, start, end, adjusted=adjusted)
+                bars.pop(("AAPL", start), None)
+                return bars
+
+            source.get_daily_bars = missing_exit
+            orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("screening must stop after fresh peer gap")
+            )
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
+
+        epoch = store.current_epoch()
+        assert not first_exit["cohort_0"]["error"]
+        assert first_exit["cohort_1"]["error"]
+        assert replay["cohort_0"]["replayed"]
+        assert not replay["cohort_0"]["error"]
+        assert replay["cohort_1"]["error"]
+        assert completed_ledger.session_invalid_reason(sessions[-1]) == ""
+        assert completed_ledger.read_snapshots(
+            sessions[-1], sessions[-1]
+        ) == [completed_snapshot]
+        assert store.read_outcomes(orchestrator._epoch_id) == (valid_outcome,)
+        assert valid_outcome.status == "valid"
+        assert committed_due_calls == [False, True]
+        assert epoch is not None and epoch.status == "invalid"
+        assert orchestrator.cohorts[1]["ledger"].session_invalid_reason(
+            sessions[-1]
+        )
+
+    def test_critical_outcome_conflict_invalidates_before_reraising(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions[:-1]:
+                orchestrator.run_daily(session.isoformat())
+            original_get = source.get_daily_bars
+
+            def missing_exit(tickers, start, end, adjusted=False):
+                bars = original_get(tickers, start, end, adjusted=adjusted)
+                bars.pop(("AAPL", start), None)
+                return bars
+
+            source.get_daily_bars = missing_exit
+            store = orchestrator.cohorts[0]["executor"].metric_store
+            store.upsert_outcome = lambda outcome: (_ for _ in ()).throw(
+                ValueError("immutable outcome conflict sentinel")
+            )
+            with pytest.raises(
+                ValueError, match="immutable outcome conflict sentinel"
+            ):
+                orchestrator.run_daily(sessions[-1].isoformat())
+
+        epoch = store.current_epoch()
+        assert epoch is not None and epoch.status == "invalid"
+        assert epoch.end_session == sessions[-1]
+
     def test_untraded_signal_outcomes_reuse_one_shared_raw_bundle_and_restart_idempotently(
         self, tmp_path
     ):
@@ -730,6 +1177,10 @@ class TestIdempotencyDoubleRun:
         session = date(2026, 3, 30)
         prior = previous_session(session)
         cutoff = session_close(prior)
+        metric_epoch = executor.ensure_metric_epoch(
+            orchestrator._metric_epoch_context, prior
+        )
+        orchestrator._epoch_id = metric_epoch.epoch_id
         signal = SignalRecord(
             stable_id("borrow_resume_signal", "AAPL"),
             orchestrator._epoch_id,

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from importlib.metadata import version as package_version
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from tradingagents.strategies.execution import (
     AccountSnapshot,
@@ -19,6 +19,12 @@ from tradingagents.strategies.execution import (
     stable_id,
 )
 from tradingagents.strategies.execution.cost_model import PaperCostModel
+from tradingagents.strategies.execution.contracts import (
+    COST_MODEL_VERSION,
+    EXECUTION_CLOCK_VERSION,
+    POLICY_DOCUMENT_VERSION,
+    PRICING_VERSION,
+)
 from tradingagents.strategies.execution.price_source import (
     AdjustedClose,
     BarValidationError,
@@ -31,6 +37,8 @@ from tradingagents.strategies.orchestration.trading_calendar import (
     session_close,
 )
 from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, SignalMetricRecord
+from tradingagents.strategies.metrics.epochs import EpochContext, EpochManager
+from tradingagents.strategies.metrics.models import MetricEpoch
 from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
 from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.state.portfolio_ledger import (
@@ -174,6 +182,30 @@ class SessionExecutor:
         self._after_phase_mutation = after_phase_mutation or (lambda phase: None)
         self._after_phase_commit = after_phase_commit or (lambda phase: None)
 
+    def semantic_policy_document(self) -> dict[str, object]:
+        """Return canonical, secret-free, session-invariant execution semantics."""
+        config_inputs, _ = self._static_context_documents((), {})
+        return config_inputs
+
+    def ensure_metric_epoch(
+        self, context: EpochContext, session: date
+    ) -> MetricEpoch:
+        epoch = EpochManager(self.metric_store).ensure_epoch(context, session)
+        if epoch.status == "invalid" and epoch.end_session == session:
+            return epoch
+        if epoch.status != "open" or epoch.end_session is not None:
+            raise RuntimeError("metric epoch is not open")
+        return epoch
+
+    def invalidate_metric_epoch(
+        self,
+        session: date,
+        reason: str = "critical_market_data_gap",
+    ) -> MetricEpoch:
+        if reason != "critical_market_data_gap":
+            raise ValueError("metric epoch invalidation reason must be stable")
+        return EpochManager(self.metric_store).invalidate_current(session, reason)
+
     def required_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
         """Bounded union of execution and exact outcome tickers."""
         tickers = {str(position["ticker"]) for position in self.ledger.open_positions()}
@@ -258,9 +290,13 @@ class SessionExecutor:
         session: date,
         epoch_id: str,
         raw_bars: dict[tuple[str, date], MarketBar],
+        invalid_reasons: Mapping[str, str] | None = None,
+        *,
+        preserve_existing_valid: bool = False,
     ) -> int:
         """Persist due outcomes from shared current bars and durable entry bars only."""
         written = 0
+        forced_reasons = invalid_reasons or {}
         for signal, window in self.due_outcome_signals(session, epoch_id):
             entry_session = self.outcome_calculator.calendar.next_session(
                 signal.reference_session
@@ -268,11 +304,72 @@ class SessionExecutor:
             bars = dict(raw_bars)
             if self.ledger.session_execution_context(entry_session) is not None:
                 bars.update(self.persisted_input_bundle(entry_session).bars)
-            self.metric_store.upsert_outcome(
-                self.outcome_calculator.build(signal, window, bars)
-            )
+            outcome = self.outcome_calculator.build(signal, window, bars)
+            forced_reason = forced_reasons.get(signal.ticker)
+            if (
+                forced_reason
+                and not outcome.invalid_reason.endswith("entry_bar")
+                and not outcome.invalid_reason.endswith("entry_price")
+            ):
+                outcome = replace(
+                    outcome,
+                    exit_price=None,
+                    raw_return=None,
+                    signed_return=None,
+                    status="invalid",
+                    invalid_reason=forced_reason,
+                )
+            if preserve_existing_valid:
+                try:
+                    existing = self.metric_store.load_outcome(outcome.outcome_id)
+                except KeyError:
+                    existing = None
+                if existing is not None and existing.status == "valid":
+                    continue
+            self.metric_store.upsert_outcome(outcome)
             written += 1
         return written
+
+    def validated_outcome_bars(
+        self,
+        session: date,
+        epoch_id: str,
+        raw_bars: Mapping[tuple[str, date], MarketBar],
+        validation_at: datetime,
+    ) -> tuple[dict[tuple[str, date], MarketBar], dict[str, str]]:
+        """Validate only exact due-exit bars without fetching or using a fallback."""
+        due_tickers = {
+            signal.ticker for signal, _ in self.due_outcome_signals(session, epoch_id)
+        }
+        valid: dict[tuple[str, date], MarketBar] = {}
+        invalid: dict[str, str] = {}
+        max_age = timedelta(
+            hours=float(self.ledger_config.get("bar_max_age_hours", 24))
+        )
+        for ticker in sorted(due_tickers):
+            key = (ticker, session)
+            bar = raw_bars.get(key)
+            if bar is None:
+                invalid[ticker] = "missing_exit_bar"
+                continue
+            if (
+                bar.fetched_at.tzinfo is not None
+                and bar.fetched_at.utcoffset() is not None
+                and validation_at - bar.fetched_at > max_age
+            ):
+                invalid[ticker] = "stale_exit_bar"
+                continue
+            try:
+                validate_required_bars(
+                    {key: bar}, {ticker}, session, validation_at, max_age
+                )
+                if bar.fetched_at < session_close(session):
+                    raise BarValidationError(f"pre-close {ticker}/{session}")
+            except (BarValidationError, KeyError, TypeError, ValueError):
+                invalid[ticker] = "invalid_exit_bar"
+                continue
+            valid[key] = bar
+        return valid, invalid
 
     @classmethod
     def fetch_input_bundle(
@@ -785,15 +882,15 @@ class SessionExecutor:
         }
         config_inputs = _canonical_json_value(
             {
-                "policy_document_version": "execution-policy-v2",
+                "policy_document_version": POLICY_DOCUMENT_VERSION,
                 "execution": {
                     "mode": self.config.get("execution", {}).get("mode", "paper"),
                     "price_rules": ["next_session_open", "resting_stop"],
                 },
                 "schema_version": SCHEMA_VERSION,
-                "pricing_contract": "raw-unadjusted-daily-ohlc-v1",
-                "execution_clock_contract": "exact-next-xnys-open-v1",
-                "cost_model_contract": "adverse-equity-fill-v1",
+                "pricing_contract": PRICING_VERSION,
+                "execution_clock_contract": EXECUTION_CLOCK_VERSION,
+                "cost_model_contract": COST_MODEL_VERSION,
                 "calendar": {
                     "name": "XNYS",
                     "provider": "exchange-calendars",

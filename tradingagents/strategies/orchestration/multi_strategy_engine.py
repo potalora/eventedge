@@ -26,6 +26,7 @@ from tradingagents.strategies.data_sources.registry import (
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.modules.base import Candidate
+from tradingagents.strategies.metrics.identity import signal_id as metric_signal_id
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 logger = logging.getLogger(__name__)
@@ -474,8 +475,8 @@ class MultiStrategyEngine:
                 event_key = str(explicit_event_key)
             else:
                 event_key = canonical_event_key(strategy, ticker, metadata, session)
-            signal_id = stable_id(
-                "signal", epoch_id, strategy, horizon, direction, event_key
+            signal_id = metric_signal_id(
+                epoch_id, strategy, policy_id, direction, event_key
             )
             if signal_id in seen_signal_ids:
                 continue

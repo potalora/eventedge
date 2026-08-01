@@ -68,6 +68,23 @@ class EpochManager:
             )
         if (
             current is not None
+            and current.status == "invalid"
+            and current.end_session == session
+        ):
+            if _matches_context(current, context):
+                return current
+            raise ValueError("invalidated session context conflict")
+        if (
+            current is not None
+            and current.status == "invalid"
+            and current.end_session is not None
+            and session < current.end_session
+        ):
+            raise ValueError(
+                f"{session} precedes invalid epoch end {current.end_session}"
+            )
+        if (
+            current is not None
             and current.status == "open"
             and _matches_context(current, context)
         ):

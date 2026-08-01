@@ -1097,7 +1097,12 @@ class TestCohortOrchestrator:
             CohortConfig(name="a", state_dir=str(tmp_path / "a"), horizon="30d", size_profile="5k", use_llm=False),
             CohortConfig(name="b", state_dir=str(tmp_path / "b"), horizon="3m", size_profile="10k", use_llm=False),
         ]
-        orch = CohortOrchestrator(configs, {"autoresearch": {"state_dir": str(tmp_path)}})
+        orch = CohortOrchestrator(
+            configs,
+            {"autoresearch": {"state_dir": str(tmp_path)}},
+            generation_id="gen_test",
+            generation_commit="test-commit",
+        )
         assert len(orch.cohorts) == 2
         assert orch.cohorts[0]["config"].name == "a"
         assert orch.cohorts[1]["config"].name == "b"

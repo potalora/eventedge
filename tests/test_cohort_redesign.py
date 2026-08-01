@@ -268,7 +268,12 @@ class TestOrchestratorHorizonScreening:
         with patch("tradingagents.strategies.modules.get_paper_trade_strategies",
                     return_value=[mock_strategy]):
             with patch("tradingagents.strategies.orchestration.multi_strategy_engine.build_default_registry"):
-                orch = CohortOrchestrator(configs, {"autoresearch": {"state_dir": "/tmp/test"}})
+                orch = CohortOrchestrator(
+                    configs,
+                    {"autoresearch": {"state_dir": "/tmp/test"}},
+                    generation_id="gen_test",
+                    generation_commit="test-commit",
+                )
 
         # Call the horizon screening method directly
         orch._screen_for_horizon({}, "2026-01-15", "3m")

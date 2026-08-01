@@ -204,6 +204,8 @@ class CohortOrchestrator:
         cohort_configs: list[CohortConfig],
         base_config: dict,
         *,
+        generation_id: str,
+        generation_commit: str,
         price_source: Any | None = None,
     ):
         """
@@ -220,14 +222,80 @@ class CohortOrchestrator:
         )
         from tradingagents.strategies.execution.price_source import YFinancePriceSource
         from tradingagents.strategies.metrics.store import MetricStore
+        from tradingagents.strategies.orchestration.metric_epoch_context import (
+            CohortSemanticPolicy,
+            build_epoch_context,
+        )
         from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.modules import get_paper_trade_strategies
+
+        if not isinstance(generation_id, str) or not generation_id.strip():
+            raise ValueError("generation_id must be non-empty text")
+        if not isinstance(generation_commit, str) or not generation_commit.strip():
+            raise ValueError("generation_commit must be non-empty text")
+        model_keys = (
+            "llm_provider",
+            "deep_think_llm",
+            "quick_think_llm",
+            "cache_model",
+            "live_model",
+            "strategist_model",
+            "cro_model",
+            "autoresearch_model",
+        )
+        ar_config = base_config.get("autoresearch", {})
+        models = {
+            key: (base_config.get(key) if index < 3 else ar_config.get(key))
+            for index, key in enumerate(model_keys)
+        }
+        for key, value in models.items():
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"model {key} must be non-empty text")
 
         self.cohorts: list[dict[str, Any]] = []
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
         strategies = get_paper_trade_strategies()
+        strategy_names = tuple(getattr(strategy, "name", None) for strategy in strategies)
+        if any(
+            not isinstance(name, str) or not name.strip() for name in strategy_names
+        ):
+            raise ValueError("strategy names must be non-empty text")
+        if len(set(strategy_names)) != len(strategy_names):
+            raise ValueError("duplicate strategy name")
+        cohort_names = [cfg.name for cfg in cohort_configs]
+        if any(
+            not isinstance(name, str) or not name.strip() for name in cohort_names
+        ):
+            raise ValueError("cohort names must be non-empty text")
+        if len(set(cohort_names)) != len(cohort_names):
+            raise ValueError("duplicate cohort name")
+        configured_policy_id = (
+            base_config.get("autoresearch", {})
+            .get("paper_ledger", {})
+            .get("policy_id")
+        )
+        policy_ids: dict[str, str] = {}
+        for cfg in cohort_configs:
+            for label, value in (
+                ("horizon", cfg.horizon),
+                ("size_profile", cfg.size_profile),
+            ):
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"cohort {label} must be non-empty text")
+            if not isinstance(cfg.use_llm, bool):
+                raise ValueError("cohort use_llm must be boolean")
+            policy_id = (
+                configured_policy_id
+                if configured_policy_id is not None
+                else f"foundation-{cfg.horizon}"
+            )
+            if not isinstance(policy_id, str) or not policy_id.strip():
+                raise ValueError("policy_id must be non-empty text")
+            policy_ids[cfg.name] = policy_id.strip()
         metric_store = MetricStore(
             Path(base_config.get("autoresearch", {}).get("state_dir", "data/state"))
             / "metrics_v2.sqlite3"
@@ -283,13 +351,29 @@ class CohortOrchestrator:
                 }
             )
 
+        cohort_policies = tuple(
+            CohortSemanticPolicy(
+                name=cohort["config"].name,
+                horizon=cohort["config"].horizon,
+                size_profile=cohort["config"].size_profile,
+                policy_id=policy_ids[cohort["config"].name],
+                use_llm=cohort["config"].use_llm,
+                learning_enabled=cohort["config"].learning_enabled,
+                execution_policy=cohort["executor"].semantic_policy_document(),
+            )
+            for cohort in self.cohorts
+        )
+        self._metric_epoch_context = build_epoch_context(
+            generation_id=generation_id,
+            generation_commit=generation_commit,
+            models=models,
+            strategies=strategy_names,
+            cohort_policies=cohort_policies,
+        )
+
         self._base_config = base_config
         self._price_source = price_source or YFinancePriceSource()
-        self._epoch_id = str(
-            base_config.get("autoresearch", {})
-            .get("paper_ledger", {})
-            .get("epoch_id", "foundation-v1")
-        )
+        self._epoch_id: str | None = None
 
         # OpenBB availability check — warn loudly if unavailable
         first_engine = self.cohorts[0]["engine"] if self.cohorts else None
@@ -313,6 +397,79 @@ class CohortOrchestrator:
         """Screen all strategies with horizon-specific params."""
         first_engine = self.cohorts[0]["engine"]
         return first_engine.screen_and_enrich(trading_date, data, horizon=horizon)
+
+    def _stop_for_critical_market_data_gap(
+        self,
+        session: date,
+        processed_at: datetime,
+        results: dict[str, Any],
+        raw_bars: dict,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Write due invalid outcomes, invalidate once, and stop this daily run."""
+        from tradingagents.strategies.orchestration.session_executor import PHASES
+
+        if self._epoch_id is None:
+            raise RuntimeError("metric epoch is not initialized")
+        committed = {
+            cohort["config"].name
+            for cohort in self.cohorts
+            if cohort["ledger"].read_snapshots(
+                session, session, epoch_id=self._epoch_id, valid_only=True
+            )
+            and all(
+                cohort["ledger"].phase_completed(session, phase)
+                for phase in PHASES
+            )
+        }
+        write_error: Exception | None = None
+        try:
+            for cohort in self.cohorts:
+                executor = cohort["executor"]
+                due = executor.due_outcome_signals(session, self._epoch_id)
+                if due:
+                    valid_bars, invalid_reasons = executor.validated_outcome_bars(
+                        session, self._epoch_id, raw_bars, processed_at
+                    )
+                    for signal, _ in due:
+                        if signal.ticker not in invalid_reasons:
+                            invalid_reasons[signal.ticker] = (
+                                "critical_market_data_gap"
+                            )
+                            valid_bars.pop((signal.ticker, session), None)
+                    executor.record_due_outcomes(
+                        session,
+                        self._epoch_id,
+                        valid_bars,
+                        invalid_reasons,
+                        preserve_existing_valid=True,
+                    )
+        except Exception as error:
+            write_error = error
+        for cohort in self.cohorts:
+            name = cohort["config"].name
+            if name in committed:
+                results.setdefault(
+                    name,
+                    {
+                        "error": True,
+                        "invalid_reason": "critical_market_data_gap",
+                    },
+                )
+                continue
+            ledger = cohort["ledger"]
+            if not ledger.session_invalid_reason(session):
+                ledger.invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
+            results[name] = {
+                "error": True,
+                "invalid_reason": ledger.session_invalid_reason(session) or reason,
+            }
+        self.cohorts[0]["executor"].invalidate_metric_epoch(session)
+        if write_error is not None:
+            raise write_error
+        return results
 
     def run_daily(self, trading_date: str | None = None) -> dict[str, Any]:
         """Execute/mark every cohort, then share four screens and stage intents."""
@@ -338,6 +495,20 @@ class CohortOrchestrator:
 
         logger.info("=== Cohort daily run: %s ===", trading_date)
         results: dict[str, Any] = {}
+        if not self.cohorts:
+            return results
+        metric_epoch = self.cohorts[0]["executor"].ensure_metric_epoch(
+            self._metric_epoch_context, session
+        )
+        self._epoch_id = metric_epoch.epoch_id
+        if metric_epoch.status == "invalid":
+            for cohort in self.cohorts:
+                reason = cohort["ledger"].session_invalid_reason(session)
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason or metric_epoch.boundary_reason,
+                }
+            return results
 
         complete_replays: dict[str, Any] = {}
         completed_cohorts: list[dict[str, Any]] = []
@@ -499,7 +670,13 @@ class CohortOrchestrator:
                         "error": True,
                         "invalid_reason": reason,
                     }
-                bundle = None
+                return self._stop_for_critical_market_data_gap(
+                    session,
+                    processed_at,
+                    results,
+                    bundle.bars,
+                    "critical_market_data_gap",
+                )
             except Exception as error:
                 reason = f"shared session input fetch failed: {error}"
                 for cohort in fresh_execution:
@@ -510,11 +687,49 @@ class CohortOrchestrator:
                         "error": True,
                         "invalid_reason": reason,
                     }
-                if not valid_cohorts:
-                    return results
-                bundle = None
+                return self._stop_for_critical_market_data_gap(
+                    session,
+                    processed_at,
+                    results,
+                    {},
+                    reason,
+                )
 
             if bundle is not None:
+                critical_gap = False
+                for cohort in fresh_execution:
+                    executor = cohort["executor"]
+                    if not executor.due_outcome_signals(session, self._epoch_id):
+                        continue
+                    valid_bars, invalid_reasons = executor.validated_outcome_bars(
+                        session,
+                        self._epoch_id,
+                        bundle.bars,
+                        processed_at,
+                    )
+                    if not invalid_reasons:
+                        continue
+                    reason = "market data validation failed: " + "; ".join(
+                        f"{ticker} {invalid_reasons[ticker]}"
+                        for ticker in sorted(invalid_reasons)
+                    )
+                    cohort["ledger"].invalidate_session_and_cancel_due(
+                        session, reason, processed_at
+                    )
+                    results[cohort["config"].name] = {
+                        "error": True,
+                        "invalid_reason": reason,
+                    }
+                    critical_gap = True
+                if critical_gap:
+                    return self._stop_for_critical_market_data_gap(
+                        session,
+                        processed_at,
+                        results,
+                        bundle.bars,
+                        "critical_market_data_gap",
+                    )
+                execution_bundle_gap = False
                 for cohort in fresh_execution:
                     name = cohort["config"].name
                     try:
@@ -537,9 +752,21 @@ class CohortOrchestrator:
                             "error": True,
                             "invalid_reason": lifecycle.invalid_reason,
                         }
+                        if lifecycle.invalid_reason.startswith(
+                            "market data validation failed:"
+                        ):
+                            execution_bundle_gap = True
                         continue
                     cohort["marked_account"] = lifecycle.snapshot
                     valid_cohorts.append(cohort)
+                if execution_bundle_gap:
+                    return self._stop_for_critical_market_data_gap(
+                        session,
+                        processed_at,
+                        results,
+                        bundle.bars,
+                        "critical_market_data_gap",
+                    )
 
         if not valid_cohorts:
             return results
