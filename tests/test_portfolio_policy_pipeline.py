@@ -18,6 +18,10 @@ from tradingagents.strategies.trading.portfolio_policy import (
     PortfolioPolicyConfig,
     PortfolioRiskContext,
 )
+from tradingagents.strategies.modules.base import OptionSpec
+
+
+_ORIGINAL_POLICY_APPLY = PortfolioPolicy.apply
 
 
 def _empty_context() -> PortfolioRiskContext:
@@ -71,11 +75,24 @@ def _oversized(**changes: object) -> TradeRecommendation:
     return TradeRecommendation(**values)
 
 
+def _apply_policy_once(
+    policy: PortfolioPolicy,
+    recommendations: list[TradeRecommendation],
+    context: PortfolioRiskContext,
+) -> list[TradeRecommendation]:
+    return _ORIGINAL_POLICY_APPLY(policy, recommendations, context)
+
+
 def test_llm_result_passes_through_portfolio_policy_once() -> None:
     committee = PortfolioCommittee(DEFAULT_CONFIG, size_profile=SIZE_PROFILES["100k"])
     with (
         patch.object(committee, "_llm_synthesize", return_value=[_oversized()]),
-        patch.object(PortfolioPolicy, "apply", wraps=PortfolioPolicy().apply) as apply,
+        patch.object(
+            PortfolioPolicy,
+            "apply",
+            autospec=True,
+            side_effect=_apply_policy_once,
+        ) as apply,
     ):
         result = committee.synthesize([_signal()], risk_context=_empty_context())
 
@@ -89,12 +106,53 @@ def test_fallback_result_passes_through_portfolio_policy_once() -> None:
     committee = PortfolioCommittee(config, size_profile=SIZE_PROFILES["100k"])
     with (
         patch.object(committee, "_rule_based_synthesize", return_value=[_oversized()]),
-        patch.object(PortfolioPolicy, "apply", wraps=PortfolioPolicy().apply) as apply,
+        patch.object(
+            PortfolioPolicy,
+            "apply",
+            autospec=True,
+            side_effect=_apply_policy_once,
+        ) as apply,
     ):
         result = committee.synthesize([_signal()], risk_context=_empty_context())
 
     assert apply.call_count == 1
     assert result[0].position_size_pct == 0.08
+
+
+def test_policy_sidecar_missing_fails_closed_without_second_evaluation() -> None:
+    committee = PortfolioCommittee(DEFAULT_CONFIG, size_profile=SIZE_PROFILES["100k"])
+    with (
+        patch.object(committee, "_llm_synthesize", return_value=[_oversized()]),
+        patch.object(PortfolioPolicy, "apply", return_value=[]) as apply,
+        pytest.raises(RuntimeError, match="decision sidecar"),
+    ):
+        committee.synthesize([_signal()], risk_context=_empty_context())
+
+    assert apply.call_count == 1
+
+
+def test_duplicate_recommendation_choice_is_permutation_invariant() -> None:
+    config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"].pop("portfolio_policy")
+    committee = PortfolioCommittee(config, size_profile=SIZE_PROFILES["100k"])
+    equity = _oversized(
+        position_size_pct=0.05,
+        regime_alignment="neutral",
+        vehicle="equity",
+    )
+    call = _oversized(
+        position_size_pct=0.05,
+        regime_alignment="aligned",
+        vehicle="option",
+        option_spec=OptionSpec("call_spread", 45, 0.05, 0.02),
+    )
+
+    with patch.object(committee, "_llm_synthesize", return_value=[equity, call]):
+        forward = committee.synthesize([_signal()])
+    with patch.object(committee, "_llm_synthesize", return_value=[call, equity]):
+        reverse = committee.synthesize([_signal()])
+
+    assert forward == reverse
 
 
 def test_post_pass_derives_attribution_from_matching_input_signals() -> None:

@@ -159,6 +159,7 @@ class PortfolioRiskContext:
     margin_used: float
     consumed_event_keys: frozenset[str]
     config: PortfolioPolicyConfig
+    require_borrow: bool = True
 
     def __post_init__(self) -> None:
         """Normalize direct construction to the same deep immutability contract."""
@@ -190,6 +191,17 @@ class PortfolioRiskContext:
             "consumed_event_keys",
             frozenset(self.consumed_event_keys),
         )
+
+
+@dataclass(frozen=True)
+class PortfolioPolicyDecision:
+    ticker: str
+    direction: str
+    event_key: str
+    decision: str
+    reason: str
+    requested_weight: float
+    approved_weight: float
 
 
 def annualized_volatility(
@@ -248,6 +260,8 @@ def build_portfolio_risk_context(
     margin_used: float,
     consumed_event_keys: Iterable[str],
     config: PortfolioPolicyConfig,
+    sectors: Mapping[str, str] | None = None,
+    require_borrow: bool = True,
 ) -> PortfolioRiskContext:
     """Build an immutable prospective-book context from authoritative marks."""
     if portfolio_value <= 0:
@@ -262,15 +276,24 @@ def build_portfolio_risk_context(
         for row in pending_positions
     )
     all_positions = current + pending
+    sector_map = {p.ticker: p.sector for p in all_positions}
+    sector_map.update(
+        {str(ticker): str(sector) for ticker, sector in (sectors or {}).items()}
+    )
+    volatility_map = {p.ticker: p.annualized_volatility for p in all_positions}
+    for ticker, prices in price_cache.items():
+        volatility_map[str(ticker)] = annualized_volatility(
+            prices,
+            lookback_sessions=config.volatility_lookback_sessions,
+            floor=config.annualized_volatility_floor,
+        )
     return PortfolioRiskContext(
         portfolio_value=float(portfolio_value),
         cash=float(cash),
         positions=current,
         pending_positions=pending,
-        sectors=_immutable_mapping({p.ticker: p.sector for p in all_positions}),
-        annualized_volatility=_immutable_mapping(
-            {p.ticker: p.annualized_volatility for p in all_positions}
-        ),
+        sectors=_immutable_mapping(sector_map),
+        annualized_volatility=_immutable_mapping(volatility_map),
         earnings_dates=_immutable_mapping(
             {str(ticker): int(days) for ticker, days in earnings_dates.items()}
         ),
@@ -283,6 +306,7 @@ def build_portfolio_risk_context(
         margin_used=float(margin_used),
         consumed_event_keys=frozenset(str(key) for key in consumed_event_keys),
         config=config,
+        require_borrow=bool(require_borrow),
     )
 
 
@@ -307,20 +331,60 @@ class PortfolioPolicy:
         context: PortfolioRiskContext,
     ) -> list["TradeRecommendation"]:
         """Scale or reject recommendations sequentially in their ranked order."""
+        accepted, decisions = self.evaluate(recommendations, context)
+        self.last_decisions = decisions
+        return accepted
+
+    def evaluate(
+        self,
+        recommendations: list["TradeRecommendation"],
+        context: PortfolioRiskContext,
+    ) -> tuple[list["TradeRecommendation"], tuple[PortfolioPolicyDecision, ...]]:
+        """Return constrained recommendations plus deterministic audit decisions."""
         accepted: list["TradeRecommendation"] = []
+        decisions: list[PortfolioPolicyDecision] = []
         working = context
         for recommendation in recommendations:
-            allowed, _ = self._max_allowed_weight(recommendation, working)
+            allowed, reason = self._max_allowed_weight(recommendation, working)
             weight = min(float(recommendation.position_size_pct), allowed)
             if weight <= self._EPSILON:
+                decisions.append(
+                    PortfolioPolicyDecision(
+                        recommendation.ticker,
+                        recommendation.direction,
+                        recommendation.event_key,
+                        "rejected",
+                        reason,
+                        float(recommendation.position_size_pct),
+                        0.0,
+                    )
+                )
                 continue
+            trimmed = weight + self._EPSILON < float(
+                recommendation.position_size_pct
+            )
             constrained = replace(
                 recommendation,
-                position_size_pct=round(weight, 8),
+                position_size_pct=(
+                    round(weight, 8)
+                    if trimmed
+                    else float(recommendation.position_size_pct)
+                ),
             )
             accepted.append(constrained)
+            decisions.append(
+                PortfolioPolicyDecision(
+                    recommendation.ticker,
+                    recommendation.direction,
+                    recommendation.event_key,
+                    "trimmed" if trimmed else "accepted",
+                    reason if trimmed else "accepted",
+                    float(recommendation.position_size_pct),
+                    float(constrained.position_size_pct),
+                )
+            )
             working = self._with_pending(working, constrained)
-        return accepted
+        return accepted, tuple(decisions)
 
     def validate(
         self,
@@ -426,7 +490,10 @@ class PortfolioPolicy:
             )
 
         if recommendation.direction == "short":
-            if context.borrow_available.get(recommendation.ticker) is not True:
+            if (
+                context.require_borrow
+                and context.borrow_available.get(recommendation.ticker) is not True
+            ):
                 return 0.0, "borrow_unavailable"
 
             correlated_shorts = sum(
@@ -535,3 +602,92 @@ class PortfolioPolicy:
         if not sector or sector.casefold() == "unknown":
             return "Unknown"
         return sector.casefold()
+
+
+def portfolio_policy_config_document(
+    config: PortfolioPolicyConfig,
+) -> dict[str, object]:
+    """Return the stable JSON-compatible policy document used by epochs/bindings."""
+    return {field.name: getattr(config, field.name) for field in fields(config)}
+
+
+def portfolio_risk_context_document(
+    context: PortfolioRiskContext,
+) -> dict[str, object]:
+    """Serialize an immutable context without timestamps or mutable containers."""
+
+    def position_document(position: PolicyPosition) -> dict[str, object]:
+        return {
+            "ticker": position.ticker,
+            "direction": position.direction,
+            "weight": position.weight,
+            "sector": position.sector,
+            "strategy_tags": list(position.strategy_tags),
+            "risk_tags": list(position.risk_tags),
+            "annualized_volatility": position.annualized_volatility,
+        }
+
+    return {
+        "portfolio_value": context.portfolio_value,
+        "cash": context.cash,
+        "positions": [position_document(item) for item in context.positions],
+        "pending_positions": [
+            position_document(item) for item in context.pending_positions
+        ],
+        "sectors": dict(context.sectors),
+        "annualized_volatility": dict(context.annualized_volatility),
+        "earnings_dates": dict(context.earnings_dates),
+        "short_interest": dict(context.short_interest),
+        "borrow_available": dict(context.borrow_available),
+        "margin_used": context.margin_used,
+        "consumed_event_keys": sorted(context.consumed_event_keys),
+        "require_borrow": context.require_borrow,
+    }
+
+
+def portfolio_risk_context_from_document(
+    document: Mapping[str, Any], config: PortfolioPolicyConfig
+) -> PortfolioRiskContext:
+    """Rehydrate the exact typed context from an immutable ledger binding."""
+
+    def position(value: Mapping[str, Any]) -> PolicyPosition:
+        return PolicyPosition(
+            ticker=str(value["ticker"]),
+            direction=str(value["direction"]),
+            weight=float(value["weight"]),
+            sector=str(value["sector"]),
+            strategy_tags=tuple(str(tag) for tag in value["strategy_tags"]),
+            risk_tags=tuple(str(tag) for tag in value["risk_tags"]),
+            annualized_volatility=float(value["annualized_volatility"]),
+        )
+
+    return PortfolioRiskContext(
+        portfolio_value=float(document["portfolio_value"]),
+        cash=float(document["cash"]),
+        positions=tuple(position(item) for item in document["positions"]),
+        pending_positions=tuple(
+            position(item) for item in document["pending_positions"]
+        ),
+        sectors={str(key): str(value) for key, value in document["sectors"].items()},
+        annualized_volatility={
+            str(key): float(value)
+            for key, value in document["annualized_volatility"].items()
+        },
+        earnings_dates={
+            str(key): int(value) for key, value in document["earnings_dates"].items()
+        },
+        short_interest={
+            str(key): float(value)
+            for key, value in document["short_interest"].items()
+        },
+        borrow_available={
+            str(key): bool(value)
+            for key, value in document["borrow_available"].items()
+        },
+        margin_used=float(document["margin_used"]),
+        consumed_event_keys=frozenset(
+            str(value) for value in document["consumed_event_keys"]
+        ),
+        config=config,
+        require_borrow=bool(document.get("require_borrow", True)),
+    )

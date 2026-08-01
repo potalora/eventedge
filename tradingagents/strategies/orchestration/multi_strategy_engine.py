@@ -30,7 +30,10 @@ from tradingagents.strategies.metrics.identity import signal_id as metric_signal
 from tradingagents.strategies.metrics.health import classify_strategy_run
 from tradingagents.strategies.metrics.models import OutcomeRecord, StrategyHealthRecord
 from tradingagents.strategies.metrics.outcomes import directional_accuracy
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +440,13 @@ class MultiStrategyEngine:
         from tradingagents.strategies.trading.portfolio_committee import (
             PortfolioCommittee,
         )
+        from tradingagents.strategies.trading.portfolio_policy import (
+            PortfolioPolicyConfig,
+            build_portfolio_risk_context,
+            portfolio_policy_config_document,
+            portfolio_risk_context_document,
+            portfolio_risk_context_from_document,
+        )
 
         if self.ledger is None:
             raise ValueError("screen_and_stage requires an authoritative ledger")
@@ -472,10 +482,178 @@ class MultiStrategyEngine:
         expected_staging_state_digest = self.ledger.verify_session_phase_chain(
             session, PHASES
         )
-        if self.ledger.staging_completed(session, epoch_id, policy_id):
+        replaying = self.ledger.staging_completed(session, epoch_id, policy_id)
+
+        raw_bars = data.get("_execution_reference_bars", {})
+        if not isinstance(raw_bars, dict):
+            raise ValueError("_execution_reference_bars must be a mapping")
+
+        policy_settings = self.ar_config.get("portfolio_policy")
+        policy_enabled = size_profile is not None and isinstance(
+            policy_settings, dict
+        )
+        policy_config = (
+            PortfolioPolicyConfig.from_size_profile(size_profile, policy_settings)
+            if policy_enabled
+            else None
+        )
+        if replaying and policy_config is None:
+            persisted_binding = self.ledger.read_policy_session_context(
+                session, binding_kind="staging"
+            )
+            persisted_manifests = self.ledger.read_policy_staging_audit_manifests(
+                epoch_id=epoch_id
+            )
+            if persisted_binding is not None or any(
+                manifest["session"] == session
+                and manifest["policy_id"] == policy_id
+                for manifest in persisted_manifests
+            ):
+                raise LedgerConflictError(
+                    "policy artifacts exist on replay while portfolio policy is disabled"
+                )
+        risk_context = None
+        policy_binding = None
+        if policy_config is not None:
+            baseline_pending = tuple(
+                row
+                for row in self.ledger.policy_pending_entry_projection()
+                if not (replaying and row["eligible_session"] == eligible_session)
+            )
+            if replaying:
+                policy_binding = self.ledger.read_policy_session_context(
+                    session, binding_kind="staging"
+                )
+                if (
+                    policy_binding is None
+                    or policy_binding["epoch_id"] != epoch_id
+                    or policy_binding["policy_version"] != policy_config.version
+                    or policy_binding["policy_config"]
+                    != portfolio_policy_config_document(policy_config)
+                ):
+                    raise LedgerConflictError(
+                        "staging policy binding mismatch on replay"
+                    )
+                risk_context = portfolio_risk_context_from_document(
+                    policy_binding["context"], policy_config
+                )
+                authoritative = build_portfolio_risk_context(
+                    portfolio_value=float(marked_account.net_equity),
+                    cash=float(marked_account.cash),
+                    current_positions=self.ledger.policy_open_lot_projection(session),
+                    pending_positions=baseline_pending,
+                    price_cache={},
+                    earnings_dates=risk_context.earnings_dates,
+                    short_interest=risk_context.short_interest,
+                    borrow_available=risk_context.borrow_available,
+                    margin_used=float(marked_account.margin_used),
+                    consumed_event_keys=self.ledger.consumed_event_keys(),
+                    config=policy_config,
+                    sectors=risk_context.sectors,
+                    require_borrow=risk_context.require_borrow,
+                )
+
+                def economic_positions(items):
+                    return tuple(
+                        (
+                            item.ticker,
+                            item.direction,
+                            item.weight,
+                            item.sector,
+                            item.strategy_tags,
+                            item.risk_tags,
+                        )
+                        for item in items
+                    )
+
+                if (
+                    authoritative.portfolio_value != risk_context.portfolio_value
+                    or authoritative.cash != risk_context.cash
+                    or authoritative.margin_used != risk_context.margin_used
+                    or authoritative.consumed_event_keys
+                    != risk_context.consumed_event_keys
+                    or economic_positions(authoritative.positions)
+                    != economic_positions(risk_context.positions)
+                    or economic_positions(authoritative.pending_positions)
+                    != economic_positions(risk_context.pending_positions)
+                ):
+                    raise LedgerConflictError(
+                        "authoritative staging context changed on replay"
+                    )
+            else:
+                profiles = (enrichment or {}).get("profiles", {})
+                sectors = {
+                    str(signal.get("ticker", "")).strip().upper(): str(
+                        profiles.get(
+                            str(signal.get("ticker", "")).strip().upper(), {}
+                        ).get("sector", "Unknown")
+                    )
+                    for signal in shared_signals
+                    if signal.get("ticker")
+                }
+                risk_context = build_portfolio_risk_context(
+                    portfolio_value=float(marked_account.net_equity),
+                    cash=float(marked_account.cash),
+                    current_positions=self.ledger.policy_open_lot_projection(session),
+                    pending_positions=baseline_pending,
+                    price_cache=self._price_cache,
+                    earnings_dates={},
+                    short_interest={},
+                    borrow_available={},
+                    margin_used=float(marked_account.margin_used),
+                    consumed_event_keys=self.ledger.consumed_event_keys(),
+                    config=policy_config,
+                    sectors=sectors,
+                    require_borrow=False,
+                )
+                policy_binding = self.ledger.bind_policy_session_context(
+                    session,
+                    binding_kind="staging",
+                    epoch_id=epoch_id,
+                    policy_version=policy_config.version,
+                    policy_config=portfolio_policy_config_document(policy_config),
+                    context=portfolio_risk_context_document(risk_context),
+                    bound_at=cutoff,
+                )
+        if replaying:
             records = self.ledger.read_signals(
                 session, session, epoch_id=epoch_id, policy_id=policy_id
             )
+            if policy_config is not None:
+                manifests = self.ledger.read_policy_staging_audit_manifests(
+                    epoch_id=epoch_id
+                )
+                matching = [
+                    item
+                    for item in manifests
+                    if item["session"] == session and item["policy_id"] == policy_id
+                ]
+                if len(matching) != 1:
+                    raise LedgerConflictError(
+                        "missing policy staging audit manifest on replay"
+                    )
+                for record in records:
+                    if self.ledger.read_signal_policy_provenance(record.signal_id) is None:
+                        raise LedgerConflictError(
+                            f"missing signal policy provenance {record.signal_id}"
+                        )
+                intent_rows = self.ledger.connection.execute(
+                    """SELECT DISTINCT i.intent_id FROM order_intents i
+                       JOIN intent_signals x ON x.intent_id = i.intent_id
+                       JOIN signals s ON s.signal_id = x.signal_id
+                       WHERE i.cohort_id = ? AND s.reference_session = ?
+                         AND s.epoch_id = ? AND s.policy_id = ?""",
+                    (self.ledger.cohort_id, session.isoformat(), epoch_id, policy_id),
+                ).fetchall()
+                for row in intent_rows:
+                    intent = self.ledger.intent(str(row["intent_id"]))
+                    if intent is not None and intent.side in {"buy", "short"}:
+                        if self.ledger.read_intent_policy_provenance(
+                            intent.intent_id
+                        ) is None:
+                            raise LedgerConflictError(
+                                f"missing intent policy provenance {intent.intent_id}"
+                            )
             return {
                 "signals": [record.__dict__ for record in records],
                 "recommendations": [],
@@ -486,12 +664,10 @@ class MultiStrategyEngine:
                 "replayed": True,
             }
 
-        raw_bars = data.get("_execution_reference_bars", {})
-        if not isinstance(raw_bars, dict):
-            raise ValueError("_execution_reference_bars must be a mapping")
-
         records: list[SignalRecord] = []
         timely: list[tuple[dict, SignalRecord]] = []
+        policy_inputs: list[tuple[dict, SignalRecord, str]] = []
+        policy_provenance_specs: dict[str, dict[str, object]] = {}
         late_ids: list[str] = []
         seen_signal_ids: set[str] = set()
         for signal in shared_signals:
@@ -540,6 +716,8 @@ class MultiStrategyEngine:
             existing_observation = self.ledger.signal_observation(signal_id)
             if existing_observation is not None:
                 record, candidate_context, journal_payload = existing_observation
+                if record.reference_session != session:
+                    continue
                 records.append(record)
                 status = str(journal_payload.get("status", "timely"))
                 if status == "cutoff-late":
@@ -552,7 +730,9 @@ class MultiStrategyEngine:
                         )
                     enriched = dict(stored_signal)
                     enriched["_signal_id"] = signal_id
+                    enriched["event_key"] = record.event_key
                     timely.append((enriched, record))
+                policy_inputs.append((dict(candidate_context["signal"]), record, status))
                 continue
 
             evidence = _canonical_signal_evidence(
@@ -625,8 +805,10 @@ class MultiStrategyEngine:
                 enriched = dict(signal)
                 enriched["ticker"] = ticker
                 enriched["_signal_id"] = signal_id
+                enriched["event_key"] = event_key
                 timely.append((enriched, record))
                 status = "timely"
+            policy_inputs.append((dict(signal), record, status))
             llm = metadata.get("llm_analysis")
             journal_payload = asdict(
                 JournalEntry(
@@ -668,6 +850,66 @@ class MultiStrategyEngine:
                 },
             )
 
+        if policy_config is not None:
+            assert policy_binding is not None
+            consumed = risk_context.consumed_event_keys
+            profiles = (enrichment or {}).get("profiles", {})
+            eligible_signal_ids: set[str] = set()
+            def policy_tags(value: object) -> tuple[str, ...]:
+                if isinstance(value, str):
+                    return (value,) if value else ()
+                if not isinstance(value, (list, tuple, set, frozenset)):
+                    return ()
+                return tuple(str(item) for item in value if str(item))
+
+            for signal, record, status in policy_inputs:
+                journal_only = bool(signal.get("journal_only", False))
+                reasons: list[str] = []
+                if status == "cutoff-late":
+                    reasons.append("cutoff_late")
+                if journal_only:
+                    reasons.append("journal_only")
+                if record.direction == "neutral":
+                    reasons.append("neutral")
+                if record.event_key in consumed:
+                    reasons.append("consumed_event")
+                if record.direction == "short" and not size_profile.short_eligible:
+                    reasons.append("short_ineligible")
+                order_eligible = not reasons
+                if order_eligible:
+                    eligible_signal_ids.add(record.signal_id)
+                source_event_keys = policy_tags(signal.get("source_event_keys", ()))
+                strategy_tags = tuple(
+                    sorted(
+                        {record.strategy}
+                        | {
+                            str(value)
+                            for value in policy_tags(signal.get("strategy_tags", ()))
+                        }
+                    )
+                )
+                risk_tags = policy_tags(signal.get("risk_tags", ()))
+                profile = profiles.get(record.ticker, {})
+                sector = (
+                    str(profile.get("sector", "Unknown"))
+                    if isinstance(profile, Mapping)
+                    else "Unknown"
+                )
+                policy_provenance_specs[record.signal_id] = {
+                    "record": record,
+                    "source_event_keys": source_event_keys,
+                    "strategy_tags": strategy_tags,
+                    "risk_tags": risk_tags,
+                    "sector": sector,
+                    "journal_only": journal_only,
+                    "preliminary_reasons": tuple(reasons),
+                }
+            timely = [
+                (signal, record)
+                for signal, record in timely
+                if record.signal_id in eligible_signal_ids
+            ]
+
         self._journal.mirror_signals(records, {})
 
         strategy_confidence = {
@@ -687,7 +929,65 @@ class MultiStrategyEngine:
             current_positions=self.ledger.open_positions(),
             total_capital=float(marked_account.net_equity),
             enrichment=enrichment or {},
+            risk_context=risk_context,
         )
+        if policy_config is not None:
+            policy_decisions = tuple(
+                getattr(committee, "last_policy_decisions", ())
+            )
+            for signal_id, spec in policy_provenance_specs.items():
+                record = spec["record"]
+                preliminary = tuple(spec["preliminary_reasons"])
+                if preliminary:
+                    decision = "rejected"
+                    reason_codes = preliminary
+                    order_eligible = False
+                else:
+                    # Signal companions describe ingress eligibility only.  A
+                    # multi-signal recommendation is audited once in the
+                    # candidate-decision table below, avoiding double counts.
+                    decision = "accepted"
+                    reason_codes = ("ingress_eligible",)
+                    order_eligible = True
+                self.ledger.record_signal_policy_provenance(
+                    signal_id,
+                    policy_version=policy_config.version,
+                    event_key=record.event_key,
+                    source_event_keys=tuple(spec["source_event_keys"]),
+                    strategy_tags=tuple(spec["strategy_tags"]),
+                    risk_tags=tuple(spec["risk_tags"]),
+                    sector=str(spec["sector"]),
+                    journal_only=bool(spec["journal_only"]),
+                    order_eligible=order_eligible,
+                    decision=decision,
+                    reason_codes=reason_codes,
+                    bound_context_digest=str(policy_binding["context_digest"]),
+                    captured_at=cutoff,
+                )
+            candidate_decision_specs: list[tuple[Any, tuple[str, ...]]] = []
+            covered_signal_ids: set[str] = set()
+            for outcome in policy_decisions:
+                contributors = tuple(
+                    sorted(
+                        record.signal_id
+                        for signal, record in timely
+                        if record.ticker == outcome.ticker
+                        and record.direction == outcome.direction
+                    )
+                )
+                if not contributors:
+                    raise LedgerConflictError(
+                        "policy candidate decision lacks signal contributors"
+                    )
+                candidate_decision_specs.append((outcome, contributors))
+                covered_signal_ids.update(contributors)
+            candidate_decisions = {
+                (item.ticker, item.direction): item for item in policy_decisions
+            }
+        else:
+            candidate_decisions = {}
+            candidate_decision_specs = []
+            covered_signal_ids = set()
         bridge = ExecutionBridge(self.config, ledger=self.ledger)
         rec_specs: list[tuple[Any, tuple[SignalRecord, ...]]] = []
         for recommendation in recommendations:
@@ -698,6 +998,7 @@ class MultiStrategyEngine:
                         record
                         for signal, record in timely
                         if record.ticker == recommendation.ticker
+                        and record.direction == recommendation.direction
                         and record.strategy in contributors
                     ),
                     key=lambda record: record.signal_id,
@@ -716,6 +1017,26 @@ class MultiStrategyEngine:
         staged_ids: list[str] = []
 
         def persist_staging() -> None:
+            candidate_decision_ids: list[str] = []
+            if policy_config is not None:
+                assert policy_binding is not None
+                for outcome, contributors in candidate_decision_specs:
+                    persisted = self.ledger.record_policy_candidate_decision(
+                        session,
+                        epoch_id=epoch_id,
+                        policy_version=policy_config.version,
+                        ticker=outcome.ticker,
+                        direction=outcome.direction,
+                        event_key=outcome.event_key,
+                        signal_ids=contributors,
+                        requested_weight=outcome.requested_weight,
+                        approved_weight=outcome.approved_weight,
+                        decision=outcome.decision,
+                        reason_codes=(outcome.reason,),
+                        bound_context_digest=str(policy_binding["context_digest"]),
+                        captured_at=cutoff,
+                    )
+                    candidate_decision_ids.append(str(persisted["decision_id"]))
             for intent in cancellations:
                 self.ledger.cancel_intent(
                     intent.intent_id, cutoff, "strategy exit superseded resting stop"
@@ -738,7 +1059,53 @@ class MultiStrategyEngine:
                     cutoff,
                     eligible_session,
                 )
+                if policy_config is not None:
+                    assert policy_binding is not None
+                    outcome = candidate_decisions.get(
+                        (recommendation.ticker, recommendation.direction)
+                    )
+                    intent_decision = (
+                        outcome.decision if outcome is not None else "accepted"
+                    )
+                    intent_reasons = (
+                        (outcome.reason,) if outcome is not None else ("accepted",)
+                    )
+                    self.ledger.record_intent_policy_provenance(
+                        intent.intent_id,
+                        signal_ids=intent.signal_ids,
+                        policy_version=policy_config.version,
+                        event_key=recommendation.event_key,
+                        source_event_keys=recommendation.source_event_keys,
+                        strategy_tags=recommendation.strategy_tags,
+                        risk_tags=recommendation.risk_tags,
+                        sector=str(risk_context.sectors.get(
+                            recommendation.ticker, "Unknown"
+                        )),
+                        journal_only=recommendation.journal_only,
+                        order_eligible=True,
+                        decision=intent_decision,
+                        reason_codes=intent_reasons,
+                        bound_context_digest=str(policy_binding["context_digest"]),
+                        captured_at=cutoff,
+                    )
                 staged_ids.append(intent.intent_id)
+            if policy_config is not None:
+                assert policy_binding is not None
+                ingress_ids = tuple(sorted(eligible_signal_ids))
+                nonselected_ids = tuple(
+                    sorted(set(ingress_ids) - covered_signal_ids)
+                )
+                self.ledger.record_policy_staging_audit_manifest(
+                    session,
+                    epoch_id=epoch_id,
+                    policy_id=policy_id,
+                    policy_version=policy_config.version,
+                    bound_context_digest=str(policy_binding["context_digest"]),
+                    ingress_signal_ids=ingress_ids,
+                    candidate_decision_ids=tuple(candidate_decision_ids),
+                    committee_not_selected_ids=nonselected_ids,
+                    recorded_at=cutoff,
+                )
 
         executed, _ = self.ledger.complete_staging(
             session,

@@ -130,6 +130,7 @@ class PortfolioCommittee:
             .get("short_conviction_threshold", self.SHORT_CONVICTION_THRESHOLD)
         )
         self._client = None
+        self.last_policy_decisions = ()
 
     def synthesize(
         self,
@@ -155,6 +156,7 @@ class PortfolioCommittee:
         Returns:
             List of TradeRecommendation sorted by confidence descending.
         """
+        self.last_policy_decisions = ()
         if not signals:
             return []
 
@@ -188,12 +190,70 @@ class PortfolioCommittee:
                 current_positions, total_capital, enrichment,
             )
         if not ranked:
+            self.last_policy_decisions = ()
             return []
 
         attributed = self._derive_attribution(ranked, signals)
+
+        def recommendation_key(
+            recommendation: TradeRecommendation,
+        ) -> tuple[object, ...]:
+            option_spec = recommendation.option_spec
+            option_key: tuple[object, ...] = (
+                (0, "", 0, 0.0, 0.0)
+                if option_spec is None
+                else (
+                    1,
+                    option_spec.strategy,
+                    option_spec.expiry_target_days,
+                    option_spec.strike_offset_pct,
+                    option_spec.max_premium_pct,
+                )
+            )
+            return (
+                -float(recommendation.confidence),
+                -float(recommendation.position_size_pct),
+                recommendation.ticker,
+                recommendation.direction,
+                recommendation.rationale,
+                tuple(recommendation.contributing_strategies),
+                recommendation.regime_alignment,
+                recommendation.vehicle,
+                option_key,
+                recommendation.event_key,
+                recommendation.source_event_keys,
+                recommendation.strategy_tags,
+                recommendation.risk_tags,
+                recommendation.journal_only,
+            )
+
+        attributed = sorted(
+            attributed,
+            key=recommendation_key,
+        )
+        deduped: list[TradeRecommendation] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for recommendation in attributed:
+            pair = (recommendation.ticker, recommendation.direction)
+            if pair in seen_pairs:
+                logger.warning(
+                    "dropping duplicate attributed recommendation: %s %s",
+                    *pair,
+                )
+                continue
+            seen_pairs.add(pair)
+            deduped.append(recommendation)
+        attributed = deduped
         if not self._policy_enabled:
+            self.last_policy_decisions = ()
             return attributed
-        return PortfolioPolicy().apply(attributed, risk_context)
+        policy = PortfolioPolicy()
+        accepted = policy.apply(attributed, risk_context)
+        if hasattr(policy, "last_decisions"):
+            self.last_policy_decisions = policy.last_decisions
+        else:
+            raise RuntimeError("portfolio policy did not publish its decision sidecar")
+        return accepted
 
     @staticmethod
     def _signal_tags(signal: dict, key: str) -> tuple[str, ...]:
@@ -643,7 +703,7 @@ Synthesize into ranked trade list. Return JSON array."""
         # Strip markdown fences
         if text.startswith("```"):
             lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             text = "\n".join(lines)
 
         try:
@@ -765,7 +825,7 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
             )
             if text.startswith("```"):
                 lines = text.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
+                lines = [line for line in lines if not line.strip().startswith("```")]
                 text = "\n".join(lines)
             data = json.loads(text)
             return data if isinstance(data, list) else []

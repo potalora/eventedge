@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.strategies.execution import (
     CorporateAction,
     Fill,
@@ -26,8 +28,10 @@ from tradingagents.strategies.orchestration.session_executor import (
 from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
+from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
+from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicyDecision
 from tradingagents.strategies.orchestration.trading_calendar import (
     next_session,
     session_close,
@@ -2353,6 +2357,331 @@ def test_screen_and_stage_persists_all_events_partitions_late_and_replays(tmp_pa
         assert len(ledger.read_signals(FRIDAY, FRIDAY)) == 3
         assert len(ledger.pending_intents(MONDAY)) == 1
         assert len(engine._journal.get_entries()) == 3
+    finally:
+        ledger.close()
+
+
+def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
+    tmp_path,
+) -> None:
+    state_dir = str(tmp_path / "state")
+    config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"].update(
+        {"state_dir": state_dir, "horizon": "30d", "total_capital": 5000}
+    )
+    config["autoresearch"]["paper_trade"]["portfolio_committee_enabled"] = False
+    profile = SIZE_PROFILES["5k"]
+    config["autoresearch"]["risk_gate"].update(
+        {
+            "max_positions": profile.max_positions,
+            "max_position_pct": profile.max_position_pct,
+            "min_position_value": profile.min_position_value,
+            "cash_reserve_pct": profile.cash_reserve_pct,
+            "long_only": True,
+        }
+    )
+    ledger = PortfolioLedger(
+        Path(state_dir) / "portfolio.db", "cohort", Decimal("5000")
+    )
+    try:
+        friday = SessionExecutor(
+            ledger, config, size_profile=profile
+        ).execute_open_and_mark(
+            FRIDAY,
+            "epoch",
+            FakePriceSource(
+                adjusted={
+                    ("SPY", FRIDAY): Decimal("649"),
+                    ("BIL", FRIDAY): Decimal("91"),
+                }
+            ),
+            {},
+            datetime(2026, 7, 31, 22, tzinfo=UTC),
+        )
+        assert friday.snapshot is not None
+        engine = MultiStrategyEngine(
+            config=config,
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        candidate = {
+            "ticker": "AAPL",
+            "direction": "long",
+            "score": 2.0,
+            "strategy": "strategy",
+            "event_key": "event-aapl",
+            "source_event_keys": ("native-aapl",),
+            "strategy_tags": ("strategy",),
+            "risk_tags": ("event:aapl",),
+            "metadata": {
+                "event_key": "event-aapl",
+                "observed_at": "2026-07-31T19:30:00+00:00",
+            },
+        }
+
+        def committee_output(weight: float):
+            def synthesize(committee, **_kwargs):
+                committee.last_policy_decisions = (
+                    PortfolioPolicyDecision(
+                        "AAPL",
+                        "long",
+                        "event-aapl",
+                        "accepted",
+                        "accepted",
+                        weight,
+                        weight,
+                    ),
+                )
+                return [
+                    TradeRecommendation(
+                        "AAPL",
+                        "long",
+                        weight,
+                        0.8,
+                        "test",
+                        ["strategy"],
+                        event_key="event-aapl",
+                        source_event_keys=("native-aapl",),
+                        strategy_tags=("strategy",),
+                        risk_tags=("event:aapl",),
+                    )
+                ]
+
+            return synthesize
+
+        with (
+            patch(
+                "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+                new=committee_output(0.04),
+            ),
+            patch.object(
+                ledger,
+                "record_intent_policy_provenance",
+                side_effect=RuntimeError("staging crash"),
+            ),
+            pytest.raises(RuntimeError, match="staging crash"),
+        ):
+            engine.screen_and_stage(
+                FRIDAY.isoformat(),
+                {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                [candidate],
+                {},
+                {"profiles": {"AAPL": {"sector": "Technology"}}},
+                profile,
+                friday.snapshot,
+            )
+        assert ledger.read_policy_candidate_decisions() == ()
+        assert ledger.read_policy_staging_audit_manifests() == ()
+        assert ledger.pending_intents(MONDAY) == []
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            new=committee_output(0.03),
+        ):
+            result = engine.screen_and_stage(
+                FRIDAY.isoformat(),
+                {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                [candidate],
+                {},
+                {"profiles": {"AAPL": {"sector": "Technology"}}},
+                profile,
+                friday.snapshot,
+            )
+        assert len(result["intents_staged"]) == 1
+        decisions = ledger.read_policy_candidate_decisions()
+        assert len(decisions) == 1
+        assert decisions[0]["approved_weight"] == pytest.approx(0.03)
+        assert ledger.read_policy_session_context(
+            FRIDAY, binding_kind="staging"
+        ) is not None
+
+        replay_engine = MultiStrategyEngine(
+            config=deepcopy(config),
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        assert replay_engine._price_cache == {}
+        replay = replay_engine.screen_and_stage(
+            FRIDAY.isoformat(),
+            {"_execution_reference_bars": {}},
+            [],
+            {},
+            {},
+            profile,
+            friday.snapshot,
+        )
+        assert replay["replayed"] is True
+
+        policy_changed = deepcopy(config)
+        policy_changed["autoresearch"]["portfolio_policy"]["version"] = (
+            "portfolio_policy_v2"
+        )
+        changed_engine = MultiStrategyEngine(
+            config=policy_changed,
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        with pytest.raises(LedgerConflictError, match="binding mismatch"):
+            changed_engine.screen_and_stage(
+                FRIDAY.isoformat(),
+                {"_execution_reference_bars": {}},
+                [],
+                {},
+                {},
+                profile,
+                friday.snapshot,
+            )
+
+        policy_removed = deepcopy(config)
+        policy_removed["autoresearch"].pop("portfolio_policy")
+        replay_engine = MultiStrategyEngine(
+            config=policy_removed,
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        with pytest.raises(
+            LedgerConflictError, match="policy artifacts.*policy is disabled"
+        ):
+            replay_engine.screen_and_stage(
+                FRIDAY.isoformat(),
+                {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                [],
+                {},
+                {},
+                profile,
+                friday.snapshot,
+            )
+
+        monday = SessionExecutor(
+            ledger, config, size_profile=profile
+        ).execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            FakePriceSource(
+                {("AAPL", MONDAY): _bar("AAPL", MONDAY)},
+                adjusted={
+                    ("SPY", MONDAY): Decimal("650"),
+                    ("BIL", MONDAY): Decimal("91.1"),
+                },
+            ),
+            {},
+            PROCESSED,
+        )
+        assert monday.valid
+        assert ledger.intent(result["intents_staged"][0]).status == "filled"
+        assert ledger.read_policy_session_context(
+            MONDAY, binding_kind="execution"
+        ) is not None
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("borrow_rate", "expected_status", "expected_reason"),
+    (
+        (None, "rejected", "portfolio_policy:borrow_unavailable"),
+        (Decimal("0.01"), "filled", ""),
+    ),
+)
+def test_short_stages_without_borrow_but_fill_requires_bound_availability(
+    tmp_path, borrow_rate, expected_status: str, expected_reason: str
+) -> None:
+    state_dir = str(tmp_path / expected_status)
+    config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"].update(
+        {"state_dir": state_dir, "horizon": "3m", "total_capital": 50_000}
+    )
+    config["autoresearch"]["paper_trade"]["portfolio_committee_enabled"] = False
+    profile = SIZE_PROFILES["50k"]
+    config["autoresearch"]["risk_gate"].update(
+        {
+            "max_positions": profile.max_positions,
+            "max_position_pct": profile.max_position_pct,
+            "min_position_value": profile.min_position_value,
+            "cash_reserve_pct": profile.cash_reserve_pct,
+            "long_only": False,
+        }
+    )
+    ledger = PortfolioLedger(
+        Path(state_dir) / "portfolio.db", "cohort", Decimal("50000")
+    )
+    try:
+        friday = SessionExecutor(
+            ledger, config, size_profile=profile
+        ).execute_open_and_mark(
+            FRIDAY,
+            "epoch",
+            FakePriceSource(
+                adjusted={
+                    ("SPY", FRIDAY): Decimal("649"),
+                    ("BIL", FRIDAY): Decimal("91"),
+                }
+            ),
+            {},
+            datetime(2026, 7, 31, 22, tzinfo=UTC),
+        )
+        assert friday.snapshot is not None
+        engine = MultiStrategyEngine(
+            config=config,
+            strategies=[_NeverExitStrategy()],
+            state_manager=StateManager(state_dir),
+            ledger=ledger,
+        )
+        staged = engine.screen_and_stage(
+            FRIDAY.isoformat(),
+            {"_execution_reference_bars": {"MSFT": _bar("MSFT", FRIDAY)}},
+            [
+                {
+                    "ticker": "MSFT",
+                    "direction": "short",
+                    "score": 2.0,
+                    "strategy": "strategy",
+                    "event_key": "event-msft-short",
+                    "source_event_keys": ("native-msft",),
+                    "strategy_tags": ("strategy",),
+                    "risk_tags": ("event:msft-short",),
+                    "metadata": {
+                        "event_key": "event-msft-short",
+                        "observed_at": "2026-07-31T19:30:00+00:00",
+                        "llm_analysis": {"conviction": 0.9},
+                    },
+                }
+            ],
+            {},
+            {"profiles": {"MSFT": {"sector": "Technology"}}},
+            profile,
+            friday.snapshot,
+        )
+        assert len(staged["intents_staged"]) == 1
+        intent_id = staged["intents_staged"][0]
+
+        result = SessionExecutor(
+            ledger, config, size_profile=profile
+        ).execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            FakePriceSource(
+                {("MSFT", MONDAY): _bar("MSFT", MONDAY)},
+                adjusted={
+                    ("SPY", MONDAY): Decimal("650"),
+                    ("BIL", MONDAY): Decimal("91.1"),
+                },
+            ),
+            {"MSFT": borrow_rate},
+            PROCESSED,
+        )
+        assert result.valid
+        assert ledger.intent(intent_id).status == expected_status
+        transitions = ledger.connection.execute(
+            "SELECT reason FROM order_status_transitions WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchall()
+        if expected_reason:
+            assert transitions[-1]["reason"] == expected_reason
     finally:
         ledger.close()
 

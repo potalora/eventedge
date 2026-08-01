@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import date
 from decimal import Decimal
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.strategies.execution.contracts import (
     COST_MODEL_VERSION,
     EXECUTION_CLOCK_VERSION,
@@ -29,6 +31,7 @@ from tradingagents.strategies.orchestration.session_executor import SessionExecu
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortConfig,
     CohortOrchestrator,
+    SIZE_PROFILES,
 )
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
@@ -320,6 +323,41 @@ def test_every_effective_executor_policy_leaf_rotates_config_hash(tmp_path) -> N
         assert all(row.config_hash != baseline.config_hash for row in changed_contexts)
     finally:
         ledger.close()
+
+
+def test_profile_bound_portfolio_policy_version_rotates_epoch_config_hash(
+    tmp_path,
+) -> None:
+    baseline_config = deepcopy(DEFAULT_CONFIG)
+    changed_config = deepcopy(DEFAULT_CONFIG)
+    changed_config["autoresearch"]["portfolio_policy"]["version"] = (
+        "portfolio_policy_v2"
+    )
+    baseline_ledger = PortfolioLedger(
+        tmp_path / "baseline-policy.db", "baseline", Decimal("5000")
+    )
+    changed_ledger = PortfolioLedger(
+        tmp_path / "changed-policy.db", "changed", Decimal("5000")
+    )
+    try:
+        baseline = SessionExecutor(
+            baseline_ledger, baseline_config, size_profile=SIZE_PROFILES["5k"]
+        ).semantic_policy_document()
+        changed = SessionExecutor(
+            changed_ledger, changed_config, size_profile=SIZE_PROFILES["5k"]
+        ).semantic_policy_document()
+        baseline_context = _context(
+            cohort_policies=(_policy(execution_policy=baseline),)
+        )
+        changed_context = _context(
+            cohort_policies=(_policy(execution_policy=changed),)
+        )
+        assert baseline["portfolio_policy"]["version"] == "portfolio_policy_v1"
+        assert changed["portfolio_policy"]["version"] == "portfolio_policy_v2"
+        assert changed_context.config_hash != baseline_context.config_hash
+    finally:
+        baseline_ledger.close()
+        changed_ledger.close()
 
 
 @pytest.mark.parametrize("field", ("generation_id", "generation_commit"))

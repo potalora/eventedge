@@ -338,25 +338,28 @@ class CohortOrchestrator:
             cohort_config.setdefault("autoresearch", {})["state_dir"] = cfg.state_dir
             cohort_config["autoresearch"]["horizon"] = cfg.horizon
             profile = SIZE_PROFILES.get(cfg.size_profile)
-            if profile:
-                cohort_config.setdefault("autoresearch", {})["total_capital"] = (
-                    profile.total_capital
+            if profile is None:
+                raise ValueError(
+                    f"unknown size profile {cfg.size_profile!r} for cohort {cfg.name}"
                 )
-                risk = cohort_config["autoresearch"].setdefault("risk_gate", {})
-                risk.update(
-                    {
-                        "max_positions": profile.max_positions,
-                        "max_position_pct": profile.max_position_pct,
-                        "min_position_value": profile.min_position_value,
-                        "cash_reserve_pct": profile.cash_reserve_pct,
-                        "long_only": not profile.short_eligible,
-                    }
-                )
+            cohort_config.setdefault("autoresearch", {})["total_capital"] = (
+                profile.total_capital
+            )
+            risk = cohort_config["autoresearch"].setdefault("risk_gate", {})
+            risk.update(
+                {
+                    "max_positions": profile.max_positions,
+                    "max_position_pct": profile.max_position_pct,
+                    "min_position_value": profile.min_position_value,
+                    "cash_reserve_pct": profile.cash_reserve_pct,
+                    "long_only": not profile.short_eligible,
+                }
+            )
 
             ledger = PortfolioLedger(
                 Path(cfg.state_dir) / "portfolio.db",
                 cfg.name,
-                Decimal(str(profile.total_capital if profile else 5000)),
+                Decimal(str(profile.total_capital)),
                 paper_ledger_config=cohort_config["autoresearch"].get("paper_ledger"),
                 short_selling_config=cohort_config["autoresearch"].get("short_selling"),
             )
@@ -370,13 +373,18 @@ class CohortOrchestrator:
                 adaptive_confidence=False,
                 ledger=ledger,
             )
-            executor = SessionExecutor(ledger, cohort_config, metric_store=metric_store)
+            executor = SessionExecutor(
+                ledger,
+                cohort_config,
+                metric_store=metric_store,
+                size_profile=profile,
+            )
             self.cohorts.append(
                 {
                     "config": cfg,
                     "engine": engine,
                     "state": state,
-                    "size_profile": SIZE_PROFILES.get(cfg.size_profile),
+                    "size_profile": profile,
                     "ledger": ledger,
                     "executor": executor,
                 }

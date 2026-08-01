@@ -41,6 +41,7 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "cost_model",
         "risk_gate",
         "short_selling",
+        "portfolio_policy",
     }
 )
 _NESTED_POLICY_KEYS = {
@@ -80,6 +81,27 @@ _NESTED_POLICY_KEYS = {
     ),
     "short_selling": frozenset({"borrow_cost_reject_above"}),
 }
+_PORTFOLIO_POLICY_KEYS = frozenset(
+    {
+        "profile_name",
+        "version",
+        "max_positions",
+        "max_position_pct",
+        "max_sector_exposure_pct",
+        "max_strategy_exposure_pct",
+        "max_event_cluster_exposure_pct",
+        "max_position_risk_contribution_pct",
+        "risk_contribution_min_positions",
+        "max_short_exposure_pct",
+        "max_single_short_pct",
+        "max_correlated_shorts",
+        "cash_reserve_pct",
+        "margin_cash_buffer_pct",
+        "volatility_lookback_sessions",
+        "annualized_volatility_floor",
+        "congressional_exposure_pct",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -126,7 +148,9 @@ def _validate_execution_policy_schema(policy: object) -> None:
         raise ValueError(
             f"unexpected execution_policy key {sorted(unexpected)[0]!r}"
         )
-    missing = _EXECUTION_POLICY_KEYS - actual
+    # The field is optional only for historical/legacy policy documents. New
+    # profile-bound executors always emit it (as a document, never implicitly).
+    missing = (_EXECUTION_POLICY_KEYS - {"portfolio_policy"}) - actual
     if missing:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
@@ -167,7 +191,35 @@ def _validate_execution_policy_schema(policy: object) -> None:
         or any(not isinstance(item, str) for item in benchmarks)
     ):
         raise TypeError("execution_policy.benchmark_symbols must be a string list")
-    nested_keys = {*_NESTED_POLICY_KEYS, "benchmark_symbols"}
+    portfolio_policy = policy.get("portfolio_policy")
+    if portfolio_policy is not None:
+        if not isinstance(portfolio_policy, dict):
+            raise TypeError("execution_policy.portfolio_policy must be a dict or null")
+        actual = set(portfolio_policy)
+        unexpected = actual - _PORTFOLIO_POLICY_KEYS
+        if unexpected:
+            raise ValueError(
+                "unexpected execution_policy.portfolio_policy key "
+                f"{sorted(unexpected)[0]!r}"
+            )
+        missing = _PORTFOLIO_POLICY_KEYS - actual
+        if missing:
+            raise ValueError(
+                "execution_policy.portfolio_policy key set is missing "
+                f"{sorted(missing)[0]!r}"
+            )
+        if any(
+            not isinstance(value, (str, int, bool))
+            for value in portfolio_policy.values()
+        ):
+            raise TypeError(
+                "execution_policy.portfolio_policy values must be canonical scalars"
+            )
+    nested_keys = {
+        *_NESTED_POLICY_KEYS,
+        "benchmark_symbols",
+        "portfolio_policy",
+    }
     for key, value in policy.items():
         if key in nested_keys:
             continue

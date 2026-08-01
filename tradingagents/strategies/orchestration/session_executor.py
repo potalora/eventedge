@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from importlib.metadata import version as package_version
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +49,14 @@ from tradingagents.strategies.state.portfolio_ledger import (
 )
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 from tradingagents.strategies.trading.risk_gate import RiskGateConfig
+from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicyConfig,
+    PortfolioRiskContext,
+    build_portfolio_risk_context,
+    portfolio_policy_config_document,
+    portfolio_risk_context_document,
+)
+from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
 
 
 PHASES = (
@@ -152,15 +160,26 @@ class SessionExecutor:
         ledger: PortfolioLedger,
         config: dict,
         *,
+        size_profile: object | None = None,
         metric_store: MetricStore | None = None,
         after_phase_mutation: Callable[[str], None] | None = None,
         after_phase_commit: Callable[[str], None] | None = None,
     ) -> None:
         self.ledger = ledger
         self.config = config
+        self.size_profile = size_profile
         if config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("EventEdge cohort execution must remain paper-only")
         self.ar_config = config.get("autoresearch", {})
+        policy_settings = self.ar_config.get("portfolio_policy")
+        self.policy_enabled = size_profile is not None and isinstance(
+            policy_settings, dict
+        )
+        self.portfolio_policy_config = (
+            PortfolioPolicyConfig.from_size_profile(size_profile, policy_settings)
+            if self.policy_enabled
+            else None
+        )
         self.ledger_config = self.ar_config.get("paper_ledger", {})
         self.benchmark_symbols = tuple(
             self.ledger_config.get("benchmark_symbols", ("SPY", "BIL"))
@@ -187,6 +206,44 @@ class SessionExecutor:
         """Return canonical, secret-free, session-invariant execution semantics."""
         config_inputs, _ = self._static_context_documents((), {})
         return config_inputs
+
+    def portfolio_policy_document(self) -> dict[str, object] | None:
+        """Return the normalized profile-bound policy or ``None`` for legacy callers."""
+        if self.portfolio_policy_config is None:
+            return None
+        return {
+            field.name: getattr(self.portfolio_policy_config, field.name)
+            for field in fields(self.portfolio_policy_config)
+        }
+
+    def _verify_committed_execution_policy_binding(
+        self, session: date, epoch_id: str
+    ) -> None:
+        """Require the exact policy artifact committed by the entry phase."""
+        if not self.ledger.phase_completed(session, "execute_entries"):
+            return
+        binding = self.ledger.read_policy_session_context(
+            session, binding_kind="execution"
+        )
+        if self.portfolio_policy_config is None:
+            if binding is not None:
+                raise LedgerConflictError(
+                    "execution policy binding exists while portfolio policy is disabled"
+                )
+            return
+        if binding is None:
+            raise LedgerConflictError(
+                f"missing committed execution policy binding for {session}"
+            )
+        if (
+            binding["epoch_id"] != epoch_id
+            or binding["policy_version"] != self.portfolio_policy_config.version
+            or binding["policy_config"]
+            != portfolio_policy_config_document(self.portfolio_policy_config)
+        ):
+            raise LedgerConflictError(
+                f"committed execution policy binding mismatch for {session}"
+            )
 
     def ensure_metric_epoch(
         self, context: EpochContext, session: date
@@ -630,6 +687,7 @@ class SessionExecutor:
                 self._expected_state_digest = self.ledger.verify_session_phase_chain(
                     session, PHASES
                 )
+                self._verify_committed_execution_policy_binding(session, epoch_id)
             except LedgerConflictError as error:
                 reason = f"execution context conflict: {error}"
                 if not existing:
@@ -787,9 +845,9 @@ class SessionExecutor:
             session,
             "execute_entries",
             processed_at,
-            lambda: self._execute_intents(
+            lambda: self._execute_entry_intents(
                 session,
-                {"buy", "short"},
+                epoch_id,
                 bridge,
                 bars,
                 opening_prices,
@@ -950,8 +1008,7 @@ class SessionExecutor:
             name: format(getattr(self.cost_model, name), "f")
             for name in PaperCostModel.DEFAULTS
         }
-        config_inputs = _canonical_json_value(
-            {
+        semantic_inputs: dict[str, object] = {
                 "policy_document_version": POLICY_DOCUMENT_VERSION,
                 "execution": {
                     "mode": self.config.get("execution", {}).get("mode", "paper"),
@@ -974,9 +1031,149 @@ class SessionExecutor:
                     "borrow_cost_reject_above": format(self.borrow_reject_above, "f"),
                 },
             }
-        )
+        policy_document = self.portfolio_policy_document()
+        if policy_document is not None:
+            semantic_inputs["portfolio_policy"] = policy_document
+        config_inputs = _canonical_json_value(semantic_inputs)
         assert isinstance(config_inputs, dict)
         return config_inputs, borrow_inputs
+
+    def _execute_entry_intents(
+        self,
+        session: date,
+        epoch_id: str,
+        bridge: ExecutionBridge,
+        bars: dict[str, MarketBar],
+        opening_prices: dict[str, Decimal],
+        borrow_rates: dict[str, Decimal | None],
+        processed_at: datetime,
+        market_validated_at: datetime,
+    ) -> None:
+        """Bind one post-exit baseline, then validate every entry against it."""
+        portfolio_context = None
+        if self.portfolio_policy_config is not None:
+            account = self.ledger.account_state()
+            current = self.ledger.policy_open_lot_projection(session)
+            pending = self._policy_pending_with_execution_prices(
+                session, self.ledger.policy_pending_entry_projection(), opening_prices
+            )
+            sectors = {
+                str(row["ticker"]): str(row.get("sector", "Unknown"))
+                for row in current + pending
+            }
+            borrow_available = {
+                str(row["ticker"]): borrow_rates.get(str(row["ticker"])) is not None
+                for row in pending
+                if str(row.get("direction")) == "short"
+            }
+            portfolio_context = build_portfolio_risk_context(
+                portfolio_value=float(account.net_equity),
+                cash=float(account.cash),
+                current_positions=current,
+                pending_positions=pending,
+                price_cache={},
+                earnings_dates={},
+                short_interest={},
+                borrow_available=borrow_available,
+                margin_used=float(account.margin_used),
+                consumed_event_keys=self.ledger.consumed_event_keys(),
+                config=self.portfolio_policy_config,
+                sectors=sectors,
+            )
+            self.ledger.bind_policy_session_context(
+                session,
+                binding_kind="execution",
+                epoch_id=epoch_id,
+                policy_version=self.portfolio_policy_config.version,
+                policy_config=portfolio_policy_config_document(
+                    self.portfolio_policy_config
+                ),
+                context=portfolio_risk_context_document(portfolio_context),
+                bound_at=processed_at,
+            )
+        self._execute_intents(
+            session,
+            {"buy", "short"},
+            bridge,
+            bars,
+            opening_prices,
+            borrow_rates,
+            processed_at,
+            market_validated_at,
+            portfolio_context=portfolio_context,
+        )
+
+    @staticmethod
+    def _policy_pending_with_execution_prices(
+        session: date,
+        pending: tuple[dict[str, object], ...],
+        opening_prices: Mapping[str, Decimal],
+    ) -> tuple[dict[str, object], ...]:
+        """Use bound raw opens for due reservations; future entries retain D-close."""
+        priced: list[dict[str, object]] = []
+        for row in pending:
+            item = dict(row)
+            if item["eligible_session"] == session:
+                ticker = str(item["ticker"])
+                opening_price = opening_prices.get(ticker)
+                if (
+                    not isinstance(opening_price, Decimal)
+                    or not opening_price.is_finite()
+                    or opening_price <= 0
+                ):
+                    raise LedgerConflictError(
+                        f"missing bound opening price for due policy entry {ticker}"
+                    )
+                item["marked_value"] = Decimal(int(item["quantity"])) * opening_price
+            priced.append(item)
+        return tuple(priced)
+
+    def _current_intent_policy_context(
+        self,
+        session: date,
+        intent_id: str,
+        opening_prices: Mapping[str, Decimal],
+        borrow_rates: Mapping[str, Decimal | None],
+        baseline: PortfolioRiskContext,
+    ) -> PortfolioRiskContext:
+        """Rebuild the prospective view after each prior fill/rejection."""
+        if self.portfolio_policy_config is None:
+            raise LedgerConflictError("portfolio policy config is unavailable")
+        current = self.ledger.policy_open_lot_projection(session)
+        pending = self._policy_pending_with_execution_prices(
+            session,
+            self.ledger.policy_pending_entry_projection(
+                exclude_intent_id=intent_id
+            ),
+            opening_prices,
+        )
+        account = self.ledger.account_state()
+        sectors = dict(baseline.sectors)
+        sectors.update(
+            {
+                str(row["ticker"]): str(row.get("sector", "Unknown"))
+                for row in current + pending
+            }
+        )
+        borrow_available = {
+            str(row["ticker"]): borrow_rates.get(str(row["ticker"])) is not None
+            for row in pending
+            if str(row.get("direction")) == "short"
+        }
+        return build_portfolio_risk_context(
+            portfolio_value=float(account.net_equity),
+            cash=float(account.cash),
+            current_positions=current,
+            pending_positions=pending,
+            price_cache={},
+            earnings_dates=baseline.earnings_dates,
+            short_interest=baseline.short_interest,
+            borrow_available=borrow_available,
+            margin_used=float(account.margin_used),
+            consumed_event_keys=self.ledger.consumed_event_keys(),
+            config=self.portfolio_policy_config,
+            sectors=sectors,
+        )
 
     def _phase(
         self,
@@ -1014,6 +1211,8 @@ class SessionExecutor:
         borrow_rates: dict[str, Decimal | None],
         processed_at: datetime,
         market_validated_at: datetime,
+        *,
+        portfolio_context: PortfolioRiskContext | None = None,
     ) -> None:
         intents = sorted(
             (
@@ -1033,6 +1232,59 @@ class SessionExecutor:
             if len(tickers) != 1:
                 raise ValueError(f"ambiguous ticker for intent {intent.intent_id}")
             ticker = next(iter(tickers))
+            recommendation = None
+            intent_context = portfolio_context
+            if self.policy_enabled and intent.side in {"buy", "short"}:
+                if portfolio_context is None:
+                    raise LedgerConflictError(
+                        f"missing execution policy context for {intent.intent_id}"
+                    )
+                provenance = self.ledger.read_intent_policy_provenance(
+                    intent.intent_id
+                )
+                if provenance is None:
+                    raise LedgerConflictError(
+                        f"missing intent policy provenance {intent.intent_id}"
+                    )
+                if (
+                    self.portfolio_policy_config is None
+                    or provenance["policy_version"]
+                    != self.portfolio_policy_config.version
+                ):
+                    raise LedgerConflictError(
+                        f"intent policy version mismatch for {intent.intent_id}"
+                    )
+                direction = "short" if intent.side == "short" else "long"
+                intent_context = self._current_intent_policy_context(
+                    session,
+                    intent.intent_id,
+                    opening_prices,
+                    borrow_rates,
+                    portfolio_context,
+                )
+                intent_context = replace(
+                    intent_context,
+                    borrow_available={
+                        **dict(intent_context.borrow_available),
+                        ticker: borrow_rates.get(ticker) is not None,
+                    },
+                )
+                proposed_value = float(Decimal(intent.requested_qty) * bars[ticker].open)
+                recommendation = TradeRecommendation(
+                    ticker=ticker,
+                    direction=direction,
+                    position_size_pct=(
+                        proposed_value / intent_context.portfolio_value
+                    ),
+                    confidence=0.0,
+                    rationale="rehydrated immutable intent provenance",
+                    contributing_strategies=list(provenance["strategy_tags"]),
+                    event_key=str(provenance["event_key"]),
+                    source_event_keys=tuple(provenance["source_event_keys"]),
+                    strategy_tags=tuple(provenance["strategy_tags"]),
+                    risk_tags=tuple(provenance["risk_tags"]),
+                    journal_only=bool(provenance["journal_only"]),
+                )
             bridge.execute_due_intent(
                 intent,
                 bars[ticker],
@@ -1056,6 +1308,9 @@ class SessionExecutor:
                     ],
                     "earnings_dates": {},
                     "short_interest": {},
+                    "policy_enabled": self.policy_enabled,
+                    "recommendation": recommendation,
+                    "portfolio_context": intent_context,
                 },
                 self.cost_model,
             )

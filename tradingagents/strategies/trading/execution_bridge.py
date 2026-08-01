@@ -235,13 +235,6 @@ class ExecutionBridge:
         direction = "short" if intent.side == "short" else "long"
         if intent.side in {"buy", "short"}:
             borrow_rate = risk_context.get("borrow_rate")
-            if intent.side == "short":
-                try:
-                    cost_model.validate_new_short_borrow_rate(
-                        borrow_rate, self._borrow_reject_above
-                    )
-                except (TypeError, ValueError) as error:
-                    return self._reject(intent, processing_at, str(error))
             due_entries = [
                 pending
                 for pending in self.ledger.pending_intents(opening_bar.session)
@@ -298,9 +291,19 @@ class ExecutionBridge:
                     if intent.side == "short"
                     else 0.0
                 ),
+                policy_enabled=bool(risk_context.get("policy_enabled", False)),
+                recommendation=risk_context.get("recommendation"),
+                portfolio_context=risk_context.get("portfolio_context"),
             )
             if not passed:
                 return self._reject(intent, processing_at, reason)
+            if intent.side == "short":
+                try:
+                    cost_model.validate_new_short_borrow_rate(
+                        borrow_rate, self._borrow_reject_above
+                    )
+                except (TypeError, ValueError) as error:
+                    return self._reject(intent, processing_at, str(error))
         else:
             borrow_rate = None
 

@@ -307,6 +307,7 @@ def _context(
     borrow_available: dict[str, bool] | None = None,
     margin_used: float = 0.0,
     consumed_event_keys: frozenset[str] = frozenset(),
+    require_borrow: bool = True,
 ) -> PortfolioRiskContext:
     return PortfolioRiskContext(
         portfolio_value=100_000.0,
@@ -321,6 +322,7 @@ def _context(
         margin_used=margin_used,
         consumed_event_keys=consumed_event_keys,
         config=_policy_config(size),
+        require_borrow=require_borrow,
     )
 
 
@@ -734,6 +736,23 @@ def test_policy_rejects_short_when_borrow_is_unknown_or_unavailable(
             sectors={"MSFT": "Technology"},
             borrow_available=borrow_available,
         ),
+    ) == (False, "borrow_unavailable")
+
+
+def test_staging_context_can_defer_unknown_borrow_to_bound_fill_check() -> None:
+    recommendation = _recommendation("MSFT", 0.02, direction="short")
+
+    assert PortfolioPolicy().validate(
+        recommendation,
+        _context(
+            size="50k",
+            sectors={"MSFT": "Technology"},
+            require_borrow=False,
+        ),
+    ) == (True, "")
+    assert PortfolioPolicy().validate(
+        recommendation,
+        _context(size="50k", sectors={"MSFT": "Technology"}),
     ) == (False, "borrow_unavailable")
 
 

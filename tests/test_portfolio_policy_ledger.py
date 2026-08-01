@@ -7,7 +7,13 @@ from decimal import Decimal
 
 import pytest
 
-from tradingagents.strategies.execution import Fill, MarketBar, OrderIntent, SignalRecord
+from tradingagents.strategies.execution import (
+    Fill,
+    MarketBar,
+    OrderIntent,
+    SignalRecord,
+    stable_id,
+)
 from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     MissingMarkError,
@@ -269,6 +275,68 @@ def test_companion_provenance_conflict_and_tamper_fail_closed(tmp_path) -> None:
         ledger.close()
 
 
+@pytest.mark.parametrize(
+    "artifact",
+    (
+        "signal_empty_reasons",
+        "signal_naive_time",
+        "intent_empty_reasons",
+        "intent_naive_time",
+    ),
+)
+def test_companion_reads_reject_coherently_rehashed_invalid_payloads_on_reopen(
+    tmp_path, artifact: str
+) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    try:
+        _stage_policy_entry(ledger)
+        if artifact in {"signal_empty_reasons", "intent_empty_reasons"}:
+            kind = artifact.split("_", 1)[0]
+            table = f"{kind}_policy_provenance"
+            identity_column = f"{kind}_id"
+            identity = f"{kind}-1"
+            row = ledger.connection.execute(
+                f"SELECT payload_json FROM {table} WHERE {identity_column} = ?",
+                (identity,),
+            ).fetchone()
+            payload = json.loads(str(row["payload_json"]))
+            payload["reason_codes"] = []
+            payload_json = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            )
+            ledger.connection.execute(
+                f"""UPDATE {table}
+                   SET reason_codes_json = '[]', payload_json = ?, payload_digest = ?
+                   WHERE {identity_column} = ?""",
+                (
+                    payload_json,
+                    stable_id("policy_payload", kind, identity, payload_json),
+                    identity,
+                ),
+            )
+        else:
+            kind = artifact.split("_", 1)[0]
+            ledger.connection.execute(
+                f"""UPDATE {kind}_policy_provenance
+                   SET captured_at = '2026-07-31T20:00:00'
+                   WHERE {kind}_id = ?""",
+                (f"{kind}-1",),
+            )
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        with pytest.raises(LedgerConflictError, match="policy"):
+            if artifact.startswith("signal_"):
+                reopened.read_signal_policy_provenance("signal-1")
+            else:
+                reopened.read_intent_policy_provenance("intent-1")
+    finally:
+        reopened.close()
+
+
 def test_noncanonical_companion_column_tamper_raises_ledger_conflict(tmp_path) -> None:
     ledger = _ledger(tmp_path)
     try:
@@ -341,6 +409,365 @@ def test_bound_policy_context_is_canonical_idempotent_and_tamper_evident(tmp_pat
             ledger.read_policy_session_context(MONDAY)
     finally:
         ledger.close()
+
+
+def test_staging_and_execution_policy_bindings_coexist_for_same_session(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        staging = _bind_policy_context(ledger, session=MONDAY)
+        execution = ledger.bind_policy_session_context(
+            MONDAY,
+            binding_kind="execution",
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            policy_config={"max_positions": 5},
+            context={"cash": "4900", "positions": ["AAPL"]},
+            bound_at=datetime(2026, 8, 3, 21, tzinfo=UTC),
+        )
+
+        assert staging["binding_kind"] == "staging"
+        assert execution["binding_kind"] == "execution"
+        assert staging["context_digest"] != execution["context_digest"]
+        assert ledger.read_policy_session_context(MONDAY) == staging
+        assert (
+            ledger.read_policy_session_context(
+                MONDAY, binding_kind="execution"
+            )
+            == execution
+        )
+        with pytest.raises(ValueError, match="binding_kind"):
+            ledger.read_policy_session_context(
+                MONDAY, binding_kind="unknown"
+            )
+    finally:
+        ledger.close()
+
+
+def test_candidate_policy_decision_is_one_tamper_evident_multi_signal_unit(
+    tmp_path,
+) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    first = _signal("signal-a", event_key="event-a")
+    second = _signal(
+        "signal-b", event_key="event-b", strategy="earnings_call"
+    )
+    try:
+        _record_signal_policy(ledger, first)
+        _record_signal_policy(ledger, second)
+        binding = ledger.read_policy_session_context(FRIDAY)
+        assert binding is not None
+        decision = ledger.record_policy_candidate_decision(
+            FRIDAY,
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            ticker="AAPL",
+            direction="long",
+            event_key="event-a",
+            signal_ids=(first.signal_id, second.signal_id),
+            requested_weight=0.25,
+            approved_weight=0.20,
+            decision="trimmed",
+            reason_codes=("max_sector",),
+            bound_context_digest=str(binding["context_digest"]),
+            captured_at=CAPTURED_AT,
+        )
+        assert decision["signal_ids"] == ("signal-a", "signal-b")
+        assert decision["decision"] == "trimmed"
+        assert len(ledger.read_policy_candidate_decisions()) == 1
+    finally:
+        ledger.close()
+
+    tamper = sqlite3.connect(path)
+    tamper.execute(
+        "UPDATE policy_candidate_decisions SET approved_weight = '0.19'"
+    )
+    tamper.commit()
+    tamper.close()
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        with pytest.raises(LedgerConflictError, match="tampered"):
+            reopened.read_policy_candidate_decisions()
+    finally:
+        reopened.close()
+
+
+def test_candidate_policy_decision_rejects_coherent_payload_rewrite(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    signal = _signal()
+    try:
+        _record_signal_policy(ledger, signal)
+        binding = ledger.read_policy_session_context(FRIDAY)
+        assert binding is not None
+        decision = ledger.record_policy_candidate_decision(
+            FRIDAY,
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            ticker="AAPL",
+            direction="long",
+            event_key=signal.event_key,
+            signal_ids=(signal.signal_id,),
+            requested_weight=0.25,
+            approved_weight=0.25,
+            decision="accepted",
+            reason_codes=("accepted",),
+            bound_context_digest=str(binding["context_digest"]),
+            captured_at=CAPTURED_AT,
+        )
+        payload = json.loads(str(decision["payload_json"]))
+        payload.update(
+            {
+                "approved_weight": "0.1",
+                "decision": "trimmed",
+                "reason_codes": ["position_cap"],
+            }
+        )
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload_digest = stable_id(
+            "policy_candidate_payload", decision["decision_id"], payload_json
+        )
+        ledger.connection.execute(
+            """UPDATE policy_candidate_decisions
+               SET approved_weight = ?, decision = ?, reason_codes_json = ?,
+                   payload_json = ?, payload_digest = ?
+               WHERE decision_id = ?""",
+            (
+                "0.1",
+                "trimmed",
+                '["position_cap"]',
+                payload_json,
+                payload_digest,
+                decision["decision_id"],
+            ),
+        )
+
+        with pytest.raises(LedgerConflictError, match="tampered"):
+            ledger.read_policy_candidate_decisions()
+    finally:
+        ledger.close()
+
+
+def test_staging_audit_manifest_is_atomic_idempotent_and_revalidates_on_reopen(
+    tmp_path,
+) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    first = _signal("signal-a", event_key="event-a")
+    second = _signal("signal-b", event_key="event-b")
+    try:
+        _record_signal_policy(ledger, first)
+        _record_signal_policy(ledger, second)
+        binding = ledger.read_policy_session_context(FRIDAY)
+        assert binding is not None
+        decision = ledger.record_policy_candidate_decision(
+            FRIDAY,
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            ticker="AAPL",
+            direction="long",
+            event_key=first.event_key,
+            signal_ids=(first.signal_id,),
+            requested_weight=0.20,
+            approved_weight=0.20,
+            decision="accepted",
+            reason_codes=("accepted",),
+            bound_context_digest=str(binding["context_digest"]),
+            captured_at=CAPTURED_AT,
+        )
+
+        def record_manifest() -> dict[str, object]:
+            return ledger.record_policy_staging_audit_manifest(
+                FRIDAY,
+                epoch_id="epoch-1",
+                policy_id="param-policy-1",
+                policy_version="portfolio_policy_v1",
+                bound_context_digest=str(binding["context_digest"]),
+                ingress_signal_ids=(first.signal_id, second.signal_id),
+                candidate_decision_ids=(str(decision["decision_id"]),),
+                committee_not_selected_ids=(second.signal_id,),
+                recorded_at=CAPTURED_AT,
+            )
+
+        ledger.complete_staging(
+            FRIDAY,
+            "epoch-1",
+            "param-policy-1",
+            CAPTURED_AT,
+            record_manifest,
+            ledger.execution_governed_state_digest(FRIDAY),
+        )
+        stored = ledger.read_policy_staging_audit_manifests(epoch_id="epoch-1")
+        assert len(stored) == 1
+        assert record_manifest() == stored[0]
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        assert len(reopened.read_policy_staging_audit_manifests()) == 1
+    finally:
+        reopened.close()
+
+    mutable = _ledger(tmp_path)
+    try:
+        binding = mutable.read_policy_session_context(FRIDAY)
+        assert binding is not None
+        extra = mutable.record_policy_candidate_decision(
+            FRIDAY,
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            ticker="AAPL",
+            direction="long",
+            event_key=second.event_key,
+            signal_ids=(second.signal_id,),
+            requested_weight=0.10,
+            approved_weight=0.10,
+            decision="accepted",
+            reason_codes=("accepted",),
+            bound_context_digest=str(binding["context_digest"]),
+            captured_at=CAPTURED_AT,
+        )
+        with pytest.raises(LedgerConflictError, match="candidate set is incomplete"):
+            mutable.read_policy_staging_audit_manifests()
+        mutable.connection.execute(
+            "DELETE FROM policy_candidate_decisions WHERE decision_id = ?",
+            (extra["decision_id"],),
+        )
+    finally:
+        mutable.close()
+
+    tamper = sqlite3.connect(path)
+    tamper.execute("DELETE FROM policy_candidate_decisions")
+    tamper.commit()
+    tamper.close()
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        with pytest.raises(LedgerConflictError, match="missing policy candidate"):
+            reopened.read_policy_staging_audit_manifests()
+    finally:
+        reopened.close()
+
+
+def test_staging_audit_manifest_rejects_overlapping_candidate_contributors(
+    tmp_path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    first = _signal("signal-a", event_key="event-a")
+    second = _signal("signal-b", event_key="event-b")
+    try:
+        _record_signal_policy(ledger, first)
+        _record_signal_policy(ledger, second)
+        binding = ledger.read_policy_session_context(FRIDAY)
+        assert binding is not None
+
+        def decision(signal_ids: tuple[str, ...]) -> dict[str, object]:
+            return ledger.record_policy_candidate_decision(
+                FRIDAY,
+                epoch_id="epoch-1",
+                policy_version="portfolio_policy_v1",
+                ticker="AAPL",
+                direction="long",
+                event_key=first.event_key,
+                signal_ids=signal_ids,
+                requested_weight=0.20,
+                approved_weight=0.20,
+                decision="accepted",
+                reason_codes=("accepted",),
+                bound_context_digest=str(binding["context_digest"]),
+                captured_at=CAPTURED_AT,
+            )
+
+        one = decision((first.signal_id,))
+        both = decision((first.signal_id, second.signal_id))
+        with pytest.raises(LedgerConflictError, match="contributors overlap"):
+            ledger.record_policy_staging_audit_manifest(
+                FRIDAY,
+                epoch_id="epoch-1",
+                policy_id="param-policy-1",
+                policy_version="portfolio_policy_v1",
+                bound_context_digest=str(binding["context_digest"]),
+                ingress_signal_ids=(first.signal_id, second.signal_id),
+                candidate_decision_ids=tuple(
+                    sorted((str(one["decision_id"]), str(both["decision_id"])))
+                ),
+                committee_not_selected_ids=(),
+                recorded_at=CAPTURED_AT,
+            )
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("tamper", ("empty_policy_id", "naive_recorded_at"))
+def test_staging_manifest_read_rejects_coherent_invalid_rewrite_on_reopen(
+    tmp_path, tamper: str
+) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    try:
+        binding = _bind_policy_context(ledger)
+
+        def record_empty_manifest() -> None:
+            ledger.record_policy_staging_audit_manifest(
+                FRIDAY,
+                epoch_id="epoch-1",
+                policy_id="param-policy-1",
+                policy_version="portfolio_policy_v1",
+                bound_context_digest=str(binding["context_digest"]),
+                ingress_signal_ids=(),
+                candidate_decision_ids=(),
+                committee_not_selected_ids=(),
+                recorded_at=CAPTURED_AT,
+            )
+
+        ledger.complete_staging(
+            FRIDAY,
+            "epoch-1",
+            "param-policy-1",
+            CAPTURED_AT,
+            record_empty_manifest,
+            ledger.execution_governed_state_digest(FRIDAY),
+        )
+        if tamper == "empty_policy_id":
+            row = ledger.connection.execute(
+                "SELECT payload_json FROM policy_staging_audit_manifests"
+            ).fetchone()
+            payload = json.loads(str(row["payload_json"]))
+            payload["policy_id"] = ""
+            payload_json = json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            )
+            manifest_id = stable_id(
+                "policy_staging_audit_manifest", payload_json
+            )
+            ledger.connection.execute(
+                """UPDATE policy_staging_audit_manifests
+                   SET manifest_id = ?, policy_id = '', payload_json = ?,
+                       payload_digest = ?""",
+                (
+                    manifest_id,
+                    payload_json,
+                    stable_id(
+                        "policy_staging_audit_payload", manifest_id, payload_json
+                    ),
+                ),
+            )
+            ledger.connection.execute(
+                "UPDATE staging_runs SET policy_id = ''"
+            )
+        else:
+            ledger.connection.execute(
+                """UPDATE policy_staging_audit_manifests
+                   SET recorded_at = '2026-07-31T20:00:00'"""
+            )
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        with pytest.raises(LedgerConflictError, match="manifest"):
+            reopened.read_policy_staging_audit_manifests()
+    finally:
+        reopened.close()
 
 
 def test_signal_policy_rejects_arbitrary_digest_without_bound_context(tmp_path) -> None:
