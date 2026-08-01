@@ -1,6 +1,19 @@
+import dataclasses
+
+import pandas as pd
+import pytest
+
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.strategies.modules.base import Candidate
-from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+from tradingagents.strategies.orchestration.cohort_orchestrator import (
+    SIZE_PROFILES,
+)
+from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicyConfig,
+    PortfolioRiskContext,
+    annualized_volatility,
+    build_portfolio_risk_context,
+)
 from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
 
 
@@ -68,3 +81,122 @@ def test_policy_config_is_versioned_and_options_are_inactive() -> None:
         "100k": 0.12,
     }
     assert policy["options_overlays_enabled"] is False
+
+
+def test_annualized_volatility_uses_60_sessions_and_floor() -> None:
+    flat = pd.DataFrame({"Close": [100.0] * 80})
+
+    assert annualized_volatility(flat, lookback_sessions=60, floor=0.15) == 0.15
+
+
+def test_context_includes_current_and_pending_positions_with_full_tags() -> None:
+    prices = {
+        "AAPL": pd.DataFrame({"Close": [100.0, 101.0, 100.5]}),
+        "MSFT": pd.DataFrame({"Close": [200.0, 202.0, 204.0]}),
+    }
+    context = build_portfolio_risk_context(
+        portfolio_value=100_000.0,
+        cash=75_000.0,
+        current_positions=[{
+            "ticker": "AAPL",
+            "direction": "long",
+            "marked_value": 10_000.0,
+            "sector": "Technology",
+            "strategy_tags": ("earnings_call", "filing_analysis"),
+            "risk_tags": ("event:aapl-q2",),
+        }],
+        pending_positions=[{
+            "ticker": "MSFT",
+            "direction": "long",
+            "marked_value": 8_000.0,
+            "sector": "Technology",
+            "strategy_tags": ("congressional_trades",),
+            "risk_tags": ("member:jane-doe",),
+        }],
+        price_cache=prices,
+        earnings_dates={"MSFT": 12},
+        short_interest={"MSFT": 2.0},
+        borrow_available={"MSFT": True},
+        margin_used=0.0,
+        consumed_event_keys={"event-old"},
+        config=PortfolioPolicyConfig(),
+    )
+
+    assert context.positions[0].weight == 0.10
+    assert context.pending_positions[0].weight == 0.08
+    assert context.positions[0].strategy_tags == (
+        "earnings_call",
+        "filing_analysis",
+    )
+    assert context.consumed_event_keys == frozenset({"event-old"})
+
+
+def test_context_mappings_resist_source_and_instance_mutation() -> None:
+    earnings_dates = {"MSFT": 12}
+    context = build_portfolio_risk_context(
+        portfolio_value=10_000.0,
+        cash=9_000.0,
+        current_positions=[],
+        pending_positions=[],
+        price_cache={},
+        earnings_dates=earnings_dates,
+        short_interest={"MSFT": 2.0},
+        borrow_available={"MSFT": True},
+        margin_used=0.0,
+        consumed_event_keys={"event-old"},
+        config=PortfolioPolicyConfig(),
+    )
+
+    earnings_dates["MSFT"] = 99
+
+    assert context.earnings_dates["MSFT"] == 12
+    with pytest.raises(TypeError):
+        context.earnings_dates["AAPL"] = 3  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        context.cash = 0.0  # type: ignore[misc]
+
+
+def test_direct_context_constructor_normalizes_mutable_collections() -> None:
+    earnings_dates = {"MSFT": 12}
+    context = PortfolioRiskContext(
+        portfolio_value=10_000.0,
+        cash=9_000.0,
+        positions=[],  # type: ignore[arg-type]
+        pending_positions=[],  # type: ignore[arg-type]
+        sectors={"MSFT": "Technology"},
+        annualized_volatility={"MSFT": 0.20},
+        earnings_dates=earnings_dates,
+        short_interest={"MSFT": 2.0},
+        borrow_available={"MSFT": True},
+        margin_used=0.0,
+        consumed_event_keys={"event-old"},
+        config=PortfolioPolicyConfig(),
+    )
+
+    earnings_dates["MSFT"] = 99
+
+    assert context.positions == ()
+    assert context.earnings_dates["MSFT"] == 12
+    with pytest.raises(TypeError):
+        context.sectors["AAPL"] = "Technology"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("size", ["5k", "10k", "50k", "100k"])
+def test_policy_config_factory_uses_every_profile_limit(size: str) -> None:
+    settings = DEFAULT_CONFIG["autoresearch"]["portfolio_policy"]
+    profile = SIZE_PROFILES[size]
+
+    config = PortfolioPolicyConfig.from_size_profile(profile, settings)
+
+    assert config.max_positions == profile.max_positions
+    assert config.max_position_pct == profile.max_position_pct
+    assert config.max_sector_exposure_pct == profile.sector_concentration_cap
+    assert config.max_strategy_exposure_pct == profile.max_strategy_exposure_pct
+    assert config.max_event_cluster_exposure_pct == profile.max_event_cluster_exposure_pct
+    assert config.max_position_risk_contribution_pct == (
+        profile.max_position_risk_contribution_pct
+    )
+    assert config.congressional_exposure_pct == settings[
+        "congressional_exposure_by_size"
+    ][size]
+    assert config.version == settings["version"]
