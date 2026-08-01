@@ -507,6 +507,17 @@ def test_generation_report_classifies_exactly_four_headline_and_twelve_stress_bo
     assert len(report["stress_tests"]) == 12
 
 
+def test_generation_report_rejects_unapproved_scenario_cohort_binding(
+    tmp_path, ledger_factory
+) -> None:
+    rogue = ledger_factory("rogue_book")
+    service = MetricsService(tmp_path, {rogue.cohort_id: rogue})
+    service.store.save_epoch(_epoch())
+
+    with pytest.raises(ValueError, match="unexpected scenario cohort"):
+        service.generation_report()
+
+
 def test_generation_report_reads_each_cohort_once_and_rejects_epoch_change(
     tmp_path, ledger_factory, monkeypatch
 ) -> None:
@@ -751,7 +762,7 @@ def test_metrics_add_no_api_or_llm_calls(tmp_path, ledger_factory, monkeypatch) 
     ledgers = {}
     services = {}
     for generation_id in ("gen_004", "gen_005"):
-        ledger = ledger_factory(f"{generation_id}-book", tmp_path / generation_id)
+        ledger = ledger_factory("horizon_30d_size_100k", tmp_path / generation_id)
         _seed_clean_generation_book(
             ledger, f"{generation_id}-epoch", sessions, charge_costs=False
         )
@@ -828,6 +839,45 @@ def test_compare_uses_exact_reports_and_contiguous_common_daily_returns(
         candidate.compare(
             "candidate", "candidate-epoch", no_common, "no-common", "no-common-epoch"
         )
+
+
+def test_compare_does_not_reread_after_epoch_validation(
+    tmp_path, ledger_factory, monkeypatch
+) -> None:
+    candidate_ledger = ledger_factory("candidate", tmp_path / "candidate-ledger")
+    baseline_ledger = ledger_factory("baseline", tmp_path / "baseline-ledger")
+    _record_window(candidate_ledger, "candidate-epoch", SESSIONS[:3])
+    _record_window(baseline_ledger, "baseline-epoch", SESSIONS[:3])
+    candidate = MetricsService(tmp_path / "candidate", {"candidate": candidate_ledger})
+    baseline = MetricsService(tmp_path / "baseline", {"baseline": baseline_ledger})
+    candidate.store.save_epoch(_epoch("candidate-epoch"))
+    baseline.store.save_epoch(_epoch("baseline-epoch"))
+    original_read = candidate_ledger.read_snapshots
+    reads = 0
+
+    def invalidate_on_second_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        result = original_read(*args, **kwargs)
+        if reads == 2:
+            candidate.store.invalidate_epoch(
+                "candidate-epoch", SESSIONS[2], "concurrent gap"
+            )
+        return result
+
+    monkeypatch.setattr(candidate_ledger, "read_snapshots", invalidate_on_second_read)
+
+    comparison = candidate.compare(
+        "candidate",
+        "candidate-epoch",
+        baseline,
+        "baseline",
+        "baseline-epoch",
+    )
+
+    assert comparison.common_sessions == (SESSIONS[1], SESSIONS[2])
+    assert reads == 1
+    assert candidate.store.load_epoch("candidate-epoch").status == "open"
 
 
 def test_metrics_modules_and_consumers_have_no_learning_or_local_formulas() -> None:

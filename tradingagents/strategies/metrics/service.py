@@ -26,6 +26,12 @@ from .store import MetricStore
 _HEADLINE_BOOKS = frozenset(
     f"horizon_{horizon}_size_100k" for horizon in ("30d", "3m", "6m", "1y")
 )
+_STRESS_BOOKS = frozenset(
+    f"horizon_{horizon}_size_{size}"
+    for horizon in ("30d", "3m", "6m", "1y")
+    for size in ("5k", "10k", "50k")
+)
+_SCENARIO_BOOKS = _HEADLINE_BOOKS | _STRESS_BOOKS
 
 
 class MetricsService:
@@ -170,6 +176,11 @@ class MetricsService:
         return report
 
     def generation_report(self, epoch_id: str | None = None) -> dict[str, object]:
+        unexpected = sorted(set(self.cohort_ids) - _SCENARIO_BOOKS)
+        if unexpected:
+            raise ValueError(
+                "unexpected scenario cohort bindings: " + ", ".join(unexpected)
+            )
         epoch = self._epoch(epoch_id)
         if epoch is None:
             return {
@@ -231,7 +242,7 @@ class MetricsService:
             "stress_tests": {
                 key: asdict(value)
                 for key, value in reports.items()
-                if not key.endswith("_size_100k")
+                if key in _STRESS_BOOKS
             },
             # These are projections of the immutable ledger, not dashboard-side
             # calculations.  Keep the raw persisted observations available so all
@@ -309,21 +320,31 @@ class MetricsService:
         baseline_cohort_id: str,
         baseline_epoch_id: str,
     ) -> PairedComparison:
-        candidate = self.cohort_report(candidate_cohort_id, candidate_epoch_id)
-        baseline = baseline_service.cohort_report(baseline_cohort_id, baseline_epoch_id)
-        candidate_rows = self._ledger(candidate.cohort_id).read_snapshots(
-            start_session=candidate.start_session,
-            end_session=candidate.end_session,
-            epoch_id=candidate_epoch_id,
+        candidate_epoch = self._epoch(candidate_epoch_id)
+        baseline_epoch = baseline_service._epoch(baseline_epoch_id)
+        if candidate_epoch is None or baseline_epoch is None:
+            raise KeyError("comparison metric epoch is unavailable")
+        self._require_available_epoch(candidate_epoch, candidate_epoch_id)
+        baseline_service._require_available_epoch(baseline_epoch, baseline_epoch_id)
+        candidate_inputs = self._inputs(candidate_cohort_id, candidate_epoch_id)
+        baseline_inputs = baseline_service._inputs(
+            baseline_cohort_id, baseline_epoch_id
         )
-        baseline_rows = baseline_service._ledger(baseline.cohort_id).read_snapshots(
-            start_session=baseline.start_session,
-            end_session=baseline.end_session,
-            epoch_id=baseline_epoch_id,
+        self._portfolio_from_inputs(
+            candidate_cohort_id, candidate_epoch_id, candidate_inputs
+        )
+        baseline_service._portfolio_from_inputs(
+            baseline_cohort_id, baseline_epoch_id, baseline_inputs
+        )
+        self._assert_epoch_unchanged(
+            candidate_epoch, self.store.load_epoch(candidate_epoch_id)
+        )
+        baseline_service._assert_epoch_unchanged(
+            baseline_epoch, baseline_service.store.load_epoch(baseline_epoch_id)
         )
         return paired_comparison(
             candidate_epoch_id=candidate_epoch_id,
             baseline_epoch_id=baseline_epoch_id,
-            candidate_returns=daily_net_returns(candidate_rows),
-            baseline_returns=daily_net_returns(baseline_rows),
+            candidate_returns=daily_net_returns(candidate_inputs[0]),
+            baseline_returns=daily_net_returns(baseline_inputs[0]),
         )
