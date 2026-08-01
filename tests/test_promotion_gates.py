@@ -134,6 +134,22 @@ def test_invalid_strategy_claim_count_and_mutation_are_rejected_or_isolated() ->
     assert evidence.strategy_claim_event_counts["congressional_trades"] == 30
 
 
+def test_evidence_subclass_cannot_bypass_validation() -> None:
+    class BypassEvidence(PromotionEvidence):
+        def __post_init__(self) -> None:
+            pass
+
+    bypass = BypassEvidence(
+        **{
+            **_passing().__dict__,
+            "matched_excess_return": float("nan"),
+        }
+    )
+
+    with pytest.raises(TypeError, match="exactly PromotionEvidence"):
+        PromotionEvaluator().evaluate(bypass)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

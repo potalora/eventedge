@@ -135,8 +135,8 @@ class PromotionEvaluator:
         self.policy = policy or PromotionPolicy()
 
     def evaluate(self, evidence: PromotionEvidence) -> PromotionDecision:
-        if not isinstance(evidence, PromotionEvidence):
-            raise TypeError("evidence must be PromotionEvidence")
+        if type(evidence) is not PromotionEvidence:
+            raise TypeError("evidence must be exactly PromotionEvidence")
         failures: list[str] = []
         if evidence.missing_marks or evidence.stale_marks:
             failures.append("missing_or_stale_marks")
