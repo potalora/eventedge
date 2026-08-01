@@ -380,6 +380,11 @@ class MultiStrategyEngine:
                         "score": c.score,
                         "strategy": strategy.name,
                         "metadata": c.metadata,
+                        "event_key": c.event_key,
+                        "source_event_keys": c.source_event_keys,
+                        "strategy_tags": c.strategy_tags,
+                        "risk_tags": c.risk_tags,
+                        "journal_only": c.journal_only,
                     }
                 )
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))

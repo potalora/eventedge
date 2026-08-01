@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 from collections import defaultdict
+from datetime import date as Date
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from tradingagents.strategies.orchestration.trading_calendar import (
+    is_session,
+    next_session,
+    session_close,
+)
 
 from .base import Candidate
 
@@ -22,24 +34,203 @@ AMOUNT_BUCKETS = [
 ]
 
 # Map bucket string to a 1-based tier for scoring
-BUCKET_TIER = {b: i + 1 for i, b in enumerate(AMOUNT_BUCKETS)}
+BUCKET_TIER = {bucket: index + 1 for index, bucket in enumerate(AMOUNT_BUCKETS)}
+
+
+def _normalized_text(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _member_key(value: object) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", _normalized_text(value))
+    normalized = " ".join(normalized.split())
+    return normalized or "unknown"
+
+
+def _member_tag(member: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", member.casefold()).strip("-") or "unknown"
+
+
+def _canonical_url(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    tracking = {"fbclid", "gclid", "dclid", "msclkid"}
+    kept_query = urlencode(
+        sorted(
+            (
+                key,
+                value,
+            )
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.casefold() not in tracking
+            and not key.casefold().startswith(("utm_", "mc_"))
+        )
+    )
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path.rstrip("/"),
+            kept_query,
+            "",
+        )
+    )
+
+
+def _normalized_date(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            continue
+    try:
+        timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        return raw
+    return timestamp.astimezone(timezone.utc).isoformat()
+
+
+def _publication_value(trade: dict[str, Any]) -> object:
+    for key in ("publication_date", "disclosure_date", "filing_date", "pub_date"):
+        if trade.get(key) not in (None, ""):
+            return trade[key]
+    return ""
+
+
+def _native_disclosure_id(trade: dict[str, Any]) -> str:
+    for key in (
+        "native_disclosure_id",
+        "disclosure_id",
+        "disclosureId",
+        "transaction_id",
+        "transactionId",
+    ):
+        value = _normalized_text(trade.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _stable_facts(trade: dict[str, Any], direction: str) -> dict[str, str]:
+    """The narrow cross-vendor bridge; deliberately excludes vendor/source."""
+    return {
+        "member": _member_key(trade.get("representative") or trade.get("senator")),
+        "chamber": _normalized_text(trade.get("chamber")),
+        "ticker": _normalized_text(trade.get("ticker")).upper(),
+        "direction": direction,
+        "transaction_date": _normalized_date(trade.get("transaction_date")),
+        "publication_date": _normalized_date(_publication_value(trade)),
+        "amount": _normalized_text(trade.get("amount")),
+        "owner": _normalized_text(trade.get("owner")),
+    }
+
+
+def _digest(prefix: str, payload: object) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"{prefix}:{hashlib.sha256(canonical.encode()).hexdigest()[:24]}"
+
+
+def congressional_event_key(trade: dict[str, Any], direction: str) -> str:
+    """Return a canonical component disclosure key, never keyed by vendor.
+
+    Native disclosure identifiers are strongest.  When a vendor does not expose
+    one, use a canonical disclosure URL plus stable facts.  The stable facts are
+    also available to the screen as a conservative bridge between two vendors.
+    """
+    native = _native_disclosure_id(trade)
+    if native:
+        return _digest("congress-native", {"native_disclosure_id": native})
+    facts = _stable_facts(trade, direction)
+    url = _canonical_url(trade.get("canonical_disclosure_url") or trade.get("source_url") or trade.get("url"))
+    if url:
+        return _digest("congress-url", {"url": url, "facts": facts})
+    if not all(
+        facts[key]
+        for key in ("member", "ticker", "direction", "transaction_date", "publication_date", "amount")
+    ):
+        return ""
+    return _digest("congress-facts", facts)
+
+
+def _stable_fact_bridge_key(trade: dict[str, Any], direction: str) -> str:
+    facts = _stable_facts(trade, direction)
+    if not all(
+        facts[key]
+        for key in ("member", "ticker", "direction", "transaction_date", "publication_date", "amount")
+    ):
+        return ""
+    return _digest("congress-bridge", facts)
+
+
+def congressional_cluster_event_key(
+    ticker: str, direction: str, component_keys: list[str] | tuple[str, ...]
+) -> str:
+    return _digest(
+        "congress-cluster",
+        {
+            "ticker": str(ticker).upper(),
+            "direction": direction,
+            "components": sorted(set(component_keys)),
+        },
+    )
+
+
+def _parse_publication(value: object) -> tuple[str, Date | datetime] | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return None
+        return "timestamp", value.astimezone(timezone.utc)
+    if isinstance(value, Date):
+        return "date", value
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        parsed_date = Date.fromisoformat(raw)
+    except ValueError:
+        parsed_date = None
+    if parsed_date is not None and raw == parsed_date.isoformat():
+        return "date", parsed_date
+    for fmt in ("%m/%d/%Y", "%m-%d-%Y"):
+        try:
+            return "date", datetime.strptime(raw, fmt).date()
+        except ValueError:
+            continue
+    try:
+        parsed_timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed_timestamp.tzinfo is None or parsed_timestamp.utcoffset() is None:
+        return None
+    return "timestamp", parsed_timestamp.astimezone(timezone.utc)
+
+
+def _publication_is_eligible(trade: dict[str, Any], decision_session: Date) -> bool:
+    """Enforce no same-day look-ahead for date-only disclosure records."""
+    if not is_session(decision_session):
+        return False
+    parsed = _parse_publication(_publication_value(trade))
+    if parsed is None:
+        return False
+    kind, publication = parsed
+    if kind == "date":
+        return decision_session >= next_session(publication)  # type: ignore[arg-type]
+    return publication <= session_close(decision_session)  # type: ignore[arg-type]
 
 
 class CongressionalTradesStrategy:
-    """P11: Follow congressional stock purchases.
-
-    Academic basis: Eggers & Hainmueller (2014, APSR) show members of
-    Congress earn abnormal returns of 6-9% annually. Informational
-    advantages stem from committee assignments, legislative oversight,
-    and advance knowledge of policy changes. Insider purchases are more
-    informative than sales (Ziobrowski et al. 2004, JFP&QA).
-
-    Signal logic:
-    1. Monitor congressional trade disclosures for purchases.
-    2. Score by dollar amount bucket (higher = stronger conviction).
-    3. Cluster signal: multiple members buying the same stock.
-    4. Go long on high-conviction cluster buys.
-    """
+    """Follow timely, independently disclosed congressional clusters."""
 
     name = "congressional_trades"
     track = "paper_trade"
@@ -53,9 +244,9 @@ class CongressionalTradesStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_amount_bucket": (1, 4),
-            "max_positions": (2, 5),
-            "min_members": (1, 3),
+            "min_amount_bucket": (2, 4),
+            "max_positions": (2, 2),
+            "min_members": (2, 3),
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
@@ -66,196 +257,206 @@ class CongressionalTradesStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_amount_bucket": 1,
-            "max_positions": 3,
-            "min_members": 1,
+            "min_amount_bucket": 2,
+            "max_positions": 2,
+            "min_members": 2,
+            "enable_sale_orders": False,
+            "publication_lookback_days": 7,
+            "max_journal_only_sales": 2,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
-        """Screen congressional trade disclosures for purchase and sale clusters."""
+        """Create deterministic, time-safe long candidates and journal-only sales."""
         congress_data = data.get("congress", {})
         trades = congress_data.get("recent_trades", congress_data.get("trades", []))
-
         if not trades:
             return []
+        try:
+            decision_session = Date.fromisoformat(date)
+        except ValueError:
+            return []
+        if not is_session(decision_session):
+            return []
 
-        min_bucket = params.get("min_amount_bucket", 2)
-        min_members = params.get("min_members", 1)
-        max_positions = params.get("max_positions", 3)
-
-        def source_trade_key(trade: dict, ticker: str, tx_type: str) -> str:
-            native = trade.get("source_url") or trade.get("url") or trade.get("id")
-            if native:
-                return str(native)
-            fields = (
-                trade.get("chamber", "unknown"),
-                trade.get("representative") or trade.get("senator", "Unknown"),
-                trade.get("transaction_date", ""),
-                trade.get("amount", ""),
-                trade.get("owner", ""),
-                trade.get("publication_date")
-                or trade.get("disclosure_date")
-                or trade.get("filing_date")
-                or trade.get("pub_date", ""),
-                ticker,
-                tx_type,
-            )
-            if not fields[2] or not fields[3]:
-                return ""
-            return "|".join(str(value) for value in fields)
-
-        # Group purchases by ticker
-        ticker_buys: dict[str, list[dict]] = defaultdict(list)
+        min_bucket = max(2, int(params.get("min_amount_bucket", 2)))
+        min_members = max(2, int(params.get("min_members", 2)))
+        max_purchases = min(2, max(0, int(params.get("max_positions", 2))))
+        max_journal_sales = min(
+            2, max(0, int(params.get("max_journal_only_sales", 2)))
+        )
+        publication_lookback_days = max(
+            0, int(params.get("publication_lookback_days", 7))
+        )
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
 
         for trade in trades:
-            tx_type = (trade.get("transaction_type") or "").lower()
-            if tx_type not in ("buy", "purchase") and "purchase" not in tx_type:
+            if not isinstance(trade, dict) or not _publication_is_eligible(
+                trade, decision_session
+            ):
                 continue
-
-            ticker = (trade.get("ticker") or "").upper().strip()
+            parsed_publication = _parse_publication(_publication_value(trade))
+            if parsed_publication is None:
+                continue
+            publication_day = (
+                parsed_publication[1]
+                if parsed_publication[0] == "date"
+                else parsed_publication[1].date()
+            )
+            if (decision_session - publication_day).days > publication_lookback_days:
+                continue
+            transaction_type = _normalized_text(trade.get("transaction_type"))
+            if transaction_type in {"buy", "purchase"} or "purchase" in transaction_type:
+                direction = "long"
+            elif transaction_type in {"sell", "sale"} or "sale" in transaction_type:
+                direction = "short"
+            else:
+                continue
+            ticker = str(trade.get("ticker") or "").upper().strip()
             if not ticker or ticker == "--":
                 continue
-
-            amount = trade.get("amount", "")
-            tier = BUCKET_TIER.get(amount, 0)
+            tier = BUCKET_TIER.get(str(trade.get("amount") or ""), 0)
             if tier < min_bucket:
                 continue
-
-            trade_key = source_trade_key(trade, ticker, tx_type)
-            if not trade_key:
+            component_key = congressional_event_key(trade, direction)
+            bridge_key = _stable_fact_bridge_key(trade, direction)
+            if not component_key or not bridge_key:
                 continue
-            ticker_buys[ticker].append(
-                {
-                    "member": trade.get("representative")
-                    or trade.get("senator", "Unknown"),
-                    "chamber": trade.get("chamber", "unknown"),
-                    "amount": amount,
-                    "tier": tier,
-                    "date": trade.get("transaction_date", ""),
-                    "publication_date": trade.get("publication_date")
-                    or trade.get("disclosure_date")
-                    or trade.get("filing_date")
-                    or trade.get("pub_date", ""),
-                    "trade_key": trade_key,
-                }
-            )
+            member = _member_key(trade.get("representative") or trade.get("senator"))
+            record = {
+                "member": member,
+                "tier": tier,
+                "component_key": component_key,
+                "bridge_key": bridge_key,
+                "native_id": _native_disclosure_id(trade),
+                "publication_date": _publication_value(trade),
+            }
+            grouped[(ticker, direction)].append(record)
 
-        # Group sales by ticker
-        ticker_sells: dict[str, list[dict]] = defaultdict(list)
-
-        for trade in trades:
-            tx_type = (trade.get("transaction_type") or "").lower()
-            if tx_type not in ("sell", "sale") and "sale" not in tx_type:
+        candidates: list[Candidate] = []
+        for (ticker, direction), raw_components in sorted(grouped.items()):
+            components = self._dedupe_components(raw_components)
+            members = sorted({item["member"] for item in components})
+            if len(members) < min_members:
                 continue
-
-            ticker = (trade.get("ticker") or "").upper().strip()
-            if not ticker or ticker == "--":
-                continue
-
-            amount = trade.get("amount", "")
-            tier = BUCKET_TIER.get(amount, 0)
-            if tier < min_bucket:
-                continue
-
-            trade_key = source_trade_key(trade, ticker, tx_type)
-            if not trade_key:
-                continue
-            ticker_sells[ticker].append(
-                {
-                    "member": trade.get("representative")
-                    or trade.get("senator", "Unknown"),
-                    "chamber": trade.get("chamber", "unknown"),
-                    "amount": amount,
-                    "tier": tier,
-                    "date": trade.get("transaction_date", ""),
-                    "publication_date": trade.get("publication_date")
-                    or trade.get("disclosure_date")
-                    or trade.get("filing_date")
-                    or trade.get("pub_date", ""),
-                    "trade_key": trade_key,
-                }
-            )
-
-        # Build candidates from tickers with enough unique members
-        candidates = []
-        for ticker, buys in ticker_buys.items():
-            unique_members = {b["member"] for b in buys}
-            if len(unique_members) < min_members:
-                continue
-
-            # Score: sum of tiers * cluster multiplier
-            total_tier = sum(b["tier"] for b in buys)
-            cluster_bonus = len(unique_members)
-            score = total_tier * cluster_bonus
-
+            component_keys = tuple(item["component_key"] for item in components)
+            publication_dates = [
+                str(item["publication_date"])
+                for item in components
+                if item["publication_date"] not in (None, "")
+            ]
+            score = float(sum(int(item["tier"]) for item in components) * len(members))
+            risk_tags = {"strategy:congressional_trades"}
+            risk_tags.update(f"member:{_member_tag(member)}" for member in members)
+            for value in publication_dates:
+                parsed = _parse_publication(value)
+                if parsed is None:
+                    continue
+                publication_day = (
+                    parsed[1] if parsed[0] == "date" else parsed[1].date()
+                )
+                iso_year, iso_week, _ = publication_day.isocalendar()
+                risk_tags.add(f"disclosure_week:{iso_year}-W{iso_week:02d}")
             candidates.append(
                 Candidate(
                     ticker=ticker,
                     date=date,
-                    direction="long",
-                    score=float(score),
+                    direction=direction,
+                    score=score,
                     metadata={
-                        "num_members": len(unique_members),
-                        "num_trades": len(buys),
-                        "members": list(unique_members)[:5],
-                        "max_tier": max(b["tier"] for b in buys),
-                        "trade_keys": sorted({b["trade_key"] for b in buys}),
-                        **(
-                            {
-                                "publication_date": max(
-                                    str(b["publication_date"])
-                                    for b in buys
-                                    if b.get("publication_date")
-                                )
-                            }
-                            if any(b.get("publication_date") for b in buys)
-                            else {}
-                        ),
+                        "num_members": len(members),
+                        "num_trades": len(components),
+                        "members": members,
+                        "max_tier": max(int(item["tier"]) for item in components),
+                        "trade_keys": list(component_keys),
+                        "cluster_direction": direction,
+                        "publication_date": max(publication_dates),
                         "needs_llm_analysis": False,
                     },
+                    event_key=congressional_cluster_event_key(
+                        ticker, direction, component_keys
+                    ),
+                    source_event_keys=component_keys,
+                    strategy_tags=("congressional_trades",),
+                    risk_tags=tuple(sorted(risk_tags)),
+                    journal_only=direction == "short",
                 )
             )
 
-        for ticker, sells in ticker_sells.items():
-            unique_members = {s["member"] for s in sells}
-            if len(unique_members) < min_members:
+        purchases = sorted(
+            (candidate for candidate in candidates if candidate.direction == "long"),
+            key=lambda candidate: (-candidate.score, candidate.ticker, candidate.event_key),
+        )[:max_purchases]
+        sales = sorted(
+            (candidate for candidate in candidates if candidate.direction == "short"),
+            key=lambda candidate: (-candidate.score, candidate.ticker, candidate.event_key),
+        )[:max_journal_sales]
+        return purchases + sales
+
+    @staticmethod
+    def _dedupe_components(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Union records by actual native ID or the strict stable-facts bridge."""
+        ordered = sorted(
+            records,
+            key=lambda item: (
+                str(item["native_id"]),
+                str(item["bridge_key"]),
+                str(item["component_key"]),
+            ),
+        )
+        parent = list(range(len(ordered)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root, right_root = find(left), find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        native_seen: dict[str, int] = {}
+        bridge_members: dict[str, list[int]] = defaultdict(list)
+        for index, item in enumerate(ordered):
+            if item["native_id"]:
+                native = str(item["native_id"])
+                if native in native_seen:
+                    union(index, native_seen[native])
+                else:
+                    native_seen[native] = index
+            bridge_members[str(item["bridge_key"])].append(index)
+
+        for indices in bridge_members.values():
+            native_ids = {
+                str(ordered[index]["native_id"])
+                for index in indices
+                if ordered[index]["native_id"]
+            }
+            if len(native_ids) <= 1:
+                for index in indices[1:]:
+                    union(indices[0], index)
                 continue
+            # Conflicting native disclosure IDs prove distinct underlying rows;
+            # unkeyed vendor fallbacks remain separate rather than joining both.
+            unkeyed = [index for index in indices if not ordered[index]["native_id"]]
+            for index in unkeyed[1:]:
+                union(unkeyed[0], index)
 
-            # Score: sum of tiers * cluster multiplier
-            total_tier = sum(s["tier"] for s in sells)
-            cluster_bonus = len(unique_members)
-            score = total_tier * cluster_bonus
-
-            candidates.append(
-                Candidate(
-                    ticker=ticker,
-                    date=date,
-                    direction="short",
-                    score=float(score),
-                    metadata={
-                        "num_members": len(unique_members),
-                        "num_trades": len(sells),
-                        "members": list(unique_members)[:5],
-                        "max_tier": max(s["tier"] for s in sells),
-                        "trade_keys": sorted({s["trade_key"] for s in sells}),
-                        **(
-                            {
-                                "publication_date": max(
-                                    str(s["publication_date"])
-                                    for s in sells
-                                    if s.get("publication_date")
-                                )
-                            }
-                            if any(s.get("publication_date") for s in sells)
-                            else {}
-                        ),
-                        "needs_llm_analysis": False,
-                    },
-                )
+        groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for index, item in enumerate(ordered):
+            groups[find(index)].append(item)
+        components: list[dict[str, Any]] = []
+        for members in groups.values():
+            representative = min(
+                members,
+                key=lambda item: (
+                    0 if item["native_id"] else 1,
+                    str(item["component_key"]),
+                ),
             )
-
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[: max_positions * 2]
+            components.append(representative)
+        return sorted(components, key=lambda item: str(item["component_key"]))
 
     def check_exit(
         self,
@@ -270,28 +471,17 @@ class CongressionalTradesStrategy:
         hold_days = params.get("hold_days", 28)
         if holding_days >= hold_days:
             return True, "hold_period"
-
-        if entry_price > 0:
-            pnl_pct = (current_price - entry_price) / entry_price
-            if pnl_pct <= -0.08:
-                return True, "stop_loss"
-
+        if entry_price > 0 and (current_price - entry_price) / entry_price <= -0.08:
+            return True, "stop_loss"
         return False, ""
 
     def build_propose_prompt(self, context: dict) -> str:
         current = context.get("current_params", self.get_default_params())
-        return f"""You are optimizing a Congressional Stock Trades strategy that follows
-purchase disclosures from US Congress members.
+        return f"""You are optimizing a Congressional Stock Trades strategy.
 
-Investment horizon: 30 days. Congress members often trade ahead of
-legislation by 30-60 days. Target ~28-30 day holds.
+The fixed controls require at least two distinct members, amount bucket 2 or
+higher, at most two long candidates, and sales remain journal-only.
 
 Current parameters: {current}
-
-Parameter ranges:
-- hold_days: 20-45 (target ~28 days)
-- min_amount_bucket: 1-4 (1=$1K-$15K, 4=$100K-$250K)
-- max_positions: 2-5
-- min_members: 1-3 (minimum unique members buying same stock)
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

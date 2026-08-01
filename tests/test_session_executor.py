@@ -2057,6 +2057,11 @@ def _stage_real_strategy_candidate(tmp_path, strategy_name, data):
             "score": candidate.score,
             "strategy": strategy_name,
             "metadata": candidate.metadata,
+            "event_key": candidate.event_key,
+            "source_event_keys": candidate.source_event_keys,
+            "strategy_tags": candidate.strategy_tags,
+            "risk_tags": candidate.risk_tags,
+            "journal_only": candidate.journal_only,
         }
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
@@ -2077,6 +2082,7 @@ def _stage_real_strategy_candidate(tmp_path, strategy_name, data):
             )
         assert len(result["signals"]) == 1
         assert result["signals"][0]["strategy"] == strategy_name
+        return candidate, result
     finally:
         ledger.close()
 
@@ -2124,11 +2130,25 @@ def test_production_congress_pub_date_normalization_stages_real_candidate(tmp_pa
     )
 
     assert normalized["publication_date"] == normalized["pub_date"]
-    _stage_real_strategy_candidate(
+    second = _normalize_fmp_trade(
+        {
+            "symbol": "AAPL",
+            "assetDescription": "Apple Inc.",
+            "transactionDate": "2026-07-25",
+            "disclosureDate": "2026-07-30",
+            "type": "Purchase",
+            "amount": "$15,001 - $50,000",
+            "office": "Member Two",
+            "link": "https://example.test/disclosure-2",
+        },
+        "house",
+    )
+    candidate, result = _stage_real_strategy_candidate(
         tmp_path,
         "congressional_trades",
-        {"congress": {"recent_trades": [normalized]}},
+        {"congress": {"recent_trades": [normalized, second]}},
     )
+    assert result["signals"][0]["event_key"] == candidate.event_key
 
 
 def test_production_usaspending_availability_stages_real_candidate(tmp_path):
