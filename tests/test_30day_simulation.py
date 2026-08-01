@@ -912,6 +912,58 @@ class TestIdempotencyDoubleRun:
         assert epoch is not None and epoch.status == "invalid"
         assert executor.metric_store.read_outcomes(epoch.epoch_id) == ()
 
+    def test_candidate_reference_gap_closes_epoch_without_refetch_or_staging(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        session = date(2026, 3, 30)
+        cohort = orchestrator.cohorts[0]
+        store = cohort["executor"].metric_store
+        original_stage = cohort["engine"].screen_and_stage
+        cohort["engine"].screen_and_stage = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("staging must stop after candidate reference gap")
+        )
+
+        with (
+            patch(
+                "tradingagents.strategies.orchestration.session_executor.ensure_reference_bars",
+                side_effect=RuntimeError("deterministic candidate reference gap"),
+            ),
+            pytest.raises(RuntimeError, match="deterministic candidate reference gap"),
+        ):
+            orchestrator.run_daily(session.isoformat())
+
+        epoch_id = orchestrator._epoch_id
+        epoch = store.load_epoch(epoch_id)
+        assert epoch.status == "invalid" and epoch.end_session == session
+        assert store.pending_critical_gap() is None
+        with sqlite3.connect(store.path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM critical_gap_markers WHERE status = 'completed'"
+            ).fetchone()[0] == 1
+        snapshot = cohort["ledger"].read_snapshots(
+            session, session, epoch_id=epoch_id, valid_only=True
+        )
+        assert len(snapshot) == 1
+        assert cohort["ledger"].session_invalid_reason(session) == ""
+        assert (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        ) == (0, 0, 1)
+
+        cohort["engine"].screen_and_stage = original_stage
+        later_session = next_session(session)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            clean = orchestrator.run_daily(later_session.isoformat())
+        assert not clean["cohort_0"]["error"]
+        assert orchestrator._epoch_id != epoch_id
+
     def test_execution_only_missing_required_bar_invalidates_shared_epoch(self, tmp_path):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
@@ -2023,26 +2075,63 @@ class TestIdempotencyDoubleRun:
         snapshot = cohort["ledger"].read_snapshots(sessions[-1], sessions[-1])[0]
         with sqlite3.connect(store.path) as connection:
             connection.execute("DELETE FROM outcomes")
+        entry_context = cohort["ledger"].session_execution_context(sessions[1])
+        assert entry_context is not None
         _corrupt_persisted_market_bundle(cohort["ledger"], sessions[1])
-        calls_before = len(source.raw_calls)
+        calls_before = (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        )
 
         with pytest.raises(KeyError, match="open"):
             orchestrator.run_daily(sessions[-1].isoformat())
 
         epoch = store.load_epoch(epoch_id)
         assert epoch.status == "invalid" and epoch.end_session == sessions[-1]
-        assert store.pending_critical_gap() is None
+        marker = store.pending_critical_gap()
+        assert marker is not None and marker.detail_status == "ready"
+        assert store.read_outcomes(epoch_id) == ()
         assert cohort["ledger"].session_invalid_reason(sessions[-1]) == ""
         assert cohort["ledger"].read_snapshots(
             sessions[-1], sessions[-1]
         ) == [snapshot]
-        assert len(source.raw_calls) == calls_before
+        for replay_session in (
+            sessions[-1],
+            next_session(sessions[-1]),
+        ):
+            with pytest.raises(KeyError, match="open"):
+                orchestrator.run_daily(replay_session.isoformat())
+            assert store.pending_critical_gap() == marker
+            assert store.read_outcomes(epoch_id) == ()
+            assert (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+            ) == calls_before
+
+        cohort["ledger"].connection.execute(
+            """
+            UPDATE session_execution_contexts
+            SET economic_inputs_json = ?, input_digest = ?, market_digest = ?
+            WHERE cohort_id = ? AND session = ?
+            """,
+            (
+                entry_context["economic_inputs_json"],
+                entry_context["input_digest"],
+                entry_context["market_digest"],
+                cohort["ledger"].cohort_id,
+                sessions[1].isoformat(),
+            ),
+        )
+        cohort["ledger"].connection.commit()
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
             side_effect=_authoritative_committee,
         ):
             clean = orchestrator.run_daily(next_session(sessions[-1]).isoformat())
         assert not clean["cohort_0"]["error"]
+        assert store.pending_critical_gap() is None
         assert store.current_epoch().epoch_id != epoch_id
 
     def test_partial_resume_outcome_conflict_closes_epoch_and_preserves_commit(

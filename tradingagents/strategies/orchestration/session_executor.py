@@ -358,10 +358,7 @@ class SessionExecutor:
             )
             bars: dict[tuple[str, date], MarketBar] = {}
             if self.ledger.session_execution_context(entry_session) is not None:
-                try:
-                    bars.update(self.persisted_input_bundle(entry_session).bars)
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                    pass
+                bars.update(self.persisted_input_bundle(entry_session).bars)
             outcome = self.outcome_calculator.build(signal, window, bars)
             forced_reason = invalid_reasons.get(
                 signal.ticker, "critical_market_data_gap"

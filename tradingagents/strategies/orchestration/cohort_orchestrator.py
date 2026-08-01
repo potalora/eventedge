@@ -911,6 +911,7 @@ class CohortOrchestrator:
 
         valid_cohorts: list[dict[str, Any]] = list(stage_only)
         fresh_execution: list[dict[str, Any]] = []
+        bundle = None
         if execution_needed:
             for cohort in execution_needed:
                 name = cohort["config"].name
@@ -1199,7 +1200,14 @@ class CohortOrchestrator:
                     "error": True,
                     "invalid_reason": reason,
                 }
-            return results
+            return self._stop_for_critical_market_data_gap(
+                session,
+                processed_at,
+                results,
+                bundle.bars if bundle is not None else {},
+                "critical_market_data_gap",
+                original_error=error,
+            )
 
         for cohort in valid_cohorts:
             cfg = cohort["config"]

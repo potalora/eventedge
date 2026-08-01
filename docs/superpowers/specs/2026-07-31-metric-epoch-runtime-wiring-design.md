@@ -196,6 +196,15 @@ metric `EpochContext`, preventing drift between two copies.
   metric/session staging, and completes the marker only after all required
   writes succeed. A later clean session recovers first and creates a new epoch.
   Task 7 reuses the same manager for unclassified strategy silence.
+- Candidate execution-reference validation is part of the same critical
+  market-data boundary. A failure after P0 commit uses only an already validated
+  in-scope shared bundle when available, never refetches, preserves committed
+  P0, stops before staging, closes the exact epoch, and surfaces the original
+  reference error.
+- Absent persisted entry context may produce `missing_entry_bar`; a context that
+  exists but is malformed or conflicting is corruption, not absence. Recovery
+  surfaces that corruption, keeps the ready marker pending after exact-epoch
+  closure, and fails same/later zero-fetch replay until the evidence is repaired.
 - Outcomes from a closed prior epoch are never attached to the new epoch.
 - No legacy generation artifact is rewritten, and no VPS, generation, service,
   or timer operation is part of this change.
@@ -214,6 +223,9 @@ Tests must prove:
 - a missing/stale due bar writes one invalid outcome, invalidates the shared
   epoch once, performs no further metric write, and an exact replay neither
   refetches data nor opens another epoch;
+- candidate reference-bar failure preserves committed P0, performs no second
+  market fetch or staging, closes the exact epoch through the durable marker,
+  surfaces the original error, and forces a later replacement epoch;
 - crashes after ready marker persistence, P0 invalidation, and metric
   invalidation leave a pending boundary that a same-session replay completes
   without a fetch; direct later-session recovery completes before replacement
@@ -231,6 +243,9 @@ Tests must prove:
   session without changing that committed snapshot or phase validity;
 - completed, stage-only, partial-resume, and outcome-repair corruption preserve
   committed P0, invalidate the original epoch, and surface the original error;
+- malformed present entry evidence never becomes `missing_entry_bar`; its
+  marker remains pending and same/later recovery stays closed until repair,
+  while a genuinely absent entry context retains the missing-entry contract;
 - P0 `SignalRecord.signal_id`, v2 `SignalMetricRecord.signal_id`, and outcomes
   use the returned metric epoch identity consistently;
 - missing metadata and malformed context fail without creating state;

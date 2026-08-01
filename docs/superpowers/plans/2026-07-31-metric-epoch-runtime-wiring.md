@@ -401,6 +401,13 @@ empty mapping. Keep the P0 session invalid and cohort result error unchanged.
 Identical replay must call immutable upsert; unequal payload must fail closed.
 Do not make a second price-source call.
 
+Treat candidate execution-reference validation as the same critical gap after
+screening but before staging. Route the original exception through the durable
+stop, preserve committed P0, and pass only bars from the already fetched and
+validated shared execution bundle when one exists; otherwise pass an empty
+mapping. Never refetch candidate bars during recovery, and surface the original
+reference error after exact-epoch closure.
+
 After all affected due outcomes have been attempted, invalidate the shared
 metric epoch exactly once with `critical_market_data_gap`, stop screening and
 staging for that daily run, and return the cohort errors. Persist invalid
@@ -479,14 +486,22 @@ committed P0 and existing immutable outcomes, surface the original integrity
 error after safety closure, and leave the marker pending if a new recovery
 write fails.
 
+For invalid-outcome recovery, distinguish a missing entry execution context
+from a present but malformed/conflicting one. Only true absence may produce
+`missing_entry_bar`. Propagate parsing or integrity failure from a present
+context so the ready marker stays pending, exact epoch closes, committed P0 is
+preserved, and same/later zero-fetch recovery remains blocked until exact
+evidence repair.
+
 Add deterministic crash hooks after minimal blocker persistence, ready-marker
 attachment, P0 invalidation, and metric invalidation. Tests must cover every
 crash boundary, unrepresentable provider fields/errors plus item/byte overflow,
 exact affected-ledger topology and legacy failure, safe added-cohort behavior,
 binding-derivation failure, all-removed ready/minimal recovery, interleaved
 committed audit replay, direct later-session recovery, and audit-write failure
-followed by zero-fetch replay with exactly one rejection row. Also cover malformed
-completed/stage/partial contexts,
+followed by zero-fetch replay with exactly one rejection row. Also cover
+candidate reference failure without refetch/staging, malformed present entry
+evidence remaining pending until repair, malformed completed/stage/partial contexts,
 immutable conflicts, committed-P0 preservation, and marker migration/bounds.
 
 - [ ] **Step 10: Run focused, full, and static verification**
