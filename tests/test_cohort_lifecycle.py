@@ -14,7 +14,8 @@ Uses fully mocked data (no API calls, no LLM).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from unittest.mock import patch
 
 import pandas as pd
@@ -25,6 +26,9 @@ from tradingagents.strategies.orchestration.multi_strategy_engine import (
 )
 from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+from tradingagents.strategies.execution.models import MarketBar
+from tradingagents.strategies.metrics.models import SignalMetricRecord
+from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules.base import Candidate
 
@@ -173,59 +177,54 @@ class TestCheckExits:
 
 
 # ---------------------------------------------------------------------------
-# Test: Signal journal back-fills return data
+# Test: exact-session derived outcomes
 # ---------------------------------------------------------------------------
 
 
-class TestJournalOutcomes:
-    def test_fill_outcomes_after_5d(self, journal):
-        """return_5d gets filled after 5 calendar days."""
-        signal_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-
-        journal.log_signal(
-            JournalEntry(
-                timestamp=signal_date,
-                strategy="fake_strat",
-                ticker="AAPL",
-                direction="long",
-                score=5.0,
-                traded=True,
-                entry_price=150.0,
-            )
+class TestExactSessionOutcomes:
+    def test_five_session_outcome_uses_next_session_open(self):
+        signal = SignalMetricRecord(
+            event_key="event-aapl",
+            signal_id="signal-aapl",
+            epoch_id="epoch",
+            policy_id="30d",
+            strategy="fake_strat",
+            ticker="AAPL",
+            direction="long",
+            decision_at=datetime(2026, 8, 3, 20, tzinfo=UTC),
+            reference_session=date(2026, 8, 3),
         )
+        bars = {
+            ("AAPL", date(2026, 8, 4)): MarketBar(
+                "AAPL",
+                date(2026, 8, 4),
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("101"),
+                "fixture",
+                datetime(2026, 8, 4, 22, tzinfo=UTC),
+                False,
+            ),
+            ("AAPL", date(2026, 8, 10)): MarketBar(
+                "AAPL",
+                date(2026, 8, 10),
+                Decimal("109"),
+                Decimal("111"),
+                Decimal("108"),
+                Decimal("110"),
+                "fixture",
+                datetime(2026, 8, 10, 22, tzinfo=UTC),
+                False,
+            ),
+        }
 
-        prices = _make_price_df(150.0, days=30)
-        today = datetime.now().strftime("%Y-%m-%d")
-        updated = journal.fill_outcomes({"AAPL": prices}, today)
+        outcome = OutcomeCalculator().build(signal, 5, bars)
 
-        assert updated == 1
-        entries = journal.get_entries()
-        assert entries[0]["return_5d"] is not None
-        assert entries[0]["return_5d"] > 0  # prices drift up
-
-    def test_no_fill_before_5d(self, journal):
-        """return_5d stays None before 5 days elapsed."""
-        signal_date = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-
-        journal.log_signal(
-            JournalEntry(
-                timestamp=signal_date,
-                strategy="fake_strat",
-                ticker="AAPL",
-                direction="long",
-                score=5.0,
-                traded=True,
-                entry_price=150.0,
-            )
-        )
-
-        prices = _make_price_df(150.0, days=30)
-        today = datetime.now().strftime("%Y-%m-%d")
-        updated = journal.fill_outcomes({"AAPL": prices}, today)
-
-        assert updated == 0
-        entries = journal.get_entries()
-        assert entries[0]["return_5d"] is None
+        assert outcome.entry_session == date(2026, 8, 4)
+        assert outcome.exit_session == date(2026, 8, 10)
+        assert outcome.entry_price == Decimal("100")
+        assert outcome.exit_price == Decimal("110")
 
 
 # ---------------------------------------------------------------------------
@@ -265,12 +264,21 @@ class TestLearningLoop:
 
         # Create closed trades with PnL
         for i in range(3):
-            state.save_paper_trade({
-                "strategy": "fake_strat", "ticker": f"T{i}", "direction": "long",
-                "entry_price": 100.0, "exit_price": 110.0,
-                "entry_date": "2026-03-01", "exit_date": "2026-03-15",
-                "shares": 5, "status": "closed", "pnl": 50.0, "pnl_pct": 0.1,
-            })
+            state.save_paper_trade(
+                {
+                    "strategy": "fake_strat",
+                    "ticker": f"T{i}",
+                    "direction": "long",
+                    "entry_price": 100.0,
+                    "exit_price": 110.0,
+                    "entry_date": "2026-03-01",
+                    "exit_date": "2026-03-15",
+                    "shares": 5,
+                    "status": "closed",
+                    "pnl": 50.0,
+                    "pnl_pct": 0.1,
+                }
+            )
 
         result = engine.run_learning_loop()
         assert result["triggered"] is True
@@ -434,13 +442,21 @@ class TestCohortComparison:
             state = StateManager(sd)
             for i in range(3):
                 exit_px = 110.0 if cohort_name == "adaptive" else 105.0
-                state.save_paper_trade({
-                    "strategy": "fake_strat", "ticker": f"T{i}", "direction": "long",
-                    "entry_price": 100.0, "exit_price": exit_px,
-                    "entry_date": "2026-03-01", "exit_date": "2026-03-15",
-                    "shares": 5, "status": "closed", "pnl": (exit_px - 100.0) * 5,
-                    "pnl_pct": (exit_px - 100.0) / 100.0,
-                })
+                state.save_paper_trade(
+                    {
+                        "strategy": "fake_strat",
+                        "ticker": f"T{i}",
+                        "direction": "long",
+                        "entry_price": 100.0,
+                        "exit_price": exit_px,
+                        "entry_date": "2026-03-01",
+                        "exit_date": "2026-03-15",
+                        "shares": 5,
+                        "status": "closed",
+                        "pnl": (exit_px - 100.0) * 5,
+                        "pnl_pct": (exit_px - 100.0) / 100.0,
+                    }
+                )
 
         comparison = CohortComparison(
             {

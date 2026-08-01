@@ -346,7 +346,9 @@ class SignalJournal:
     # ------------------------------------------------------------------
 
     def fill_outcomes(self, price_cache: dict[str, Any], today: str) -> int:
-        """Back-fill return fields for past entries where enough time has elapsed.
+        """Legacy schema-v1 calendar-day updater; never called by v2 production.
+
+        Back-fill return fields for past entries where enough time has elapsed.
 
         Args:
             price_cache: {ticker: DataFrame with "Close" column}

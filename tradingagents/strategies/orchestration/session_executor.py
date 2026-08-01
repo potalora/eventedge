@@ -7,6 +7,7 @@ from importlib.metadata import version as package_version
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Callable
 
 from tradingagents.strategies.execution import (
@@ -14,6 +15,7 @@ from tradingagents.strategies.execution import (
     BenchmarkObservation,
     CorporateAction,
     MarketBar,
+    SignalRecord,
     stable_id,
 )
 from tradingagents.strategies.execution.cost_model import PaperCostModel
@@ -28,6 +30,9 @@ from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     session_close,
 )
+from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, SignalMetricRecord
+from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
+from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     PortfolioLedger,
@@ -138,6 +143,7 @@ class SessionExecutor:
         ledger: PortfolioLedger,
         config: dict,
         *,
+        metric_store: MetricStore | None = None,
         after_phase_mutation: Callable[[str], None] | None = None,
         after_phase_commit: Callable[[str], None] | None = None,
     ) -> None:
@@ -160,11 +166,16 @@ class SessionExecutor:
             "borrow_cost_reject_above",
             "0.05",
         )
+        self.outcome_calculator = OutcomeCalculator()
+        state_dir = Path(self.ar_config.get("state_dir", self.ledger.path.parent))
+        self.metric_store = metric_store or MetricStore(
+            state_dir / "metrics_v2.sqlite3"
+        )
         self._after_phase_mutation = after_phase_mutation or (lambda phase: None)
         self._after_phase_commit = after_phase_commit or (lambda phase: None)
 
-    def required_tickers(self, session: date) -> tuple[str, ...]:
-        """Bounded union of held and due-intent tickers."""
+    def required_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
+        """Bounded union of execution and exact outcome tickers."""
         tickers = {str(position["ticker"]) for position in self.ledger.open_positions()}
         for intent in self.ledger.pending_intents(session):
             signals = self.ledger.signals_for_intent(intent.intent_id)
@@ -174,7 +185,94 @@ class SessionExecutor:
                     f"intent {intent.intent_id} has ambiguous ticker provenance"
                 )
             tickers.update(provenance)
+        tickers.update(self.outcome_tickers(session, epoch_id))
         return tuple(sorted(tickers))
+
+    def outcome_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
+        """Return signal tickers requiring an exact raw entry or exit bar today."""
+        tickers: set[str] = set()
+        earliest_reference = session
+        for _ in range(max(OUTCOME_WINDOWS)):
+            earliest_reference = self.outcome_calculator.calendar.previous_session(
+                earliest_reference
+            )
+        for signal in self.ledger.read_signals(
+            earliest_reference, session, epoch_id=epoch_id
+        ):
+            metric_signal = self._metric_signal(signal)
+            entry_session = self.outcome_calculator.calendar.next_session(
+                metric_signal.reference_session
+            )
+            if entry_session == session:
+                tickers.add(metric_signal.ticker)
+                continue
+            for window in OUTCOME_WINDOWS:
+                if self.outcome_calculator.calendar.held_session(
+                    entry_session, window
+                ) == session:
+                    tickers.add(metric_signal.ticker)
+                    break
+        return tuple(sorted(tickers))
+
+    @staticmethod
+    def _metric_signal(signal: SignalRecord) -> SignalMetricRecord:
+        return SignalMetricRecord(
+            event_key=signal.event_key,
+            signal_id=signal.signal_id,
+            epoch_id=signal.epoch_id,
+            policy_id=signal.policy_id,
+            strategy=signal.strategy,
+            ticker=signal.ticker,
+            direction=signal.direction,
+            decision_at=signal.decision_at,
+            reference_session=signal.reference_session,
+        )
+
+    def due_outcome_signals(
+        self, session: date, epoch_id: str
+    ) -> tuple[tuple[SignalMetricRecord, int], ...]:
+        """Convert authoritative ledger signals whose exact outcome closes today."""
+        due: list[tuple[SignalMetricRecord, int]] = []
+        earliest_reference = session
+        for _ in range(max(OUTCOME_WINDOWS)):
+            earliest_reference = self.outcome_calculator.calendar.previous_session(
+                earliest_reference
+            )
+        for signal in self.ledger.read_signals(
+            earliest_reference, session, epoch_id=epoch_id
+        ):
+            metric_signal = self._metric_signal(signal)
+            entry_session = self.outcome_calculator.calendar.next_session(
+                metric_signal.reference_session
+            )
+            for window in OUTCOME_WINDOWS:
+                if (
+                    self.outcome_calculator.calendar.held_session(entry_session, window)
+                    == session
+                ):
+                    due.append((metric_signal, window))
+        return tuple(due)
+
+    def record_due_outcomes(
+        self,
+        session: date,
+        epoch_id: str,
+        raw_bars: dict[tuple[str, date], MarketBar],
+    ) -> int:
+        """Persist due outcomes from shared current bars and durable entry bars only."""
+        written = 0
+        for signal, window in self.due_outcome_signals(session, epoch_id):
+            entry_session = self.outcome_calculator.calendar.next_session(
+                signal.reference_session
+            )
+            bars = dict(raw_bars)
+            if self.ledger.session_execution_context(entry_session) is not None:
+                bars.update(self.persisted_input_bundle(entry_session).bars)
+            self.metric_store.upsert_outcome(
+                self.outcome_calculator.build(signal, window, bars)
+            )
+            written += 1
+        return written
 
     @classmethod
     def fetch_input_bundle(
@@ -336,7 +434,7 @@ class SessionExecutor:
         required = (
             tuple(bound_context["required_tickers"])
             if bound_context is not None
-            else self.required_tickers(session)
+            else self.required_tickers(session, epoch_id)
         )
         config_inputs, borrow_inputs = self._static_context_documents(
             required, borrow_rates

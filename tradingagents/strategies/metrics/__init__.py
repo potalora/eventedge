@@ -19,6 +19,7 @@ from .models import (
     StrategyHealthRecord,
 )
 from .store import MetricStore
+from .outcomes import DirectionalAccuracy, OutcomeCalculator, directional_accuracy
 
 __all__ = [
     "LEGACY_SCHEMA_LABEL",
@@ -32,6 +33,8 @@ __all__ = [
     "HealthStatus",
     "MetricEpoch",
     "MetricStore",
+    "DirectionalAccuracy",
+    "OutcomeCalculator",
     "OutcomeRecord",
     "OutcomeStatus",
     "PairedComparison",
@@ -43,5 +46,6 @@ __all__ = [
     "deduplicate_signals",
     "event_key",
     "execution_id",
+    "directional_accuracy",
     "signal_id",
 ]

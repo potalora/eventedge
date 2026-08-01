@@ -2,7 +2,7 @@
 
 Validates the entire pipeline end-to-end with synthetic data:
 1. Broker reconstruction across days
-2. Signal journal fill_outcomes with correct target-date prices
+2. Exact XNYS-session outcomes with raw next-open and close prices
 3. Idempotency (double-run same date produces no duplicates)
 4. Full 30-day lifecycle: open, hold, exit, back-fill, learn
 5. 2-cohort divergence over 30 days
@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from pathlib import Path
+import sqlite3
 from unittest.mock import patch
 
 import numpy as np
@@ -44,7 +46,8 @@ from tradingagents.strategies.orchestration.trading_calendar import (
 from tradingagents.strategies.trading.portfolio_committee import (
     TradeRecommendation,
 )
-from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+from tradingagents.strategies.metrics.models import SignalMetricRecord
+from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules.base import Candidate
 
@@ -214,102 +217,71 @@ def _make_fake_committee(max_per_day: int = 3):
 
 
 # ===========================================================================
-# 2. TestFillOutcomesCorrectPrices
+# 2. TestExactSessionOutcomePrices
 # ===========================================================================
 
 
-class TestFillOutcomesCorrectPrices:
-    """Verify fill_outcomes uses the correct target-date price, not latest."""
+class TestExactSessionOutcomePrices:
+    """Verify v2 outcomes use exact raw XNYS bars and one short sign flip."""
 
-    def _build_price_df(self, signal_date_str: str) -> pd.DataFrame:
-        """Build a price DF with known prices at day 0, 5, 10, 30."""
-        signal_dt = datetime.strptime(signal_date_str, "%Y-%m-%d")
-        # Create 35 business days of prices starting from signal date
-        dates = pd.bdate_range(start=signal_dt, periods=35)
-        prices = [100.0] * 35  # default base
-
-        # Set specific prices at known offsets by calendar day
-        for i, d in enumerate(dates):
-            cal_days = (d - pd.Timestamp(signal_dt)).days
-            if cal_days <= 5:
-                # Ramp from 100 to 105 over first 5 calendar days
-                prices[i] = 100.0 + cal_days
-            elif cal_days <= 10:
-                # 110 around day 10
-                prices[i] = 105.0 + (cal_days - 5)
-            elif cal_days <= 30:
-                # 120 around day 30
-                frac = (cal_days - 10) / 20
-                prices[i] = 110.0 + frac * 10.0
-            else:
-                prices[i] = 120.0
-
-        return pd.DataFrame({"Close": prices}, index=dates)
-
-    def test_5d_uses_day5_price_not_latest(self, tmp_path):
-        signal_date = "2026-04-01"
-        journal = SignalJournal(str(tmp_path / "state"))
-        journal.log_signal(
-            JournalEntry(
-                timestamp=signal_date,
-                strategy="test_strat",
-                ticker="AAPL",
-                direction="long",
-                score=5.0,
-                traded=True,
-                entry_price=100.0,
-            )
+    @staticmethod
+    def _signal(direction: str) -> SignalMetricRecord:
+        return SignalMetricRecord(
+            event_key="event-aapl",
+            signal_id=f"signal-{direction}",
+            epoch_id="epoch",
+            policy_id="30d",
+            strategy="test_strat",
+            ticker="AAPL",
+            direction=direction,
+            decision_at=datetime(2026, 8, 3, 20, tzinfo=timezone.utc),
+            reference_session=date(2026, 8, 3),
         )
 
-        price_df = self._build_price_df(signal_date)
-        price_cache = {"AAPL": price_df}
+    @staticmethod
+    def _bars(entry_open: str, exit_close: str) -> dict[tuple[str, date], MarketBar]:
+        fetched_at = datetime(2026, 8, 10, 22, tzinfo=timezone.utc)
+        return {
+            ("AAPL", date(2026, 8, 4)): MarketBar(
+                "AAPL",
+                date(2026, 8, 4),
+                Decimal(entry_open),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+                "fixture",
+                fetched_at,
+                False,
+            ),
+            ("AAPL", date(2026, 8, 10)): MarketBar(
+                "AAPL",
+                date(2026, 8, 10),
+                Decimal("105"),
+                Decimal("111"),
+                Decimal("104"),
+                Decimal(exit_close),
+                "fixture",
+                fetched_at,
+                False,
+            ),
+        }
 
-        # Day 7: only 5d should fill
-        updated = journal.fill_outcomes(price_cache, "2026-04-08")
-        assert updated == 1
-        entries = journal.get_entries()
-        assert entries[0]["return_5d"] is not None
-        assert entries[0]["return_10d"] is None
-        # Day-5 price is ~105, so return should be ~0.05
-        assert entries[0]["return_5d"] == pytest.approx(0.05, abs=0.02)
-
-        # Day 12: 10d should fill
-        updated = journal.fill_outcomes(price_cache, "2026-04-13")
-        assert updated == 1
-        entries = journal.get_entries()
-        assert entries[0]["return_10d"] is not None
-        assert entries[0]["return_10d"] == pytest.approx(0.10, abs=0.02)
-
-        # Day 32: 30d should fill
-        updated = journal.fill_outcomes(price_cache, "2026-05-03")
-        assert updated == 1
-        entries = journal.get_entries()
-        assert entries[0]["return_30d"] is not None
-        assert entries[0]["return_30d"] == pytest.approx(0.20, abs=0.03)
-
-    def test_short_direction_flips_sign(self, tmp_path):
-        signal_date = "2026-04-01"
-        journal = SignalJournal(str(tmp_path / "state"))
-        journal.log_signal(
-            JournalEntry(
-                timestamp=signal_date,
-                strategy="test_strat",
-                ticker="AAPL",
-                direction="short",
-                score=5.0,
-                traded=True,
-                entry_price=100.0,
-            )
+    def test_five_sessions_uses_exact_next_open_and_exit_close(self):
+        outcome = OutcomeCalculator().build(
+            self._signal("long"), 5, self._bars("100", "110")
         )
 
-        price_df = self._build_price_df(signal_date)
-        price_cache = {"AAPL": price_df}
+        assert outcome.entry_price == Decimal("100")
+        assert outcome.exit_price == Decimal("110")
+        assert outcome.raw_return == Decimal("0.1")
 
-        journal.fill_outcomes(price_cache, "2026-04-08")
-        entries = journal.get_entries()
-        # Short: return should be negative (price went up)
-        assert entries[0]["return_5d"] is not None
-        assert entries[0]["return_5d"] < 0
+    def test_short_negates_raw_return_once(self):
+        outcome = OutcomeCalculator().build(
+            self._signal("short"), 5, self._bars("100", "110")
+        )
+
+        assert outcome.raw_return == Decimal("0.1")
+        assert outcome.signed_return == Decimal("-0.1")
 
 
 # ===========================================================================
@@ -428,6 +400,176 @@ def _authoritative_committee(signals, **kwargs):
 
 
 class TestIdempotencyDoubleRun:
+    def test_untraded_signal_outcomes_reuse_one_shared_raw_bundle_and_restart_idempotently(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions[:-1]:
+                orchestrator.run_daily(session.isoformat())
+            raw_before_exit = len(source.raw_calls)
+            first = orchestrator.run_daily(sessions[-1].isoformat())
+            raw_after_exit = len(source.raw_calls)
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
+
+        cohort = orchestrator.cohorts[0]
+        outcomes = cohort["executor"].metric_store.read_outcomes(orchestrator._epoch_id)
+        assert not first["cohort_0"]["error"]
+        assert not first["cohort_1"]["error"]
+        assert source.raw_calls[-1] == (("AAPL", "MSFT"), sessions[-1])
+        assert raw_after_exit == raw_before_exit + 2
+        assert {(row.ticker, row.status) for row in outcomes} == {
+            ("AAPL", "valid"),
+            ("MSFT", "valid"),
+        }
+        assert replay["cohort_0"]["replayed"]
+        assert replay["cohort_1"]["replayed"]
+        assert len(source.raw_calls) == raw_after_exit
+        assert (
+            len(cohort["executor"].metric_store.read_outcomes(orchestrator._epoch_id))
+            == 2
+        )
+
+    def test_cohorts_share_generation_metric_store_not_cohort_metric_databases(
+        self, tmp_path
+    ):
+        orchestrator, _ = _authoritative_orchestrator(tmp_path, cohorts=2)
+
+        paths = {
+            cohort["executor"].metric_store.path for cohort in orchestrator.cohorts
+        }
+        assert paths == {tmp_path / "base" / "metrics_v2.sqlite3"}
+        assert all(
+            not (Path(cohort["config"].state_dir) / "metrics_v2.sqlite3").exists()
+            for cohort in orchestrator.cohorts
+        )
+
+    def test_shared_outcome_does_not_remove_fresh_cohort_exit_ticker(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+        fresh_executor = orchestrator.cohorts[1]["executor"]
+        original_execute = fresh_executor.execute_open_and_mark
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(sessions[0].isoformat())
+            cutoff = session_close(sessions[0])
+            shared_untraded = SignalRecord(
+                signal_id="shared-untraded-signal",
+                epoch_id=orchestrator._epoch_id,
+                policy_id="foundation-30d",
+                event_key="shared-untraded-event",
+                strategy="filing_analysis",
+                ticker="ZZZZ",
+                direction="long",
+                event_at=cutoff,
+                observed_at=cutoff,
+                reference_session=sessions[0],
+                reference_close=Decimal("100"),
+                decision_at=cutoff,
+                evidence_hash="shared-untraded-evidence",
+            )
+            for cohort in orchestrator.cohorts:
+                cohort["ledger"].record_signal(shared_untraded)
+            for session in sessions[1:-1]:
+                orchestrator.run_daily(session.isoformat())
+
+            fresh_executor.execute_open_and_mark = lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("fresh cohort execution crash")
+            )
+            first_exit = orchestrator.run_daily(sessions[-1].isoformat())
+            fresh_executor.execute_open_and_mark = original_execute
+            shared_due = next(
+                (signal, window)
+                for signal, window in fresh_executor.due_outcome_signals(
+                    sessions[-1], orchestrator._epoch_id
+                )
+                if signal.ticker == "ZZZZ"
+            )
+            fresh_executor.metric_store.load_outcome(
+                fresh_executor.outcome_calculator.outcome_id(*shared_due)
+            )
+            fresh_required = fresh_executor.required_tickers(
+                sessions[-1], orchestrator._epoch_id
+            )
+            before_replay = len(source.raw_calls)
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
+
+        assert not first_exit["cohort_0"]["error"]
+        assert first_exit["cohort_1"]["error"]
+        assert fresh_required == ("AAPL", "MSFT", "ZZZZ")
+        assert not replay["cohort_1"]["error"]
+        assert source.raw_calls[before_replay] == (
+            ("AAPL", "MSFT", "ZZZZ"),
+            sessions[-1],
+        )
+
+    def test_completed_replay_repairs_missing_outcome_from_persisted_bars(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path)
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions:
+                orchestrator.run_daily(session.isoformat())
+            store = orchestrator.cohorts[0]["executor"].metric_store
+            with sqlite3.connect(store.path) as connection:
+                connection.execute("DELETE FROM outcomes")
+            raw_before_repair = len(source.raw_calls)
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
+
+        assert replay["cohort_0"]["replayed"]
+        assert len(source.raw_calls) == raw_before_repair
+        assert len(store.read_outcomes(orchestrator._epoch_id)) == 2
+
+    def test_completed_replay_fails_closed_for_conflicting_outcome_payload(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(tmp_path)
+        sessions = [date(2026, 3, 30)]
+        for _ in range(5):
+            sessions.append(next_session(sessions[-1]))
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            for session in sessions:
+                orchestrator.run_daily(session.isoformat())
+            store = orchestrator.cohorts[0]["executor"].metric_store
+            with sqlite3.connect(store.path) as connection:
+                payload = connection.execute(
+                    "SELECT payload_json FROM outcomes ORDER BY outcome_id LIMIT 1"
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE outcomes SET payload_json = ? WHERE outcome_id = "
+                    "(SELECT outcome_id FROM outcomes ORDER BY outcome_id LIMIT 1)",
+                    (payload.replace('"status":"valid"', '"status":"invalid"'),),
+                )
+            raw_before_replay = len(source.raw_calls)
+            replay = orchestrator.run_daily(sessions[-1].isoformat())
+
+        assert replay["cohort_0"]["error"]
+        assert "immutable outcome_id" in replay["cohort_0"]["invalid_reason"]
+        assert len(source.raw_calls) == raw_before_replay
+
     def test_double_run_no_duplicates(self, tmp_path):
         orchestrator, source = _authoritative_orchestrator(tmp_path)
         session = date(2026, 3, 30)

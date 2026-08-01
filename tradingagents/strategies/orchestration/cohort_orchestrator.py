@@ -219,6 +219,7 @@ class CohortOrchestrator:
             SessionExecutor,
         )
         from tradingagents.strategies.execution.price_source import YFinancePriceSource
+        from tradingagents.strategies.metrics.store import MetricStore
         from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.modules import get_paper_trade_strategies
@@ -227,6 +228,10 @@ class CohortOrchestrator:
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
         strategies = get_paper_trade_strategies()
+        metric_store = MetricStore(
+            Path(base_config.get("autoresearch", {}).get("state_dir", "data/state"))
+            / "metrics_v2.sqlite3"
+        )
 
         for cfg in cohort_configs:
             cfg = replace(cfg, adaptive_confidence=False, learning_enabled=False)
@@ -266,7 +271,7 @@ class CohortOrchestrator:
                 adaptive_confidence=False,
                 ledger=ledger,
             )
-            executor = SessionExecutor(ledger, cohort_config)
+            executor = SessionExecutor(ledger, cohort_config, metric_store=metric_store)
             self.cohorts.append(
                 {
                     "config": cfg,
@@ -335,6 +340,7 @@ class CohortOrchestrator:
         results: dict[str, Any] = {}
 
         complete_replays: dict[str, Any] = {}
+        completed_cohorts: list[dict[str, Any]] = []
         stage_only: list[dict[str, Any]] = []
         execution_needed: list[dict[str, Any]] = []
         for cohort in self.cohorts:
@@ -371,6 +377,7 @@ class CohortOrchestrator:
                     }
                     continue
             if len(snapshots) == 1 and phases_complete and staging_complete:
+                completed_cohorts.append(cohort)
                 fills = ledger.read_fills(session, session)
                 complete_replays[cohort["config"].name] = {
                     "signals": [
@@ -402,6 +409,19 @@ class CohortOrchestrator:
             else:
                 execution_needed.append(cohort)
         results.update(complete_replays)
+        for cohort in completed_cohorts:
+            name = cohort["config"].name
+            executor = cohort["executor"]
+            if not executor.due_outcome_signals(session, self._epoch_id):
+                continue
+            try:
+                executor.record_due_outcomes(
+                    session,
+                    self._epoch_id,
+                    executor.persisted_input_bundle(session).bars,
+                )
+            except Exception as error:
+                results[name] = {"error": True, "invalid_reason": str(error)}
         if not execution_needed and not stage_only:
             return results
 
@@ -445,7 +465,9 @@ class CohortOrchestrator:
                     {
                         ticker
                         for cohort in fresh_execution
-                        for ticker in cohort["executor"].required_tickers(session)
+                        for ticker in cohort["executor"].required_tickers(
+                            session, self._epoch_id
+                        )
                     }
                 )
             )
@@ -463,7 +485,9 @@ class CohortOrchestrator:
                 processed_at = datetime.now(timezone.utc)
             except CorporateActionBatchError as error:
                 for cohort in fresh_execution:
-                    required = cohort["executor"].required_tickers(session)
+                    required = cohort["executor"].required_tickers(
+                        session, self._epoch_id
+                    )
                     reason = cohort["ledger"].reject_corporate_action_batch(
                         session,
                         error.actions,
@@ -494,7 +518,9 @@ class CohortOrchestrator:
                 for cohort in fresh_execution:
                     name = cohort["config"].name
                     try:
-                        required = cohort["executor"].required_tickers(session)
+                        required = cohort["executor"].required_tickers(
+                            session, self._epoch_id
+                        )
                         lifecycle = cohort["executor"].execute_open_and_mark(
                             session,
                             self._epoch_id,
@@ -515,6 +541,27 @@ class CohortOrchestrator:
                     cohort["marked_account"] = lifecycle.snapshot
                     valid_cohorts.append(cohort)
 
+        if not valid_cohorts:
+            return results
+
+        outcome_ready: list[dict[str, Any]] = []
+        for cohort in valid_cohorts:
+            name = cohort["config"].name
+            executor = cohort["executor"]
+            if not executor.due_outcome_signals(session, self._epoch_id):
+                outcome_ready.append(cohort)
+                continue
+            try:
+                executor.record_due_outcomes(
+                    session,
+                    self._epoch_id,
+                    executor.persisted_input_bundle(session).bars,
+                )
+            except Exception as error:
+                results[name] = {"error": True, "invalid_reason": str(error)}
+                continue
+            outcome_ready.append(cohort)
+        valid_cohorts = outcome_ready
         if not valid_cohorts:
             return results
 
