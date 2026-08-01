@@ -114,3 +114,14 @@ def _render_gen_card(gen: dict) -> None:
         "Four $100k horizon books are dependent scenario portfolios; shared "
         "signals and market data mean they are not independent observations."
     )
+    quality = [
+        (
+            f"{cohort_id}: {book.get('valid_sessions', 'unavailable')} valid sessions; "
+            f"{book.get('missing_mark_count', 'unavailable')}/"
+            f"{book.get('stale_mark_count', 'unavailable')} missing/stale marks; "
+            f"valuation {book.get('valuation_at', 'unavailable')}; "
+            f"benchmark {book.get('benchmark_at', 'unavailable')}"
+        )
+        for cohort_id, book in sorted(headline.items())
+    ]
+    st.caption("Data quality — " + (" | ".join(quality) if quality else "unavailable"))

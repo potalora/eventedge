@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from tradingagents.dashboard import data_loaders
-from tradingagents.dashboard.charts import make_cohort_heatmap
+from tradingagents.dashboard.charts import make_cohort_heatmap, make_equity_curves_facet
 from tradingagents.strategies.metrics.service import MetricsService
 from scripts.generate_daily_report import render_generation_report
 
@@ -165,3 +165,28 @@ def test_heatmap_formats_governed_ratio_metrics_truthfully(
     )
 
     assert figure.data[0].text[0][0] == expected
+
+
+def test_equity_chart_consumes_governed_metric_v2_series() -> None:
+    figure = make_equity_curves_facet(
+        {
+            "horizon_30d_size_100k": [
+                {"session": "2026-08-03", "net_equity": 100_000.0, "total_return": 0.0},
+                {
+                    "session": "2026-08-04",
+                    "net_equity": 101_000.0,
+                    "total_return": 0.01,
+                },
+            ]
+        }
+    )
+
+    assert tuple(figure.data[0].x) == ("2026-08-03", "2026-08-04")
+    assert tuple(figure.data[0].y) == (0.0, 0.01)
+
+
+def test_overview_discloses_governed_headline_data_quality() -> None:
+    source = Path("tradingagents/dashboard/pages/overview.py").read_text()
+
+    assert "valid sessions" in source
+    assert "missing/stale marks" in source

@@ -295,7 +295,7 @@ def make_strategy_bars(
 def make_equity_curves_facet(
     history: dict[str, list[dict[str, Any]]],
 ) -> go.Figure:
-    """4-panel facet (one per horizon): cumulative return % per size cohort over time."""
+    """Plot the persisted metric-v2 return series without rebuilding returns."""
     from plotly.subplots import make_subplots
 
     fig = make_subplots(
@@ -326,8 +326,8 @@ def make_equity_curves_facet(
             continue
         h, s = parts[1], parts[3]
         row, col = panel_pos.get(h, (1, 1))
-        dates = [r["date"] for r in snaps]
-        ret = [r["total_return_pct"] for r in snaps]
+        dates = [record["session"] for record in snaps]
+        ret = [record["total_return"] for record in snaps]
         showlegend = s not in seen_sizes
         seen_sizes.add(s)
         fig.add_trace(
@@ -339,7 +339,7 @@ def make_equity_curves_facet(
                 line=dict(color=size_color.get(s, GRAY), width=2),
                 legendgroup=s,
                 showlegend=showlegend,
-                hovertemplate=f"{size_label.get(s, s)}<br>%{{x}}<br>%{{y:+.2f}}%<extra></extra>",
+                hovertemplate=f"{size_label.get(s, s)}<br>%{{x}}<br>%{{y:+.2%}}<extra></extra>",
             ),
             row=row,
             col=col,
@@ -359,7 +359,7 @@ def make_equity_curves_facet(
         height=560,
         **_DARK_LAYOUT,
     )
-    fig.update_yaxes(title_text="Return %", ticksuffix="%")
+    fig.update_yaxes(title_text="Return", tickformat=".1%")
     return fig
 
 
