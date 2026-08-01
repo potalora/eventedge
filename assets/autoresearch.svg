@@ -161,4 +161,5 @@
     <text x="300" y="232" text-anchor="middle" fill="#484f58" font-size="8">each scenario has authoritative portfolio.db; JSON is a read projection</text>
     <text x="300" y="244" text-anchor="middle" fill="#484f58" font-size="8">covered-call execution inactive; shared evidence means scenarios are dependent</text>
   </g>
+  <text x="400" y="612" text-anchor="middle" fill="#484f58" font-size="8">metrics v2; learning disabled; promotion: manual review only</text>
 </svg>

@@ -35,7 +35,7 @@ The provided systemd timer is configured for 18:00 ET, after XNYS daily bars fin
 
 Each cohort has its own authoritative SQLite `portfolio.db`. Signals, next-open intents, fills, lots, marks, benchmark observations, and account snapshots are recorded there with explicit slippage, commission, other fees, borrow costs, and financing. The familiar JSON files are deterministic read-compatible projections from SQLite; they are not accounting authority.
 
-The generation management system supports parallel frozen code versions through git worktrees. The 16 horizon/size portfolios within a generation are dependent scenarios: they share fetched evidence and screening decisions, then apply different portfolio constraints. They must not be treated as 16 statistically independent trials. Autoresearch LLM calls use Claude Sonnet 5 at medium effort, with rule-based synthesis as the failure fallback.
+The generation management system supports parallel frozen code versions through git worktrees. EventEdge runs 16 dependent scenario portfolios. Headline performance shows four separate $100k horizon books plus an equal-weighted scenario panel; the panel is not investable fund AUM. Smaller books are concentration stress tests. Metrics use XNYS sessions, next-session-open signal outcomes, persisted SPY/BIL benchmarks, explicit costs, and immutable schema-v2 epochs. Production learning is disabled. Promotion output is advisory and requires Pedro's manual review. Covered-call execution remains inactive scaffolding. Autoresearch LLM calls use Claude Sonnet 5 at medium effort, with rule-based synthesis as the failure fallback.
 
 <p align="center">
   <img src="assets/daily-cycle.svg" style="width: 100%; height: auto;">

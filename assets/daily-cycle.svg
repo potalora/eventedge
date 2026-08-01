@@ -7,7 +7,7 @@
   </defs>
   <rect width="800" height="330" rx="12" fill="url(#bg3)"/>
   <text x="400" y="34" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="bold">Exact-session Daily Cycle</text>
-  <text x="400" y="52" text-anchor="middle" fill="#7d8590" font-size="11">18:00 ET wakeup; Python requires the exact XNYS session</text>
+  <text x="400" y="52" text-anchor="middle" fill="#7d8590" font-size="11">18:00 ET close-safe cycle; Python requires the exact XNYS session</text>
 
   <g transform="translate(25,82)">
     <rect width="130" height="78" rx="8" fill="#1a2332" stroke="#7d8590" stroke-width="1.5"/>
@@ -23,7 +23,7 @@
     <text x="65" y="23" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">Execute + Mark</text>
     <line x1="14" y1="33" x2="116" y2="33" stroke="#30363d"/>
     <text x="65" y="50" text-anchor="middle" fill="#8b949e" font-size="8">exits before entries</text>
-    <text x="65" y="64" text-anchor="middle" fill="#8b949e" font-size="8">costs, marks, snapshot</text>
+    <text x="65" y="64" text-anchor="middle" fill="#8b949e" font-size="8">costs, ledger snapshot + SPY/BIL</text>
   </g>
   <line x1="310" y1="121" x2="327" y2="121" stroke="#30363d" stroke-width="1.5"/><polygon points="333,121 325,116 325,126" fill="#30363d"/>
 
@@ -41,7 +41,7 @@
     <text x="65" y="23" text-anchor="middle" fill="#7ee787" font-size="10" font-weight="bold">Stage Intents</text>
     <line x1="14" y1="33" x2="116" y2="33" stroke="#30363d"/>
     <text x="65" y="50" text-anchor="middle" fill="#8b949e" font-size="8">signal at close</text>
-    <text x="65" y="64" text-anchor="middle" fill="#8b949e" font-size="8">next XNYS open only</text>
+    <text x="65" y="64" text-anchor="middle" fill="#8b949e" font-size="8">next-session open only</text>
   </g>
   <line x1="620" y1="121" x2="637" y2="121" stroke="#30363d" stroke-width="1.5"/><polygon points="643,121 635,116 635,126" fill="#30363d"/>
 
@@ -59,6 +59,6 @@
     <line x1="18" y1="33" x2="582" y2="33" stroke="#30363d"/>
     <text x="300" y="51" text-anchor="middle" fill="#e6edf3" font-size="9">one SQLite portfolio.db per dependent horizon/size scenario</text>
     <text x="300" y="68" text-anchor="middle" fill="#8b949e" font-size="8">signals, intents, fills, lots, marks, snapshots, benchmarks, explicit costs</text>
-    <text x="300" y="83" text-anchor="middle" fill="#484f58" font-size="8">covered-call execution inactive</text>
+    <text x="300" y="83" text-anchor="middle" fill="#484f58" font-size="8">metrics v2; learning disabled; manual review only</text>
   </g>
 </svg>

@@ -34,12 +34,16 @@ promotion or deployment.
 
 ## Portfolio scenarios
 
-The horizon-by-size matrix contains 16 dependent scenarios. They share source
-fetches and horizon screens, then apply different sizing and eligibility rules.
-This makes comparison efficient but does not create 16 independent statistical
-experiments. Equity shorts are active only where the size/horizon policy allows
-them. Covered-call configuration remains present, but covered-call execution is
-inactive.
+EventEdge runs 16 dependent scenario portfolios. Headline performance shows
+four separate $100k horizon books plus an equal-weighted scenario panel; the
+panel is not investable fund AUM. Smaller books are concentration stress tests.
+Metrics use XNYS sessions, next-session-open signal outcomes, persisted SPY/BIL
+benchmarks, explicit costs, and immutable schema-v2 epochs. Production learning
+is disabled. Promotion output is advisory and requires Pedro's manual review.
+Covered-call execution remains inactive scaffolding. The scenarios share source
+fetches and horizon screens, then apply different sizing and eligibility rules;
+they are not independent statistical experiments. Equity shorts are active only
+where the size/horizon policy allows them.
 
 Generations are frozen code snapshots with isolated state directories. A branch,
 PR, clean-ledger readiness run, or timer file in this repository is not a live
