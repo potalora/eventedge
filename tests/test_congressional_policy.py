@@ -90,7 +90,7 @@ def test_normalizers_preserve_audit_source_native_id_and_disclosure_url() -> Non
     assert capitol["canonical_disclosure_url"] == "https://disclosures.example/capitol/42"
 
 
-def test_native_disclosure_id_dedupes_even_if_vendor_facts_differ() -> None:
+def test_matching_native_alias_dedupes_when_vendor_facts_differ() -> None:
     first = _trade("Rep A", native_id="DISC-42", source="fmp")
     mirror = _trade(
         "Rep A.",
@@ -101,16 +101,13 @@ def test_native_disclosure_id_dedupes_even_if_vendor_facts_differ() -> None:
     )
     second_member = _trade("Rep B", native_id="DISC-8")
 
-    assert congressional_event_key(first, "long") == congressional_event_key(
-        mirror, "long"
-    )
     candidates = _screen(first, mirror, second_member)
 
     assert len(candidates) == 1
     assert candidates[0].metadata["num_trades"] == 2
 
 
-def test_distinct_native_disclosure_ids_do_not_collapse_on_stable_facts() -> None:
+def test_conflicting_native_ids_do_not_create_extra_trading_authority() -> None:
     first = _trade("Rep A", native_id="DISC-41")
     second = _trade("Rep A", native_id="DISC-42")
     other_member = _trade("Rep B", native_id="DISC-8")
@@ -118,8 +115,9 @@ def test_distinct_native_disclosure_ids_do_not_collapse_on_stable_facts() -> Non
     candidates = _screen(first, second, other_member)
 
     assert len(candidates) == 1
-    assert candidates[0].metadata["num_trades"] == 3
-    assert len(candidates[0].source_event_keys) == 3
+    assert candidates[0].metadata["num_members"] == 2
+    assert candidates[0].metadata["num_trades"] == 2
+    assert len(candidates[0].source_event_keys) == 2
 
 
 def test_url_and_stable_facts_dedupe_across_vendors_before_member_count() -> None:
@@ -144,6 +142,36 @@ def test_url_and_stable_facts_dedupe_across_vendors_before_member_count() -> Non
     assert candidates[0].metadata["num_members"] == 2
     assert candidates[0].metadata["num_trades"] == 2
     assert len(candidates[0].source_event_keys) == 2
+
+
+def test_one_vendor_runs_share_consumable_identity_but_retain_audit_aliases() -> None:
+    fmp = _screen(
+        _trade("Rep A", source="fmp", source_url="https://fmp.example/disclosure/1"),
+        _trade("Rep B", source="fmp", source_url="https://fmp.example/disclosure/2"),
+    )
+    capitol = _screen(
+        _trade(
+            "Rep A",
+            source="capitoltrades",
+            source_url="https://capitol.example/house/101",
+        ),
+        _trade(
+            "Rep B",
+            source="capitoltrades",
+            source_url="https://capitol.example/house/102",
+        ),
+    )
+
+    assert len(fmp) == len(capitol) == 1
+    assert fmp[0].source_event_keys == capitol[0].source_event_keys
+    assert fmp[0].metadata["trade_keys"] == capitol[0].metadata["trade_keys"]
+    assert fmp[0].event_key == capitol[0].event_key
+    assert fmp[0].metadata["source_identity_aliases"] != capitol[0].metadata[
+        "source_identity_aliases"
+    ]
+    assert canonical_event_key(
+        "congressional_trades", fmp[0].ticker, fmp[0].metadata, date(2026, 7, 31)
+    ) == fmp[0].event_key
 
 
 def test_stable_facts_bridge_does_not_merge_distinct_disclosures() -> None:

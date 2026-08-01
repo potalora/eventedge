@@ -140,19 +140,8 @@ def _digest(prefix: str, payload: object) -> str:
 
 
 def congressional_event_key(trade: dict[str, Any], direction: str) -> str:
-    """Return a canonical component disclosure key, never keyed by vendor.
-
-    Native disclosure identifiers are strongest.  When a vendor does not expose
-    one, use a canonical disclosure URL plus stable facts.  The stable facts are
-    also available to the screen as a conservative bridge between two vendors.
-    """
-    native = _native_disclosure_id(trade)
-    if native:
-        return _digest("congress-native", {"native_disclosure_id": native})
+    """Return the source-independent consumable disclosure identity."""
     facts = _stable_facts(trade, direction)
-    url = _canonical_url(trade.get("canonical_disclosure_url") or trade.get("source_url") or trade.get("url"))
-    if url:
-        return _digest("congress-url", {"url": url, "facts": facts})
     if not all(
         facts[key]
         for key in ("member", "ticker", "direction", "transaction_date", "publication_date", "amount")
@@ -161,14 +150,25 @@ def congressional_event_key(trade: dict[str, Any], direction: str) -> str:
     return _digest("congress-facts", facts)
 
 
-def _stable_fact_bridge_key(trade: dict[str, Any], direction: str) -> str:
+def _source_identity_alias(trade: dict[str, Any], direction: str) -> str:
+    """Retain stronger vendor evidence for audit without affecting consumption."""
+    native = _native_disclosure_id(trade)
+    if native:
+        return _digest("congress-native", {"native_disclosure_id": native})
     facts = _stable_facts(trade, direction)
+    url = _canonical_url(
+        trade.get("canonical_disclosure_url")
+        or trade.get("source_url")
+        or trade.get("url")
+    )
+    if url:
+        return _digest("congress-url", {"url": url, "facts": facts})
     if not all(
         facts[key]
         for key in ("member", "ticker", "direction", "transaction_date", "publication_date", "amount")
     ):
         return ""
-    return _digest("congress-bridge", facts)
+    return congressional_event_key(trade, direction)
 
 
 def congressional_cluster_event_key(
@@ -318,16 +318,15 @@ class CongressionalTradesStrategy:
             if tier < min_bucket:
                 continue
             component_key = congressional_event_key(trade, direction)
-            bridge_key = _stable_fact_bridge_key(trade, direction)
-            if not component_key or not bridge_key:
+            source_identity_alias = _source_identity_alias(trade, direction)
+            if not component_key or not source_identity_alias:
                 continue
             member = _member_key(trade.get("representative") or trade.get("senator"))
             record = {
                 "member": member,
                 "tier": tier,
                 "component_key": component_key,
-                "bridge_key": bridge_key,
-                "native_id": _native_disclosure_id(trade),
+                "source_identity_alias": source_identity_alias,
                 "publication_date": _publication_value(trade),
             }
             grouped[(ticker, direction)].append(record)
@@ -368,6 +367,10 @@ class CongressionalTradesStrategy:
                         "members": members,
                         "max_tier": max(int(item["tier"]) for item in components),
                         "trade_keys": list(component_keys),
+                        "source_identity_aliases": {
+                            item["component_key"]: item["source_identity_aliases"]
+                            for item in components
+                        },
                         "cluster_direction": direction,
                         "publication_date": max(publication_dates),
                         "needs_llm_analysis": False,
@@ -394,13 +397,12 @@ class CongressionalTradesStrategy:
 
     @staticmethod
     def _dedupe_components(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Union records by actual native ID or the strict stable-facts bridge."""
+        """Collapse matching stable facts or a matching native audit alias."""
         ordered = sorted(
             records,
             key=lambda item: (
-                str(item["native_id"]),
-                str(item["bridge_key"]),
                 str(item["component_key"]),
+                str(item["source_identity_alias"]),
             ),
         )
         parent = list(range(len(ordered)))
@@ -416,44 +418,44 @@ class CongressionalTradesStrategy:
             if left_root != right_root:
                 parent[right_root] = left_root
 
+        stable_seen: dict[str, int] = {}
         native_seen: dict[str, int] = {}
-        bridge_members: dict[str, list[int]] = defaultdict(list)
         for index, item in enumerate(ordered):
-            if item["native_id"]:
-                native = str(item["native_id"])
-                if native in native_seen:
-                    union(index, native_seen[native])
+            component_key = str(item["component_key"])
+            if component_key in stable_seen:
+                union(index, stable_seen[component_key])
+            else:
+                stable_seen[component_key] = index
+            alias = str(item["source_identity_alias"])
+            if alias.startswith("congress-native:"):
+                if alias in native_seen:
+                    union(index, native_seen[alias])
                 else:
-                    native_seen[native] = index
-            bridge_members[str(item["bridge_key"])].append(index)
-
-        for indices in bridge_members.values():
-            native_ids = {
-                str(ordered[index]["native_id"])
-                for index in indices
-                if ordered[index]["native_id"]
-            }
-            if len(native_ids) <= 1:
-                for index in indices[1:]:
-                    union(indices[0], index)
-                continue
-            # Conflicting native disclosure IDs prove distinct underlying rows;
-            # unkeyed vendor fallbacks remain separate rather than joining both.
-            unkeyed = [index for index in indices if not ordered[index]["native_id"]]
-            for index in unkeyed[1:]:
-                union(unkeyed[0], index)
+                    native_seen[alias] = index
 
         groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for index, item in enumerate(ordered):
             groups[find(index)].append(item)
         components: list[dict[str, Any]] = []
-        for members in groups.values():
+        for views in groups.values():
             representative = min(
-                members,
+                views,
                 key=lambda item: (
-                    0 if item["native_id"] else 1,
                     str(item["component_key"]),
+                    str(item["source_identity_alias"]),
+                    str(item["publication_date"]),
                 ),
+            )
+            representative = dict(representative)
+            representative["component_key"] = min(
+                str(item["component_key"]) for item in views
+            )
+            representative["source_identity_aliases"] = sorted(
+                {
+                    str(item["source_identity_alias"])
+                    for item in views
+                    if item["source_identity_alias"]
+                }
             )
             components.append(representative)
         return sorted(components, key=lambda item: str(item["component_key"]))
