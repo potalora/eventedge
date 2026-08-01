@@ -96,7 +96,7 @@ class RegulationsSource:
             )
             if resp.status_code != 200:
                 logger.warning("regulations.gov returned %d", resp.status_code)
-                return []
+                raise RuntimeError(f"regulations.gov returned {resp.status_code}")
 
             data = resp.json()
             results = []
@@ -120,7 +120,7 @@ class RegulationsSource:
             return results
         except Exception:
             logger.error("search_documents failed", exc_info=True)
-            return []
+            raise
 
     def get_recent_proposed_rules(
         self,

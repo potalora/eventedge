@@ -42,8 +42,12 @@ def _provider_errors(data: Mapping[str, Any], sources: Iterable[str]) -> dict[st
     """Return only explicit provider failures from the shared fetch payload."""
     errors: dict[str, str] = {}
     for source in sources:
-        payload = data.get(source)
+        if source not in data:
+            errors[str(source)] = "missing from shared data"
+            continue
+        payload = data[source]
         if not isinstance(payload, Mapping):
+            errors[str(source)] = "invalid shared data payload"
             continue
         error = payload.get("error")
         if error not in (None, ""):
@@ -1139,6 +1143,8 @@ class MultiStrategyEngine:
 
         available = set(self.registry.available_sources())
         logger.info("Needed sources: %s, available: %s", needed_sources, available)
+        for source in sorted(needed_sources - available):
+            data[source] = {"error": "source unavailable or skipped"}
 
         # Fetch yfinance data (VIX + core market data for regime model)
         if "yfinance" in needed_sources and "yfinance" in available:

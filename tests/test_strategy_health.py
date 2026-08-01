@@ -143,7 +143,7 @@ def test_screen_and_enrich_returns_health_for_exception_zero_and_signals(
     engine._build_regime_model = lambda data: {}
     signals, regime, health = engine.screen_and_enrich(
         "2026-08-03",
-        {"finnhub": {"error": "timeout"}},
+        {"yfinance": {}, "finnhub": {"error": "timeout"}},
         horizon="30d",
         epoch_id="epoch-1",
         policy_id="policy-1",
@@ -157,6 +157,42 @@ def test_screen_and_enrich_returns_health_for_exception_zero_and_signals(
         "provider_failure": "data_failure",
         "broken": "strategy_defect",
     }
+
+
+def test_absent_required_source_is_data_failure(tmp_path) -> None:
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}},
+        strategies=[_ScreenStrategy("missing_source", [], data_sources=("edgar",))],
+    )
+    engine._build_regime_model = lambda data: {}
+
+    _, _, health = engine.screen_and_enrich(
+        "2026-08-03", {"finnhub": {}}, epoch_id="epoch-1", policy_id="policy-1"
+    )
+
+    assert health[0].status == "data_failure"
+    assert health[0].evidence["provider_errors"] == {
+        "edgar": "missing from shared data"
+    }
+
+
+def test_unavailable_required_source_is_explicit_data_failure(tmp_path) -> None:
+    from tradingagents.strategies.data_sources.registry import DataSourceRegistry
+
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}},
+        strategies=[_ScreenStrategy("unavailable_source", [], data_sources=("edgar",))],
+        registry=DataSourceRegistry(),
+    )
+    engine._build_regime_model = lambda data: {}
+    data = engine._fetch_all_data("2026-07-01", "2026-08-03")
+
+    _, _, health = engine.screen_and_enrich(
+        "2026-08-03", data, epoch_id="epoch-1", policy_id="policy-1"
+    )
+
+    assert data["edgar"]["error"] == "source unavailable or skipped"
+    assert health[0].status == "data_failure"
 
 
 def test_fetch_exception_is_retained_and_classified_as_data_failure(tmp_path) -> None:
@@ -217,7 +253,10 @@ def test_default_params_exception_is_strategy_defect_and_other_health_survives(
     engine._build_regime_model = lambda data: {}
 
     _, _, health = engine.screen_and_enrich(
-        "2026-08-03", {}, epoch_id="epoch-1", policy_id="policy-1"
+        "2026-08-03",
+        {"finnhub": {}},
+        epoch_id="epoch-1",
+        policy_id="policy-1",
     )
 
     assert {record.strategy: record.status for record in health} == {
