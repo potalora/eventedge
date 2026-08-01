@@ -395,8 +395,6 @@ def _cohort_config(tmp_path, name: str, state_name: str | None = None) -> Cohort
         state_dir=str(tmp_path / (state_name or name)),
         horizon="30d",
         size_profile="5k",
-        adaptive_confidence=True,
-        learning_enabled=True,
         use_llm=False,
     )
 
@@ -2592,12 +2590,8 @@ class TestThirtyDayCohortDivergence:
         assert len(source.raw_calls) == 1
         assert all(
             cohort["engine"]._adaptive_confidence is False
-            and cohort["config"].learning_enabled is False
+            and cohort["config"].learning_policy.mode == "disabled"
             for cohort in orchestrator.cohorts
-        )
-        assert all(
-            item["reason"] == "learning_disabled"
-            for item in orchestrator.run_learning().values()
         )
 
 

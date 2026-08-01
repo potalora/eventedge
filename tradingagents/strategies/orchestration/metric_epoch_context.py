@@ -89,7 +89,7 @@ class CohortSemanticPolicy:
     size_profile: str
     policy_id: str
     use_llm: bool
-    learning_enabled: bool
+    learning_mode: str
     execution_policy: dict[str, object]
 
 
@@ -218,8 +218,8 @@ def build_epoch_context(
         _required_text("cohort policy_id", policy.policy_id)
         if not isinstance(policy.use_llm, bool):
             raise ValueError("cohort use_llm must be boolean")
-        if not isinstance(policy.learning_enabled, bool):
-            raise ValueError("cohort learning_enabled must be boolean")
+        if policy.learning_mode != "disabled":
+            raise ValueError("cohort learning_mode must be disabled")
         _validate_execution_policy_schema(policy.execution_policy)
     if len(set(names)) != len(names):
         raise ValueError("duplicate cohort name")

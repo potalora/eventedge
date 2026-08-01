@@ -111,7 +111,7 @@ def _policy(
     size_profile: str = "5k",
     policy_id: str = "foundation-30d",
     use_llm: bool = False,
-    learning_enabled: bool = False,
+    learning_mode: str = "disabled",
     execution_policy: dict[str, object] | None = None,
 ) -> CohortSemanticPolicy:
     return CohortSemanticPolicy(
@@ -120,7 +120,7 @@ def _policy(
         size_profile=size_profile,
         policy_id=policy_id,
         use_llm=use_llm,
-        learning_enabled=learning_enabled,
+        learning_mode=learning_mode,
         execution_policy=(
             execution_policy if execution_policy is not None else _execution_policy()
         ),
@@ -203,7 +203,6 @@ def test_epoch_context_is_stable_across_order_and_state_paths(tmp_path) -> None:
         "cohort_horizon",
         "size_profile",
         "policy_id",
-        "learning_flag",
         "risk_gate",
         "cost_parameter",
     ),
@@ -225,8 +224,6 @@ def test_every_allowlisted_semantic_change_rotates_context_hash(change: str) -> 
         changed = _context(cohort_policies=(_policy(size_profile="10k"),))
     elif change == "policy_id":
         changed = _context(cohort_policies=(_policy(policy_id="policy-v2"),))
-    elif change == "learning_flag":
-        changed = _context(cohort_policies=(_policy(learning_enabled=True),))
     elif change == "risk_gate":
         policy = _execution_policy()
         policy["risk_gate"]["max_positions"] = 6

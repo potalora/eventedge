@@ -14,6 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from tradingagents.strategies.orchestration.learning_policy import LearningPolicy
+
 if TYPE_CHECKING:
     from tradingagents.strategies.metrics.models import (
         CriticalGapMarker,
@@ -198,8 +200,7 @@ class CohortConfig:
     horizon: str  # "30d", "3m", "6m", "1y"
     size_profile: str  # "5k", "10k", "50k", "100k"
     use_llm: bool = True
-    adaptive_confidence: bool = False  # dormant
-    learning_enabled: bool = False  # dormant
+    learning_policy: LearningPolicy = field(default_factory=LearningPolicy)
 
 
 class CohortOrchestrator:
@@ -306,7 +307,8 @@ class CohortOrchestrator:
         self._metric_store = metric_store
 
         for cfg in cohort_configs:
-            cfg = replace(cfg, adaptive_confidence=False, learning_enabled=False)
+            if not isinstance(cfg.learning_policy, LearningPolicy):
+                raise ValueError("cohort learning_policy must be a LearningPolicy")
             cohort_config = copy.deepcopy(base_config)
             cohort_config.setdefault("autoresearch", {})["state_dir"] = cfg.state_dir
             cohort_config["autoresearch"]["horizon"] = cfg.horizon
@@ -362,7 +364,7 @@ class CohortOrchestrator:
                 size_profile=cohort["config"].size_profile,
                 policy_id=policy_ids[cohort["config"].name],
                 use_llm=cohort["config"].use_llm,
-                learning_enabled=cohort["config"].learning_enabled,
+                learning_mode=cohort["config"].learning_policy.mode,
                 execution_policy=cohort["executor"].semantic_policy_document(),
             )
             for cohort in self.cohorts
@@ -1362,29 +1364,6 @@ class CohortOrchestrator:
 
         return enrichment
 
-    def run_learning(self) -> dict[str, Any]:
-        """Run learning loop for cohorts that have it enabled.
-
-        Returns:
-            {cohort_name: learning_result}
-        """
-        results: dict[str, Any] = {}
-        for cohort in self.cohorts:
-            cfg = cohort["config"]
-            if not cfg.learning_enabled:
-                results[cfg.name] = {"skipped": True, "reason": "learning_disabled"}
-                continue
-
-            logger.info("--- Learning loop: %s ---", cfg.name)
-            try:
-                result = cohort["engine"].run_learning_loop()
-                results[cfg.name] = result
-            except Exception:
-                logger.error("Learning loop failed for %s", cfg.name, exc_info=True)
-                results[cfg.name] = {"error": True}
-
-        return results
-
     def reset(self) -> None:
         """Reset all cohort state (for testing/fresh start)."""
         for cohort in self.cohorts:
@@ -1396,7 +1375,7 @@ def build_default_cohorts(base_config: dict) -> list[CohortConfig]:
     """Build the 16-cohort horizon x size matrix.
 
     Produces one cohort for each combination of 4 horizons x 4 portfolio sizes.
-    All cohorts start with adaptive_confidence=False and learning_enabled=False.
+    All cohorts use the fail-closed production learning policy.
     """
     base_state_dir = base_config.get("autoresearch", {}).get("state_dir", "data/state")
     horizons = ["30d", "3m", "6m", "1y"]

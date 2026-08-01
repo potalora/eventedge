@@ -177,8 +177,6 @@ DEFAULT_CONFIG = {
             "min_trades_for_evaluation": 20,
             "exploration_budget_pct": 0.15,
             "max_vintage_age_days": 540,
-            "learning_loop_calendar_days": 30,
-            "learning_loop_min_strategies": 5,
             "portfolio_committee_enabled": True,
             "max_sector_concentration_pct": 0.30,
             "max_single_position_pct": 0.10,

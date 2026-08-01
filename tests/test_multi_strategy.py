@@ -1291,10 +1291,9 @@ class TestCohortOrchestrator:
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
         assert len(cohorts) == 16
         assert cohorts[0].name == "horizon_30d_size_5k"
-        # All cohorts have adaptive/learning dormant
+        # All cohorts use the sole fail-closed production learning policy.
         for c in cohorts:
-            assert c.adaptive_confidence is False
-            assert c.learning_enabled is False
+            assert c.learning_policy.mode == "disabled"
 
     def test_separate_state_dirs(self):
         """Each cohort gets its own state directory."""

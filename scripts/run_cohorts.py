@@ -3,7 +3,7 @@
 
 Usage:
     python scripts/run_cohorts.py --date 2026-04-05    # daily trading (LLM on by default)
-    python scripts/run_cohorts.py --learning            # learning loop (adaptive only)
+    python scripts/run_cohorts.py --learning            # refused: production learning is disabled
     python scripts/run_cohorts.py --compare             # print comparison report
     python scripts/run_cohorts.py --reset               # clear all cohort state
     python scripts/run_cohorts.py --date 2026-04-05 --no-llm  # without LLM enrichment
@@ -70,7 +70,7 @@ def main():
     parser.add_argument(
         "--learning",
         action="store_true",
-        help="Run learning loop (adaptive cohort only).",
+        help="Refuse retired production learning (exit 2).",
     )
     parser.add_argument(
         "--compare",
@@ -93,6 +93,13 @@ def main():
         help="Comma-separated tickers to exclude (compliance). Also reads BLOCKED_TICKERS env var.",
     )
     args = parser.parse_args()
+
+    if args.learning:
+        print(
+            "Production learning is disabled; no generation state was changed.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     if not (args.learning or args.compare or args.reset):
         requested = args.date or date.today().isoformat()
@@ -199,14 +206,6 @@ def main():
     if args.reset:
         orchestrator.reset()
         print("All cohort state has been cleared.")
-        return
-
-    if args.learning:
-        start = time.time()
-        result = orchestrator.run_learning()
-        elapsed = time.time() - start
-        print(f"\nLearning loop completed in {elapsed:.1f}s")
-        print(json.dumps(result, indent=2, default=str))
         return
 
     # Default: daily trading

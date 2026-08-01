@@ -113,8 +113,7 @@ class TestCohortConfig:
         )
         assert cfg.horizon == "30d"
         assert cfg.size_profile == "5k"
-        assert cfg.adaptive_confidence is False
-        assert cfg.learning_enabled is False
+        assert cfg.learning_policy.mode == "disabled"
         assert cfg.use_llm is True
 
 
@@ -157,15 +156,14 @@ class TestBuildDefaultCohorts:
         for c in cohorts:
             assert c.state_dir == f"data/state/{c.name}"
 
-    def test_no_adaptive_or_learning_enabled(self):
+    def test_all_cohorts_use_disabled_learning_policy(self):
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
             build_default_cohorts,
         )
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
         for c in cohorts:
-            assert c.adaptive_confidence is False
-            assert c.learning_enabled is False
+            assert c.learning_policy.mode == "disabled"
 
     def test_custom_base_state_dir(self):
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -348,7 +346,7 @@ class TestPortfolioCommitteeSizeAware:
 class TestOrchestratorHorizonScreening:
     """Test that the orchestrator screens once per horizon, not once per cohort."""
 
-    def test_screen_for_horizon_uses_horizon_params(self):
+    def test_screen_for_horizon_uses_horizon_params(self, tmp_path):
         """Verify _screen_for_horizon passes horizon to strategy.get_default_params."""
         from unittest.mock import MagicMock, patch
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -364,7 +362,7 @@ class TestOrchestratorHorizonScreening:
         configs = [
             CohortConfig(
                 name="horizon_3m_size_5k",
-                state_dir="/tmp/test/horizon_3m_size_5k",
+                state_dir=str(tmp_path / "horizon_3m_size_5k"),
                 horizon="3m",
                 size_profile="5k",
             ),
@@ -379,7 +377,7 @@ class TestOrchestratorHorizonScreening:
             ):
                 orch = CohortOrchestrator(
                     configs,
-                    {"autoresearch": {"state_dir": "/tmp/test"}},
+                    {"autoresearch": {"state_dir": str(tmp_path)}},
                     generation_id="gen_test",
                     generation_commit="test-commit",
                 )

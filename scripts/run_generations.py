@@ -8,7 +8,7 @@ can run daily in parallel, building independent track records.
 Usage:
     python scripts/run_generations.py start "Initial 7-strategy baseline"
     python scripts/run_generations.py run-daily [--date 2026-04-01]
-    python scripts/run_generations.py run-learning
+    python scripts/run_generations.py run-learning  # refused: production learning is disabled
     python scripts/run_generations.py compare [--gens gen_001,gen_002]
     python scripts/run_generations.py list
     python scripts/run_generations.py pause gen_001
@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -135,7 +136,7 @@ def main():
     p_daily.add_argument("--date", default=None, help="Trading date (YYYY-MM-DD)")
 
     # run-learning
-    sub.add_parser("run-learning", help="Run learning loop for all active generations")
+    sub.add_parser("run-learning", help="Refuse retired production learning")
 
     # compare
     p_compare = sub.add_parser("compare", help="Compare generations")
@@ -192,6 +193,13 @@ def main():
     if not args.command:
         parser.print_help()
         return
+
+    if args.command == "run-learning":
+        print(
+            "Production learning is disabled; no generation state was changed.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     # Load env
     try:
@@ -250,12 +258,6 @@ def main():
                     print(f"    {line}")
         if any(not result["success"] for result in results.values()):
             raise SystemExit(1)
-
-    elif args.command == "run-learning":
-        results = manager.run_learning()
-        for gen_id, result in results.items():
-            status = "OK" if result["success"] else "FAILED"
-            print(f"  {gen_id}: {status}")
 
     elif args.command == "compare":
         if args.gens is not None:
