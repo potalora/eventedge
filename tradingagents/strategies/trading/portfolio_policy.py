@@ -290,6 +290,16 @@ class PortfolioPolicy:
     """Apply deterministic portfolio constraints to a prospective book."""
 
     _EPSILON = 1e-9
+    _HARD_REJECTION_REASONS = frozenset(
+        {
+            "journal_only",
+            "duplicate_ticker",
+            "consumed_event",
+            "max_positions",
+            "borrow_unavailable",
+            "max_correlated_shorts",
+        }
+    )
 
     def apply(
         self,
@@ -319,6 +329,13 @@ class PortfolioPolicy:
     ) -> tuple[bool, str]:
         """Return whether a recommendation fits without policy scaling."""
         allowed, reason = self._max_allowed_weight(recommendation, context)
+        if recommendation.position_size_pct <= 0.0:
+            if (
+                allowed <= self._EPSILON
+                and reason in self._HARD_REJECTION_REASONS
+            ):
+                return False, reason
+            return False, "nonpositive_weight"
         if recommendation.position_size_pct <= allowed + self._EPSILON:
             return True, ""
         return False, reason
@@ -368,12 +385,19 @@ class PortfolioPolicy:
             ),
         ]
         for tag in strategy_tags:
-            cap = (
-                cfg.congressional_exposure_pct
-                if tag == "congressional_trades"
-                else cfg.max_strategy_exposure_pct
+            caps.append(
+                (
+                    cfg.max_strategy_exposure_pct - strategy_exposure[tag],
+                    f"strategy:{tag}",
+                )
             )
-            caps.append((cap - strategy_exposure[tag], f"strategy:{tag}"))
+            if tag == "congressional_trades":
+                caps.append(
+                    (
+                        cfg.congressional_exposure_pct - strategy_exposure[tag],
+                        "congressional_exposure",
+                    )
+                )
         for tag in risk_tags:
             caps.append(
                 (
@@ -510,4 +534,4 @@ class PortfolioPolicy:
         sector = str(value).strip() if value is not None else ""
         if not sector or sector.casefold() == "unknown":
             return "Unknown"
-        return sector
+        return sector.casefold()

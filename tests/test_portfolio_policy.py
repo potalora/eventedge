@@ -241,6 +241,17 @@ def test_policy_config_rejects_direct_full_value_construction() -> None:
         PortfolioPolicyConfig(**dataclasses.asdict(valid_config))
 
 
+def test_policy_config_rejects_altered_real_factory_config() -> None:
+    altered_values = dataclasses.asdict(_policy_config("100k"))
+    altered_values["max_strategy_exposure_pct"] = 1.0
+
+    with pytest.raises(
+        TypeError,
+        match=r"PortfolioPolicyConfig\.from_size_profile",
+    ):
+        PortfolioPolicyConfig(**altered_values)
+
+
 @pytest.mark.parametrize("size", ["5k", "10k", "50k", "100k"])
 def test_policy_config_factory_uses_every_profile_limit(size: str) -> None:
     settings = DEFAULT_CONFIG["autoresearch"]["portfolio_policy"]
@@ -405,6 +416,48 @@ def test_policy_applies_congressional_cap_independently() -> None:
     assert [item.position_size_pct for item in accepted] == pytest.approx([0.02])
 
 
+def test_policy_enforces_generic_and_congressional_caps_from_factory_profile() -> None:
+    config = _policy_config("100k")
+    assert config.max_strategy_exposure_pct == pytest.approx(0.20)
+    assert config.congressional_exposure_pct == pytest.approx(0.12)
+
+    generic_accepted = PortfolioPolicy().apply(
+        [_recommendation("MSFT", 0.08, strategies=("earnings_call",))],
+        _context(
+            positions=(
+                _position(
+                    "AAPL",
+                    0.18,
+                    strategies=("earnings_call",),
+                    risks=("generic:old",),
+                ),
+            ),
+            sectors={"MSFT": "Technology"},
+        ),
+    )
+    congressional_accepted = PortfolioPolicy().apply(
+        [_recommendation("NVDA", 0.08, strategies=("congressional_trades",))],
+        _context(
+            positions=(
+                _position(
+                    "AAPL",
+                    0.08,
+                    strategies=("congressional_trades",),
+                    risks=("congressional:old",),
+                ),
+            ),
+            sectors={"NVDA": "Technology"},
+        ),
+    )
+
+    assert [item.position_size_pct for item in generic_accepted] == pytest.approx(
+        [0.02]
+    )
+    assert [item.position_size_pct for item in congressional_accepted] == pytest.approx(
+        [0.04]
+    )
+
+
 def test_policy_counts_current_pending_and_prior_acceptances_in_order() -> None:
     current = _position(
         "AAPL",
@@ -513,6 +566,38 @@ def test_policy_rejects_consumed_event() -> None:
     ) == (False, "consumed_event")
 
 
+@pytest.mark.parametrize(
+    ("recommendation", "context", "reason"),
+    [
+        (_recommendation("MSFT", 0.0, journal_only=True), _context(), "journal_only"),
+        (
+            _recommendation("MSFT", 0.0),
+            _context(positions=(_position("MSFT", 0.01),)),
+            "duplicate_ticker",
+        ),
+        (
+            _recommendation("MSFT", 0.0, event_key="event:used"),
+            _context(consumed_event_keys=frozenset({"event:used"})),
+            "consumed_event",
+        ),
+    ],
+)
+def test_policy_validate_preserves_hard_rejection_for_zero_weight(
+    recommendation: TradeRecommendation,
+    context: PortfolioRiskContext,
+    reason: str,
+) -> None:
+    assert PortfolioPolicy().validate(recommendation, context) == (False, reason)
+
+
+@pytest.mark.parametrize("weight", [0.0, -0.01])
+def test_policy_validate_rejects_ordinary_nonpositive_weight(weight: float) -> None:
+    assert PortfolioPolicy().validate(
+        _recommendation("MSFT", weight),
+        _context(),
+    ) == (False, "nonpositive_weight")
+
+
 def test_policy_rejects_when_profile_max_positions_is_reached() -> None:
     positions = tuple(
         _position(
@@ -550,6 +635,17 @@ def test_policy_scales_to_sector_cap() -> None:
     )
 
     assert accepted[0].position_size_pct == pytest.approx(0.02)
+
+
+def test_policy_normalizes_case_and_whitespace_for_sector_exposure() -> None:
+    existing = _position("AAPL", 0.23, sector="Technology")
+
+    accepted = PortfolioPolicy().apply(
+        [_recommendation("MSFT", 0.08)],
+        _context(positions=(existing,), sectors={"MSFT": "  technology  "}),
+    )
+
+    assert [item.position_size_pct for item in accepted] == pytest.approx([0.02])
 
 
 def test_policy_scales_single_short_to_profile_cap() -> None:
@@ -607,6 +703,22 @@ def test_policy_rejects_correlated_short_count_for_known_and_unknown_sectors(
             positions=(current,),
             pending=(pending,),
             sectors=sectors,
+            borrow_available={"MSFT": True},
+        ),
+    ) == (False, "max_correlated_shorts")
+
+
+def test_policy_normalizes_case_and_whitespace_for_correlated_shorts() -> None:
+    current = _position("AAPL", 0.02, direction="short", sector="Technology")
+    pending = _position("NVDA", 0.02, direction="short", sector="Technology")
+
+    assert PortfolioPolicy().validate(
+        _recommendation("MSFT", 0.02, direction="short"),
+        _context(
+            size="50k",
+            positions=(current,),
+            pending=(pending,),
+            sectors={"MSFT": " technology "},
             borrow_available={"MSFT": True},
         ),
     ) == (False, "max_correlated_shorts")
