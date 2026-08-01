@@ -32,6 +32,11 @@ class TradeRecommendation:
     regime_alignment: str = "neutral"       # "aligned"/"neutral"/"misaligned"
     vehicle: str = "equity"                 # "equity" or "option"
     option_spec: OptionSpec | None = None   # Populated when vehicle == "option"
+    event_key: str = ""
+    source_event_keys: tuple[str, ...] = ()
+    strategy_tags: tuple[str, ...] = ()
+    risk_tags: tuple[str, ...] = ()
+    journal_only: bool = False
 
 
 class PortfolioCommittee:

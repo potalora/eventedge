@@ -81,6 +81,12 @@ class PortfolioSizeProfile:
     max_commodity_allocation_pct: float = 0.0
     commodity_instruments: list[str] = field(default_factory=list)
 
+    # Portfolio-policy limits
+    max_strategy_exposure_pct: float = 1.0
+    max_event_cluster_exposure_pct: float = 1.0
+    max_position_risk_contribution_pct: float = 1.0
+    risk_contribution_min_positions: int = 4
+
 
 SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
     "5k": PortfolioSizeProfile(
@@ -91,6 +97,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=5,
         sector_concentration_cap=0.50,
         cash_reserve_pct=0.10,
+        max_strategy_exposure_pct=0.50,
+        max_event_cluster_exposure_pct=0.25,
+        max_position_risk_contribution_pct=0.40,
+        risk_contribution_min_positions=4,
     ),
     "10k": PortfolioSizeProfile(
         name="10k",
@@ -100,6 +110,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=8,
         sector_concentration_cap=0.40,
         cash_reserve_pct=0.10,
+        max_strategy_exposure_pct=0.40,
+        max_event_cluster_exposure_pct=0.20,
+        max_position_risk_contribution_pct=0.35,
+        risk_contribution_min_positions=4,
         # Options: covered calls only, no short selling
         options_eligible=["covered_call"],
         max_options_premium_pct=0.05,
@@ -116,6 +130,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=15,
         sector_concentration_cap=0.30,
         cash_reserve_pct=0.15,
+        max_strategy_exposure_pct=0.25,
+        max_event_cluster_exposure_pct=0.15,
+        max_position_risk_contribution_pct=0.30,
+        risk_contribution_min_positions=4,
         # Short selling eligible
         short_eligible=True,
         max_short_exposure_pct=0.15,
@@ -138,6 +156,10 @@ SIZE_PROFILES: dict[str, PortfolioSizeProfile] = {
         max_positions=20,
         sector_concentration_cap=0.25,
         cash_reserve_pct=0.15,
+        max_strategy_exposure_pct=0.20,
+        max_event_cluster_exposure_pct=0.10,
+        max_position_risk_contribution_pct=0.25,
+        risk_contribution_min_positions=4,
         # Short selling eligible
         short_eligible=True,
         max_short_exposure_pct=0.20,
