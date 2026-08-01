@@ -107,7 +107,7 @@ def test_matching_native_alias_dedupes_when_vendor_facts_differ() -> None:
     assert candidates[0].metadata["num_trades"] == 2
 
 
-def test_conflicting_native_ids_do_not_create_extra_trading_authority() -> None:
+def test_distinct_native_ids_remain_distinct_components_but_share_cluster_identity() -> None:
     first = _trade("Rep A", native_id="DISC-41")
     second = _trade("Rep A", native_id="DISC-42")
     other_member = _trade("Rep B", native_id="DISC-8")
@@ -116,8 +116,9 @@ def test_conflicting_native_ids_do_not_create_extra_trading_authority() -> None:
 
     assert len(candidates) == 1
     assert candidates[0].metadata["num_members"] == 2
-    assert candidates[0].metadata["num_trades"] == 2
-    assert len(candidates[0].source_event_keys) == 2
+    assert candidates[0].metadata["num_trades"] == 3
+    assert len(candidates[0].source_event_keys) == 3
+    assert len(candidates[0].metadata["trade_keys"]) == 2
 
 
 def test_url_and_stable_facts_dedupe_across_vendors_before_member_count() -> None:
@@ -172,6 +173,27 @@ def test_one_vendor_runs_share_consumable_identity_but_retain_audit_aliases() ->
     assert canonical_event_key(
         "congressional_trades", fmp[0].ticker, fmp[0].metadata, date(2026, 7, 31)
     ) == fmp[0].event_key
+
+
+def test_native_and_unkeyed_views_share_cluster_identity() -> None:
+    native = _screen(
+        _trade("Rep A", native_id="DISC-1"),
+        _trade("Rep B", native_id="DISC-2"),
+    )
+    unkeyed = _screen(
+        _trade("Rep A", source_url="https://vendor.example/rep-a"),
+        _trade("Rep B", source_url="https://vendor.example/rep-b"),
+    )
+
+    assert native[0].source_event_keys != unkeyed[0].source_event_keys
+    assert native[0].metadata["trade_keys"] == unkeyed[0].metadata["trade_keys"]
+    assert native[0].event_key == unkeyed[0].event_key
+    assert canonical_event_key(
+        "congressional_trades", native[0].ticker, native[0].metadata, date(2026, 7, 31)
+    ) == native[0].event_key
+    assert canonical_event_key(
+        "congressional_trades", unkeyed[0].ticker, unkeyed[0].metadata, date(2026, 7, 31)
+    ) == unkeyed[0].event_key
 
 
 def test_stable_facts_bridge_does_not_merge_distinct_disclosures() -> None:
@@ -280,7 +302,8 @@ def test_purchase_cap_event_key_and_component_provenance_are_stable() -> None:
     ]
     candidate = forward[0]
     assert candidate.source_event_keys == tuple(sorted(candidate.source_event_keys))
-    assert candidate.metadata["trade_keys"] == list(candidate.source_event_keys)
+    assert candidate.metadata["trade_keys"] == sorted(candidate.metadata["trade_keys"])
+    assert candidate.metadata["trade_keys"] != list(candidate.source_event_keys)
     assert canonical_event_key(
         "congressional_trades", candidate.ticker, candidate.metadata, date(2026, 7, 31)
     ) == candidate.event_key

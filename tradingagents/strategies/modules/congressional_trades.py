@@ -140,7 +140,15 @@ def _digest(prefix: str, payload: object) -> str:
 
 
 def congressional_event_key(trade: dict[str, Any], direction: str) -> str:
-    """Return the source-independent consumable disclosure identity."""
+    """Return the native-first per-component source identity."""
+    native = _native_disclosure_id(trade)
+    if native:
+        return _digest("congress-native", {"native_disclosure_id": native})
+    return _stable_trade_key(trade, direction)
+
+
+def _stable_trade_key(trade: dict[str, Any], direction: str) -> str:
+    """Return the source-independent disclosure identity used for consumption."""
     facts = _stable_facts(trade, direction)
     if not all(
         facts[key]
@@ -150,11 +158,12 @@ def congressional_event_key(trade: dict[str, Any], direction: str) -> str:
     return _digest("congress-facts", facts)
 
 
-def _source_identity_alias(trade: dict[str, Any], direction: str) -> str:
-    """Retain stronger vendor evidence for audit without affecting consumption."""
+def _source_identity_aliases(trade: dict[str, Any], direction: str) -> tuple[str, ...]:
+    """Retain native and URL evidence for audit without affecting consumption."""
+    aliases: set[str] = set()
     native = _native_disclosure_id(trade)
     if native:
-        return _digest("congress-native", {"native_disclosure_id": native})
+        aliases.add(_digest("congress-native", {"native_disclosure_id": native}))
     facts = _stable_facts(trade, direction)
     url = _canonical_url(
         trade.get("canonical_disclosure_url")
@@ -162,13 +171,10 @@ def _source_identity_alias(trade: dict[str, Any], direction: str) -> str:
         or trade.get("url")
     )
     if url:
-        return _digest("congress-url", {"url": url, "facts": facts})
-    if not all(
-        facts[key]
-        for key in ("member", "ticker", "direction", "transaction_date", "publication_date", "amount")
-    ):
-        return ""
-    return congressional_event_key(trade, direction)
+        aliases.add(_digest("congress-url", {"url": url, "facts": facts}))
+    if not aliases:
+        aliases.add(_stable_trade_key(trade, direction))
+    return tuple(sorted(alias for alias in aliases if alias))
 
 
 def congressional_cluster_event_key(
@@ -318,15 +324,18 @@ class CongressionalTradesStrategy:
             if tier < min_bucket:
                 continue
             component_key = congressional_event_key(trade, direction)
-            source_identity_alias = _source_identity_alias(trade, direction)
-            if not component_key or not source_identity_alias:
+            stable_trade_key = _stable_trade_key(trade, direction)
+            source_identity_aliases = _source_identity_aliases(trade, direction)
+            if not component_key or not stable_trade_key or not source_identity_aliases:
                 continue
             member = _member_key(trade.get("representative") or trade.get("senator"))
             record = {
                 "member": member,
                 "tier": tier,
                 "component_key": component_key,
-                "source_identity_alias": source_identity_alias,
+                "stable_trade_key": stable_trade_key,
+                "native_id": _native_disclosure_id(trade),
+                "source_identity_aliases": source_identity_aliases,
                 "publication_date": _publication_value(trade),
             }
             grouped[(ticker, direction)].append(record)
@@ -338,6 +347,7 @@ class CongressionalTradesStrategy:
             if len(members) < min_members:
                 continue
             component_keys = tuple(item["component_key"] for item in components)
+            trade_keys = sorted({str(item["stable_trade_key"]) for item in components})
             publication_dates = [
                 str(item["publication_date"])
                 for item in components
@@ -366,7 +376,7 @@ class CongressionalTradesStrategy:
                         "num_trades": len(components),
                         "members": members,
                         "max_tier": max(int(item["tier"]) for item in components),
-                        "trade_keys": list(component_keys),
+                        "trade_keys": trade_keys,
                         "source_identity_aliases": {
                             item["component_key"]: item["source_identity_aliases"]
                             for item in components
@@ -376,7 +386,7 @@ class CongressionalTradesStrategy:
                         "needs_llm_analysis": False,
                     },
                     event_key=congressional_cluster_event_key(
-                        ticker, direction, component_keys
+                        ticker, direction, trade_keys
                     ),
                     source_event_keys=component_keys,
                     strategy_tags=("congressional_trades",),
@@ -397,12 +407,13 @@ class CongressionalTradesStrategy:
 
     @staticmethod
     def _dedupe_components(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Collapse matching stable facts or a matching native audit alias."""
+        """Deduplicate vendor views without collapsing distinct native disclosures."""
         ordered = sorted(
             records,
             key=lambda item: (
+                str(item["native_id"]),
+                str(item["stable_trade_key"]),
                 str(item["component_key"]),
-                str(item["source_identity_alias"]),
             ),
         )
         parent = list(range(len(ordered)))
@@ -418,20 +429,30 @@ class CongressionalTradesStrategy:
             if left_root != right_root:
                 parent[right_root] = left_root
 
-        stable_seen: dict[str, int] = {}
         native_seen: dict[str, int] = {}
+        stable_members: dict[str, list[int]] = defaultdict(list)
         for index, item in enumerate(ordered):
-            component_key = str(item["component_key"])
-            if component_key in stable_seen:
-                union(index, stable_seen[component_key])
-            else:
-                stable_seen[component_key] = index
-            alias = str(item["source_identity_alias"])
-            if alias.startswith("congress-native:"):
-                if alias in native_seen:
-                    union(index, native_seen[alias])
+            native = str(item["native_id"])
+            if native:
+                if native in native_seen:
+                    union(index, native_seen[native])
                 else:
-                    native_seen[alias] = index
+                    native_seen[native] = index
+            stable_members[str(item["stable_trade_key"])].append(index)
+
+        for indices in stable_members.values():
+            native_ids = {
+                str(ordered[index]["native_id"])
+                for index in indices
+                if ordered[index]["native_id"]
+            }
+            if len(native_ids) <= 1:
+                for index in indices[1:]:
+                    union(indices[0], index)
+                continue
+            unkeyed = [index for index in indices if not ordered[index]["native_id"]]
+            for index in unkeyed[1:]:
+                union(unkeyed[0], index)
 
         groups: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for index, item in enumerate(ordered):
@@ -442,19 +463,27 @@ class CongressionalTradesStrategy:
                 views,
                 key=lambda item: (
                     str(item["component_key"]),
-                    str(item["source_identity_alias"]),
+                    str(item["stable_trade_key"]),
                     str(item["publication_date"]),
                 ),
             )
             representative = dict(representative)
             representative["component_key"] = min(
+                str(item["component_key"])
+                for item in views
+                if item["native_id"]
+            ) if any(item["native_id"] for item in views) else min(
                 str(item["component_key"]) for item in views
+            )
+            representative["stable_trade_key"] = min(
+                str(item["stable_trade_key"]) for item in views
             )
             representative["source_identity_aliases"] = sorted(
                 {
-                    str(item["source_identity_alias"])
+                    alias
                     for item in views
-                    if item["source_identity_alias"]
+                    for alias in item["source_identity_aliases"]
+                    if alias
                 }
             )
             components.append(representative)
