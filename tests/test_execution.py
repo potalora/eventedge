@@ -1,109 +1,585 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
-from tradingagents.execution.base_broker import BaseBroker, OrderResult, AccountInfo
-from tradingagents.execution.paper_broker import PaperBroker
 
-
-class TestPaperBroker:
-    def test_initial_account(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        acct = broker.get_account()
-        assert acct.cash == 5000.0
-        assert acct.portfolio_value == 5000.0
-
-    def test_submit_stock_buy(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        result = broker.submit_stock_order("SOFI", "buy", 100, "market", price=10.0)
-        assert result.status == "filled"
-        assert result.filled_qty == 100
-        acct = broker.get_account()
-        assert acct.cash == 4000.0
-
-    def test_submit_stock_sell(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        broker.submit_stock_order("SOFI", "buy", 100, "market", price=10.0)
-        result = broker.submit_stock_order("SOFI", "sell", 100, "market", price=12.0)
-        assert result.status == "filled"
-        acct = broker.get_account()
-        assert acct.cash == 5200.0
-
-    def test_get_positions(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        broker.submit_stock_order("SOFI", "buy", 100, "market", price=10.0)
-        positions = broker.get_positions()
-        assert len(positions) == 1
-        assert positions[0]["ticker"] == "SOFI"
-        assert positions[0]["quantity"] == 100
-
-    def test_insufficient_funds_rejected(self):
-        broker = PaperBroker(initial_capital=100.0)
-        result = broker.submit_stock_order("NVDA", "buy", 10, "market", price=500.0)
-        assert result.status == "rejected"
-
-    def test_cancel_order(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        assert broker.cancel_order("fake-id") is False
-
-    def test_submit_options_order(self):
-        broker = PaperBroker(initial_capital=5000.0)
-        result = broker.submit_options_order(
-            symbol="SOFI", expiry="2026-06-20", strike=10.0,
-            right="call", side="buy", qty=2, price=1.20,
-        )
-        assert result.status == "filled"
-        acct = broker.get_account()
-        assert acct.cash == 5000.0 - 2 * 100 * 1.20
-
-
-from unittest.mock import patch, MagicMock
 from tradingagents.execution.alpaca_broker import AlpacaBroker
+from tradingagents.execution.paper_broker import PaperBroker
+from tradingagents.strategies.execution import OrderIntent, SignalRecord
+from tradingagents.strategies.execution.cost_model import PaperCostModel
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 
 
-class TestAlpacaBroker:
-    @patch("tradingagents.execution.alpaca_broker.TradingClient")
-    def test_get_account(self, mock_client_cls):
-        mock_client = MagicMock()
-        mock_account = MagicMock()
-        mock_account.cash = 5000.0
-        mock_account.portfolio_value = 5500.0
-        mock_account.buying_power = 5000.0
-        mock_client.get_account.return_value = mock_account
-        mock_client_cls.return_value = mock_client
+UTC = timezone.utc
+SESSION = date(2026, 8, 3)
+DISABLED = (
+    "PaperBroker direct price submission is disabled; stage and execute a ledger intent"
+)
 
-        broker = AlpacaBroker(api_key="test", secret_key="test", paper=True)
-        acct = broker.get_account()
-        assert acct.cash == 5000.0
 
-    @patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
-    @patch("tradingagents.execution.alpaca_broker.MarketOrderRequest", new_callable=MagicMock)
-    @patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
-    @patch("tradingagents.execution.alpaca_broker.TradingClient")
-    def test_submit_stock_order(self, mock_client_cls, mock_order_side, mock_market_req, mock_tif):
-        mock_client = MagicMock()
-        mock_order = MagicMock()
-        mock_order.id = "order-123"
-        mock_order.status = "filled"
-        mock_order.filled_qty = 100
-        mock_order.filled_avg_price = 10.0
-        mock_client.submit_order.return_value = mock_order
-        mock_client_cls.return_value = mock_client
+def _signal() -> SignalRecord:
+    return SignalRecord(
+        "signal",
+        "epoch",
+        "policy",
+        "event",
+        "litigation",
+        "AAPL",
+        "long",
+        datetime(2026, 7, 31, 19, tzinfo=UTC),
+        datetime(2026, 7, 31, 19, 30, tzinfo=UTC),
+        date(2026, 7, 31),
+        Decimal("100"),
+        datetime(2026, 7, 31, 20, tzinfo=UTC),
+        "evidence",
+    )
 
-        broker = AlpacaBroker(api_key="test", secret_key="test", paper=True)
-        result = broker.submit_stock_order("SOFI", "buy", 100)
+
+def _intent() -> OrderIntent:
+    return OrderIntent(
+        "intent",
+        ("signal",),
+        "cohort",
+        "buy",
+        10,
+        datetime(2026, 7, 31, 20, tzinfo=UTC),
+        SESSION,
+        "next_session_open",
+        "pending",
+        None,
+        None,
+    )
+
+
+def _staged_case(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    signal = _signal()
+    intent = _intent()
+    ledger.record_signal(signal)
+    ledger.stage_intent(intent)
+    fill = PaperCostModel().fill(
+        intent,
+        Decimal("100"),
+        datetime(2026, 8, 3, 13, 30, tzinfo=UTC),
+        datetime(2026, 8, 3, 22, tzinfo=UTC),
+    )
+    return ledger, intent, fill
+
+
+def test_paper_broker_reads_authoritative_ledger_and_disables_direct_prices(
+    tmp_path,
+):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    broker = PaperBroker(ledger)
+    try:
+        account = broker.get_account()
+        assert account.cash == 5000.0
+        assert account.portfolio_value == 5000.0
+        assert broker.get_positions() == []
+
+        with pytest.raises(RuntimeError, match=DISABLED):
+            broker.submit_stock_order("AAPL", "buy", 10, price=Decimal("100"))
+        with pytest.raises(RuntimeError, match=DISABLED):
+            broker.submit_short_sell("AAPL", 10, Decimal("100"))
+        with pytest.raises(RuntimeError, match=DISABLED):
+            broker.submit_cover("AAPL", 10, Decimal("100"))
+    finally:
+        ledger.close()
+
+
+def test_paper_broker_accepts_only_persisted_intent_and_fill_pair(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    broker = PaperBroker(ledger)
+    signal = _signal()
+    intent = _intent()
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        fill = PaperCostModel().fill(
+            intent,
+            Decimal("100"),
+            datetime(2026, 8, 3, 13, 30, tzinfo=UTC),
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        with pytest.raises(RuntimeError, match=DISABLED):
+            broker.submit_stock_order(
+                "AAPL",
+                "buy",
+                10,
+                price=Decimal("100"),
+                intent=intent,
+                fill=fill,
+            )
+        assert ledger.read_fills() == []
+        result = broker.submit_stock_order("AAPL", "buy", 10, intent=intent, fill=fill)
         assert result.status == "filled"
-        assert result.filled_qty == 100
+        assert result.order_id == intent.intent_id
+        assert broker.get_positions() == [
+            {
+                "ticker": "AAPL",
+                "quantity": 10,
+                "avg_price": pytest.approx(100.1),
+                "instrument_type": "stock",
+                "side": "long",
+            }
+        ]
+        assert ledger.read_fills() == [fill]
+    finally:
+        ledger.close()
 
-    @patch("tradingagents.execution.alpaca_broker.TradingClient")
-    def test_get_positions(self, mock_client_cls):
-        mock_client = MagicMock()
-        mock_pos = MagicMock()
-        mock_pos.symbol = "SOFI"
-        mock_pos.qty = "100"
-        mock_pos.avg_entry_price = "10.0"
-        mock_pos.asset_class = "us_equity"
-        mock_client.get_all_positions.return_value = [mock_pos]
-        mock_client_cls.return_value = mock_client
 
-        broker = AlpacaBroker(api_key="test", secret_key="test", paper=True)
-        positions = broker.get_positions()
-        assert len(positions) == 1
-        assert positions[0]["ticker"] == "SOFI"
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_uses_intent_id_and_persists_unfilled_external_order(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, time_in_force
+    client = MagicMock()
+    client.submit_order.return_value = SimpleNamespace(
+        id="external-1",
+        status="accepted",
+        filled_qty="0",
+        filled_avg_price=None,
+    )
+    client_class.return_value = client
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    signal = _signal()
+    intent = _intent()
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+        result = broker.submit_stock_order(
+            "AAPL", "buy", 10, client_order_id=intent.intent_id
+        )
+
+        assert result.status == "accepted"
+        market_request.assert_called_once_with(
+            symbol="AAPL",
+            qty=10,
+            side=market_request.call_args.kwargs["side"],
+            time_in_force=market_request.call_args.kwargs["time_in_force"],
+            client_order_id=intent.intent_id,
+        )
+        external = ledger.external_order_for_intent(intent.intent_id)
+        assert external is not None
+        assert external["external_order_id"] == "external-1"
+        assert external["status"] == "accepted"
+        assert ledger.read_fills() == []
+        submitted_at = datetime.fromisoformat(str(external["submitted_at"]))
+        with pytest.raises(LedgerConflictError, match="cannot regress"):
+            ledger.record_external_order(
+                intent_id=intent.intent_id,
+                external_order_id="external-1",
+                broker="alpaca",
+                status="pending",
+                submitted_at=submitted_at,
+                reconciled_at=submitted_at,
+                detail="invalid status regression",
+            )
+    finally:
+        ledger.close()
+
+
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_reconciles_unresolved_external_order_before_any_resubmit(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, market_request, time_in_force
+    client = MagicMock()
+    accepted = SimpleNamespace(
+        id="external-1",
+        status="accepted",
+        filled_qty="0",
+        filled_avg_price=None,
+    )
+    partial = SimpleNamespace(
+        id="external-1",
+        status="partially_filled",
+        filled_qty="4",
+        filled_avg_price="100.05",
+    )
+    client.submit_order.return_value = accepted
+    client.get_order_by_client_id.return_value = partial
+    client_class.return_value = client
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    signal = _signal()
+    intent = _intent()
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+        first = broker.submit_stock_order(
+            "AAPL", "buy", 10, client_order_id=intent.intent_id
+        )
+        second = broker.submit_stock_order(
+            "AAPL", "buy", 10, client_order_id=intent.intent_id
+        )
+
+        assert first.status == "accepted"
+        assert second.status == "partially_filled"
+        assert client.submit_order.call_count == 1
+        client.get_order_by_client_id.assert_called_once_with(intent.intent_id)
+        assert (
+            ledger.external_order_for_intent(intent.intent_id)["status"]
+            == "partially_filled"
+        )
+        assert ledger.read_fills() == []
+    finally:
+        ledger.close()
+
+
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_applies_prebuilt_fill_only_after_reconciliation_confirms_full_fill(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, market_request, time_in_force
+    client = MagicMock()
+    accepted = SimpleNamespace(
+        id="external-1",
+        status="new",
+        filled_qty="0",
+        filled_avg_price=None,
+    )
+    full = SimpleNamespace(
+        id="external-1",
+        status="filled",
+        filled_qty="10",
+        filled_avg_price="100.1",
+    )
+    client.submit_order.return_value = accepted
+    client.get_order_by_client_id.return_value = full
+    client_class.return_value = client
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    signal = _signal()
+    intent = _intent()
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        fill = PaperCostModel().fill(
+            intent,
+            Decimal("100"),
+            datetime(2026, 8, 3, 13, 30, tzinfo=UTC),
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+        first = broker.submit_stock_order(
+            "AAPL",
+            "buy",
+            10,
+            client_order_id=intent.intent_id,
+            intent=intent,
+            fill=fill,
+        )
+        assert first.status == "pending"
+        assert ledger.read_fills() == []
+
+        second = broker.submit_stock_order(
+            "AAPL",
+            "buy",
+            10,
+            client_order_id=intent.intent_id,
+            intent=intent,
+            fill=fill,
+        )
+        assert second.status == "filled"
+        assert client.submit_order.call_count == 1
+        assert ledger.read_fills() == [fill]
+    finally:
+        ledger.close()
+
+
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_reconciles_pre_submit_pending_row_after_crash_before_resubmit(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, market_request, time_in_force
+    client = MagicMock()
+    client.get_order_by_client_id.return_value = SimpleNamespace(
+        id="external-1",
+        status="accepted",
+        filled_qty="0",
+        filled_avg_price=None,
+    )
+    client_class.return_value = client
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    signal = _signal()
+    intent = _intent()
+    prepared_at = datetime(2026, 7, 31, 0, tzinfo=UTC)
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        ledger.prepare_external_order(
+            intent_id=intent.intent_id,
+            broker="alpaca",
+            submitted_at=prepared_at,
+        )
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+        result = broker.submit_stock_order(
+            "AAPL", "buy", 10, client_order_id=intent.intent_id
+        )
+        assert result.status == "accepted"
+        client.get_order_by_client_id.assert_called_once_with(intent.intent_id)
+        client.submit_order.assert_not_called()
+        external = ledger.external_order_for_intent(intent.intent_id)
+        assert external["external_order_id"] == "external-1"
+        assert external["status"] == "accepted"
+    finally:
+        ledger.close()
+
+
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_provisional_row_404_fails_closed_without_resubmit(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, market_request, time_in_force
+    not_found = RuntimeError("broker lookup failed")
+    not_found.status_code = 404
+    client = MagicMock()
+    client.get_order_by_client_id.side_effect = not_found
+    client_class.return_value = client
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    signal = _signal()
+    intent = _intent()
+    prepared_at = datetime(2026, 7, 31, 0, tzinfo=UTC)
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(intent)
+        ledger.prepare_external_order(
+            intent_id=intent.intent_id,
+            broker="alpaca",
+            submitted_at=prepared_at,
+        )
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+
+        with pytest.raises(RuntimeError, match="broker lookup failed"):
+            broker.submit_stock_order(
+                "AAPL", "buy", 10, client_order_id=intent.intent_id
+            )
+
+        client.get_order_by_client_id.assert_called_once_with(intent.intent_id)
+        client.submit_order.assert_not_called()
+        external = ledger.external_order_for_intent(intent.intent_id)
+        assert external["external_order_id"] == intent.intent_id
+        assert external["status"] == "pending"
+        assert external["submitted_at"] == prepared_at.isoformat()
+    finally:
+        ledger.close()
+
+
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_reconciles_persisted_filled_row_before_applying_missing_local_fill(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, market_request, time_in_force
+    client = MagicMock()
+    client.get_order_by_client_id.return_value = SimpleNamespace(
+        id="external-1",
+        status="filled",
+        filled_qty="10",
+        filled_avg_price="100.1",
+    )
+    client_class.return_value = client
+    ledger, intent, fill = _staged_case(tmp_path)
+    submitted_at = datetime(2026, 7, 31, 0, tzinfo=UTC)
+    try:
+        ledger.prepare_external_order(
+            intent_id=intent.intent_id,
+            broker="alpaca",
+            submitted_at=submitted_at,
+        )
+        ledger.record_external_order(
+            intent_id=intent.intent_id,
+            external_order_id="external-1",
+            broker="alpaca",
+            status="filled",
+            submitted_at=submitted_at,
+            reconciled_at=submitted_at,
+            detail="simulated crash before local fill",
+        )
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+
+        result = broker.submit_stock_order(
+            "AAPL",
+            "buy",
+            10,
+            client_order_id=intent.intent_id,
+            intent=intent,
+            fill=fill,
+        )
+
+        assert result.status == "filled"
+        client.get_order_by_client_id.assert_called_once_with(intent.intent_id)
+        client.submit_order.assert_not_called()
+        assert ledger.read_fills() == [fill]
+        assert ledger.intent(intent.intent_id).status == "filled"
+    finally:
+        ledger.close()
+
+
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_first_full_fill_applies_locally_before_terminal_external_status(
+    client_class, order_side, market_request, time_in_force, tmp_path
+):
+    del order_side, market_request, time_in_force
+    full = SimpleNamespace(
+        id="external-1",
+        status="filled",
+        filled_qty="10",
+        filled_avg_price="100.1",
+    )
+    client = MagicMock()
+    client.submit_order.return_value = full
+    client.get_order_by_client_id.return_value = full
+    client_class.return_value = client
+    ledger, intent, fill = _staged_case(tmp_path)
+    original_record = ledger.record_external_order
+
+    def crash_before_external_terminal(**_kwargs):
+        assert ledger.read_fills() == [fill]
+        assert ledger.intent(intent.intent_id).status == "filled"
+        raise RuntimeError("crash before external terminal status")
+
+    try:
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+        with patch.object(
+            ledger,
+            "record_external_order",
+            side_effect=crash_before_external_terminal,
+        ):
+            with pytest.raises(RuntimeError, match="crash before external"):
+                broker.submit_stock_order(
+                    "AAPL",
+                    "buy",
+                    10,
+                    client_order_id=intent.intent_id,
+                    intent=intent,
+                    fill=fill,
+                )
+
+        external = ledger.external_order_for_intent(intent.intent_id)
+        assert external["external_order_id"] == intent.intent_id
+        assert external["status"] == "pending"
+        ledger.record_external_order = original_record
+
+        replay = broker.submit_stock_order(
+            "AAPL",
+            "buy",
+            10,
+            client_order_id=intent.intent_id,
+            intent=intent,
+            fill=fill,
+        )
+
+        assert replay.status == "filled"
+        assert client.submit_order.call_count == 1
+        client.get_order_by_client_id.assert_called_once_with(intent.intent_id)
+        assert ledger.read_fills() == [fill]
+        assert ledger.external_order_for_intent(intent.intent_id)["status"] == "filled"
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("terminal_status", ["rejected", "cancelled"])
+@patch("tradingagents.execution.alpaca_broker.TimeInForce", new_callable=MagicMock)
+@patch(
+    "tradingagents.execution.alpaca_broker.MarketOrderRequest",
+    new_callable=MagicMock,
+)
+@patch("tradingagents.execution.alpaca_broker.OrderSide", new_callable=MagicMock)
+@patch("tradingagents.execution.alpaca_broker.TradingClient")
+def test_alpaca_terminal_external_row_reconciles_and_terminalizes_local_intent(
+    client_class,
+    order_side,
+    market_request,
+    time_in_force,
+    terminal_status,
+    tmp_path,
+):
+    del order_side, market_request, time_in_force
+    client = MagicMock()
+    client.get_order_by_client_id.return_value = SimpleNamespace(
+        id="external-1",
+        status=terminal_status,
+        filled_qty="0",
+        filled_avg_price=None,
+    )
+    client_class.return_value = client
+    ledger, intent, _ = _staged_case(tmp_path)
+    submitted_at = datetime(2026, 7, 31, 0, tzinfo=UTC)
+    try:
+        ledger.prepare_external_order(
+            intent_id=intent.intent_id,
+            broker="alpaca",
+            submitted_at=submitted_at,
+        )
+        ledger.record_external_order(
+            intent_id=intent.intent_id,
+            external_order_id="external-1",
+            broker="alpaca",
+            status=terminal_status,
+            submitted_at=submitted_at,
+            reconciled_at=submitted_at,
+            detail="simulated terminal crash state",
+        )
+        broker = AlpacaBroker("key", "secret", paper=True, ledger=ledger)
+
+        result = broker.submit_stock_order(
+            "AAPL", "buy", 10, client_order_id=intent.intent_id
+        )
+
+        assert result.status == terminal_status
+        client.get_order_by_client_id.assert_called_once_with(intent.intent_id)
+        client.submit_order.assert_not_called()
+        assert ledger.intent(intent.intent_id).status == terminal_status
+        assert ledger.read_fills() == []
+    finally:
+        ledger.close()

@@ -3,12 +3,16 @@
 Every trade must pass ALL gates or it's rejected. This is the safety layer
 that prevents unbounded losses on a $5K portfolio.
 """
+
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from tradingagents.strategies.execution import AccountState
 
 logger = logging.getLogger(__name__)
 
@@ -67,24 +71,29 @@ def compute_cooling_tickers(
 @dataclass
 class RiskGateConfig:
     """Portfolio risk parameters."""
+
     total_capital: float = 5000.0
     max_positions: int = 8
-    max_position_pct: float = 0.15          # Max 15% in one position ($750)
-    min_position_value: float = 100.0       # Don't open micro-positions
-    daily_loss_limit_pct: float = 0.03      # 3% daily = $150
-    max_drawdown_pct: float = 0.15          # 15% max DD = $750
-    per_strategy_max: int = 3               # Max 3 positions per strategy
-    global_stop_loss_pct: float = 0.08      # 8% stop per position
-    long_only: bool = True                  # $5K accounts can't short easily
-    cash_reserve_pct: float = 0.0           # Min cash as % of portfolio (0 = disabled)
-    reentry_cooldown_days: int = 0          # Block re-entry of stopped names for N days (0 = off)
+    max_position_pct: float = 0.15  # Max 15% in one position ($750)
+    min_position_value: float = 100.0  # Don't open micro-positions
+    daily_loss_limit_pct: float = 0.03  # 3% daily = $150
+    max_drawdown_pct: float = 0.15  # 15% max DD = $750
+    per_strategy_max: int = 3  # Max 3 positions per strategy
+    global_stop_loss_pct: float = 0.08  # 8% stop per position
+    long_only: bool = True  # $5K accounts can't short easily
+    cash_reserve_pct: float = 0.0  # Min cash as % of portfolio (0 = disabled)
+    reentry_cooldown_days: int = (
+        0  # Block re-entry of stopped names for N days (0 = off)
+    )
     # Short-specific gates (0 = disabled)
-    earnings_blackout_days: int = 0         # Block shorts within N days of earnings
-    max_borrow_cost_pct: float = 0.0        # Max annualised borrow cost (0 = disabled)
-    max_margin_utilization_pct: float = 0.0 # Max margin as % of total capital (0 = disabled)
-    short_squeeze_stop_pct: float = 0.15    # Stop-loss % for short squeeze protection
-    short_squeeze_window_days: int = 5      # Days to look back for squeeze detection
-    premium_decay_floor_pct: float = 0.20   # Options premium decay floor
+    earnings_blackout_days: int = 0  # Block shorts within N days of earnings
+    max_borrow_cost_pct: float = 0.0  # Max annualised borrow cost (0 = disabled)
+    max_margin_utilization_pct: float = (
+        0.0  # Max margin as % of total capital (0 = disabled)
+    )
+    short_squeeze_stop_pct: float = 0.15  # Stop-loss % for short squeeze protection
+    short_squeeze_window_days: int = 5  # Days to look back for squeeze detection
+    premium_decay_floor_pct: float = 0.20  # Options premium decay floor
 
     @classmethod
     def from_dict(cls, config: dict) -> RiskGateConfig:
@@ -111,6 +120,16 @@ class RiskGateConfig:
             short_squeeze_window_days=rg.get("short_squeeze_window_days", 5),
             premium_decay_floor_pct=rg.get("premium_decay_floor_pct", 0.20),
         )
+
+
+@dataclass(frozen=True)
+class PendingRiskEntry:
+    """Deterministic risk reservation for an earlier due entry intent."""
+
+    ticker: str
+    strategies: tuple[str, ...]
+    position_value: float
+    margin_required: float = 0.0
 
 
 class RiskGate:
@@ -140,15 +159,34 @@ class RiskGate:
         """Set tickers in re-entry cooldown (stopped out within the cooldown window)."""
         self._cooling_tickers = set(tickers)
 
+    @staticmethod
+    def _open_trade_strategies(trade: dict) -> set[str]:
+        """Read new multi-contributor or legacy scalar strategy provenance."""
+        raw = trade.get("strategies")
+        if isinstance(raw, str):
+            strategies = {raw}
+        elif isinstance(raw, (list, tuple, set)):
+            strategies = {str(item) for item in raw if str(item)}
+        else:
+            strategies = set()
+        legacy = trade.get("strategy")
+        if isinstance(legacy, str) and legacy:
+            strategies.add(legacy)
+        return strategies
+
     def check(
         self,
         ticker: str,
         direction: str,
         position_value: float,
-        strategy: str,
+        strategy: str | tuple[str, ...],
         open_trades: list[dict] | None = None,
         earnings_dates: dict[str, int] | None = None,
         short_interest: dict[str, float] | None = None,
+        *,
+        authoritative_account: AccountState | None = None,
+        pending_entries: tuple[PendingRiskEntry, ...] = (),
+        proposed_margin: float = 0.0,
     ) -> tuple[bool, str]:
         """Run all gates. Returns (passed, rejection_reason).
 
@@ -162,6 +200,32 @@ class RiskGate:
             short_interest: Optional mapping of ticker -> short interest % of float.
         """
         open_trades = open_trades or []
+        current_strategies = (strategy,) if isinstance(strategy, str) else strategy
+        self._require_nonnegative_finite(position_value, "position_value")
+        self._require_nonnegative_finite(proposed_margin, "proposed_margin")
+        if any(
+            not entry.ticker
+            or not entry.strategies
+            or not math.isfinite(entry.position_value)
+            or entry.position_value < 0
+            or not math.isfinite(entry.margin_required)
+            or entry.margin_required < 0
+            for entry in pending_entries
+        ):
+            raise ValueError("invalid pending risk entry")
+        if authoritative_account is not None:
+            for field_name in (
+                "net_equity",
+                "buying_power",
+                "high_water_mark",
+                "margin_used",
+            ):
+                self._require_nonnegative_finite(
+                    getattr(authoritative_account, field_name),
+                    f"authoritative {field_name}",
+                )
+        pending_position_value = sum(entry.position_value for entry in pending_entries)
+        pending_margin = sum(entry.margin_required for entry in pending_entries)
 
         # 1. Long-only filter
         if self.config.long_only and direction == "short":
@@ -169,37 +233,69 @@ class RiskGate:
 
         # 2. Max positions (portfolio-wide)
         positions = self.broker.get_positions()
-        if len(positions) >= self.config.max_positions:
-            return False, f"max_positions: {len(positions)}/{self.config.max_positions}"
+        position_count = len(positions) + len(pending_entries)
+        if position_count >= self.config.max_positions:
+            return False, (
+                f"max_positions: {position_count}/{self.config.max_positions}"
+            )
 
         # 3. Per-strategy limit
-        strategy_count = sum(
-            1 for t in open_trades if t.get("strategy") == strategy
-        )
-        if strategy_count >= self.config.per_strategy_max:
-            return False, f"per_strategy_max: {strategy} has {strategy_count}/{self.config.per_strategy_max}"
+        for current_strategy in current_strategies:
+            strategy_count = sum(
+                1
+                for trade in open_trades
+                if current_strategy in self._open_trade_strategies(trade)
+            ) + sum(
+                1 for entry in pending_entries if current_strategy in entry.strategies
+            )
+            if strategy_count >= self.config.per_strategy_max:
+                return False, (
+                    f"per_strategy_max: {current_strategy} has "
+                    f"{strategy_count}/{self.config.per_strategy_max}"
+                )
 
         # 4. Position size bounds
         if position_value < self.config.min_position_value:
-            return False, f"min_position_value: ${position_value:.0f} < ${self.config.min_position_value:.0f}"
+            return (
+                False,
+                f"min_position_value: ${position_value:.0f} < ${self.config.min_position_value:.0f}",
+            )
 
-        account = self.broker.get_account()
-        max_value = account.portfolio_value * self.config.max_position_pct
+        if authoritative_account is None:
+            account = self.broker.get_account()
+            portfolio_value = account.portfolio_value
+            buying_power = account.buying_power
+            high_water_mark = self._high_water_mark
+            margin_used = self._margin_used
+        else:
+            portfolio_value = float(authoritative_account.net_equity)
+            buying_power = float(authoritative_account.buying_power)
+            high_water_mark = float(authoritative_account.high_water_mark)
+            margin_used = float(authoritative_account.margin_used)
+        available_buying_power = buying_power - pending_position_value
+        max_value = portfolio_value * self.config.max_position_pct
         if position_value > max_value:
-            return False, f"max_position_pct: ${position_value:.0f} > ${max_value:.0f} ({self.config.max_position_pct:.0%})"
+            return (
+                False,
+                f"max_position_pct: ${position_value:.0f} > ${max_value:.0f} ({self.config.max_position_pct:.0%})",
+            )
 
         # 5. Daily loss limit
-        if self._daily_losses >= account.portfolio_value * self.config.daily_loss_limit_pct:
+        if self._daily_losses >= portfolio_value * self.config.daily_loss_limit_pct:
             return False, f"daily_loss_limit: ${self._daily_losses:.0f} losses today"
 
         # 6. Max drawdown
-        if self._high_water_mark > 0:
-            drawdown = (self._high_water_mark - account.portfolio_value) / self._high_water_mark
+        if high_water_mark > 0:
+            drawdown = (high_water_mark - portfolio_value) / high_water_mark
             if drawdown >= self.config.max_drawdown_pct:
-                return False, f"max_drawdown: {drawdown:.1%} >= {self.config.max_drawdown_pct:.0%}"
+                return (
+                    False,
+                    f"max_drawdown: {drawdown:.1%} >= {self.config.max_drawdown_pct:.0%}",
+                )
 
         # 7. Duplicate check (already holding this ticker?)
         held_tickers = {p.get("ticker", "") for p in positions}
+        held_tickers.update(entry.ticker for entry in pending_entries)
         if ticker in held_tickers:
             return False, f"duplicate: already holding {ticker}"
 
@@ -208,13 +304,16 @@ class RiskGate:
             return False, f"cooldown: {ticker} stopped out recently"
 
         # 8. Buying power check
-        if position_value > account.buying_power:
-            return False, f"buying_power: need ${position_value:.0f}, have ${account.buying_power:.0f}"
+        if position_value > available_buying_power:
+            return False, (
+                f"buying_power: need ${position_value:.0f}, have "
+                f"${available_buying_power:.0f} after pending entries"
+            )
 
         # 9. Cash reserve check
         if self.config.cash_reserve_pct > 0:
-            min_cash = account.portfolio_value * self.config.cash_reserve_pct
-            remaining_cash = account.buying_power - position_value
+            min_cash = portfolio_value * self.config.cash_reserve_pct
+            remaining_cash = available_buying_power - position_value
             if remaining_cash < min_cash:
                 return False, (
                     f"cash_reserve: ${remaining_cash:.0f} remaining < "
@@ -226,7 +325,10 @@ class RiskGate:
             # 10. Earnings blackout — avoid shorting near earnings surprises
             if self.config.earnings_blackout_days > 0 and earnings_dates:
                 days_to_earnings = earnings_dates.get(ticker)
-                if days_to_earnings is not None and days_to_earnings <= self.config.earnings_blackout_days:
+                if (
+                    days_to_earnings is not None
+                    and days_to_earnings <= self.config.earnings_blackout_days
+                ):
                     return False, (
                         f"earnings_blackout: {ticker} earnings in {days_to_earnings}d "
                         f"(blackout={self.config.earnings_blackout_days}d)"
@@ -246,15 +348,29 @@ class RiskGate:
 
             # 12. Margin utilization gate
             if self.config.max_margin_utilization_pct > 0:
-                utilization = self._margin_used / self.config.total_capital if self.config.total_capital > 0 else 0.0
+                projected_margin = margin_used + pending_margin + proposed_margin
+                utilization = (
+                    projected_margin / self.config.total_capital
+                    if self.config.total_capital > 0
+                    else 0.0
+                )
                 if utilization >= self.config.max_margin_utilization_pct:
                     return False, (
                         f"margin_utilization: {utilization:.1%} >= "
                         f"{self.config.max_margin_utilization_pct:.1%} limit "
-                        f"(${self._margin_used:.0f}/${self.config.total_capital:.0f})"
+                        f"(${projected_margin:.0f}/${self.config.total_capital:.0f})"
                     )
 
         return True, ""
+
+    @staticmethod
+    def _require_nonnegative_finite(value: object, label: str) -> None:
+        try:
+            valid = math.isfinite(value) and value >= 0
+        except TypeError as error:
+            raise ValueError(f"{label} must be finite and non-negative") from error
+        if not valid:
+            raise ValueError(f"{label} must be finite and non-negative")
 
     def compute_position_size(
         self,
@@ -274,6 +390,7 @@ class RiskGate:
             Number of whole shares (0 if position too small).
         """
         import math
+
         if not (current_price > 0) or math.isnan(current_price):
             return 0
 
@@ -337,7 +454,7 @@ class RiskGate:
                 continue
 
             try:
-                if hasattr(ticker_prices, 'empty') and not ticker_prices.empty:
+                if hasattr(ticker_prices, "empty") and not ticker_prices.empty:
                     current_price = float(ticker_prices["Close"].iloc[-1])
                 else:
                     continue
@@ -356,7 +473,10 @@ class RiskGate:
                     force_close.append(trade_id)
                     logger.warning(
                         "Stop loss triggered: %s %s pnl=%.1f%% (limit=%.1f%%)",
-                        ticker, direction, pnl_pct * 100, -self.config.global_stop_loss_pct * 100,
+                        ticker,
+                        direction,
+                        pnl_pct * 100,
+                        -self.config.global_stop_loss_pct * 100,
                     )
 
         return force_close

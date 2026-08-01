@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.86.0",
     "alpaca-py>=0.35.0",
+    "exchange-calendars>=4.13.2,<5",
     "finnhub-python>=2.4.0",
     "fredapi>=0.5.2",
     "httpx>=0.27.0",

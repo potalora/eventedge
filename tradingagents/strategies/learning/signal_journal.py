@@ -4,6 +4,7 @@ Logs every signal (traded or not) as a JSONL line. Outcome fields
 (5d/10d/30d returns) are back-filled on subsequent runs once enough
 calendar days have elapsed.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,9 +12,14 @@ import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
+
+from tradingagents.strategies.execution import SignalRecord
+
+if TYPE_CHECKING:
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 logger = logging.getLogger(__name__)
 
@@ -27,16 +33,18 @@ class JournalEntry:
     ticker: str
     direction: str
     score: float
+    signal_id: str = ""
     llm_conviction: float = 0.0
     regime: str = ""
     traded: bool = False
-    entry_price: float = 0.0
+    entry_price: float | None = None
     return_5d: float | None = None
     return_10d: float | None = None
     return_30d: float | None = None
     prompt_version: str = ""
     openbb_available: bool = True
     metadata: dict = field(default_factory=dict)
+    status: str = "legacy"
 
 
 class SignalJournal:
@@ -45,9 +53,17 @@ class SignalJournal:
     File lives at ``{state_dir}/signal_journal.jsonl``.
     """
 
-    def __init__(self, state_dir: str) -> None:
+    def __init__(
+        self,
+        state_dir: str,
+        ledger: "PortfolioLedger | None" = None,
+        *,
+        after_append: Callable[[], None] | None = None,
+    ) -> None:
         self._path = Path(state_dir) / "signal_journal.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ledger = ledger
+        self._after_append = after_append or (lambda: None)
 
     # ------------------------------------------------------------------
     # Write
@@ -59,8 +75,8 @@ class SignalJournal:
             f.write(json.dumps(asdict(entry), default=str) + "\n")
 
     def log_signals(self, entries: list[JournalEntry]) -> None:
-        """Append signal entries, skipping duplicates (same strategy+ticker+timestamp)."""
-        existing_keys: set[tuple[str, str, str]] = set()
+        """Append entries, using authoritative signal IDs whenever present."""
+        existing_keys: set[tuple[str, ...]] = set()
         if self._path.exists():
             for line in self._path.read_text().splitlines():
                 line = line.strip()
@@ -68,7 +84,7 @@ class SignalJournal:
                     continue
                 try:
                     e = json.loads(line)
-                    key = (e.get("strategy", ""), e.get("ticker", ""), e.get("timestamp", ""))
+                    key = self._journal_key(e)
                     existing_keys.add(key)
                 except json.JSONDecodeError:
                     continue
@@ -76,7 +92,7 @@ class SignalJournal:
         new_entries = []
         for entry in entries:
             d = asdict(entry)
-            key = (d["strategy"], d["ticker"], d["timestamp"])
+            key = self._journal_key(d)
             if key not in existing_keys:
                 new_entries.append(d)
                 existing_keys.add(key)
@@ -85,6 +101,129 @@ class SignalJournal:
             with open(self._path, "a") as f:
                 for d in new_entries:
                     f.write(json.dumps(d, default=str) + "\n")
+
+    def mirror_signals(
+        self,
+        records: list[SignalRecord],
+        context_by_id: dict[str, dict[str, Any]],
+    ) -> None:
+        """Mirror persisted ledger records without inventing identity or price."""
+        if self._ledger is not None:
+            self.drain_outbox()
+            return
+        entries = []
+        for record in records:
+            context = context_by_id.get(record.signal_id, {})
+            entries.append(
+                JournalEntry(
+                    timestamp=record.reference_session.isoformat(),
+                    strategy=record.strategy,
+                    ticker=record.ticker,
+                    direction=record.direction,
+                    score=float(context.get("score", 0.0)),
+                    signal_id=record.signal_id,
+                    llm_conviction=float(context.get("llm_conviction", 0.0)),
+                    regime=str(context.get("regime", "")),
+                    traded=False,
+                    entry_price=None,
+                    metadata=dict(context.get("metadata", {})),
+                    status=str(context.get("status", "timely")),
+                )
+            )
+        self.log_signals(entries)
+
+    def drain_outbox(self, limit: int = 256) -> int:
+        """Project one bounded ledger outbox batch with crash-safe tail recovery."""
+        if self._ledger is None:
+            return 0
+        pending = self._ledger.pending_signal_journal_outbox(limit)
+        if not pending:
+            return 0
+        now = datetime.now(timezone.utc)
+        self._path.touch(exist_ok=True)
+        verified = self._ledger.journal_projection_offset()
+        if verified is None:
+            verified = self._ledger.initialize_journal_projection(
+                self._path.stat().st_size, now
+            )
+
+        expected_lines = [
+            str(row["payload_json"]).encode("utf-8") + b"\n" for row in pending
+        ]
+        max_tail = sum(len(line) for line in expected_lines)
+        projections: list[tuple[str, str, int, int]] = []
+        recovered = 0
+        cursor = verified
+
+        with open(self._path, "r+b") as journal:
+            journal.seek(0, os.SEEK_END)
+            size = journal.tell()
+            if size < verified:
+                raise RuntimeError("signal journal is shorter than verified projection")
+            tail_size = size - verified
+            if tail_size > max_tail:
+                raise RuntimeError("signal journal has an unbounded unverified tail")
+            journal.seek(verified)
+            tail = journal.read(tail_size)
+            consumed = 0
+            for row, expected in zip(pending, expected_lines):
+                remaining = tail[consumed:]
+                if remaining.startswith(expected):
+                    projections.append(
+                        (
+                            str(row["signal_id"]),
+                            str(row["payload_hash"]),
+                            cursor,
+                            len(expected),
+                        )
+                    )
+                    consumed += len(expected)
+                    cursor += len(expected)
+                    recovered += 1
+                    continue
+                if remaining and expected.startswith(remaining):
+                    journal.truncate(cursor)
+                    tail = tail[:consumed]
+                    break
+                if remaining:
+                    raise RuntimeError(
+                        "signal journal tail conflicts with ledger outbox"
+                    )
+                break
+            if consumed != len(tail):
+                raise RuntimeError("signal journal contains an unmatched tail")
+
+            journal.seek(cursor)
+            for row, expected in zip(pending[recovered:], expected_lines[recovered:]):
+                offset = cursor
+                journal.write(expected)
+                cursor += len(expected)
+                projections.append(
+                    (
+                        str(row["signal_id"]),
+                        str(row["payload_hash"]),
+                        offset,
+                        len(expected),
+                    )
+                )
+            journal.flush()
+            os.fsync(journal.fileno())
+
+        self._after_append()
+        self._ledger.mark_signal_journal_mirrored(projections, cursor, now)
+        return len(projections)
+
+    @staticmethod
+    def _journal_key(entry: dict[str, Any]) -> tuple[str, ...]:
+        signal_id = str(entry.get("signal_id", ""))
+        if signal_id:
+            return ("signal_id", signal_id)
+        return (
+            "legacy",
+            str(entry.get("strategy", "")),
+            str(entry.get("ticker", "")),
+            str(entry.get("timestamp", "")),
+        )
 
     # ------------------------------------------------------------------
     # Read
@@ -128,9 +267,7 @@ class SignalJournal:
 
         return results
 
-    def get_convergence_signals(
-        self, date: str, min_strategies: int = 2
-    ) -> list[dict]:
+    def get_convergence_signals(self, date: str, min_strategies: int = 2) -> list[dict]:
         """Find tickers where multiple strategies agree on direction on the same date.
 
         Returns list of dicts: {ticker, direction, strategies, count, avg_score}.
@@ -151,13 +288,15 @@ class SignalJournal:
             unique_strategies = {s["strategy"] for s in signals}
             if len(unique_strategies) >= min_strategies:
                 avg_score = sum(s["score"] for s in signals) / len(signals)
-                results.append({
-                    "ticker": ticker,
-                    "direction": direction,
-                    "strategies": sorted(unique_strategies),
-                    "count": len(unique_strategies),
-                    "avg_score": avg_score,
-                })
+                results.append(
+                    {
+                        "ticker": ticker,
+                        "direction": direction,
+                        "strategies": sorted(unique_strategies),
+                        "count": len(unique_strategies),
+                        "avg_score": avg_score,
+                    }
+                )
 
         results.sort(key=lambda x: x["count"], reverse=True)
         return results
@@ -167,7 +306,8 @@ class SignalJournal:
     # ------------------------------------------------------------------
 
     def get_knowledge_gaps(
-        self, regime: str | None = None,
+        self,
+        regime: str | None = None,
     ) -> list[dict]:
         """Rank strategies by observation count (fewest first).
 
@@ -206,7 +346,9 @@ class SignalJournal:
     # ------------------------------------------------------------------
 
     def fill_outcomes(self, price_cache: dict[str, Any], today: str) -> int:
-        """Back-fill return fields for past entries where enough time has elapsed.
+        """Legacy schema-v1 calendar-day updater; never called by v2 production.
+
+        Back-fill return fields for past entries where enough time has elapsed.
 
         Args:
             price_cache: {ticker: DataFrame with "Close" column}
@@ -234,7 +376,7 @@ class SignalJournal:
                 new_lines.append(line)
                 continue
 
-            entry_price = entry.get("entry_price", 0)
+            entry_price = entry.get("entry_price")
             ticker = entry.get("ticker", "")
             ts = entry.get("timestamp", "")
 
@@ -257,15 +399,25 @@ class SignalJournal:
                 direction = entry.get("direction", "long")
                 sign = 1 if direction == "long" else -1
 
-                for period, field_name in [(5, "return_5d"), (10, "return_10d"), (30, "return_30d")]:
+                for period, field_name in [
+                    (5, "return_5d"),
+                    (10, "return_10d"),
+                    (30, "return_30d"),
+                ]:
                     if days_elapsed >= period and entry.get(field_name) is None:
                         target_dt = signal_dt + timedelta(days=period)
                         try:
-                            target_prices = close_series.loc[:target_dt.strftime("%Y-%m-%d")]
+                            target_prices = close_series.loc[
+                                : target_dt.strftime("%Y-%m-%d")
+                            ]
                             if not target_prices.empty:
                                 target_price = float(target_prices.iloc[-1])
                                 if target_price > 0 and entry_price > 0:
-                                    ret = sign * (target_price - entry_price) / entry_price
+                                    ret = (
+                                        sign
+                                        * (target_price - entry_price)
+                                        / entry_price
+                                    )
                                     entry[field_name] = round(ret, 6)
                                     changed = True
                         except (KeyError, IndexError):
@@ -279,9 +431,7 @@ class SignalJournal:
 
         if updated_count > 0:
             # Atomic rewrite
-            fd, tmp = tempfile.mkstemp(
-                dir=self._path.parent, suffix=".tmp"
-            )
+            fd, tmp = tempfile.mkstemp(dir=self._path.parent, suffix=".tmp")
             try:
                 with os.fdopen(fd, "w") as f:
                     f.write("\n".join(new_lines) + "\n")
@@ -293,7 +443,9 @@ class SignalJournal:
                     pass
                 raise
 
-        logger.info("Signal journal: updated %d entries with outcome data", updated_count)
+        logger.info(
+            "Signal journal: updated %d entries with outcome data", updated_count
+        )
         return updated_count
 
     # ------------------------------------------------------------------
@@ -301,7 +453,10 @@ class SignalJournal:
     # ------------------------------------------------------------------
 
     def get_high_conviction_failures(
-        self, strategy: str, limit: int = 10, min_conviction: float = 0.6,
+        self,
+        strategy: str,
+        limit: int = 10,
+        min_conviction: float = 0.6,
     ) -> list[dict]:
         """Return recent high-conviction signals where direction was wrong.
 

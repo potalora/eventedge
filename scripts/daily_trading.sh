@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run daily paper trading for all active generations.
-# Called by launchd or cron on weekdays.
+# Called by a scheduler Monday-Friday; Python validates the exact XNYS session.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,7 +11,8 @@ mkdir -p "$LOG_DIR"
 TODAY=$(date +%Y-%m-%d)
 DOW=$(date +%u)  # 1=Monday ... 7=Sunday
 
-# Skip weekends (markets closed)
+# Avoid needless weekend invocations. Holidays still reach Python and are
+# rejected because a weekday is not necessarily an XNYS trading session.
 if [ "$DOW" -ge 6 ]; then
     echo "$TODAY: Weekend, skipping."
     exit 0
@@ -44,6 +45,6 @@ else
 fi
 
 # Daily report is intentionally NOT generated here. Per project convention,
-# Claude writes the report by reading JSON state from
+# Codex writes the report from ledger-derived JSON projections under
 # data/generations/gen_NNN/horizon_*/ into docs/reports/YYYY-MM-DD-genNNN-daily-report.md.
-echo "=== Done (report written separately by Claude): $(date) ===" >> "$LOG_FILE"
+echo "=== Done (report written separately by Codex): $(date) ===" >> "$LOG_FILE"

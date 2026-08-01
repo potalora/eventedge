@@ -1,6 +1,6 @@
 # EventEdge
 
-An autonomous event-driven trading research system that runs 12 event-driven strategies every day across 16 paper portfolios (4 time horizons × 4 portfolio sizes), tracks what works, and learns from the results. Personal project — not a product, not a service, not financial advice.
+An autonomous event-driven trading research system that runs 12 event-driven strategies across 16 paper portfolio scenarios (4 time horizons × 4 portfolio sizes). Personal project — not a product, not a service, not financial advice.
 
 ## What it does
 
@@ -31,13 +31,17 @@ Data comes from about a dozen sources: yfinance, Finnhub, SEC EDGAR, OpenBB, FRE
 
 ## How it runs
 
-The daily job runs on a private VPS. The generation management system lets me A/B test different code versions in parallel using git worktrees — each generation gets its own frozen copy of the code and independent state. Autoresearch LLM calls use Claude Sonnet 5 at medium effort, with rule-based synthesis as the failure fallback.
+Production should be scheduled for 18:00 ET, after XNYS daily bars finalize; the repository does not install or change that schedule. Python checks the requested date against the XNYS calendar, so a weekday holiday is rejected rather than silently rolled to a different session. A signal observed at one session's close can only stage an intent for execution at the next exact XNYS session open.
+
+Each cohort has its own authoritative SQLite `portfolio.db`. Signals, next-open intents, fills, lots, marks, benchmark observations, and account snapshots are recorded there with explicit slippage, commission, other fees, borrow costs, and financing. The familiar JSON files are deterministic read-compatible projections from SQLite; they are not accounting authority.
+
+The generation management system supports parallel frozen code versions through git worktrees. EventEdge runs 16 dependent scenario portfolios. Headline performance shows four separate $100k horizon books plus an equal-weighted scenario panel; the panel is not investable fund AUM. Smaller books are concentration stress tests. Metrics use XNYS sessions, next-session-open signal outcomes, persisted SPY/BIL benchmarks, explicit costs, and immutable schema-v2 epochs. Production learning is disabled. Promotion output is advisory and requires Pedro's manual review. Covered-call execution remains inactive scaffolding. Autoresearch LLM calls use Claude Sonnet 5 at medium effort, with rule-based synthesis as the failure fallback.
 
 <p align="center">
   <img src="assets/daily-cycle.svg" style="width: 100%; height: auto;">
 </p>
 
-The 16 portfolios vary in size ($5k to $100k) and time horizon (30 days to 1 year). Bigger portfolios unlock more instruments: $10k+ can write covered calls, $50k+ can short stocks with margin and borrow cost gates.
+The 16 portfolios vary in size ($5k to $100k) and time horizon (30 days to 1 year). Eligible $50k+ scenarios can short stocks with margin and borrow-cost gates. Covered-call settings are retained for future work, but covered-call execution is inactive.
 
 ## Setup
 
@@ -52,7 +56,10 @@ You'll need an Anthropic API key for the autoresearch LLM calls. Stock prices co
 
 ```bash
 # Daily automation — run all active generations
-python scripts/run_generations.py run-daily
+python scripts/run_generations.py run-daily --date 2026-07-31
+
+# Inventory legacy JSON without importing it
+python scripts/migrate_ledger_state.py --legacy-state /path/to/legacy --output-dir /tmp/eventedge-ledger-check --dry-run
 
 # Start a new generation (A/B test a code change)
 python scripts/run_generations.py start "description of what changed"
@@ -61,7 +68,8 @@ python scripts/run_generations.py start "description of what changed"
 python scripts/run_generations.py list
 
 # Compare generations side-by-side
-python scripts/run_generations.py compare
+python scripts/run_generations.py compare \
+  --pair gen_005:horizon_30d_size_100k:candidate_epoch_id,gen_004:horizon_30d_size_100k:baseline_epoch_id
 
 # Streamlit dashboard (interactive, in a browser)
 python -m streamlit run tradingagents/dashboard/app.py

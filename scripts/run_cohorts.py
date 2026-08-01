@@ -3,28 +3,29 @@
 
 Usage:
     python scripts/run_cohorts.py --date 2026-04-05    # daily trading (LLM on by default)
-    python scripts/run_cohorts.py --learning            # learning loop (adaptive only)
+    python scripts/run_cohorts.py --learning            # refused: production learning is disabled
     python scripts/run_cohorts.py --compare             # print comparison report
-    python scripts/run_cohorts.py --reset               # clear all cohort state
+    python scripts/run_cohorts.py --reset               # refused: start a fresh generation
     python scripts/run_cohorts.py --date 2026-04-05 --no-llm  # without LLM enrichment
 """
+
 from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+import time
+from datetime import date
 
 # Generation isolation: when run via GenerationManager with PYTHONPATH set to a
 # worktree, the editable install's finder would still resolve `tradingagents` to
 # the main repo. Inserting the worktree at sys.path[0] before any project imports
 # ensures the frozen worktree code is loaded instead.
-import os
-import sys
 _worktree = os.environ.get("PYTHONPATH", "")
 if _worktree and _worktree != sys.path[0]:
     sys.path.insert(0, _worktree)
-
-import argparse
-import json
-import logging
-import time
-from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +41,7 @@ def _raise_fd_limit() -> None:
     """
     try:
         from tradingagents.sys_limits import raise_fd_limit
+
         raise_fd_limit()
         return
     except Exception:
@@ -68,7 +70,7 @@ def main():
     parser.add_argument(
         "--learning",
         action="store_true",
-        help="Run learning loop (adaptive cohort only).",
+        help="Refuse retired production learning (exit 2).",
     )
     parser.add_argument(
         "--compare",
@@ -78,7 +80,7 @@ def main():
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="Reset all cohort state.",
+        help="Refuse destructive reset; start a fresh generation instead.",
     )
     parser.add_argument(
         "--no-llm",
@@ -92,11 +94,43 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.learning:
+        print(
+            "Production learning is disabled; no generation state was changed.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if args.reset:
+        parser.error(
+            "reset is disabled for ledger-backed generation state; "
+            "start a fresh generation instead"
+        )
+
+    if not (args.learning or args.compare or args.reset):
+        requested = args.date or date.today().isoformat()
+        try:
+            trading_session = date.fromisoformat(requested)
+        except ValueError:
+            parser.error(f"invalid ISO trading date: {requested}")
+        exact_trading_date = trading_session.isoformat()
+
+    generation_id = os.environ.get("EVENTEDGE_GENERATION_ID", "").strip()
+    generation_commit = os.environ.get("EVENTEDGE_GENERATION_COMMIT", "").strip()
+    if not generation_id or not generation_commit:
+        parser.error(
+            "EVENTEDGE_GENERATION_ID and EVENTEDGE_GENERATION_COMMIT are required"
+        )
+
+    if not (args.learning or args.compare or args.reset):
+        from tradingagents.strategies.orchestration.trading_calendar import is_session
+
+        if not is_session(trading_session):
+            parser.error(f"{requested} is not an XNYS session")
+
     from dotenv import load_dotenv
 
     load_dotenv()
 
-    from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         CohortOrchestrator,
         build_default_cohorts,
@@ -142,30 +176,40 @@ def main():
         for cc in cohort_configs:
             cc.use_llm = False
 
-    orchestrator = CohortOrchestrator(cohort_configs, config)
+    orchestrator = CohortOrchestrator(
+        cohort_configs,
+        config,
+        generation_id=generation_id,
+        generation_commit=generation_commit,
+    )
 
     # Route to the right action
     if args.compare:
-        state_dirs = {cc.name: cc.state_dir for cc in cohort_configs}
-        comparison = CohortComparison(state_dirs)
-        print(comparison.format_report())
-        return
+        from tradingagents.strategies.metrics.service import MetricsService
+        from tradingagents.strategies.orchestration.cohort_comparison import (
+            CohortComparison,
+        )
 
-    if args.reset:
-        orchestrator.reset()
-        print("All cohort state has been cleared.")
-        return
-
-    if args.learning:
-        start = time.time()
-        result = orchestrator.run_learning()
-        elapsed = time.time() - start
-        print(f"\nLearning loop completed in {elapsed:.1f}s")
-        print(json.dumps(result, indent=2, default=str))
+        ledgers = {
+            cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
+        }
+        generation_state_dir = config["autoresearch"]["state_dir"]
+        service = MetricsService(
+            generation_state_dir,
+            ledgers,
+            read_only=True,
+        )
+        print(
+            json.dumps(
+                CohortComparison(metrics_service=service).compare(),
+                indent=2,
+                default=str,
+            )
+        )
         return
 
     # Default: daily trading
-    trading_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    trading_date = exact_trading_date
     start = time.time()
     result = orchestrator.run_daily(trading_date)
     elapsed = time.time() - start
@@ -180,9 +224,12 @@ def main():
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
             count_failed_cohorts,
         )
+
         n_failed, n_total, failed = count_failed_cohorts(result)
     except Exception:
-        failed = [k for k, v in result.items() if isinstance(v, dict) and v.get("error")]
+        failed = [
+            k for k, v in result.items() if isinstance(v, dict) and v.get("error")
+        ]
         n_failed, n_total = len(failed), len(result)
     if n_failed:
         print(

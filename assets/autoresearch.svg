@@ -10,7 +10,7 @@
 
   <!-- Title -->
   <text x="400" y="36" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="bold">Autoresearch System</text>
-  <text x="400" y="54" text-anchor="middle" fill="#7d8590" font-size="11">12 strategies, 16 portfolios, daily cron</text>
+  <text x="400" y="54" text-anchor="middle" fill="#7d8590" font-size="11">12 strategies, 16 dependent scenarios, SQLite authority</text>
 
   <!-- Data Sources column -->
   <g transform="translate(30, 80)">
@@ -75,8 +75,8 @@
     <text x="75" y="65" text-anchor="middle" fill="#8b949e" font-size="9">signal synthesis</text>
     <text x="75" y="80" text-anchor="middle" fill="#8b949e" font-size="9">position sizing</text>
     <text x="75" y="95" text-anchor="middle" fill="#8b949e" font-size="9">sector limits</text>
-    <text x="75" y="110" text-anchor="middle" fill="#8b949e" font-size="9">vehicle selection</text>
-    <text x="75" y="122" text-anchor="middle" fill="#484f58" font-size="8">(LLM-powered)</text>
+    <text x="75" y="110" text-anchor="middle" fill="#8b949e" font-size="9">next-open intents</text>
+    <text x="75" y="122" text-anchor="middle" fill="#484f58" font-size="8">close signal -> next open</text>
   </g>
 
   <!-- Arrow down from committee -->
@@ -93,7 +93,7 @@
     <text x="75" y="88" text-anchor="middle" fill="#8b949e" font-size="9">margin utilization</text>
     <text x="75" y="106" text-anchor="middle" fill="#8b949e" font-size="9">sector concentration</text>
     <text x="75" y="124" text-anchor="middle" fill="#8b949e" font-size="9">position limits</text>
-    <text x="75" y="145" text-anchor="middle" fill="#484f58" font-size="8">rejects bad trades</text>
+    <text x="75" y="145" text-anchor="middle" fill="#484f58" font-size="8">explicit costs + fail closed</text>
   </g>
 
   <!-- Arrow from risk gates to committee -->
@@ -103,7 +103,7 @@
   <g transform="translate(100, 345)">
     <rect width="600" height="250" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
     <text x="300" y="24" text-anchor="middle" fill="#7d8590" font-size="11" font-weight="bold">16 PAPER PORTFOLIOS</text>
-    <text x="300" y="40" text-anchor="middle" fill="#484f58" font-size="9">4 horizons x 4 sizes = 16 independent cohorts</text>
+    <text x="300" y="40" text-anchor="middle" fill="#484f58" font-size="9">4 horizons x 4 sizes = 16 dependent scenarios</text>
 
     <!-- Column headers -->
     <text x="190" y="68" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="bold">$5k</text>
@@ -121,7 +121,7 @@
     <rect x="145" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
     <text x="190" y="100" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="255" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
-    <text x="300" y="100" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <text x="300" y="100" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="365" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
     <text x="410" y="100" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="475" y="82" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
@@ -131,7 +131,7 @@
     <rect x="145" y="118" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
     <text x="190" y="136" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="255" y="118" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
-    <text x="300" y="136" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <text x="300" y="136" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="365" y="118" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
     <text x="410" y="136" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
     <rect x="475" y="118" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
@@ -141,7 +141,7 @@
     <rect x="145" y="154" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
     <text x="190" y="172" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="255" y="154" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
-    <text x="300" y="172" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <text x="300" y="172" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="365" y="154" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
     <text x="410" y="172" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
     <rect x="475" y="154" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
@@ -151,13 +151,15 @@
     <rect x="145" y="190" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
     <text x="190" y="208" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="255" y="190" width="90" height="26" rx="4" fill="#1a2332" stroke="#30363d" stroke-width="0.5"/>
-    <text x="300" y="208" text-anchor="middle" fill="#7d8590" font-size="8">+ calls</text>
+    <text x="300" y="208" text-anchor="middle" fill="#7d8590" font-size="8">long only</text>
     <rect x="365" y="190" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
     <text x="410" y="208" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
     <rect x="475" y="190" width="90" height="26" rx="4" fill="#1f2518" stroke="#3fb950" stroke-width="0.5"/>
     <text x="520" y="208" text-anchor="middle" fill="#7ee787" font-size="8">+ shorts</text>
 
     <!-- Legend -->
-    <text x="300" y="238" text-anchor="middle" fill="#484f58" font-size="8">each cell = independent paper portfolio with its own state, positions, and P&amp;L</text>
+    <text x="300" y="232" text-anchor="middle" fill="#484f58" font-size="8">each scenario has authoritative portfolio.db; JSON is a read projection</text>
+    <text x="300" y="244" text-anchor="middle" fill="#484f58" font-size="8">covered-call execution inactive; shared evidence means scenarios are dependent</text>
   </g>
+  <text x="400" y="612" text-anchor="middle" fill="#484f58" font-size="8">metrics v2; learning disabled; promotion: manual review only</text>
 </svg>

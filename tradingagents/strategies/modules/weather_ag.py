@@ -11,6 +11,7 @@ Signal logic:
 3. If yes, bundle all raw ag data into metadata and delegate to LLM for scoring.
 4. Year-round operation with seasonal ticker filtering.
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,25 +26,25 @@ logger = logging.getLogger(__name__)
 # Full agricultural ticker universe (ETFs + stocks)
 AG_TICKERS_FULL = {
     # ETFs — direct commodity exposure
-    "dba": "DBA",    # Invesco DB Agriculture Fund
+    "dba": "DBA",  # Invesco DB Agriculture Fund
     "weat": "WEAT",  # Teucrium Wheat Fund
     "corn": "CORN",  # Teucrium Corn Fund
-    "moo": "MOO",    # VanEck Agribusiness ETF
+    "moo": "MOO",  # VanEck Agribusiness ETF
     "soyb": "SOYB",  # Teucrium Soybean Fund
     # Stocks — agribusiness companies
-    "adm": "ADM",    # Archer-Daniels-Midland
-    "bg": "BG",      # Bunge Global
+    "adm": "ADM",  # Archer-Daniels-Midland
+    "bg": "BG",  # Bunge Global
     "ctva": "CTVA",  # Corteva Agriscience
-    "de": "DE",      # Deere & Company
-    "fmc": "FMC",    # FMC Corporation
+    "de": "DE",  # Deere & Company
+    "fmc": "FMC",  # FMC Corporation
     # Food/beverage — weather-sensitive demand
-    "pep": "PEP",    # PepsiCo
-    "ko": "KO",      # Coca-Cola
-    "gis": "GIS",    # General Mills
+    "pep": "PEP",  # PepsiCo
+    "ko": "KO",  # Coca-Cola
+    "gis": "GIS",  # General Mills
     "mdlz": "MDLZ",  # Mondelez International
     # Fertilizer/crop chemicals — input cost sensitivity
-    "mos": "MOS",    # Mosaic Company
-    "ntr": "NTR",    # Nutrien
+    "mos": "MOS",  # Mosaic Company
+    "ntr": "NTR",  # Nutrien
 }
 
 # Winter subset (Oct-Mar): skip corn/soy-specific + seasonal-only instruments
@@ -66,7 +67,10 @@ class WeatherAgStrategy:
     data_sources = ["yfinance", "noaa", "usda", "drought_monitor", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "lookback_days": (10, 60),
@@ -79,7 +83,10 @@ class WeatherAgStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "lookback_days": 21,
@@ -110,7 +117,9 @@ class WeatherAgStrategy:
         if is_growing_season:
             eligible_tickers = AG_TICKERS_FULL
         else:
-            eligible_tickers = {k: v for k, v in AG_TICKERS_FULL.items() if k in AG_TICKERS_WINTER}
+            eligible_tickers = {
+                k: v for k, v in AG_TICKERS_FULL.items() if k in AG_TICKERS_WINTER
+            }
 
         # --- Gather ag context from all sources ---
         noaa_data = data.get("noaa", {})
@@ -151,7 +160,7 @@ class WeatherAgStrategy:
                 gate_reasons.append(f"frost={frost_events}")
 
         # Momentum gate: any ag ticker trailing return > 2%
-        ag_returns: list[tuple[str, str, float]] = []
+        ag_returns: list[tuple[str, str, float, str]] = []
         for name, ticker in eligible_tickers.items():
             df = prices.get(ticker)
             if df is None or df.empty:
@@ -161,7 +170,13 @@ class WeatherAgStrategy:
                 continue
             close = df["Close"]
             trailing_return = (close.iloc[-1] / close.iloc[-lookback]) - 1.0
-            ag_returns.append((name, ticker, trailing_return))
+            observation = df.index[-1]
+            window_end = (
+                observation.date().isoformat()
+                if hasattr(observation, "date")
+                else str(observation)
+            )
+            ag_returns.append((name, ticker, trailing_return, window_end))
             if trailing_return > 0.02:
                 gate_triggered = True
                 gate_reasons.append(f"momentum_{ticker}={trailing_return:.1%}")
@@ -177,15 +192,40 @@ class WeatherAgStrategy:
         # Bundle all raw ag data for LLM analysis
         ag_context = {
             "drought_score": drought_score,
-            "drought_states": drought_data.get("states", {}) if isinstance(drought_data, dict) else {},
-            "noaa_data": {k: v for k, v in noaa_data.items() if k != "error"} if noaa_data else {},
+            "drought_states": drought_data.get("states", {})
+            if isinstance(drought_data, dict)
+            else {},
+            "noaa_data": {k: v for k, v in noaa_data.items() if k != "error"}
+            if noaa_data
+            else {},
             "usda_data": usda_data if usda_data else {},
             "is_growing_season": is_growing_season,
             "gate_reasons": gate_reasons,
         }
 
         candidates = []
-        for name, ticker, ret in ag_returns[:3]:
+        for name, ticker, ret, window_end in ag_returns[:3]:
+            source_ids = [f"YFINANCE:{ticker}:{window_end}"]
+            source_dates = [window_end]
+            for key in ("observation_date", "start_date", "end_date"):
+                if noaa_data.get(key):
+                    source_ids.append(f"NOAA:{key}:{noaa_data[key]}")
+                    source_dates.append(str(noaa_data[key]))
+            crop_progress = usda_data.get("crop_progress", {})
+            for crop, weeks in sorted(crop_progress.items()):
+                if isinstance(weeks, list) and weeks and weeks[-1].get("week_ending"):
+                    source_ids.append(f"USDA:{crop}:{weeks[-1]['week_ending']}")
+                    source_dates.append(str(weeks[-1]["week_ending"]))
+            for key in ("report_date", "week_ending", "valid_start", "date"):
+                if drought_data.get(key):
+                    source_ids.append(f"DROUGHT:{key}:{drought_data[key]}")
+                    source_dates.append(str(drought_data[key]))
+            parsed_dates = [
+                pd.Timestamp(value).date()
+                for value in source_dates
+                if not pd.isna(pd.to_datetime(value, errors="coerce"))
+            ]
+            event_window_end = max(parsed_dates).isoformat()
             candidates.append(
                 Candidate(
                     ticker=ticker,
@@ -197,6 +237,8 @@ class WeatherAgStrategy:
                         "trailing_return": round(ret, 4),
                         "needs_llm_analysis": True,
                         "analysis_type": "ag_weather",
+                        "source_observation_ids": sorted(set(source_ids)),
+                        "window_end": event_window_end,
                         **ag_context,
                     },
                 )
@@ -253,7 +295,7 @@ Parameter ranges:
 - crop_decline_threshold: 1-5 (min weekly Good+Excellent decline in pp)
 
 Recent results:
-{results_text or '  No results yet.'}
+{results_text or "  No results yet."}
 
 Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
@@ -262,10 +304,12 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
         universe = dict(AG_TICKERS_FULL)
         if openbb_source and openbb_source.is_available():
             for industry in AG_EXPANSION_INDUSTRIES:
-                result = openbb_source.fetch({
-                    "method": "sector_tickers",
-                    "industry": industry,
-                })
+                result = openbb_source.fetch(
+                    {
+                        "method": "sector_tickers",
+                        "industry": industry,
+                    }
+                )
                 tickers = result.get("tickers", [])
                 for t in tickers:
                     universe[t.lower()] = t

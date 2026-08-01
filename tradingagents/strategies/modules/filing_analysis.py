@@ -9,16 +9,35 @@ logger = logging.getLogger(__name__)
 
 # Major public companies with common WARN notice filings
 KNOWN_EMPLOYERS: dict[str, str] = {
-    "amazon": "AMZN", "google": "GOOGL", "alphabet": "GOOGL",
-    "meta": "META", "facebook": "META", "microsoft": "MSFT",
-    "apple": "AAPL", "tesla": "TSLA", "ford": "F",
-    "general motors": "GM", "boeing": "BA", "lockheed": "LMT",
-    "intel": "INTC", "walmart": "WMT", "target": "TGT",
-    "disney": "DIS", "netflix": "NFLX", "uber": "UBER",
-    "lyft": "LYFT", "salesforce": "CRM", "cisco": "CSCO",
-    "ibm": "IBM", "dell": "DELL", "hp ": "HPQ",
-    "goldman sachs": "GS", "morgan stanley": "MS",
-    "jpmorgan": "JPM", "citigroup": "C", "wells fargo": "WFC",
+    "amazon": "AMZN",
+    "google": "GOOGL",
+    "alphabet": "GOOGL",
+    "meta": "META",
+    "facebook": "META",
+    "microsoft": "MSFT",
+    "apple": "AAPL",
+    "tesla": "TSLA",
+    "ford": "F",
+    "general motors": "GM",
+    "boeing": "BA",
+    "lockheed": "LMT",
+    "intel": "INTC",
+    "walmart": "WMT",
+    "target": "TGT",
+    "disney": "DIS",
+    "netflix": "NFLX",
+    "uber": "UBER",
+    "lyft": "LYFT",
+    "salesforce": "CRM",
+    "cisco": "CSCO",
+    "ibm": "IBM",
+    "dell": "DELL",
+    "hp ": "HPQ",
+    "goldman sachs": "GS",
+    "morgan stanley": "MS",
+    "jpmorgan": "JPM",
+    "citigroup": "C",
+    "wells fargo": "WFC",
 }
 
 
@@ -43,7 +62,10 @@ class FilingAnalysisStrategy:
     data_sources = ["edgar", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -56,7 +78,10 @@ class FilingAnalysisStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -80,6 +105,11 @@ class FilingAnalysisStrategy:
             form_type = filing.get("form_type", "")
             entity_name = filing.get("entity_name", "")
             ticker = filing.get("ticker", "")
+            filing_identity = {
+                "accession_number": filing.get("accession_number")
+                or filing.get("adsh"),
+                "file_url": filing.get("file_url", ""),
+            }
 
             # Check for WARN employer match (from P8)
             warn_ticker = self._resolve_warn_ticker(entity_name)
@@ -97,6 +127,7 @@ class FilingAnalysisStrategy:
                             "needs_llm_analysis": False,
                             "analysis_type": "warn_act",
                             "signal_source": "edgar_filing_proxy",
+                            **filing_identity,
                         },
                     )
                 )
@@ -120,6 +151,7 @@ class FilingAnalysisStrategy:
                             "prior_text": filing.get("prior_text", ""),
                             "needs_llm_analysis": has_text,
                             "analysis_type": "filing_change",
+                            **filing_identity,
                         },
                     )
                 )
@@ -142,6 +174,7 @@ class FilingAnalysisStrategy:
                             "proxy_text": proxy_text,
                             "needs_llm_analysis": has_text,
                             "analysis_type": "exec_comp",
+                            **filing_identity,
                         },
                     )
                 )
@@ -164,6 +197,7 @@ class FilingAnalysisStrategy:
                             "current_text": event_text[:5000],
                             "needs_llm_analysis": has_text,
                             "analysis_type": "material_event",
+                            **filing_identity,
                         },
                     )
                 )
@@ -186,7 +220,10 @@ class FilingAnalysisStrategy:
                             "file_url": filing.get("file_url", ""),
                             "current_text": stake_text[:5000],
                             "needs_llm_analysis": has_text,
-                            "analysis_type": "activist_stake" if is_activist else "passive_stake",
+                            "analysis_type": "activist_stake"
+                            if is_activist
+                            else "passive_stake",
+                            **filing_identity,
                         },
                     )
                 )

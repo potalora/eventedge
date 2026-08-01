@@ -3,6 +3,7 @@
 One JSONL line per (cohort, trading_date) appended to equity_snapshots.jsonl
 in the cohort's state_dir. Reruns of the same date overwrite the existing row.
 """
+
 from __future__ import annotations
 
 import json
@@ -10,6 +11,7 @@ import logging
 import math
 import os
 import tempfile
+from pathlib import Path
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
@@ -36,13 +38,15 @@ def _atomic_write_text(path: str, text: str) -> None:
         raise
 
 
-def _mark_to_market(trade: dict[str, Any], current_price: float | None) -> tuple[float, float]:
+def _mark_to_market(
+    trade: dict[str, Any], current_price: float | None
+) -> tuple[float, float]:
     """Return (position_value, unrealized_pnl) for a single open trade."""
     entry = float(trade.get("entry_price", 0) or 0)
     shares = float(trade.get("shares", 0) or 0)
     direction = trade.get("direction", "long")
     if current_price is None or math.isnan(current_price) or current_price <= 0:
-        current_price = entry
+        raise ValueError("missing valid mark for open paper trade")
 
     if direction == "short":
         # Short pnl: (entry - current) * shares; liability = current * shares
@@ -94,6 +98,32 @@ def write_snapshot(
 
     Returns the snapshot dict that was written.
     """
+    ledger_path = Path(state_dir) / "portfolio.db"
+    if os.path.lexists(ledger_path):
+        from tradingagents.strategies.state.compatibility_projection import (
+            project_equity_snapshots,
+        )
+        from tradingagents.strategies.state.portfolio_ledger import (
+            MissingMarkError,
+            PortfolioLedger,
+        )
+
+        ledger = PortfolioLedger.open_existing(ledger_path)
+        try:
+            snapshots = project_equity_snapshots(
+                ledger, Path(state_dir) / SNAPSHOT_FILENAME
+            )
+        finally:
+            ledger.close()
+        snapshot = next(
+            (row for row in snapshots if row.get("date") == trading_date), None
+        )
+        if snapshot is None:
+            raise MissingMarkError(
+                f"no authoritative PortfolioLedger snapshot for {trading_date}"
+            )
+        return snapshot
+
     long_value = 0.0
     short_liability = 0.0
     unrealized = 0.0
@@ -164,6 +194,18 @@ def write_snapshot(
 
 def load_snapshots(state_dir: str) -> list[dict[str, Any]]:
     """Read all equity snapshots for a cohort, sorted by date."""
+    ledger_path = Path(state_dir) / "portfolio.db"
+    if os.path.lexists(ledger_path):
+        from tradingagents.strategies.state.compatibility_projection import (
+            project_equity_snapshots,
+        )
+        from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+        ledger = PortfolioLedger.open_existing(ledger_path)
+        try:
+            return project_equity_snapshots(ledger, Path(state_dir) / SNAPSHOT_FILENAME)
+        finally:
+            ledger.close()
     path = os.path.join(state_dir, SNAPSHOT_FILENAME)
     if not os.path.exists(path):
         return []

@@ -46,7 +46,10 @@ class CongressionalTradesStrategy:
     data_sources = ["congress", "yfinance"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -56,7 +59,10 @@ class CongressionalTradesStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -77,6 +83,27 @@ class CongressionalTradesStrategy:
         min_members = params.get("min_members", 1)
         max_positions = params.get("max_positions", 3)
 
+        def source_trade_key(trade: dict, ticker: str, tx_type: str) -> str:
+            native = trade.get("source_url") or trade.get("url") or trade.get("id")
+            if native:
+                return str(native)
+            fields = (
+                trade.get("chamber", "unknown"),
+                trade.get("representative") or trade.get("senator", "Unknown"),
+                trade.get("transaction_date", ""),
+                trade.get("amount", ""),
+                trade.get("owner", ""),
+                trade.get("publication_date")
+                or trade.get("disclosure_date")
+                or trade.get("filing_date")
+                or trade.get("pub_date", ""),
+                ticker,
+                tx_type,
+            )
+            if not fields[2] or not fields[3]:
+                return ""
+            return "|".join(str(value) for value in fields)
+
         # Group purchases by ticker
         ticker_buys: dict[str, list[dict]] = defaultdict(list)
 
@@ -94,13 +121,24 @@ class CongressionalTradesStrategy:
             if tier < min_bucket:
                 continue
 
-            ticker_buys[ticker].append({
-                "member": trade.get("representative") or trade.get("senator", "Unknown"),
-                "chamber": trade.get("chamber", "unknown"),
-                "amount": amount,
-                "tier": tier,
-                "date": trade.get("transaction_date", ""),
-            })
+            trade_key = source_trade_key(trade, ticker, tx_type)
+            if not trade_key:
+                continue
+            ticker_buys[ticker].append(
+                {
+                    "member": trade.get("representative")
+                    or trade.get("senator", "Unknown"),
+                    "chamber": trade.get("chamber", "unknown"),
+                    "amount": amount,
+                    "tier": tier,
+                    "date": trade.get("transaction_date", ""),
+                    "publication_date": trade.get("publication_date")
+                    or trade.get("disclosure_date")
+                    or trade.get("filing_date")
+                    or trade.get("pub_date", ""),
+                    "trade_key": trade_key,
+                }
+            )
 
         # Group sales by ticker
         ticker_sells: dict[str, list[dict]] = defaultdict(list)
@@ -119,13 +157,24 @@ class CongressionalTradesStrategy:
             if tier < min_bucket:
                 continue
 
-            ticker_sells[ticker].append({
-                "member": trade.get("representative") or trade.get("senator", "Unknown"),
-                "chamber": trade.get("chamber", "unknown"),
-                "amount": amount,
-                "tier": tier,
-                "date": trade.get("transaction_date", ""),
-            })
+            trade_key = source_trade_key(trade, ticker, tx_type)
+            if not trade_key:
+                continue
+            ticker_sells[ticker].append(
+                {
+                    "member": trade.get("representative")
+                    or trade.get("senator", "Unknown"),
+                    "chamber": trade.get("chamber", "unknown"),
+                    "amount": amount,
+                    "tier": tier,
+                    "date": trade.get("transaction_date", ""),
+                    "publication_date": trade.get("publication_date")
+                    or trade.get("disclosure_date")
+                    or trade.get("filing_date")
+                    or trade.get("pub_date", ""),
+                    "trade_key": trade_key,
+                }
+            )
 
         # Build candidates from tickers with enough unique members
         candidates = []
@@ -150,6 +199,18 @@ class CongressionalTradesStrategy:
                         "num_trades": len(buys),
                         "members": list(unique_members)[:5],
                         "max_tier": max(b["tier"] for b in buys),
+                        "trade_keys": sorted({b["trade_key"] for b in buys}),
+                        **(
+                            {
+                                "publication_date": max(
+                                    str(b["publication_date"])
+                                    for b in buys
+                                    if b.get("publication_date")
+                                )
+                            }
+                            if any(b.get("publication_date") for b in buys)
+                            else {}
+                        ),
                         "needs_llm_analysis": False,
                     },
                 )
@@ -176,13 +237,25 @@ class CongressionalTradesStrategy:
                         "num_trades": len(sells),
                         "members": list(unique_members)[:5],
                         "max_tier": max(s["tier"] for s in sells),
+                        "trade_keys": sorted({s["trade_key"] for s in sells}),
+                        **(
+                            {
+                                "publication_date": max(
+                                    str(s["publication_date"])
+                                    for s in sells
+                                    if s.get("publication_date")
+                                )
+                            }
+                            if any(s.get("publication_date") for s in sells)
+                            else {}
+                        ),
                         "needs_llm_analysis": False,
                     },
                 )
             )
 
         candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[:max_positions * 2]
+        return candidates[: max_positions * 2]
 
     def check_exit(
         self,

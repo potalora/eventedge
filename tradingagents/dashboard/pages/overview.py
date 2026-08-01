@@ -1,20 +1,16 @@
 """Autoresearch Overview — generation status, regime, capital deployment."""
-from __future__ import annotations
 
-from datetime import datetime
+from __future__ import annotations
 
 import streamlit as st
 
 from tradingagents.dashboard.charts import (
     REGIME_COLORS,
-    make_capital_bars,
     make_regime_timeline,
 )
 from tradingagents.dashboard.data_loaders import (
     get_active_generations,
-    load_all_trades,
-    load_capital_deployment,
-    load_cohort_metrics,
+    load_generation_metrics,
     load_regime_history,
 )
 
@@ -40,14 +36,9 @@ def render() -> None:
 
     st.markdown("---")
 
-    # ---- Capital deployment ----
-    st.subheader("Capital Deployment")
-    gen_tabs = st.tabs([g["gen_id"] for g in gens])
-    for tab, gen in zip(gen_tabs, gens):
-        with tab:
-            dep = load_capital_deployment(gen["gen_id"], gen["state_dir"])
-            fig = make_capital_bars(dep)
-            st.plotly_chart(fig, use_container_width=True)
+    st.info(
+        "$5k/$10k/$50k concentration stress tests are dependent scenarios, not combined fund AUM."
+    )
 
     # ---- Regime timeline ----
     st.subheader("Market Regime Timeline")
@@ -75,10 +66,10 @@ def _render_regime_banner(gen: dict) -> None:
         f'<div style="background-color:{color}22; border-left:4px solid {color}; '
         f'padding:12px 16px; border-radius:4px; margin-bottom:8px;">'
         f'<b style="color:{color}; font-size:1.2em;">'
-        f'Regime: {overall.upper()}</b>'
+        f"Regime: {overall.upper()}</b>"
         f'<span style="margin-left:24px; color:#ccc;">'
-        f'VIX {vix:.1f} &nbsp;|&nbsp; Credit {credit:.0f}bps &nbsp;|&nbsp; '
-        f'Yield Curve {yc_slope:+.2f} &nbsp;|&nbsp; {ts}</span></div>',
+        f"VIX {vix:.1f} &nbsp;|&nbsp; Credit {credit:.0f}bps &nbsp;|&nbsp; "
+        f"Yield Curve {yc_slope:+.2f} &nbsp;|&nbsp; {ts}</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -97,25 +88,40 @@ def _render_gen_card(gen: dict) -> None:
         if r.get("success"):
             run_dates.add(r["date"])
 
-    metrics = load_cohort_metrics(gen_id, state_dir)
-    cohorts = metrics.get("cohorts", {})
-    total_signals = sum(c.get("total_signals", 0) for c in cohorts.values())
-    total_trades = sum(c.get("total_trades", 0) for c in cohorts.values())
-
-    # Deduplicate signals: divide by 4 (4 sizes share signals per horizon)
-    unique_signals = total_signals // 4 if total_signals > 0 else 0
-
-    trades = load_all_trades(gen_id, state_dir)
-    unique_tickers = len({t.get("ticker") for t in trades})
+    metrics = load_generation_metrics(gen_id, state_dir)
+    headline = dict(metrics.get("headline_books", {}) or {})
+    total_decisions = sum(c.get("strategy_decisions", 0) for c in headline.values())
+    total_fills = sum(c.get("fills", 0) for c in headline.values())
+    epoch = metrics.get("epoch") or {}
 
     st.markdown(f"### {gen_id}")
     st.caption(f"`{commit}` — {desc}")
     c1, c2, c3 = st.columns(3)
     c1.metric("Trading Days", len(run_dates))
-    c2.metric("Signals", f"{unique_signals:,}")
-    c3.metric("Trades", f"{total_trades:,}")
+    c2.metric("Decisions", f"{total_decisions:,}")
+    c3.metric("Fills", f"{total_fills:,}")
 
     c4, c5, c6 = st.columns(3)
     c4.metric("Started", created)
-    c5.metric("Tickers", unique_tickers)
-    c6.metric("Cohorts", len(cohorts))
+    c5.metric("Tickers", "Unavailable (no v2 positions projection)")
+    c6.metric("Headline Books", len(headline))
+    st.caption(
+        f"Metric epoch: {epoch.get('epoch_id', 'unavailable')} · "
+        f"Schema v{metrics.get('metric_schema_version', 2)} · "
+        f"missing headline books: {len(metrics.get('missing_headline_books', []))}"
+    )
+    st.caption(
+        "Four $100k horizon books are dependent scenario portfolios; shared "
+        "signals and market data mean they are not independent observations."
+    )
+    quality = [
+        (
+            f"{cohort_id}: {book.get('valid_sessions', 'unavailable')} valid sessions; "
+            f"{book.get('missing_mark_count', 'unavailable')}/"
+            f"{book.get('stale_mark_count', 'unavailable')} missing/stale marks; "
+            f"valuation {book.get('valuation_at', 'unavailable')}; "
+            f"benchmark {book.get('benchmark_at', 'unavailable')}"
+        )
+        for cohort_id, book in sorted(headline.items())
+    ]
+    st.caption("Data quality — " + (" | ".join(quality) if quality else "unavailable"))

@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tradingagents.strategies.data_sources.regulations_source import RegulationsSource
 
 
@@ -81,3 +83,13 @@ def test_get_recent_proposed_rules_filters_each_agency_by_date():
     # Only the recent rule survives the client-side date filter (returned for each agency call).
     assert all(r["document_id"] == "new" for r in rules)
     assert len(rules) >= 1
+
+
+def test_search_documents_propagates_non_200_as_provider_failure():
+    src = RegulationsSource(api_key="test")
+    response = MagicMock()
+    response.status_code = 503
+
+    with patch("time.sleep"), patch("requests.get", return_value=response):
+        with pytest.raises(RuntimeError, match="regulations.gov returned 503"):
+            src.search_documents(agency_id="EPA")

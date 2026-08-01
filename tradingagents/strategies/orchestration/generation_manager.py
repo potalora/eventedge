@@ -222,39 +222,8 @@ class GenerationManager:
         return results
 
     def run_learning(self) -> dict[str, dict]:
-        """Run the learning loop for all active generations.
-
-        Returns:
-            {gen_id: {"success": bool, "elapsed_s": float, "error"?: str}}
-        """
-        results: dict[str, dict] = {}
-        manifest = self._load_manifest()
-
-        for gen_data in manifest["generations"]:
-            if gen_data["status"] != "active":
-                continue
-
-            gen_id = gen_data["gen_id"]
-            logger.info("Running learning for %s", gen_id)
-
-            result = self._run_cohorts_subprocess(
-                gen_data,
-                ["--learning"],
-            )
-            results[gen_id] = result
-
-            # Record in run_history
-            gen_data["run_history"].append({
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "action": "learning",
-                "success": result["success"],
-                "elapsed_s": result["elapsed_s"],
-                **({"error": result["error"]} if "error" in result else {}),
-            })
-            gen_data["run_history"] = gen_data["run_history"][-_MAX_RUN_HISTORY:]
-
-        self._save_manifest(manifest)
-        return results
+        """Refuse retired production learning without touching generation state."""
+        raise RuntimeError("production learning is disabled; no subprocess was started")
 
     def pause_generation(self, gen_id: str) -> None:
         """Set a generation's status to 'paused'."""
@@ -352,6 +321,8 @@ class GenerationManager:
         env = os.environ.copy()
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
         env["PYTHONPATH"] = str(Path(gen_data["worktree_path"]).resolve())
+        env["EVENTEDGE_GENERATION_ID"] = gen_data["gen_id"]
+        env["EVENTEDGE_GENERATION_COMMIT"] = gen_data["git_commit"]
 
         cmd = [
             str(self._venv_python),

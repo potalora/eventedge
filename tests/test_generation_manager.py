@@ -3,11 +3,13 @@
 Uses temporary git repos to test real worktree operations.
 All subprocess calls for daily/learning runs are mocked.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,24 +28,29 @@ def git_repo(tmp_path):
     """Create a minimal git repo with one commit."""
     subprocess.run(
         ["git", "init", str(tmp_path)],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "-C", str(tmp_path), "config", "user.email", "test@test.com"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "-C", str(tmp_path), "config", "user.name", "Test"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     (tmp_path / "hello.py").write_text("print('hello')\n")
     subprocess.run(
         ["git", "-C", str(tmp_path), "add", "."],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "-C", str(tmp_path), "commit", "-m", "initial"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return tmp_path
 
@@ -60,14 +67,18 @@ def manager(git_repo):
 def _head_sha(repo: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
 def _head_branch(repo: Path) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -76,11 +87,13 @@ def _add_commit(repo: Path, filename: str, content: str, message: str) -> str:
     (repo / filename).write_text(content)
     subprocess.run(
         ["git", "-C", str(repo), "add", filename],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "-C", str(repo), "commit", "-m", message],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return _head_sha(repo)
 
@@ -204,7 +217,6 @@ class TestGenerationDailyRun:
         # Mock subprocess.run at module level, but only for non-git calls
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
-        original_run = subprocess.run
         captured_calls = []
 
         def capture_run(*args, **kwargs):
@@ -219,6 +231,7 @@ class TestGenerationDailyRun:
         # Directly call _run_cohorts_subprocess with a mocked subprocess
         gen_data = {
             "gen_id": info.gen_id,
+            "git_commit": info.git_commit,
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
@@ -230,6 +243,8 @@ class TestGenerationDailyRun:
         assert "scripts/run_cohorts.py" in cmd[1]
         assert kwargs["env"]["AUTORESEARCH_STATE_DIR"] == info.state_dir
         assert kwargs["env"]["PYTHONPATH"] == str(Path(info.worktree_path).resolve())
+        assert kwargs["env"]["EVENTEDGE_GENERATION_ID"] == info.gen_id
+        assert kwargs["env"]["EVENTEDGE_GENERATION_COMMIT"] == info.git_commit
         assert kwargs["cwd"] == info.worktree_path
 
     def test_run_daily_records_history(self, git_repo, manager):
@@ -247,6 +262,66 @@ class TestGenerationDailyRun:
         assert entry["date"] == "2026-03-31"
         assert entry["success"] is True
         assert "elapsed_s" in entry
+
+    def test_subprocess_result_fails_when_any_cohort_is_invalid(
+        self, git_repo, manager
+    ):
+        """An invalid lifecycle result is a failed generation even at exit code zero."""
+        info = manager.start_generation("invalid cohort")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        process = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "horizon_30d_size_5k": {
+                        "error": False,
+                        "valid": False,
+                        "invalid_reason": "missing required mark",
+                    },
+                    "horizon_30d_size_10k": {"error": False, "valid": True},
+                },
+                indent=2,
+            ),
+            stderr="",
+        )
+        gen_data = {
+            "gen_id": info.gen_id,
+            "git_commit": info.git_commit,
+            "state_dir": info.state_dir,
+            "worktree_path": info.worktree_path,
+        }
+        with patch.object(gm_mod.subprocess, "run", return_value=process):
+            result = manager._run_cohorts_subprocess(gen_data, ["--date", "2026-03-31"])
+
+        assert result["success"] is False
+        assert "horizon_30d_size_5k" in result["error"]
+
+    def test_run_daily_cli_prints_all_results_then_exits_nonzero(
+        self, monkeypatch, capsys
+    ):
+        """The scheduled top-level command must propagate generation failure."""
+        from scripts import run_generations
+
+        results = {
+            "gen_001": {"success": False, "elapsed_s": 1.0, "error": "invalid"},
+            "gen_002": {"success": True, "elapsed_s": 2.0},
+        }
+        monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(GenerationManager, "run_daily", lambda self, date: results)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_generations.py", "run-daily", "--date", "2026-07-31"],
+        )
+
+        with pytest.raises(SystemExit) as raised:
+            run_generations.main()
+
+        output = capsys.readouterr().out
+        assert raised.value.code == 1
+        assert "gen_001: FAILED" in output
+        assert "gen_002: OK" in output
 
 
 # ------------------------------------------------------------------
@@ -315,113 +390,63 @@ class TestMultipleGenerations:
 
 
 class TestGenerationComparison:
-    def test_compare_empty_gens(self, tmp_path):
-        """Comparison with gens that have no state returns empty metrics."""
+    def test_compare_delegates_explicit_pair(self):
+        from datetime import date
+        from unittest.mock import Mock
+
+        from tradingagents.strategies.metrics.models import PairedComparison
+        from tradingagents.strategies.metrics.service import MetricsService
         from tradingagents.strategies.orchestration.generation_comparison import (
+            ComparisonPair,
             GenerationComparison,
-            GenerationInfo,
         )
 
-        state_dir = str(tmp_path / "gen_001")
-        os.makedirs(state_dir, exist_ok=True)
-
-        gen = GenerationInfo(
-            gen_id="gen_001",
-            state_dir=state_dir,
-            description="empty",
-            created_at="2026-03-31T00:00:00",
-            status="active",
+        candidate = Mock(spec=MetricsService)
+        baseline = Mock(spec=MetricsService)
+        candidate.compare.return_value = PairedComparison(
+            "candidate-epoch",
+            "baseline-epoch",
+            (date(2026, 8, 4),),
+            0.02,
+            0.01,
+            0.01,
         )
-        comp = GenerationComparison([gen])
-        result = comp.compare()
+        pair = ComparisonPair(
+            "gen-candidate",
+            "candidate-cohort",
+            "candidate-epoch",
+            "gen-baseline",
+            "baseline-cohort",
+            "baseline-epoch",
+        )
 
-        assert "generations" in result
-        assert "gen_001" in result["generations"]
-        # No cohort subdirectories exist, so cohorts should be empty
-        assert result["generations"]["gen_001"]["cohorts"] == {}
+        result = GenerationComparison(
+            {"gen-candidate": candidate, "gen-baseline": baseline}
+        ).compare((pair,))
 
-    def test_compare_with_synthetic_data(self, tmp_path):
-        """Create state dirs with paper_trades.json and signal_journal.jsonl."""
+        assert result["metric_schema_version"] == 2
+        assert result["comparisons"][0]["common_sessions"] == (date(2026, 8, 4),)
+        candidate.compare.assert_called_once_with(
+            "candidate-cohort",
+            "candidate-epoch",
+            baseline,
+            "baseline-cohort",
+            "baseline-epoch",
+        )
+
+    def test_compare_rejects_unknown_generation(self):
+        from unittest.mock import Mock
+
+        from tradingagents.strategies.metrics.service import MetricsService
         from tradingagents.strategies.orchestration.generation_comparison import (
+            ComparisonPair,
             GenerationComparison,
-            GenerationInfo,
         )
 
-        state_dir = str(tmp_path / "gen_001")
-        control_dir = Path(state_dir) / "control"
-        control_dir.mkdir(parents=True, exist_ok=True)
-
-        # Write paper_trades.json
-        trades = [
-            {
-                "ticker": "AAPL",
-                "strategy": "earnings_call",
-                "direction": "long",
-                "entry_date": "2026-03-15",
-                "entry_price": 150.0,
-                "exit_price": 160.0,
-                "pnl_pct": 0.0667,
-                "status": "closed",
-            },
-            {
-                "ticker": "MSFT",
-                "strategy": "earnings_call",
-                "direction": "long",
-                "entry_date": "2026-03-16",
-                "entry_price": 300.0,
-                "exit_price": 290.0,
-                "pnl_pct": -0.0333,
-                "status": "closed",
-            },
-        ]
-        (control_dir / "paper_trades.json").write_text(json.dumps(trades))
-
-        # Write signal_journal.jsonl
-        entries = [
-            {
-                "timestamp": "2026-03-15T10:00:00",
-                "strategy": "earnings_call",
-                "ticker": "AAPL",
-                "direction": "long",
-                "score": 0.8,
-                "return_5d": 0.05,
-            },
-            {
-                "timestamp": "2026-03-16T10:00:00",
-                "strategy": "earnings_call",
-                "ticker": "MSFT",
-                "direction": "long",
-                "score": 0.7,
-                "return_5d": -0.03,
-            },
-        ]
-        with open(control_dir / "signal_journal.jsonl", "w") as f:
-            for e in entries:
-                f.write(json.dumps(e) + "\n")
-
-        gen = GenerationInfo(
-            gen_id="gen_001",
-            state_dir=state_dir,
-            description="synthetic",
-            created_at="2026-03-31T00:00:00",
-            status="active",
-        )
-        comp = GenerationComparison([gen])
-        result = comp.compare()
-
-        gen_data = result["generations"]["gen_001"]
-        assert "control" in gen_data["cohorts"]
-
-        control = gen_data["cohorts"]["control"]
-        assert control["total_trades"] == 2
-        assert control["closed_trades"] == 2
-        assert control["total_signals"] == 2
-        assert control["hit_rate"] == 0.5  # 1 hit out of 2
-        assert control["num_trading_days"] == 2
-        assert control["date_range"] == ["2026-03-15", "2026-03-16"]
-        assert control["sharpe"] is not None
-        assert control["total_return"] is not None
-        assert "earnings_call" in control["per_strategy"]
+        service = Mock(spec=MetricsService)
+        pair = ComparisonPair("missing", "a", "e1", "known", "b", "e2")
+        with pytest.raises(KeyError, match="unknown generation"):
+            GenerationComparison({"known": service}).compare((pair,))
 
 
 # ------------------------------------------------------------------
@@ -453,14 +478,18 @@ class TestRunLogPersistence:
     """A generation run's captured output must be persisted for silent-strategy diagnosis."""
 
     def test_write_run_log_persists_stdout_stderr(self, tmp_path):
-        from tradingagents.strategies.orchestration.generation_manager import GenerationManager
+        from tradingagents.strategies.orchestration.generation_manager import (
+            GenerationManager,
+        )
 
         mgr = GenerationManager(str(tmp_path))
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         gen_data = {"gen_id": "gen_099", "state_dir": str(state_dir)}
 
-        mgr._write_run_log(gen_data, "Finnhub fetch: 9 earnings, 1135 news", "WARN throttled")
+        mgr._write_run_log(
+            gen_data, "Finnhub fetch: 9 earnings, 1135 news", "WARN throttled"
+        )
 
         log = state_dir / "last_run_output.log"
         assert log.exists()
@@ -473,9 +502,16 @@ class TestRunLogPersistence:
         from tradingagents.strategies.orchestration import generation_manager as gm
 
         mgr = gm.GenerationManager(str(tmp_path))
-        state_dir = tmp_path / "s"; state_dir.mkdir()
-        wt = tmp_path / "wt"; wt.mkdir()
-        gen_data = {"gen_id": "gen_100", "state_dir": str(state_dir), "worktree_path": str(wt)}
+        state_dir = tmp_path / "s"
+        state_dir.mkdir()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        gen_data = {
+            "gen_id": "gen_100",
+            "git_commit": "frozen-commit-100",
+            "state_dir": str(state_dir),
+            "worktree_path": str(wt),
+        }
 
         class _Proc:
             returncode = 0
@@ -483,7 +519,9 @@ class TestRunLogPersistence:
             stderr = ""
 
         monkeypatch.setattr(gm.subprocess, "run", lambda *a, **k: _Proc())
-        result = mgr._run_cohorts_subprocess(gen_data, ["run-daily", "--date", "2026-05-29"])
+        result = mgr._run_cohorts_subprocess(
+            gen_data, ["run-daily", "--date", "2026-05-29"]
+        )
         assert result["success"] is True
         log = state_dir / "last_run_output.log"
         assert log.exists()

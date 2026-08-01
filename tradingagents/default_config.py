@@ -177,8 +177,6 @@ DEFAULT_CONFIG = {
             "min_trades_for_evaluation": 20,
             "exploration_budget_pct": 0.15,
             "max_vintage_age_days": 540,
-            "learning_loop_calendar_days": 30,
-            "learning_loop_min_strategies": 5,
             "portfolio_committee_enabled": True,
             "max_sector_concentration_pct": 0.30,
             "max_single_position_pct": 0.10,
@@ -188,6 +186,24 @@ DEFAULT_CONFIG = {
             "borrow_cost_tiers": {5: 0.005, 15: 0.02, 30: 0.05},
             "borrow_cost_reject_above": 0.05,
             "hard_to_borrow_si_pct": 30,
+        },
+        # Versioned execution/accounting contract.  It intentionally does not
+        # replace the conservative short_selling gates above.
+        "paper_ledger": {
+            "schema_version": 1,
+            "calendar": "XNYS",
+            "pricing_version": "raw-yfinance-v1",
+            "execution_clock_version": "next-xnys-open-v1",
+            "cost_model_version": "equity-10bps-v1",
+            "slippage_bps": "10",
+            "commission_per_fill": "0",
+            "other_fee_per_fill": "0",
+            "margin_requirement": "1.50",
+            "margin_financing_rate": "0",
+            "idle_cash_yield_rate": "0",
+            "existing_short_missing_borrow_rate": "0.30",
+            "benchmark_symbols": ["SPY", "BIL"],
+            "bar_max_age_hours": 24,
         },
         # gen_002 risk-discipline knobs. Defaults reproduce gen_001 behavior;
         # each is read by exactly one component. Flip per generation.

@@ -50,6 +50,7 @@ class USASpendingSource:
         """USASpending is available if requests is installed."""
         try:
             import requests  # noqa: F401
+
             return True
         except ImportError:
             return False
@@ -77,7 +78,8 @@ class USASpendingSource:
 
         Returns:
             List of contract dicts with keys:
-            award_id, recipient_name, amount, agency, start_date, description.
+            award_id, recipient_name, amount, agency, start_date,
+            last_modified_date, description.
         """
         import requests
 
@@ -106,6 +108,7 @@ class USASpendingSource:
                 "Award Amount",
                 "Awarding Agency",
                 "Start Date",
+                "Last Modified Date",
                 "Description",
             ],
             "page": 1,
@@ -127,14 +130,17 @@ class USASpendingSource:
             data = resp.json()
             results: list[dict[str, Any]] = []
             for row in data.get("results", []):
-                results.append({
-                    "award_id": row.get("Award ID", ""),
-                    "recipient_name": row.get("Recipient Name", ""),
-                    "amount": row.get("Award Amount", 0),
-                    "agency": row.get("Awarding Agency", ""),
-                    "start_date": row.get("Start Date", ""),
-                    "description": row.get("Description", ""),
-                })
+                results.append(
+                    {
+                        "award_id": row.get("Award ID", ""),
+                        "recipient_name": row.get("Recipient Name", ""),
+                        "amount": row.get("Award Amount", 0),
+                        "agency": row.get("Awarding Agency", ""),
+                        "start_date": row.get("Start Date", ""),
+                        "last_modified_date": row.get("Last Modified Date", ""),
+                        "description": row.get("Description", ""),
+                    }
+                )
             return results
         except Exception:
             logger.error("search_contracts failed", exc_info=True)
@@ -185,16 +191,20 @@ class USASpendingSource:
     # ------------------------------------------------------------------
 
     def _dispatch_search_contracts(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.search_contracts(
-            keywords=params.get("keywords"),
-            recipient=params.get("recipient"),
-            date_from=params.get("date_from"),
-            date_to=params.get("date_to"),
-            min_amount=params.get("min_amount"),
-        )}
+        return {
+            "data": self.search_contracts(
+                keywords=params.get("keywords"),
+                recipient=params.get("recipient"),
+                date_from=params.get("date_from"),
+                date_to=params.get("date_to"),
+                min_amount=params.get("min_amount"),
+            )
+        }
 
     def _dispatch_recent_large(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.get_recent_large_contracts(
-            min_amount=params.get("min_amount", 100_000_000),
-            days_back=params.get("days_back", 30),
-        )}
+        return {
+            "data": self.get_recent_large_contracts(
+                min_amount=params.get("min_amount", 100_000_000),
+                days_back=params.get("days_back", 30),
+            )
+        }

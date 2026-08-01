@@ -9,9 +9,11 @@ a 1-3 week delay to downstream firms.
 
 Data sources: Finnhub (company news + peer relationships).
 """
+
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from .base import Candidate
@@ -20,11 +22,27 @@ logger = logging.getLogger(__name__)
 
 # Keywords that indicate supply chain disruption
 DISRUPTION_KEYWORDS = [
-    "supply chain", "shortage", "disruption", "recall", "force majeure",
-    "factory shutdown", "port closure", "embargo", "tariff", "sanctions",
-    "logistics", "backlog", "inventory shortage", "chip shortage",
-    "port congestion", "inventory", "sanction", "trade restriction",
-    "export ban", "import duty", "raw material",
+    "supply chain",
+    "shortage",
+    "disruption",
+    "recall",
+    "force majeure",
+    "factory shutdown",
+    "port closure",
+    "embargo",
+    "tariff",
+    "sanctions",
+    "logistics",
+    "backlog",
+    "inventory shortage",
+    "chip shortage",
+    "port congestion",
+    "inventory",
+    "sanction",
+    "trade restriction",
+    "export ban",
+    "import duty",
+    "raw material",
 ]
 
 
@@ -36,7 +54,10 @@ class SupplyChainStrategy:
     data_sources = ["finnhub", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -47,7 +68,10 @@ class SupplyChainStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -83,6 +107,22 @@ class SupplyChainStrategy:
             if not is_disruption:
                 continue
 
+            article_id = article.get("id") or article.get("article_id", "")
+            article_url = article.get("url", "")
+            published = article.get("published_at") or article.get("datetime")
+            if isinstance(published, (int, float)):
+                published = datetime.fromtimestamp(
+                    published, tz=timezone.utc
+                ).isoformat()
+            elif isinstance(published, str) and published.isdigit():
+                published = datetime.fromtimestamp(
+                    int(published), tz=timezone.utc
+                ).isoformat()
+            if not (article_id or article_url) and not (
+                article.get("source") and article.get("headline") and published
+            ):
+                continue
+
             # Get downstream peers/customers that may be affected
             peers = chains.get(symbol, [])
 
@@ -94,6 +134,9 @@ class SupplyChainStrategy:
                     score=0.6,
                     metadata={
                         "headline": article.get("headline", ""),
+                        "article_id": article_id,
+                        "url": article_url,
+                        **({"published_at": published} if published else {}),
                         "summary": article.get("summary", "")[:1000],
                         "source": article.get("source", ""),
                         "affected_peers": peers[:10],
@@ -116,7 +159,9 @@ class SupplyChainStrategy:
                     candidate.metadata["short_pct_of_float"] = short_pct
                     candidate.metadata["days_to_cover"] = si.get("days_to_cover", 0)
             if isinstance(profile_data, dict) and candidate.ticker in profile_data:
-                candidate.metadata["sector"] = profile_data[candidate.ticker].get("sector", "")
+                candidate.metadata["sector"] = profile_data[candidate.ticker].get(
+                    "sector", ""
+                )
 
         return candidates[: params.get("max_positions", 4)]
 

@@ -8,6 +8,29 @@ from .base import Candidate
 logger = logging.getLogger(__name__)
 
 
+def _source_filing_key(filing: dict) -> str:
+    native = (
+        filing.get("accession_number") or filing.get("filing_id") or filing.get("id")
+    )
+    if native:
+        return str(native)
+    observed = filing.get("filing_date") or filing.get("transaction_date")
+    if not observed:
+        return ""
+    return "|".join(
+        str(filing.get(key, ""))
+        for key in (
+            "owner_name",
+            "filing_date",
+            "transaction_date",
+            "transaction_code",
+            "transaction_type",
+            "shares",
+            "price_per_share",
+        )
+    )
+
+
 class InsiderActivityStrategy:
     """Unified insider activity strategy (merges P4 insider_combo + P7 insider_10b5_1).
 
@@ -27,7 +50,10 @@ class InsiderActivityStrategy:
     data_sources = ["edgar", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
@@ -38,7 +64,10 @@ class InsiderActivityStrategy:
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            HORIZON_PARAMS,
+        )
+
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
@@ -79,15 +108,25 @@ class InsiderActivityStrategy:
 
             # Buy cluster signal: multiple insiders buying
             if len(buys) >= min_cluster:
-                unique_buyers = {f.get("owner_name", "") for f in buys if f.get("owner_name")}
+                unique_buyers = {
+                    f.get("owner_name", "") for f in buys if f.get("owner_name")
+                }
                 officer_buys = [f for f in buys if f.get("is_officer")]
                 total_shares = sum(f.get("shares", 0) for f in buys)
-                total_value = sum(f.get("shares", 0) * f.get("price_per_share", 0) for f in buys)
+                total_value = sum(
+                    f.get("shares", 0) * f.get("price_per_share", 0) for f in buys
+                )
 
                 # Score: cluster size × officer bonus × open-market premium, normalized to [0, 1]
                 open_market = [f for f in buys if f.get("transaction_code") == "P"]
-                raw = len(buys) * (1.5 if officer_buys else 1.0) * (2.0 if open_market else 1.0)
-                score = min(raw / 10.0, 1.0)  # 10+ filings with bonuses saturates at 1.0
+                raw = (
+                    len(buys)
+                    * (1.5 if officer_buys else 1.0)
+                    * (2.0 if open_market else 1.0)
+                )
+                score = min(
+                    raw / 10.0, 1.0
+                )  # 10+ filings with bonuses saturates at 1.0
 
                 candidates.append(
                     Candidate(
@@ -103,21 +142,41 @@ class InsiderActivityStrategy:
                             "total_value": round(total_value, 2),
                             "open_market_buys": len(open_market),
                             "filings": buys[:5],
+                            "filing_keys": sorted(
+                                _source_filing_key(filing)
+                                for filing in buys
+                                if _source_filing_key(filing)
+                            ),
                             "needs_llm_analysis": True,
                             "analysis_type": "insider_activity",
                             "cluster_type": "buy_cluster",
+                            **(
+                                {
+                                    "filing_date": max(
+                                        str(filing["filing_date"])
+                                        for filing in buys
+                                        if filing.get("filing_date")
+                                    )
+                                }
+                                if any(filing.get("filing_date") for filing in buys)
+                                else {}
+                            ),
                         },
                     )
                 )
 
             # Sell pattern / 10b5-1 red flag signal
             if len(sells) >= min_sell:
-                unique_sellers = {f.get("owner_name", "") for f in sells if f.get("owner_name")}
+                unique_sellers = {
+                    f.get("owner_name", "") for f in sells if f.get("owner_name")
+                }
                 officer_sells = [f for f in sells if f.get("is_officer")]
                 total_sell_shares = sum(f.get("shares", 0) for f in sells)
 
                 raw = len(sells) * (1.5 if officer_sells else 1.0)
-                score = min(raw / 10.0, 1.0)  # 10+ filings with bonuses saturates at 1.0
+                score = min(
+                    raw / 10.0, 1.0
+                )  # 10+ filings with bonuses saturates at 1.0
 
                 candidates.append(
                     Candidate(
@@ -131,9 +190,25 @@ class InsiderActivityStrategy:
                             "officer_sells": len(officer_sells),
                             "total_sell_shares": total_sell_shares,
                             "filings": sells[:5],
+                            "filing_keys": sorted(
+                                _source_filing_key(filing)
+                                for filing in sells
+                                if _source_filing_key(filing)
+                            ),
                             "needs_llm_analysis": True,
                             "analysis_type": "insider_activity",
                             "cluster_type": "sell_pattern",
+                            **(
+                                {
+                                    "filing_date": max(
+                                        str(filing["filing_date"])
+                                        for filing in sells
+                                        if filing.get("filing_date")
+                                    )
+                                }
+                                if any(filing.get("filing_date") for filing in sells)
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -149,16 +224,25 @@ class InsiderActivityStrategy:
                 if isinstance(insider_data, dict) and ticker in insider_data:
                     for obb_trade in insider_data[ticker].get("trades", []):
                         title = (obb_trade.get("title", "") or "").upper()
-                        if any(t in title for t in ["CEO", "CFO", "COO", "CTO", "PRESIDENT"]):
+                        if any(
+                            t in title
+                            for t in ["CEO", "CFO", "COO", "CTO", "PRESIDENT"]
+                        ):
                             candidate.score = min(candidate.score * 1.3, 1.0)
-                            candidate.metadata["officer_title"] = obb_trade.get("title", "")
+                            candidate.metadata["officer_title"] = obb_trade.get(
+                                "title", ""
+                            )
                             break
                         elif "DIRECTOR" in title:
-                            candidate.metadata["officer_title"] = obb_trade.get("title", "")
+                            candidate.metadata["officer_title"] = obb_trade.get(
+                                "title", ""
+                            )
                             break
                 # Sector context
                 if isinstance(profile_data, dict) and ticker in profile_data:
-                    candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
+                    candidate.metadata["sector"] = profile_data[ticker].get(
+                        "sector", ""
+                    )
 
         candidates.sort(key=lambda c: c.score, reverse=True)
         return candidates[: params.get("max_positions", 3)]

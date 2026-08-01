@@ -1,5 +1,12 @@
 """Re-entry cooldown: block names stopped out within the cooldown window."""
-from tradingagents.strategies.trading.risk_gate import compute_cooling_tickers
+from unittest.mock import MagicMock
+
+from tradingagents.execution.base_broker import AccountInfo
+from tradingagents.strategies.trading.risk_gate import (
+    RiskGate,
+    RiskGateConfig,
+    compute_cooling_tickers,
+)
 
 
 def _stop(ticker, exit_date, reason="stop_loss"):
@@ -31,10 +38,6 @@ class TestComputeCoolingTickers:
         closed = [_stop("X", ""), _stop("Y", None), {"ticker": "Z", "exit_reason": "stop_loss"}]
         assert compute_cooling_tickers(closed, "2026-06-09", 7) == set()
 
-
-from tradingagents.strategies.trading.risk_gate import RiskGateConfig
-
-
 class TestRiskGateConfigCooldown:
     def test_default_cooldown_is_zero(self):
         assert RiskGateConfig().reentry_cooldown_days == 0
@@ -48,13 +51,10 @@ class TestRiskGateConfigCooldown:
     def test_from_dict_defaults_to_zero(self):
         assert RiskGateConfig.from_dict({"autoresearch": {}}).reentry_cooldown_days == 0
 
-
-from tradingagents.strategies.trading.risk_gate import RiskGate
-from tradingagents.execution.paper_broker import PaperBroker
-
-
 def _gate(cooldown_days=7):
-    broker = PaperBroker(initial_capital=50_000)
+    broker = MagicMock()
+    broker.get_account.return_value = AccountInfo(50_000, 50_000, 50_000)
+    broker.get_positions.return_value = []
     cfg = RiskGateConfig(total_capital=50_000, reentry_cooldown_days=cooldown_days)
     return RiskGate(cfg, broker)
 

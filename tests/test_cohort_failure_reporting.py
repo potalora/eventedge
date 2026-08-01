@@ -9,9 +9,16 @@ report was noticed.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+import sys
+from unittest.mock import Mock, patch
 
-from tradingagents.strategies.orchestration.cohort_orchestrator import count_failed_cohorts
+import pytest
+
+from scripts import run_cohorts
+from tradingagents.strategies.orchestration.cohort_orchestrator import (
+    CohortOrchestrator,
+    count_failed_cohorts,
+)
 from tradingagents.strategies.orchestration.generation_manager import (
     GenerationManager,
     _extract_cohort_results,
@@ -68,6 +75,38 @@ def test_extract_cohort_results_garbage_returns_none():
     assert _extract_cohort_results("") is None
 
 
+def test_reset_refuses_before_constructing_ledger_orchestrator(monkeypatch, capsys):
+    """A reset cannot delete P0 ledgers or retain a mismatched metric store."""
+
+    def fail_if_constructed(*args, **kwargs):
+        raise AssertionError("ledger-backed orchestrator must not be constructed")
+
+    monkeypatch.setattr(sys, "argv", ["run_cohorts.py", "--reset"])
+    monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_004")
+    monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "abc123")
+    monkeypatch.setattr(
+        "tradingagents.strategies.orchestration.cohort_orchestrator.CohortOrchestrator",
+        fail_if_constructed,
+    )
+
+    with pytest.raises(SystemExit) as error:
+        run_cohorts.main()
+
+    assert error.value.code == 2
+    assert "reset is disabled for ledger-backed generation state" in capsys.readouterr().err
+
+
+def test_orchestrator_reset_refuses_before_deleting_ledger_state():
+    orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
+    state = Mock()
+    orchestrator.cohorts = [{"state": state}]
+
+    with pytest.raises(RuntimeError, match="reset is disabled for ledger-backed generation state"):
+        orchestrator.reset()
+
+    state.reset.assert_not_called()
+
+
 # --- the core defect: rc==0 but cohorts failed => success False ---
 
 class _FakeProc:
@@ -82,6 +121,7 @@ def _run_with_proc(tmp_path, proc):
     mgr._venv_python = "python"
     gen_data = {
         "gen_id": "gen_001",
+        "git_commit": "synthetic-commit-gen-001",
         "state_dir": str(tmp_path / "state"),
         "worktree_path": str(tmp_path / "wt"),
     }

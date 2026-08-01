@@ -1,88 +1,112 @@
-"""Tests for PaperBroker short position tracking."""
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
 from tradingagents.execution.paper_broker import PaperBroker
+from tradingagents.strategies.execution import OrderIntent, SignalRecord
+from tradingagents.strategies.execution.cost_model import PaperCostModel
+from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 
-class TestPaperBrokerShorts:
-    def test_short_sell_opens_position(self):
-        broker = PaperBroker(initial_capital=50_000)
-        result = broker.submit_short_sell("AAPL", qty=10, price=150.0, stop_loss=172.5)
+UTC = timezone.utc
+SESSION = date(2026, 8, 3)
+
+
+def _signal(direction: str) -> SignalRecord:
+    return SignalRecord(
+        f"{direction}-signal",
+        "epoch",
+        "policy",
+        f"{direction}-event",
+        "litigation",
+        "AAPL",
+        direction,
+        datetime(2026, 7, 31, 19, tzinfo=UTC),
+        datetime(2026, 7, 31, 19, 30, tzinfo=UTC),
+        date(2026, 7, 31),
+        Decimal("100"),
+        datetime(2026, 7, 31, 20, tzinfo=UTC),
+        "evidence",
+    )
+
+
+def _intent(side: str, signal_id: str) -> OrderIntent:
+    return OrderIntent(
+        f"{side}-intent",
+        (signal_id,),
+        "cohort",
+        side,
+        10,
+        datetime(2026, 7, 31, 20, tzinfo=UTC),
+        SESSION,
+        "next_session_open",
+        "pending",
+        None,
+        None,
+    )
+
+
+def test_short_and_cover_positions_are_authoritative_ledger_views(tmp_path):
+    ledger = PortfolioLedger(
+        tmp_path / "ledger.db",
+        "cohort",
+        Decimal("50000"),
+        short_selling_config={"borrow_cost_reject_above": "0.05"},
+    )
+    broker = PaperBroker(ledger)
+    signal = _signal("short")
+    short = _intent("short", signal.signal_id)
+    try:
+        ledger.record_signal(signal)
+        ledger.stage_intent(short)
+        short_fill = PaperCostModel().fill(
+            short,
+            Decimal("100"),
+            datetime(2026, 8, 3, 13, 30, tzinfo=UTC),
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        result = broker.submit_short_sell(
+            "AAPL",
+            10,
+            intent=short,
+            fill=short_fill,
+            borrow_rate=Decimal("0.02"),
+        )
         assert result.status == "filled"
-        assert result.filled_qty == 10
-        assert result.filled_price == 150.0
-        assert broker.cash == 50_000 + 10 * 150.0  # cash includes short proceeds
-        assert broker.margin_used > 0
+        assert broker.get_positions()[0]["side"] == "short"
+        assert broker.get_account().buying_power < 50000
 
-    def test_short_sell_reserves_margin(self):
-        broker = PaperBroker(initial_capital=50_000)
-        broker.submit_short_sell("AAPL", qty=10, price=150.0, stop_loss=172.5)
-        expected_margin = 10 * 150.0 * 1.5  # Reg T
-        assert broker.margin_used == expected_margin
-
-    def test_short_sell_rejected_insufficient_margin(self):
-        broker = PaperBroker(initial_capital=5_000)
-        result = broker.submit_short_sell("AAPL", qty=100, price=150.0)
-        assert result.status == "rejected"
-        assert broker.margin_used == 0
-
-    def test_cover_short_with_profit(self):
-        broker = PaperBroker(initial_capital=50_000)
-        broker.submit_short_sell("AAPL", qty=10, price=150.0, stop_loss=172.5)
-        result = broker.submit_cover("AAPL", qty=10, price=140.0)
+        cover = _intent("cover", signal.signal_id)
+        ledger.stage_intent(cover)
+        cover_fill = PaperCostModel().fill(
+            cover,
+            Decimal("90"),
+            datetime(2026, 8, 3, 13, 31, tzinfo=UTC),
+            datetime(2026, 8, 3, 22, tzinfo=UTC),
+        )
+        result = broker.submit_cover("AAPL", 10, intent=cover, fill=cover_fill)
         assert result.status == "filled"
-        assert broker.cash == 50_000 + 100  # (150-140)*10
-        assert broker.margin_used == 0
+        assert broker.get_positions() == []
+        assert broker.get_account().portfolio_value > 50000
+    finally:
+        ledger.close()
 
-    def test_cover_short_with_loss(self):
-        broker = PaperBroker(initial_capital=50_000)
-        broker.submit_short_sell("AAPL", qty=10, price=150.0, stop_loss=172.5)
-        result = broker.submit_cover("AAPL", qty=10, price=160.0)
-        assert result.status == "filled"
-        assert broker.cash == 50_000 - 100  # (150-160)*10 = loss
-        assert broker.margin_used == 0
 
-    def test_cover_nonexistent_short_rejected(self):
-        broker = PaperBroker(initial_capital=50_000)
-        result = broker.submit_cover("AAPL", qty=10, price=140.0)
-        assert result.status == "rejected"
-
-    def test_short_positions_in_get_positions(self):
-        broker = PaperBroker(initial_capital=50_000)
-        broker.submit_stock_order("MSFT", "buy", 5, price=300.0)
-        broker.submit_short_sell("AAPL", qty=10, price=150.0)
-        positions = broker.get_positions()
-        tickers = {p["ticker"] for p in positions}
-        assert "MSFT" in tickers
-        assert "AAPL" in tickers
-        short_pos = next(p for p in positions if p["ticker"] == "AAPL")
-        assert short_pos.get("side") == "short"
-
-    def test_account_includes_short_impact(self):
-        broker = PaperBroker(initial_capital=50_000)
-        broker.submit_short_sell("AAPL", qty=10, price=150.0)
-        account = broker.get_account()
-        assert account.buying_power < 50_000  # reduced by margin
-
-    def test_accrue_borrow_cost(self):
-        broker = PaperBroker(initial_capital=50_000)
-        broker.submit_short_sell("AAPL", qty=10, price=150.0)
-        broker.accrue_borrow_cost("2026-04-04", borrow_rates={"AAPL": 0.02})
-        expected_daily = (10 * 150.0) * 0.02 / 365
-        assert abs(broker.accrued_borrow_cost - expected_daily) < 0.01
-        post_short_cash = 50_000 + 10 * 150.0  # includes short proceeds
-        assert broker.cash < post_short_cash  # borrow cost reduces cash
-
-    def test_reconstruct_includes_shorts(self):
-        broker = PaperBroker(initial_capital=50_000)
-        open_trades = [
-            {"ticker": "AAPL", "shares": 10, "entry_price": 150.0, "direction": "short"},
-            {"ticker": "MSFT", "shares": 5, "entry_price": 300.0, "direction": "long"},
-        ]
-        broker.reconstruct_from_trades(open_trades)
-        positions = broker.get_positions()
-        assert len(positions) == 2
-        short_pos = next(p for p in positions if p["ticker"] == "AAPL")
-        assert short_pos["side"] == "short"
-        long_pos = next(p for p in positions if p["ticker"] == "MSFT")
-        assert long_pos.get("side") != "short"
+def test_paper_broker_has_no_mutable_reconstruction_path(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "ledger.db", "cohort", Decimal("5000"))
+    broker = PaperBroker(ledger)
+    try:
+        assert not hasattr(broker, "cash")
+        assert not hasattr(broker, "positions")
+        assert not hasattr(broker, "short_positions")
+        assert not hasattr(broker, "reconstruct_from_trades")
+        with pytest.raises(
+            RuntimeError,
+            match="PaperBroker direct price submission is disabled",
+        ):
+            broker.submit_short_sell("AAPL", 10, Decimal("100"))
+    finally:
+        ledger.close()
