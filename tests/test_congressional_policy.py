@@ -106,6 +106,11 @@ def test_matching_native_alias_dedupes_when_vendor_facts_differ() -> None:
     assert len(candidates) == 1
     assert candidates[0].metadata["num_trades"] == 2
 
+    first_run = _screen(first, second_member)
+    mirror_run = _screen(mirror, second_member)
+    assert first_run[0].metadata["trade_keys"] == mirror_run[0].metadata["trade_keys"]
+    assert first_run[0].event_key == mirror_run[0].event_key
+
 
 def test_distinct_native_ids_remain_distinct_components_but_share_cluster_identity() -> None:
     first = _trade("Rep A", native_id="DISC-41")
@@ -224,6 +229,23 @@ def test_timestamp_publication_is_eligible_only_through_exact_xnys_close() -> No
 def test_timestamp_identity_normalizes_equivalent_timezones() -> None:
     utc = _trade("Rep A", publication_date="2026-07-30T20:00:00+00:00")
     eastern = _trade("Rep A", publication_date="2026-07-30T16:00:00-04:00")
+
+    assert congressional_event_key(utc, "long") == congressional_event_key(
+        eastern, "long"
+    )
+
+
+def test_timestamp_identity_uses_new_york_date_when_utc_date_differs() -> None:
+    utc = _trade(
+        "Rep A",
+        publication_date="2026-07-30T23:00:00+00:00",
+        source_url="https://vendor-one.example/disclosure",
+    )
+    eastern = _trade(
+        "Rep A",
+        publication_date="2026-07-31T01:00:00+00:00",
+        source_url="https://vendor-two.example/disclosure",
+    )
 
     assert congressional_event_key(utc, "long") == congressional_event_key(
         eastern, "long"

@@ -9,6 +9,7 @@ from datetime import date as Date
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
@@ -19,6 +20,7 @@ from tradingagents.strategies.orchestration.trading_calendar import (
 from .base import Candidate
 
 logger = logging.getLogger(__name__)
+_NEW_YORK = ZoneInfo("America/New_York")
 
 # Dollar amount buckets from congressional disclosures (ascending)
 AMOUNT_BUCKETS = [
@@ -120,6 +122,17 @@ def _native_disclosure_id(trade: dict[str, Any]) -> str:
     return ""
 
 
+def _publication_identity_date(value: object) -> str:
+    """Normalize eligible publication evidence to its New York calendar day."""
+    parsed = _parse_publication(value)
+    if parsed is None:
+        return ""
+    kind, publication = parsed
+    if kind == "date":
+        return publication.isoformat()
+    return publication.astimezone(_NEW_YORK).date().isoformat()
+
+
 def _stable_facts(trade: dict[str, Any], direction: str) -> dict[str, str]:
     """The narrow cross-vendor bridge; deliberately excludes vendor/source."""
     return {
@@ -128,7 +141,7 @@ def _stable_facts(trade: dict[str, Any], direction: str) -> dict[str, str]:
         "ticker": _normalized_text(trade.get("ticker")).upper(),
         "direction": direction,
         "transaction_date": _normalized_date(trade.get("transaction_date")),
-        "publication_date": _normalized_date(_publication_value(trade)),
+        "publication_date": _publication_identity_date(_publication_value(trade)),
         "amount": _normalized_text(trade.get("amount")),
         "owner": _normalized_text(trade.get("owner")),
     }
