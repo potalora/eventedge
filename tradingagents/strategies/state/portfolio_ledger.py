@@ -1458,6 +1458,12 @@ class PortfolioLedger:
                 result[key] = tuple(result[key])  # type: ignore[arg-type]
         return result
 
+    @staticmethod
+    def _require_exact_date(value: object, label: str) -> date:
+        if type(value) is not date:
+            raise TypeError(f"{label} must be an exact date")
+        return value
+
     def record_signal_policy_provenance(
         self,
         signal_id: str,
@@ -1501,6 +1507,7 @@ class PortfolioLedger:
             raise LedgerConflictError(
                 f"signal policy strategy mismatch for {signal_id}"
             )
+        self._require_signal_policy_binding(signal[0], payload)
         payload_json = _canonical_json(payload)
         payload_digest = self._policy_payload_digest(
             "signal", signal_id, payload_json
@@ -1591,6 +1598,7 @@ class PortfolioLedger:
             raise LedgerConflictError(
                 f"mismatched signal policy provenance {row['signal_id']}"
             )
+        self._require_signal_policy_binding(signal[0], payload)
         return self._policy_payload_result(
             "signal_id",
             str(row["signal_id"]),
@@ -1599,6 +1607,25 @@ class PortfolioLedger:
             str(row["payload_digest"]),
             _datetime(row["captured_at"]),
         )
+
+    def _require_signal_policy_binding(
+        self, signal: SignalRecord, payload: Mapping[str, object]
+    ) -> None:
+        binding = self.read_policy_session_context(signal.reference_session)
+        if binding is None:
+            raise LedgerConflictError(
+                f"missing bound policy context for signal {signal.signal_id}/"
+                f"{signal.reference_session}"
+            )
+        if (
+            binding["epoch_id"] != signal.epoch_id
+            or binding["policy_version"] != payload["policy_version"]
+            or binding["context_digest"] != payload["bound_context_digest"]
+        ):
+            raise LedgerConflictError(
+                f"signal policy binding mismatch for {signal.signal_id}/"
+                f"{signal.reference_session}"
+            )
 
     def record_intent_policy_provenance(
         self,
@@ -1912,6 +1939,7 @@ class PortfolioLedger:
         A restart with identical semantic input returns the first binding and
         its original timestamp.  Any changed semantic input conflicts.
         """
+        session = self._require_exact_date(session, "session")
         self._require_timezone_aware(bound_at, "bound_at")
         epoch_id = str(epoch_id).strip()
         policy_version = str(policy_version).strip()
@@ -1972,6 +2000,7 @@ class PortfolioLedger:
     def read_policy_session_context(
         self, session: date
     ) -> dict[str, object] | None:
+        session = self._require_exact_date(session, "session")
         row = self._connection.execute(
             """SELECT * FROM policy_session_contexts
                WHERE cohort_id = ? AND session = ?""",
@@ -2134,6 +2163,7 @@ class PortfolioLedger:
         limit: int = 256,
     ) -> tuple[dict[str, object], ...]:
         """Return marked open lots using only persisted raw ledger evidence."""
+        session = self._require_exact_date(session, "session")
         limit = self._policy_projection_limit(limit)
         rows = self._connection.execute(
             """SELECT l.*, f.intent_id,

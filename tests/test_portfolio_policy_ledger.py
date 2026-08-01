@@ -27,6 +27,23 @@ def _ledger(tmp_path) -> PortfolioLedger:
     return PortfolioLedger(tmp_path / "portfolio.db", COHORT, Decimal("5000"))
 
 
+def _bind_policy_context(
+    ledger: PortfolioLedger,
+    *,
+    session: date = FRIDAY,
+    epoch_id: str = "epoch-1",
+    policy_version: str = "portfolio_policy_v1",
+) -> dict[str, object]:
+    return ledger.bind_policy_session_context(
+        session,
+        epoch_id=epoch_id,
+        policy_version=policy_version,
+        policy_config={"max_positions": 5},
+        context={"cash": "5000", "positions": []},
+        bound_at=CAPTURED_AT,
+    )
+
+
 def _signal(
     signal_id: str = "signal-1",
     *,
@@ -114,6 +131,9 @@ def _record_signal_policy(
     sector: str = "Technology",
 ) -> dict[str, object]:
     ledger.record_signal(signal)
+    binding = _bind_policy_context(
+        ledger, session=signal.reference_session, epoch_id=signal.epoch_id
+    )
     return ledger.record_signal_policy_provenance(
         signal.signal_id,
         policy_version="portfolio_policy_v1",
@@ -126,7 +146,7 @@ def _record_signal_policy(
         order_eligible=True,
         decision="accepted",
         reason_codes=("accepted",),
-        bound_context_digest="context-digest-1",
+        bound_context_digest=str(binding["context_digest"]),
         captured_at=CAPTURED_AT,
     )
 
@@ -138,6 +158,8 @@ def _record_intent_policy(
     *,
     sector: str = "Technology",
 ) -> dict[str, object]:
+    signal_policy = ledger.read_signal_policy_provenance(signal.signal_id)
+    assert signal_policy is not None
     return ledger.record_intent_policy_provenance(
         intent.intent_id,
         signal_ids=intent.signal_ids,
@@ -151,7 +173,7 @@ def _record_intent_policy(
         order_eligible=True,
         decision="accepted",
         reason_codes=("accepted",),
-        bound_context_digest="context-digest-1",
+        bound_context_digest=str(signal_policy["bound_context_digest"]),
         captured_at=CAPTURED_AT,
     )
 
@@ -193,7 +215,7 @@ def test_companion_provenance_is_insert_once_reopenable_and_normalized(tmp_path)
             order_eligible=True,
             decision="accepted",
             reason_codes=("accepted", "accepted"),
-            bound_context_digest="context-digest-1",
+            bound_context_digest=str(signal_policy["bound_context_digest"]),
             captured_at=datetime(2026, 8, 1, 20, tzinfo=UTC),
         )
         assert replay == intent_policy
@@ -217,6 +239,8 @@ def test_companion_provenance_conflict_and_tamper_fail_closed(tmp_path) -> None:
     ledger = _ledger(tmp_path)
     signal, intent = _stage_policy_entry(ledger)
     try:
+        signal_policy = ledger.read_signal_policy_provenance(signal.signal_id)
+        assert signal_policy is not None
         with pytest.raises(LedgerConflictError, match="intent policy provenance"):
             ledger.record_intent_policy_provenance(
                 intent.intent_id,
@@ -231,7 +255,7 @@ def test_companion_provenance_conflict_and_tamper_fail_closed(tmp_path) -> None:
                 order_eligible=True,
                 decision="accepted",
                 reason_codes=("accepted",),
-                bound_context_digest="context-digest-1",
+                bound_context_digest=str(signal_policy["bound_context_digest"]),
                 captured_at=CAPTURED_AT,
             )
 
@@ -319,6 +343,141 @@ def test_bound_policy_context_is_canonical_idempotent_and_tamper_evident(tmp_pat
         ledger.close()
 
 
+def test_signal_policy_rejects_arbitrary_digest_without_bound_context(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    signal = _signal()
+    try:
+        ledger.record_signal(signal)
+
+        with pytest.raises(LedgerConflictError, match="missing bound policy context"):
+            ledger.record_signal_policy_provenance(
+                signal.signal_id,
+                policy_version="portfolio_policy_v1",
+                event_key=signal.event_key,
+                source_event_keys=("source:event-1",),
+                strategy_tags=(signal.strategy,),
+                risk_tags=("event:event-1",),
+                sector="Technology",
+                journal_only=False,
+                order_eligible=True,
+                decision="accepted",
+                reason_codes=("accepted",),
+                bound_context_digest="arbitrary-digest",
+                captured_at=CAPTURED_AT,
+            )
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("mismatch", ["epoch", "version", "digest"])
+def test_signal_policy_rejects_mismatched_bound_context(tmp_path, mismatch: str) -> None:
+    ledger = _ledger(tmp_path)
+    signal = _signal()
+    try:
+        ledger.record_signal(signal)
+        binding = _bind_policy_context(
+            ledger,
+            epoch_id="epoch-2" if mismatch == "epoch" else signal.epoch_id,
+        )
+        policy_version = (
+            "portfolio_policy_v2"
+            if mismatch == "version"
+            else "portfolio_policy_v1"
+        )
+        bound_digest = (
+            "wrong-digest"
+            if mismatch == "digest"
+            else str(binding["context_digest"])
+        )
+
+        with pytest.raises(LedgerConflictError, match="signal policy binding mismatch"):
+            ledger.record_signal_policy_provenance(
+                signal.signal_id,
+                policy_version=policy_version,
+                event_key=signal.event_key,
+                source_event_keys=("source:event-1",),
+                strategy_tags=(signal.strategy,),
+                risk_tags=("event:event-1",),
+                sector="Technology",
+                journal_only=False,
+                order_eligible=True,
+                decision="accepted",
+                reason_codes=("accepted",),
+                bound_context_digest=bound_digest,
+                captured_at=CAPTURED_AT,
+            )
+    finally:
+        ledger.close()
+
+
+def test_removed_bound_context_breaks_companion_read_and_projection_on_reopen(
+    tmp_path,
+) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    try:
+        _stage_policy_entry(ledger)
+        ledger.connection.execute(
+            "DELETE FROM policy_session_contexts WHERE cohort_id = ? AND session = ?",
+            (COHORT, FRIDAY.isoformat()),
+        )
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        with pytest.raises(LedgerConflictError, match="missing bound policy context"):
+            reopened.read_signal_policy_provenance("signal-1")
+        with pytest.raises(LedgerConflictError, match="missing bound policy context"):
+            reopened.policy_pending_entry_projection()
+    finally:
+        reopened.close()
+
+
+def test_tampered_bound_context_breaks_existing_companion_projection(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        _stage_policy_entry(ledger)
+        ledger.connection.execute(
+            "UPDATE policy_session_contexts SET context_digest = 'tampered' "
+            "WHERE cohort_id = ? AND session = ?",
+            (COHORT, FRIDAY.isoformat()),
+        )
+
+        with pytest.raises(LedgerConflictError, match="tampered policy session context"):
+            ledger.policy_pending_entry_projection()
+    finally:
+        ledger.close()
+
+
+def test_policy_session_apis_reject_datetime_before_write_or_read(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    wrong_type = datetime(2026, 7, 31, 20, tzinfo=UTC)
+    try:
+        with pytest.raises(TypeError, match="session must be an exact date"):
+            ledger.bind_policy_session_context(
+                wrong_type,  # type: ignore[arg-type]
+                epoch_id="epoch-1",
+                policy_version="portfolio_policy_v1",
+                policy_config={"max_positions": 5},
+                context={"cash": "5000"},
+                bound_at=CAPTURED_AT,
+            )
+        assert (
+            ledger.connection.execute(
+                "SELECT COUNT(*) FROM policy_session_contexts"
+            ).fetchone()[0]
+            == 0
+        )
+
+        with pytest.raises(TypeError, match="session must be an exact date"):
+            ledger.read_policy_session_context(wrong_type)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="session must be an exact date"):
+            ledger.policy_open_lot_projection(wrong_type)  # type: ignore[arg-type]
+    finally:
+        ledger.close()
+
+
 def test_pending_projection_includes_future_entries_and_supports_self_exclusion(
     tmp_path,
 ) -> None:
@@ -375,6 +534,8 @@ def test_pending_projection_rejects_missing_or_ambiguous_provenance(tmp_path) ->
             "intent-2", signal_ids=(signal.signal_id, second.signal_id)
         )
         ledger.stage_intent(ambiguous)
+        signal_policy = ledger.read_signal_policy_provenance(signal.signal_id)
+        assert signal_policy is not None
         ledger.record_intent_policy_provenance(
             ambiguous.intent_id,
             signal_ids=ambiguous.signal_ids,
@@ -388,7 +549,7 @@ def test_pending_projection_rejects_missing_or_ambiguous_provenance(tmp_path) ->
             order_eligible=True,
             decision="accepted",
             reason_codes=("accepted",),
-            bound_context_digest="context-digest-1",
+            bound_context_digest=str(signal_policy["bound_context_digest"]),
             captured_at=CAPTURED_AT,
         )
         with pytest.raises(LedgerConflictError, match="unambiguous reference_close"):
@@ -409,6 +570,9 @@ def test_entry_intent_cannot_override_ineligible_signal_policy(
     intent = _intent()
     try:
         ledger.record_signal(signal)
+        binding = _bind_policy_context(
+            ledger, session=signal.reference_session, epoch_id=signal.epoch_id
+        )
         ledger.record_signal_policy_provenance(
             signal.signal_id,
             policy_version="portfolio_policy_v1",
@@ -421,7 +585,7 @@ def test_entry_intent_cannot_override_ineligible_signal_policy(
             order_eligible=order_eligible,
             decision="rejected",
             reason_codes=("position_cap",),
-            bound_context_digest="context-digest-1",
+            bound_context_digest=str(binding["context_digest"]),
             captured_at=CAPTURED_AT,
         )
         ledger.stage_intent(intent)
@@ -500,6 +664,8 @@ def test_consumed_event_keys_include_every_filled_contributor_only(tmp_path) -> 
             "intent-filled", signal_ids=(first.signal_id, second.signal_id)
         )
         ledger.stage_intent(filled)
+        first_policy = ledger.read_signal_policy_provenance(first.signal_id)
+        assert first_policy is not None
         ledger.record_intent_policy_provenance(
             filled.intent_id,
             signal_ids=filled.signal_ids,
@@ -513,7 +679,7 @@ def test_consumed_event_keys_include_every_filled_contributor_only(tmp_path) -> 
             order_eligible=True,
             decision="accepted",
             reason_codes=("accepted",),
-            bound_context_digest="context-digest-1",
+            bound_context_digest=str(first_policy["bound_context_digest"]),
             captured_at=CAPTURED_AT,
         )
 
