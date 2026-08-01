@@ -109,32 +109,46 @@ class MetricsService:
 
     def _inputs(self, cohort_id: str, epoch_id: str):
         ledger = self._ledger(cohort_id)
-        snapshots = tuple(ledger.read_snapshots(epoch_id=epoch_id))
-        benchmarks = tuple(ledger.read_benchmark_observations(epoch_id=epoch_id))
-        signals = tuple(ledger.read_signals(epoch_id=epoch_id))
-        window = validate_snapshot_window(
-            cohort_id=cohort_id,
-            epoch_id=epoch_id,
-            snapshots=snapshots,
-        )
-        deduped = deduplicate_signals(self._metric_signal(row) for row in signals)
-        if deduped.conflicts:
-            raise ValueError("conflicting signal identities")
-        fills = tuple(
-            ledger.read_fills(
-                window[0].session,
-                window[-1].session,
+        connection = ledger.connection
+        owns_snapshot = not connection.in_transaction
+        if owns_snapshot:
+            connection.execute("BEGIN")
+        try:
+            snapshots = tuple(ledger.read_snapshots(epoch_id=epoch_id))
+            benchmarks = tuple(ledger.read_benchmark_observations(epoch_id=epoch_id))
+            signals = tuple(ledger.read_signals(epoch_id=epoch_id))
+            window = validate_snapshot_window(
+                cohort_id=cohort_id,
                 epoch_id=epoch_id,
+                snapshots=snapshots,
             )
-        )
+            deduped = deduplicate_signals(self._metric_signal(row) for row in signals)
+            if deduped.conflicts:
+                raise ValueError("conflicting signal identities")
+            fills = tuple(
+                ledger.read_fills(
+                    window[0].session,
+                    window[-1].session,
+                    epoch_id=epoch_id,
+                )
+            )
+        finally:
+            if owns_snapshot:
+                connection.execute("ROLLBACK")
         return window, benchmarks, deduped.records, fills
 
-    def cohort_report(self, cohort_id: str, epoch_id: str) -> PortfolioMetrics:
-        epoch = self._epoch(epoch_id)
-        if epoch is None:
-            raise KeyError("no metric epoch is available")
-        self._require_available_epoch(epoch, epoch_id)
-        snapshots, benchmarks, signals, fills = self._inputs(cohort_id, epoch_id)
+    @staticmethod
+    def _assert_epoch_unchanged(before: MetricEpoch, after: MetricEpoch) -> None:
+        if before != after:
+            raise RuntimeError(
+                f"metric epoch {before.epoch_id!r} changed while report was built"
+            )
+
+    @staticmethod
+    def _portfolio_from_inputs(
+        cohort_id: str, epoch_id: str, inputs: tuple
+    ) -> PortfolioMetrics:
+        snapshots, benchmarks, signals, fills = inputs
         return portfolio_metrics(
             cohort_id=cohort_id,
             epoch_id=epoch_id,
@@ -143,6 +157,17 @@ class MetricsService:
             signals=signals,
             fills=fills,
         )
+
+    def cohort_report(self, cohort_id: str, epoch_id: str) -> PortfolioMetrics:
+        epoch = self._epoch(epoch_id)
+        if epoch is None:
+            raise KeyError("no metric epoch is available")
+        self._require_available_epoch(epoch, epoch_id)
+        report = self._portfolio_from_inputs(
+            cohort_id, epoch_id, self._inputs(cohort_id, epoch_id)
+        )
+        self._assert_epoch_unchanged(epoch, self.store.load_epoch(epoch_id))
+        return report
 
     def generation_report(self, epoch_id: str | None = None) -> dict[str, object]:
         epoch = self._epoch(epoch_id)
@@ -160,14 +185,21 @@ class MetricsService:
                 "dependent_scenarios": True,
             }
         self._require_available_epoch(epoch, epoch.epoch_id)
-        reports = {
-            cohort_id: self.cohort_report(cohort_id, epoch.epoch_id)
+        materialized = {
+            cohort_id: self._materialize_cohort(cohort_id, epoch.epoch_id)
             for cohort_id in self.cohort_ids
         }
-        series = {
-            cohort_id: self._cohort_series(cohort_id, epoch.epoch_id)
-            for cohort_id in self.cohort_ids
-        }
+        reports = {key: value[0] for key, value in materialized.items()}
+        series = {key: value[1] for key, value in materialized.items()}
+        final_epoch = self.store.load_epoch(epoch.epoch_id)
+        self._assert_epoch_unchanged(epoch, final_epoch)
+        if epoch_id is None:
+            final_current = self.store.current_epoch()
+            if final_current is None:
+                raise RuntimeError(
+                    "current metric epoch disappeared while report was built"
+                )
+            self._assert_epoch_unchanged(epoch, final_current)
         headline = {
             key: reports[key] for key in sorted(_HEADLINE_BOOKS & reports.keys())
         }
@@ -208,21 +240,20 @@ class MetricsService:
             "dependent_scenarios": True,
         }
 
-    def _cohort_series(self, cohort_id: str, epoch_id: str) -> dict[str, object]:
-        """Serialize the valid ledger window and its persisted benchmarks."""
-        try:
-            snapshots, benchmarks, _signals, _fills = self._inputs(cohort_id, epoch_id)
-        except ValueError as error:
-            # ``generation_report`` can be projected from mocked/previously
-            # materialized cohort reports during offline consumers.  A series is
-            # unavailable in that case; it must never be fabricated.
-            if str(error) != "at least two valid snapshots are required":
-                raise
-            return {
-                "net_equity_history": [],
-                "benchmarks": {"SPY": [], "BIL": []},
-                "matched_benchmark_returns": [],
-            }
+    def _materialize_cohort(
+        self, cohort_id: str, epoch_id: str
+    ) -> tuple[PortfolioMetrics, dict[str, object]]:
+        """Build metrics and reporting series from one SQLite snapshot."""
+        inputs = self._inputs(cohort_id, epoch_id)
+        return (
+            self._portfolio_from_inputs(cohort_id, epoch_id, inputs),
+            self._cohort_series_from_inputs(inputs),
+        )
+
+    @staticmethod
+    def _cohort_series_from_inputs(inputs: tuple) -> dict[str, object]:
+        """Serialize one valid ledger window and its persisted benchmarks."""
+        snapshots, benchmarks, _signals, _fills = inputs
         benchmark_rows = tuple(
             row for row in benchmarks if row.valid and row.symbol in {"SPY", "BIL"}
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
@@ -13,8 +13,12 @@ import pytest
 
 from tradingagents.strategies.execution.models import (
     BenchmarkObservation,
+    Fill,
+    MarketBar,
+    OrderIntent,
     SignalRecord,
 )
+from tradingagents.strategies.metrics.health import classify_strategy_run
 from tradingagents.strategies.metrics.models import (
     METRIC_SCHEMA_VERSION,
     MetricEpoch,
@@ -23,7 +27,15 @@ from tradingagents.strategies.metrics.models import (
 )
 from tradingagents.strategies.metrics.service import MetricsService
 from tradingagents.strategies.metrics.store import MetricStore
+from tradingagents.strategies.metrics.promotion import (
+    PromotionEvaluator,
+    PromotionEvidence,
+)
 from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+from tradingagents.strategies.orchestration.generation_comparison import (
+    ComparisonPair,
+    GenerationComparison,
+)
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 
@@ -365,10 +377,18 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     service.store.save_epoch(_epoch("historical"))
     service.store.close_epoch("historical", SESSIONS[1], "closed")
     values = {name: index / 100 for index, name in enumerate(names, start=1)}
+    empty_series = {
+        "net_equity_history": [],
+        "benchmarks": {"SPY": [], "BIL": []},
+        "matched_benchmark_returns": [],
+    }
     monkeypatch.setattr(
         service,
-        "cohort_report",
-        lambda cohort_id, epoch_id: _portfolio(cohort_id, epoch_id, values[cohort_id]),
+        "_materialize_cohort",
+        lambda cohort_id, epoch_id: (
+            _portfolio(cohort_id, epoch_id, values[cohort_id]),
+            empty_series,
+        ),
     )
 
     report = service.generation_report(epoch_id="historical")
@@ -383,13 +403,16 @@ def test_generation_report_empty_current_historical_and_panel_rules(
 
     monkeypatch.setattr(
         service,
-        "cohort_report",
-        lambda cohort_id, epoch_id: replace(
-            _portfolio(cohort_id, epoch_id, values[cohort_id]),
-            start_session=(
-                SESSIONS[1] if cohort_id == "horizon_1y_size_100k" else SESSIONS[0]
+        "_materialize_cohort",
+        lambda cohort_id, epoch_id: (
+            replace(
+                _portfolio(cohort_id, epoch_id, values[cohort_id]),
+                start_session=(
+                    SESSIONS[1] if cohort_id == "horizon_1y_size_100k" else SESSIONS[0]
+                ),
+                valid_sessions=(1 if cohort_id == "horizon_1y_size_100k" else 2),
             ),
-            valid_sessions=(1 if cohort_id == "horizon_1y_size_100k" else 2),
+            empty_series,
         ),
     )
     mismatched = service.generation_report(epoch_id="historical")
@@ -406,8 +429,11 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     partial.store.save_epoch(_epoch("partial"))
     monkeypatch.setattr(
         partial,
-        "cohort_report",
-        lambda cohort_id, epoch_id: _portfolio(cohort_id, epoch_id, values[cohort_id]),
+        "_materialize_cohort",
+        lambda cohort_id, epoch_id: (
+            _portfolio(cohort_id, epoch_id, values[cohort_id]),
+            empty_series,
+        ),
     )
     partial_report = partial.generation_report(epoch_id="partial")
     assert partial_report["scenario_panel"] is None
@@ -443,6 +469,338 @@ def test_generation_report_projects_persisted_series_without_network(
         pytest.approx(1 / 1001),
         pytest.approx(1 / 1002),
     ]
+
+
+def test_generation_report_classifies_exactly_four_headline_and_twelve_stress_books(
+    tmp_path, ledger_factory, monkeypatch
+) -> None:
+    names = [
+        f"horizon_{horizon}_size_{size}"
+        for horizon in ("30d", "3m", "6m", "1y")
+        for size in ("5k", "10k", "50k", "100k")
+    ]
+    ledgers = {name: ledger_factory(name, tmp_path / "matrix") for name in names}
+    service = MetricsService(tmp_path / "metrics", ledgers)
+    service.store.save_epoch(_epoch())
+    empty_series = {
+        "net_equity_history": [],
+        "benchmarks": {"SPY": [], "BIL": []},
+        "matched_benchmark_returns": [],
+    }
+    monkeypatch.setattr(
+        service,
+        "_materialize_cohort",
+        lambda cohort_id, epoch_id: (
+            _portfolio(cohort_id, epoch_id, 0.01),
+            empty_series,
+        ),
+    )
+
+    report = service.generation_report()
+
+    assert sorted(report["headline_books"]) == [
+        "horizon_1y_size_100k",
+        "horizon_30d_size_100k",
+        "horizon_3m_size_100k",
+        "horizon_6m_size_100k",
+    ]
+    assert len(report["stress_tests"]) == 12
+
+
+def test_generation_report_reads_each_cohort_once_and_rejects_epoch_change(
+    tmp_path, ledger_factory, monkeypatch
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _record_window(ledger, "epoch-1", SESSIONS)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+    original_inputs = service._inputs
+    reads = 0
+
+    def invalidate_after_read(cohort_id: str, epoch_id: str):
+        nonlocal reads
+        reads += 1
+        result = original_inputs(cohort_id, epoch_id)
+        service.store.invalidate_epoch(epoch_id, SESSIONS[-1], "concurrent gap")
+        return result
+
+    monkeypatch.setattr(service, "_inputs", invalidate_after_read)
+
+    with pytest.raises(RuntimeError, match="changed while report was built"):
+        service.generation_report()
+    assert reads == 1
+
+
+def _thirty_xnys_sessions() -> tuple[date, ...]:
+    """A fixed 30-session XNYS-like window; Labor Day is intentionally excluded."""
+    cursor = date(2026, 8, 3)
+    sessions: list[date] = []
+    while len(sessions) < 30:
+        if cursor.weekday() < 5 and cursor != date(2026, 9, 7):
+            sessions.append(cursor)
+        cursor += timedelta(days=1)
+    return tuple(sessions)
+
+
+def _seed_clean_generation_book(
+    ledger: PortfolioLedger,
+    epoch_id: str,
+    sessions: tuple[date, ...],
+    *,
+    charge_costs: bool,
+) -> None:
+    """Persist a bounded, deterministic book without providers or an LLM."""
+    if charge_costs:
+        signal = SignalRecord(
+            signal_id=f"{ledger.cohort_id}-signal",
+            epoch_id=epoch_id,
+            policy_id="policy-v2",
+            event_key=f"{ledger.cohort_id}-event",
+            strategy="earnings_call",
+            ticker="AAPL",
+            direction="long",
+            event_at=None,
+            observed_at=datetime.combine(sessions[0], datetime.min.time(), UTC),
+            reference_session=sessions[0],
+            reference_close=Decimal("100"),
+            decision_at=datetime.combine(sessions[0], datetime.min.time(), UTC),
+            evidence_hash="fixture",
+        )
+        ledger.record_signal(signal)
+        intent = OrderIntent(
+            intent_id=f"{ledger.cohort_id}-intent",
+            signal_ids=(signal.signal_id,),
+            cohort_id=ledger.cohort_id,
+            side="buy",
+            requested_qty=10,
+            created_at=datetime.combine(sessions[0], datetime.min.time(), UTC),
+            eligible_session=sessions[0],
+            price_rule="next_session_open",
+            status="pending",
+            stop_price=None,
+            external_order_id=None,
+        )
+        ledger.stage_intent(intent)
+        timestamp = datetime.combine(sessions[0], datetime.min.time(), UTC)
+        ledger.apply_fill(
+            intent,
+            Fill(
+                fill_id=f"{ledger.cohort_id}-fill",
+                intent_id=intent.intent_id,
+                side="buy",
+                session=sessions[0],
+                effective_at=timestamp,
+                processed_at=timestamp,
+                reference_price=Decimal("100"),
+                fill_price=Decimal("100.10"),
+                quantity=10,
+                slippage=Decimal("1.00"),
+                commission=Decimal("0.25"),
+                other_fees=Decimal("0.05"),
+            ),
+        )
+    for offset, session in enumerate(sessions):
+        observed_at = datetime.combine(session, datetime.min.time(), UTC)
+        marks = {}
+        if charge_costs:
+            close = Decimal("100") + Decimal(offset)
+            marks["AAPL"] = MarketBar(
+                ticker="AAPL",
+                session=session,
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                source="fixture",
+                fetched_at=observed_at,
+                adjusted=False,
+            )
+        ledger.mark(session, marks, epoch_id, observed_at)
+        for symbol, close in (("SPY", 100 + offset), ("BIL", 100 + offset / 100)):
+            ledger.record_benchmark_observation(
+                BenchmarkObservation(
+                    observation_id=f"{ledger.cohort_id}-{symbol}-{session}",
+                    cohort_id=ledger.cohort_id,
+                    epoch_id=epoch_id,
+                    session=session,
+                    symbol=symbol,
+                    close=Decimal(str(close)),
+                    return_basis="total_return_adjusted",
+                    source="fixture",
+                    observed_at=observed_at,
+                    valid=True,
+                    invalid_reason="",
+                )
+            )
+
+
+def test_clean_gen004_gen005_mocked_smoke(tmp_path, ledger_factory) -> None:
+    """Two complete 16-book v2 generations compare on identical clean evidence."""
+    sessions = _thirty_xnys_sessions()
+    cohort_ids = tuple(
+        f"horizon_{horizon}_size_{size}"
+        for horizon in ("30d", "3m", "6m", "1y")
+        for size in ("5k", "10k", "50k", "100k")
+    )
+    services: dict[str, MetricsService] = {}
+    for generation_id, charge_costs in (("gen_004", False), ("gen_005", True)):
+        generation_root = tmp_path / generation_id
+        epoch_id = f"{generation_id}-epoch"
+        ledgers = {
+            cohort_id: ledger_factory(cohort_id, generation_root)
+            for cohort_id in cohort_ids
+        }
+        for ledger in ledgers.values():
+            _seed_clean_generation_book(
+                ledger, epoch_id, sessions, charge_costs=charge_costs
+            )
+        service = MetricsService(generation_root, ledgers)
+        service.store.save_epoch(
+            replace(
+                _epoch(epoch_id),
+                generation_id=generation_id,
+                start_session=sessions[0],
+            )
+        )
+        for strategy in (
+            "earnings_call",
+            "insider_activity",
+            "filing_analysis",
+            "regulatory_pipeline",
+            "supply_chain",
+            "litigation",
+            "congressional_trades",
+            "govt_contracts",
+            "state_economics",
+            "weather_ag",
+            "commodity_macro",
+            "quantum_readiness",
+        ):
+            service.store.save_strategy_health(
+                classify_strategy_run(
+                    epoch_id=epoch_id,
+                    session=sessions[-1],
+                    policy_id="policy-v2",
+                    strategy=strategy,
+                    data_sources=("fixture",),
+                    candidates=(),
+                    provider_errors={},
+                    exception=None,
+                )
+            )
+        assert len(service.store.read_strategy_health(epoch_id)) == 12
+        services[generation_id] = service
+
+    reports = {
+        generation_id: service.generation_report()
+        for generation_id, service in services.items()
+    }
+    assert all(report["metric_schema_version"] == 2 for report in reports.values())
+    assert all(len(report["headline_books"]) == 4 for report in reports.values())
+    assert all(len(report["stress_tests"]) == 12 for report in reports.values())
+    assert all(
+        book["valid_sessions"] == 30
+        and book["missing_mark_count"] == 0
+        and book["stale_mark_count"] == 0
+        for report in reports.values()
+        for book in (
+            *report["headline_books"].values(),
+            *report["stress_tests"].values(),
+        )
+    )
+    assert all(
+        book["cumulative_costs"]["slippage"] == 0.0
+        for book in (
+            *reports["gen_004"]["headline_books"].values(),
+            *reports["gen_004"]["stress_tests"].values(),
+        )
+    )
+    assert all(
+        book["cumulative_costs"]["slippage"] > 0.0
+        for book in (
+            *reports["gen_005"]["headline_books"].values(),
+            *reports["gen_005"]["stress_tests"].values(),
+        )
+    )
+    comparison = GenerationComparison(services).compare(
+        (
+            ComparisonPair(
+                "gen_005",
+                "horizon_30d_size_100k",
+                "gen_005-epoch",
+                "gen_004",
+                "horizon_30d_size_100k",
+                "gen_004-epoch",
+            ),
+        )
+    )["comparisons"][0]
+    assert comparison["common_sessions"] == sessions[1:]
+
+
+def test_metrics_add_no_api_or_llm_calls(tmp_path, ledger_factory, monkeypatch) -> None:
+    """Metrics reporting, comparison, and advisory promotion are offline-only."""
+    import http.client
+    import socket
+    import urllib.request
+
+    external_call = Mock(side_effect=AssertionError("external API/LLM call"))
+    monkeypatch.setattr(socket, "create_connection", external_call)
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", external_call)
+    monkeypatch.setattr(urllib.request, "urlopen", external_call)
+    sessions = _thirty_xnys_sessions()
+    ledgers = {}
+    services = {}
+    for generation_id in ("gen_004", "gen_005"):
+        ledger = ledger_factory(f"{generation_id}-book", tmp_path / generation_id)
+        _seed_clean_generation_book(
+            ledger, f"{generation_id}-epoch", sessions, charge_costs=False
+        )
+        service = MetricsService(tmp_path / generation_id, {ledger.cohort_id: ledger})
+        service.store.save_epoch(
+            replace(
+                _epoch(f"{generation_id}-epoch"),
+                generation_id=generation_id,
+                start_session=sessions[0],
+            )
+        )
+        services[generation_id] = service
+        ledgers[generation_id] = ledger
+
+    services["gen_004"].generation_report()
+    GenerationComparison(services).compare(
+        (
+            ComparisonPair(
+                "gen_004",
+                ledgers["gen_004"].cohort_id,
+                "gen_004-epoch",
+                "gen_005",
+                ledgers["gen_005"].cohort_id,
+                "gen_005-epoch",
+            ),
+        )
+    )
+    PromotionEvaluator().evaluate(
+        PromotionEvidence(
+            clean_common_sessions=30,
+            independent_completed_ideas=30,
+            strategy_claim_event_counts={"earnings_call": 0},
+            missing_marks=0,
+            stale_marks=0,
+            sessions_aligned=True,
+            stable_epoch_hashes=True,
+            crosses_invalid_boundary=False,
+            classified_strategy_count=12,
+            cost_categories_present=True,
+            risk_limit_breach=False,
+            matched_excess_return=0.0,
+            winning_strategies=0,
+            candidate_max_drawdown=0.0,
+            baseline_max_drawdown=0.0,
+            delayed_fill_excess_return=0.0,
+            slippage_20bps_excess_return=0.0,
+        )
+    )
+    external_call.assert_not_called()
 
 
 def test_compare_uses_exact_reports_and_contiguous_common_daily_returns(

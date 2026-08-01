@@ -12,7 +12,6 @@ from tradingagents.dashboard.charts import (
 from tradingagents.dashboard.data_loaders import (
     cohort_metric_books,
     get_active_generations,
-    load_all_trades,
     load_capital_deployment,
     load_cohort_metrics,
     load_regime_history,
@@ -102,9 +101,6 @@ def _render_gen_card(gen: dict) -> None:
     total_decisions = sum(c.get("strategy_decisions", 0) for c in cohorts.values())
     total_fills = sum(c.get("fills", 0) for c in cohorts.values())
 
-    trades = load_all_trades(gen_id, state_dir)
-    unique_tickers = len({t.get("ticker") for t in trades})
-
     st.markdown(f"### {gen_id}")
     st.caption(f"`{commit}` — {desc}")
     c1, c2, c3 = st.columns(3)
@@ -114,5 +110,5 @@ def _render_gen_card(gen: dict) -> None:
 
     c4, c5, c6 = st.columns(3)
     c4.metric("Started", created)
-    c5.metric("Tickers", unique_tickers)
+    c5.metric("Tickers", "Unavailable (no v2 positions projection)")
     c6.metric("Cohorts", len(cohorts))

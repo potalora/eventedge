@@ -139,7 +139,12 @@ def load_generation_metrics(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
             "dependent_scenarios": True,
         }
     try:
-        return service.generation_report()
+        report = service.generation_report()
+        epoch = report.get("epoch") if isinstance(report, dict) else None
+        if isinstance(epoch, dict):
+            if epoch.get("generation_id") != gen_id:
+                raise ValueError("generation identity mismatch")
+        return report
     finally:
         for ledger in ledgers:
             ledger.close()
@@ -173,24 +178,9 @@ def load_cohort_heatmap(
 
 @st.cache_data(ttl=3600)
 def load_all_trades(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
-    """Load all paper trades across 16 cohorts, annotated with cohort/horizon/size."""
-    all_trades: list[dict] = []
-    for h in HORIZONS:
-        for s in SIZES:
-            name = f"horizon_{h}_size_{s}"
-            pt_path = Path(gen_state_dir) / name / "paper_trades.json"
-            if not pt_path.exists():
-                continue
-            try:
-                trades = json.loads(pt_path.read_text())
-            except (json.JSONDecodeError, OSError):
-                continue
-            for t in trades:
-                t["cohort"] = name
-                t["horizon"] = h
-                t["size"] = s
-            all_trades.extend(trades)
-    return all_trades
+    """Compatibility placeholder until the v2 contract exposes positions."""
+    load_generation_metrics(gen_id, gen_state_dir)
+    return []
 
 
 # ------------------------------------------------------------------
