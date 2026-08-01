@@ -32,6 +32,14 @@ _DARK_LAYOUT = dict(
 SIZE_LABELS = ["$5K", "$10K", "$50K", "$100K"]
 SIZE_KEYS = ["5k", "10k", "50k", "100k"]
 HORIZON_LABELS = ["30d", "3m", "6m", "1y"]
+_PERCENT_METRICS = frozenset(
+    {
+        "net total return",
+        "gross weight",
+        "cash weight",
+        "net max drawdown",
+    }
+)
 
 
 def make_cohort_heatmap(
@@ -55,7 +63,7 @@ def make_cohort_heatmap(
             row_z.append(val if val is not None else 0)
             if val is None:
                 row_t.append("N/A")
-            elif "rate" in metric_name.lower() or "pct" in metric_name.lower():
+            elif metric_name.lower() in _PERCENT_METRICS:
                 row_t.append(f"{val * 100:.1f}%")
             elif isinstance(val, float) and abs(val) < 100:
                 row_t.append(f"{val:.2f}")

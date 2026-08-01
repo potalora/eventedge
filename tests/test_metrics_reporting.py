@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from tradingagents.dashboard import data_loaders
+from tradingagents.dashboard.charts import make_cohort_heatmap
 from tradingagents.strategies.metrics.service import MetricsService
 from scripts.generate_daily_report import render_generation_report
 
@@ -143,3 +144,24 @@ def test_matrix_uses_exact_governed_labels_and_unavailable_copy() -> None:
         "Dependent scenario portfolios",
     ):
         assert required in source
+
+
+@pytest.mark.parametrize(
+    ("metric_name", "value", "expected"),
+    (
+        ("Net Total Return", 0.01, "1.0%"),
+        ("Gross Weight", 0.80, "80.0%"),
+        ("Cash Weight", 0.20, "20.0%"),
+        ("Net Max Drawdown", -0.10, "-10.0%"),
+        ("Annualized daily net Sharpe", 0.75, "0.75"),
+    ),
+)
+def test_heatmap_formats_governed_ratio_metrics_truthfully(
+    metric_name: str, value: float, expected: str
+) -> None:
+    figure = make_cohort_heatmap(
+        {"30d": {"5k": value}},
+        metric_name,
+    )
+
+    assert figure.data[0].text[0][0] == expected
