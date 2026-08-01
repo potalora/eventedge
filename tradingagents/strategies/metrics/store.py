@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 from .calendar import XNYSCalendar
 from .models import (
@@ -58,15 +59,54 @@ _MAX_GAP_DETAIL_TEXT = 4_096
 _MAX_GAP_AUDIT_ITEMS = 2_048
 _MAX_GAP_PAYLOAD_BYTES = 2_000_000
 
+
 class MetricStore:
     """SQLite persistence for immutable, derived metrics-v2 records."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._calendar = XNYSCalendar()
+        self._read_only = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.executescript(_SCHEMA)
+
+    @classmethod
+    def open_existing(cls, path: str | Path) -> "MetricStore":
+        """Open an existing metric store without schema or journal mutations."""
+        target = Path(path)
+        if not target.is_file():
+            raise FileNotFoundError(target)
+        store = cls.__new__(cls)
+        store.path = target
+        store._calendar = XNYSCalendar()
+        store._read_only = True
+        with store._connect() as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        required = {
+            "metric_epochs",
+            "outcomes",
+            "strategy_health",
+            "critical_gap_markers",
+        }
+        if not required <= tables:
+            raise ValueError("existing metric store schema is incomplete")
+        return store
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._read_only:
+            encoded = quote(str(self.path.resolve()), safe="/")
+            return sqlite3.connect(f"file:{encoded}?mode=ro", uri=True)
+        return sqlite3.connect(self.path)
 
     @staticmethod
     def _json(record: object) -> str:
@@ -208,7 +248,9 @@ class MetricStore:
             actions = intent["actions"]
             governed = intent["governed_tickers"]
             errors = intent["errors"]
-            if not all(isinstance(value, list) for value in (actions, governed, errors)):
+            if not all(
+                isinstance(value, list) for value in (actions, governed, errors)
+            ):
                 raise ValueError("critical gap corporate action lists are invalid")
             if not errors:
                 raise ValueError("critical gap corporate action errors are required")
@@ -228,7 +270,9 @@ class MetricStore:
                 ):
                     raise ValueError("critical gap corporate action error is invalid")
             if governed != sorted(set(governed)) or errors != sorted(set(errors)):
-                raise ValueError("critical gap corporate action lists are not canonical")
+                raise ValueError(
+                    "critical gap corporate action lists are not canonical"
+                )
             expected_action_keys = {
                 "action_id",
                 "ticker",
@@ -253,7 +297,9 @@ class MetricStore:
                 ):
                     value = action[key]
                     if not isinstance(value, str) or len(value) > _MAX_GAP_TEXT:
-                        raise ValueError("critical gap corporate action text is invalid")
+                        raise ValueError(
+                            "critical gap corporate action text is invalid"
+                        )
                 try:
                     date.fromisoformat(action["session"])
                     datetime.fromisoformat(action["fetched_at"])
@@ -268,7 +314,9 @@ class MetricStore:
                         "critical gap corporate action value is invalid"
                     ) from error
                 if not isinstance(action["verified"], bool):
-                    raise ValueError("critical gap corporate action verified is invalid")
+                    raise ValueError(
+                        "critical gap corporate action verified is invalid"
+                    )
         if audit_items > _MAX_GAP_AUDIT_ITEMS:
             raise ValueError("critical gap corporate action item count exceeds bound")
         payload_size = len(
@@ -302,7 +350,7 @@ class MetricStore:
 
     def save_epoch(self, epoch: MetricEpoch) -> None:
         payload = self._json(epoch)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
@@ -322,7 +370,7 @@ class MetricStore:
             )
 
     def load_epoch(self, epoch_id: str) -> MetricEpoch:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
                 (epoch_id,),
@@ -332,7 +380,7 @@ class MetricStore:
         return self._epoch(row[0])
 
     def current_epoch(self) -> MetricEpoch | None:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT payload_json
@@ -354,7 +402,7 @@ class MetricStore:
         if not self._calendar.is_session(end_session):
             raise ValueError(f"{end_session} is not an XNYS session")
         target_status = "invalid" if invalid else "closed"
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
@@ -394,7 +442,7 @@ class MetricStore:
         if marker.detail_status != "minimal":
             raise ValueError("new critical gap marker must be minimal")
         payload = self._json(marker)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
@@ -433,7 +481,7 @@ class MetricStore:
         if marker.status != "pending" or marker.detail_status != "ready":
             raise ValueError("critical gap recovery detail must be ready and pending")
         payload = self._json(marker)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
@@ -475,7 +523,7 @@ class MetricStore:
         return marker
 
     def load_critical_gap(self, marker_id: str) -> CriticalGapMarker:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
                 (marker_id,),
@@ -485,7 +533,7 @@ class MetricStore:
         return self._critical_gap(row[0])
 
     def pending_critical_gap(self) -> CriticalGapMarker | None:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT payload_json
@@ -499,7 +547,7 @@ class MetricStore:
 
     def complete_critical_gap(self, marker_id: str) -> CriticalGapMarker:
         """Durably complete a recovered marker; repeated completion is a no-op."""
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
@@ -525,7 +573,7 @@ class MetricStore:
 
     def upsert_outcome(self, outcome: OutcomeRecord) -> None:
         payload = self._json(outcome)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._insert_immutable(
                 connection,
@@ -541,7 +589,7 @@ class MetricStore:
             )
 
     def load_outcome(self, outcome_id: str) -> OutcomeRecord:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT payload_json FROM outcomes WHERE outcome_id = ?",
                 (outcome_id,),
@@ -554,7 +602,7 @@ class MetricStore:
         self, epoch_id: str, *, limit: int = 1_000
     ) -> tuple[OutcomeRecord, ...]:
         self._validate_limit(limit)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT payload_json
@@ -569,7 +617,7 @@ class MetricStore:
 
     def save_strategy_health(self, health: StrategyHealthRecord) -> None:
         payload = self._json(health)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._insert_immutable(
                 connection,
@@ -591,7 +639,7 @@ class MetricStore:
             )
 
     def load_strategy_health(self, health_id: str) -> StrategyHealthRecord:
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT payload_json FROM strategy_health WHERE health_id = ?",
                 (health_id,),
@@ -604,7 +652,7 @@ class MetricStore:
         self, epoch_id: str, *, limit: int = 1_000
     ) -> tuple[StrategyHealthRecord, ...]:
         self._validate_limit(limit)
-        with sqlite3.connect(self.path) as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT payload_json

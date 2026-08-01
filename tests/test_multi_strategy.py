@@ -636,6 +636,9 @@ class TestTwoPhaseEngine:
             engine = MultiStrategyEngine(
                 config=config, strategies=get_all_strategies(), state_manager=state
             )
+            state.load_paper_trades = lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("learning triggers must not read legacy paper trades")
+            )
 
             result = engine.run_learning_loop()
             assert (
@@ -1091,15 +1094,30 @@ class TestStrategyConfidence:
 
     def test_all_hits_returns_high_confidence(self, tmp_path):
         """100% hit rate -> 0.9 confidence (capped)."""
+        from dataclasses import replace
+        from decimal import Decimal
+
         from tradingagents.strategies.orchestration.multi_strategy_engine import (
             MultiStrategyEngine,
         )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
+        five_session = self._outcomes(15, 15)
+        other_horizons = tuple(
+            replace(
+                row,
+                outcome_id=f"outcome-10-{index}",
+                holding_sessions=10,
+                exit_price=Decimal("99"),
+                raw_return=Decimal("-0.01"),
+                signed_return=Decimal("-0.01"),
+            )
+            for index, row in enumerate(five_session)
+        )
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
             strategies=get_paper_trade_strategies(),
-            outcome_reader=lambda _strategy: iter(self._outcomes(15, 15)),
+            outcome_reader=lambda _strategy: iter(five_session + other_horizons),
         )
         conf = engine._compute_strategy_confidence("earnings_call")
         assert conf == pytest.approx(0.9)

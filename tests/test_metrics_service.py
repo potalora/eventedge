@@ -22,6 +22,7 @@ from tradingagents.strategies.metrics.models import (
     SignalMetricRecord,
 )
 from tradingagents.strategies.metrics.service import MetricsService
+from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
@@ -192,6 +193,19 @@ def test_constructor_requires_exact_immutable_unique_database_bindings(
         reopened.close()
 
 
+def test_metric_store_read_only_open_blocks_mutation(tmp_path) -> None:
+    path = tmp_path / "metrics_v2.sqlite3"
+    writable = MetricStore(path)
+    writable.save_epoch(_epoch())
+
+    read_only = MetricStore.open_existing(path)
+
+    assert read_only.read_only is True
+    assert read_only.load_epoch("epoch-1") == _epoch()
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        read_only.save_epoch(_epoch("epoch-2"))
+
+
 def test_cohort_report_reads_once_bounds_fills_and_aggregates_once(
     tmp_path, ledger_factory, monkeypatch
 ) -> None:
@@ -327,6 +341,7 @@ def test_generation_report_empty_current_historical_and_panel_rules(
         "headline_books": {},
         "scenario_panel": None,
         "scenario_panel_available": False,
+        "scenario_panel_unavailable_reason": "no_current_epoch",
         "missing_headline_books": [
             "horizon_1y_size_100k",
             "horizon_30d_size_100k",
@@ -358,11 +373,30 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     report = service.generation_report(epoch_id="historical")
 
     assert report["scenario_panel_available"] is True
+    assert report["scenario_panel_unavailable_reason"] is None
     assert report["missing_headline_books"] == []
     assert report["scenario_panel"]["total_return"] == pytest.approx(0.025)
     assert set(report["headline_books"]) == set(names[:4])
     assert set(report["stress_tests"]) == {"horizon_30d_size_50k"}
     assert report["epoch"]["status"] == "closed"
+
+    monkeypatch.setattr(
+        service,
+        "cohort_report",
+        lambda cohort_id, epoch_id: replace(
+            _portfolio(cohort_id, epoch_id, values[cohort_id]),
+            start_session=(
+                SESSIONS[1] if cohort_id == "horizon_1y_size_100k" else SESSIONS[0]
+            ),
+            valid_sessions=(1 if cohort_id == "horizon_1y_size_100k" else 2),
+        ),
+    )
+    mismatched = service.generation_report(epoch_id="historical")
+    assert mismatched["scenario_panel"] is None
+    assert mismatched["scenario_panel_available"] is False
+    assert mismatched["scenario_panel_unavailable_reason"] == (
+        "mismatched_headline_windows"
+    )
 
     partial_ledgers = dict(list(ledgers.items())[:3]) | {
         "horizon_30d_size_50k": ledgers["horizon_30d_size_50k"]
@@ -377,6 +411,9 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     partial_report = partial.generation_report(epoch_id="partial")
     assert partial_report["scenario_panel"] is None
     assert partial_report["scenario_panel_available"] is False
+    assert partial_report["scenario_panel_unavailable_reason"] == (
+        "missing_headline_books"
+    )
     assert partial_report["missing_headline_books"] == ["horizon_1y_size_100k"]
     assert set(partial_report["stress_tests"]) == {"horizon_30d_size_50k"}
 
@@ -444,6 +481,32 @@ def test_metrics_modules_and_consumers_have_no_learning_or_local_formulas() -> N
             & forbidden_names
         )
     assert "sum(" not in Path("tradingagents/strategies/metrics/service.py").read_text()
+    engine_source = Path(
+        "tradingagents/strategies/orchestration/multi_strategy_engine.py"
+    ).read_text()
+    assert "statistics.stdev" not in engine_source
+    assert "load_paper_trades" not in engine_source
+
+
+def test_dashboard_adapter_exposes_only_v2_metric_books() -> None:
+    from tradingagents.dashboard.data_loaders import cohort_metric_books
+
+    report = {
+        "headline_books": {"horizon_30d_size_100k": {"fills": 2}},
+        "stress_tests": {"horizon_30d_size_5k": {"fills": 1}},
+    }
+
+    assert cohort_metric_books(report) == {
+        "horizon_30d_size_100k": {"fills": 2},
+        "horizon_30d_size_5k": {"fills": 1},
+    }
+    with pytest.raises(ValueError, match="duplicate cohort"):
+        cohort_metric_books(
+            {
+                "headline_books": {"same": {}},
+                "stress_tests": {"same": {}},
+            }
+        )
 
 
 def test_generation_cli_pair_parser_and_read_only_ledgers_close(
@@ -485,14 +548,23 @@ def test_generation_cli_pair_parser_and_read_only_ledgers_close(
         return ledger
 
     monkeypatch.setattr(PortfolioLedger, "open_existing", staticmethod(capture))
+    observed_read_only: list[bool] = []
+
+    def compare_services(self, pairs):
+        observed_read_only.extend(
+            service.store.read_only for service in self._services.values()
+        )
+        return {"metric_schema_version": 2, "comparisons": []}
+
     monkeypatch.setattr(
         GenerationComparison,
         "compare",
-        lambda self, pairs: {"metric_schema_version": 2, "comparisons": []},
+        compare_services,
     )
     manager = SimpleNamespace(list_generations=lambda: generations)
 
     assert _run_explicit_comparison(manager, (pair,))["metric_schema_version"] == 2
+    assert observed_read_only == [True, True]
     assert len(opened) == 2
     for ledger in opened:
         with pytest.raises(sqlite3.ProgrammingError):

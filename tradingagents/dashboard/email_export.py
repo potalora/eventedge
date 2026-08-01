@@ -5,6 +5,7 @@ tradingagents.dashboard.charts for figure construction. Charts are exported to
 PNG via kaleido and embedded as base64 data URIs so the resulting HTML is
 fully self-contained (forwards cleanly through Gmail).
 """
+
 from __future__ import annotations
 
 import base64
@@ -13,6 +14,7 @@ import logging
 import warnings
 from html import escape
 from typing import Any, Iterable
+
 
 # Suppress noisy Streamlit warnings BEFORE importing data_loaders (which imports
 # streamlit). The warnings come from @st.cache_data running outside a script run.
@@ -35,10 +37,10 @@ def _silence_streamlit() -> None:
 
 _silence_streamlit()
 
-import plotly.graph_objects as go
+import plotly.graph_objects as go  # noqa: E402
 
-from tradingagents.dashboard import charts as ch
-from tradingagents.dashboard import data_loaders as dl
+from tradingagents.dashboard import charts as ch  # noqa: E402
+from tradingagents.dashboard import data_loaders as dl  # noqa: E402
 
 _silence_streamlit()  # Re-apply after streamlit import attaches its own handlers.
 
@@ -48,7 +50,9 @@ CHART_WIDTH = 760
 PLACEHOLDER = '<p class="placeholder">[chart unavailable]</p>'
 
 
-def _chart_to_png_b64(fig: go.Figure, width: int = CHART_WIDTH, height: int | None = None) -> str:
+def _chart_to_png_b64(
+    fig: go.Figure, width: int = CHART_WIDTH, height: int | None = None
+) -> str:
     """Render a plotly figure to a base64-encoded PNG. Returns "" on failure."""
     try:
         kwargs = {"format": "png", "width": width, "scale": 2}
@@ -102,6 +106,7 @@ def _regime_badge(regime: str | None) -> str:
 # Section renderers
 # ---------------------------------------------------------------------------
 
+
 def _render_header(gen_meta: dict[str, Any], date: str, regime: str | None) -> str:
     gen_id = gen_meta.get("gen_id", "?")
     started = gen_meta.get("created_at", "")[:10] or "?"
@@ -116,15 +121,16 @@ def _render_header(gen_meta: dict[str, Any], date: str, regime: str | None) -> s
       <div class="header-meta">
         <span>Snapshot {escape(date)}</span>
         <span>Started {escape(started)}</span>
-        {f'<span>Commit {escape(commit)}</span>' if commit else ''}
+        {f"<span>Commit {escape(commit)}</span>" if commit else ""}
       </div>
-      {f'<p class="header-desc">{escape(description)}</p>' if description else ''}
+      {f'<p class="header-desc">{escape(description)}</p>' if description else ""}
     </div>
     """
 
 
 def _is_nan(v: Any) -> bool:
     import math
+
     return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
 
 
@@ -137,7 +143,9 @@ def _safe_num(v: Any) -> float | None:
     return v if isinstance(v, (int, float)) else None
 
 
-def _latest_equity(equity: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+def _latest_equity(
+    equity: dict[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
     """Return {cohort: latest_snapshot} from equity history. Skips snapshots
     whose total_return_pct is NaN by walking back to the last clean one."""
     out: dict[str, dict[str, Any]] = {}
@@ -159,7 +167,7 @@ def _render_kpis(
     positions: list[dict[str, Any]],
     equity: dict[str, list[dict[str, Any]]],
 ) -> str:
-    cohorts = metrics.get("cohorts", {}) or {}
+    cohorts = dl.cohort_metric_books(metrics)
     latest = _latest_equity(equity)
 
     total_deployed = sum(r.get("deployed", 0) for r in capital_rows)
@@ -182,9 +190,21 @@ def _render_kpis(
     total_traded = signal_stats.get("total_traded", 0)
 
     tiles = [
-        ("Capital deployed", f"{_fmt_money(total_deployed)}", f"{deployed_pct:.1f}% of {_fmt_money(total_capital)}"),
-        ("Weighted return", _fmt_pct(weighted_return), f"across {len(cohorts)} cohorts"),
-        ("Open positions", f"{open_positions:,}", f"{sum(1 for p in positions if p.get('status') == 'closed')} closed"),
+        (
+            "Capital deployed",
+            f"{_fmt_money(total_deployed)}",
+            f"{deployed_pct:.1f}% of {_fmt_money(total_capital)}",
+        ),
+        (
+            "Weighted return",
+            _fmt_pct(weighted_return),
+            f"across {len(cohorts)} cohorts",
+        ),
+        (
+            "Open positions",
+            f"{open_positions:,}",
+            f"{sum(1 for p in positions if p.get('status') == 'closed')} closed",
+        ),
         ("Signals (cum.)", f"{total_signals:,}", f"{total_traded} traded"),
     ]
 
@@ -201,7 +221,7 @@ def _render_cohort_matrix(
     metrics: dict[str, Any],
     equity: dict[str, list[dict[str, Any]]],
 ) -> str:
-    cohorts = metrics.get("cohorts", {}) or {}
+    cohorts = dl.cohort_metric_books(metrics)
     latest = _latest_equity(equity)
 
     # Build heatmap data from equity history (cohort metrics doesn't include return %).
@@ -221,7 +241,11 @@ def _render_cohort_matrix(
         b64 = ""
 
     # Trade-count table
-    rows = ['<tr><th>Horizon</th>'] + [f'<th>{lbl}</th>' for lbl in ch.SIZE_LABELS] + ['</tr>']
+    rows = (
+        ["<tr><th>Horizon</th>"]
+        + [f"<th>{lbl}</th>" for lbl in ch.SIZE_LABELS]
+        + ["</tr>"]
+    )
     header = "".join(rows)
     body_rows = []
     for h in ch.HORIZON_LABELS:
@@ -262,7 +286,7 @@ def _render_equity_curves(history: dict[str, list[dict[str, Any]]]) -> str:
         return '<section><h2>Equity curves</h2><p class="muted">No equity history yet.</p></section>'
     fig = ch.make_equity_curves_facet(history)
     b64 = _chart_to_png_b64(fig, height=560)
-    return f'<section><h2>Equity curves</h2>{_img_tag(b64, "Equity curves by horizon")}</section>'
+    return f"<section><h2>Equity curves</h2>{_img_tag(b64, 'Equity curves by horizon')}</section>"
 
 
 def _render_strategy_pnl(strategy_rows: list[dict[str, Any]]) -> str:
@@ -299,7 +323,7 @@ def _render_strategy_pnl(strategy_rows: list[dict[str, Any]]) -> str:
         "</table>"
     )
 
-    return f'<section><h2>Strategy P&amp;L</h2>{_img_tag(b64, "Strategy P&L")}{table}</section>'
+    return f"<section><h2>Strategy P&amp;L</h2>{_img_tag(b64, 'Strategy P&L')}{table}</section>"
 
 
 def _render_winners_losers(positions: list[dict[str, Any]]) -> str:
@@ -307,7 +331,7 @@ def _render_winners_losers(positions: list[dict[str, Any]]) -> str:
         return '<section><h2>Winners &amp; losers</h2><p class="muted">No positions yet.</p></section>'
     fig = ch.make_winners_losers_bars(positions, top_n=10)
     b64 = _chart_to_png_b64(fig, height=480)
-    return f'<section><h2>Winners &amp; losers</h2>{_img_tag(b64, "Winners and losers")}</section>'
+    return f"<section><h2>Winners &amp; losers</h2>{_img_tag(b64, 'Winners and losers')}</section>"
 
 
 def _render_positions_table(positions: list[dict[str, Any]], top_n: int = 50) -> str:
@@ -317,10 +341,12 @@ def _render_positions_table(positions: list[dict[str, Any]], top_n: int = 50) ->
     if not open_pos:
         return '<section><h2>Open positions</h2><p class="muted">No open positions.</p></section>'
 
-    open_pos = sorted(open_pos, key=lambda p: abs(p.get("pnl", 0)), reverse=True)[:top_n]
+    open_pos = sorted(open_pos, key=lambda p: abs(p.get("pnl", 0)), reverse=True)[
+        :top_n
+    ]
 
     head = (
-        '<tr><th>Ticker</th><th>Strategy</th><th>Cohort</th>'
+        "<tr><th>Ticker</th><th>Strategy</th><th>Cohort</th>"
         '<th class="num">Entry</th><th class="num">Last</th>'
         '<th class="num">Shares</th><th class="num">P&amp;L</th>'
         '<th class="num">P&amp;L %</th><th class="num">Days</th></tr>'
@@ -350,7 +376,7 @@ def _render_positions_table(positions: list[dict[str, Any]], top_n: int = 50) ->
         "</table>"
     )
 
-    return f'<section><h2>Open positions (top {len(open_pos)} by |P&amp;L|)</h2>{table}</section>'
+    return f"<section><h2>Open positions (top {len(open_pos)} by |P&amp;L|)</h2>{table}</section>"
 
 
 def _render_regime_timeline(snapshots: list[dict[str, Any]]) -> str:
@@ -358,7 +384,7 @@ def _render_regime_timeline(snapshots: list[dict[str, Any]]) -> str:
         return ""
     fig = ch.make_regime_timeline(snapshots)
     b64 = _chart_to_png_b64(fig, height=300)
-    return f'<section><h2>Regime timeline</h2>{_img_tag(b64, "VIX & regime timeline")}</section>'
+    return f"<section><h2>Regime timeline</h2>{_img_tag(b64, 'VIX & regime timeline')}</section>"
 
 
 # ---------------------------------------------------------------------------
@@ -496,19 +522,21 @@ def _render_benchmarks(
                 ret = _safe_num(snap.get("total_return_pct"))
                 excess_data[h][s] = (ret - spy_return) if ret is not None else None
 
-        has_any = any(v is not None for row in excess_data.values() for v in row.values())
+        has_any = any(
+            v is not None for row in excess_data.values() for v in row.values()
+        )
         if has_any:
             fig = ch.make_cohort_heatmap(excess_data, "Excess Return vs SPY (pp)")
             b64 = _chart_to_png_b64(fig, height=380)
             excess_heatmap_html = (
                 f'<h3 style="margin-top:18px;font-size:13px;color:#9ca3af;">'
-                f'Excess return vs SPY (over {start_date} → today, percentage points)</h3>'
-                f'{_img_tag(b64, "Excess return vs SPY heatmap")}'
+                f"Excess return vs SPY (over {start_date} → today, percentage points)</h3>"
+                f"{_img_tag(b64, 'Excess return vs SPY heatmap')}"
             )
 
     period_note = (
         f'<p class="muted" style="margin-top:0;font-size:12px;">'
-        f'Period: {escape(start_date)} → today · Total returns include dividends (auto-adjusted)</p>'
+        f"Period: {escape(start_date)} → today · Total returns include dividends (auto-adjusted)</p>"
     )
 
     return f"""
@@ -599,19 +627,24 @@ def _render_one_generation(
             logger.warning("loader %s failed for %s: %s", fn.__name__, gen_id, exc)
             return default
 
-    metrics = _safe(dl.load_cohort_metrics, {"cohorts": {}, "per_strategy": {}}, gen_id, state_dir)
+    metrics = _safe(
+        dl.load_cohort_metrics, {"cohorts": {}, "per_strategy": {}}, gen_id, state_dir
+    )
     equity = _safe(dl.load_equity_history, {}, gen_id, state_dir)
     regime = _safe(dl.load_regime_history, [], gen_id, state_dir)
-    signal_stats = _safe(dl.load_signal_stats, {"per_strategy": {}, "total_signals": 0, "total_traded": 0}, gen_id, state_dir)
+    signal_stats = _safe(
+        dl.load_signal_stats,
+        {"per_strategy": {}, "total_signals": 0, "total_traded": 0},
+        gen_id,
+        state_dir,
+    )
     capital = _safe(dl.load_capital_deployment, [], gen_id, state_dir)
 
     if no_prices:
         # Bypass yfinance: use entry price as current
-        from datetime import datetime
         trades = dl.load_all_trades(gen_id, state_dir)
         positions = []
         strategy_pnl_map: dict[str, dict[str, Any]] = {}
-        today = datetime.now().date()
         for t in trades:
             entry = float(t.get("entry_price", 0) or 0)
             shares = float(t.get("shares", 0) or 0)
@@ -621,35 +654,49 @@ def _render_one_generation(
                 current = float(t.get("exit_price", 0) or 0)
             else:
                 current = entry
-            pnl = (entry - current) * shares if direction == "short" else (current - entry) * shares
+            pnl = (
+                (entry - current) * shares
+                if direction == "short"
+                else (current - entry) * shares
+            )
             cost = entry * shares if entry > 0 else 1
-            positions.append({
-                "cohort": t.get("cohort", ""),
-                "horizon": t.get("horizon", ""),
-                "size": t.get("size", ""),
-                "ticker": t.get("ticker", ""),
-                "strategy": t.get("strategy", ""),
-                "direction": direction,
-                "entry_price": entry,
-                "current_price": current,
-                "shares": shares,
-                "position_value": shares * current * (1 if direction == "long" else -1),
-                "pnl": pnl,
-                "pnl_pct": (pnl / cost * 100) if cost > 0 else 0,
-                "status": status,
-                "days_held": 0,
-                "entry_date": t.get("entry_date", ""),
-            })
+            positions.append(
+                {
+                    "cohort": t.get("cohort", ""),
+                    "horizon": t.get("horizon", ""),
+                    "size": t.get("size", ""),
+                    "ticker": t.get("ticker", ""),
+                    "strategy": t.get("strategy", ""),
+                    "direction": direction,
+                    "entry_price": entry,
+                    "current_price": current,
+                    "shares": shares,
+                    "position_value": shares
+                    * current
+                    * (1 if direction == "long" else -1),
+                    "pnl": pnl,
+                    "pnl_pct": (pnl / cost * 100) if cost > 0 else 0,
+                    "status": status,
+                    "days_held": 0,
+                    "entry_date": t.get("entry_date", ""),
+                }
+            )
         # Aggregate to strategy_pnl
         for p in positions:
             s = p["strategy"] or "unknown"
-            d = strategy_pnl_map.setdefault(s, {
-                "strategy": s,
-                "realized_long": 0.0, "realized_short": 0.0,
-                "unrealized_long": 0.0, "unrealized_short": 0.0,
-                "open_long_count": 0, "open_short_count": 0,
-                "closed_count": 0,
-            })
+            d = strategy_pnl_map.setdefault(
+                s,
+                {
+                    "strategy": s,
+                    "realized_long": 0.0,
+                    "realized_short": 0.0,
+                    "unrealized_long": 0.0,
+                    "unrealized_short": 0.0,
+                    "open_long_count": 0,
+                    "open_short_count": 0,
+                    "closed_count": 0,
+                },
+            )
             if p["status"] == "closed":
                 if p["direction"] == "short":
                     d["realized_short"] += p["pnl"]
@@ -663,14 +710,22 @@ def _render_one_generation(
                 else:
                     d["unrealized_long"] += p["pnl"]
                     d["open_long_count"] += 1
-        strategy_pnl = sorted(strategy_pnl_map.values(), key=lambda r: (
-            r["realized_long"] + r["realized_short"]
-            + r["unrealized_long"] + r["unrealized_short"]
-        ), reverse=True)
+        strategy_pnl = sorted(
+            strategy_pnl_map.values(),
+            key=lambda r: (
+                r["realized_long"]
+                + r["realized_short"]
+                + r["unrealized_long"]
+                + r["unrealized_short"]
+            ),
+            reverse=True,
+        )
         for r in strategy_pnl:
             r["total_pnl"] = (
-                r["realized_long"] + r["realized_short"]
-                + r["unrealized_long"] + r["unrealized_short"]
+                r["realized_long"]
+                + r["realized_short"]
+                + r["unrealized_long"]
+                + r["unrealized_short"]
             )
     else:
         positions = _safe(dl.load_position_pnl, [], gen_id, state_dir)
@@ -678,6 +733,7 @@ def _render_one_generation(
 
     # Sanitize NaN/inf P&L values that occasionally appear in real state.
     import math
+
     def _is_bad_num(v):
         return isinstance(v, float) and (math.isnan(v) or math.isinf(v))
 
@@ -686,11 +742,17 @@ def _render_one_generation(
             if _is_bad_num(p.get(k)):
                 p[k] = 0.0
     for r in strategy_pnl:
-        for k in ("realized_long", "realized_short", "unrealized_long", "unrealized_short", "total_pnl"):
+        for k in (
+            "realized_long",
+            "realized_short",
+            "unrealized_long",
+            "unrealized_short",
+            "total_pnl",
+        ):
             if _is_bad_num(r.get(k)):
                 r[k] = 0.0
 
-    current_regime = (regime[-1].get("overall_regime") if regime else None)
+    current_regime = regime[-1].get("overall_regime") if regime else None
 
     parts = [
         '<div class="gen-block">',
@@ -703,7 +765,7 @@ def _render_one_generation(
         _render_winners_losers(positions),
         _render_positions_table(positions),
         _render_regime_timeline(regime),
-        '</div>',
+        "</div>",
     ]
     return "".join(parts)
 

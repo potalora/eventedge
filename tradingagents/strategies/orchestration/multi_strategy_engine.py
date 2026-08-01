@@ -11,11 +11,10 @@ import logging
 import math
 import os
 import json
-import statistics
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Callable
 
 import pandas as pd
@@ -35,6 +34,7 @@ from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 logger = logging.getLogger(__name__)
 
 _FINNHUB_FETCH_SAFETY_MARGIN_S = 30.0
+_DIAGNOSTIC_HOLDING_SESSIONS = 5
 
 
 def _fetch_timeout_s() -> float:
@@ -812,45 +812,21 @@ class MultiStrategyEngine:
         return exit_specs, cancellations
 
     def run_learning_loop(self) -> dict:
-        """Phase 2 learning loop: Evaluate strategy performance and optimize prompts."""
-        if not self._should_trigger_learning_loop():
+        """Evaluate governed outcome diagnostics and optimize prompts."""
+        outcomes_by_strategy = {
+            strategy.name: self._read_strategy_outcomes(strategy.name)
+            for strategy in self.paper_trade_strategies
+        }
+        if not self._should_trigger_learning_loop(outcomes_by_strategy):
             return {"triggered": False, "strategies_evaluated": 0}
 
-        scores: dict[str, float] = {}
+        scores: dict[str, float | None] = {}
         trade_counts: dict[str, int] = {}
 
         for strategy in self.paper_trade_strategies:
-            trades = self.state.load_paper_trades(
-                strategy=strategy.name, status="closed"
-            )
-            trade_counts[strategy.name] = len(trades)
-
-            if not trades:
-                scores[strategy.name] = 0.0
-                continue
-
-            # Compute Sharpe from PnL (with fallback for trades closed before pnl field existed)
-            pnls = []
-            for t in trades:
-                p = t.get("pnl")
-                if p is not None:
-                    pnls.append(p)
-                else:
-                    entry = t.get("entry_price", 0)
-                    exit_ = t.get("exit_price", 0)
-                    if entry > 0 and exit_ > 0:
-                        raw = (exit_ - entry) / entry
-                        if t.get("direction") == "short":
-                            raw = -raw
-                        pnls.append(raw * entry * t.get("shares", 1))
-            if len(pnls) > 1:
-                mean_pnl = statistics.mean(pnls)
-                std_pnl = statistics.stdev(pnls)
-                scores[strategy.name] = mean_pnl / std_pnl if std_pnl > 0 else 0.0
-            elif pnls:
-                scores[strategy.name] = pnls[0]
-            else:
-                scores[strategy.name] = 0.0
+            accuracy = directional_accuracy(outcomes_by_strategy[strategy.name])
+            trade_counts[strategy.name] = accuracy.actionable_count
+            scores[strategy.name] = accuracy.rate
 
         # ------------------------------------------------------------------
         # Prompt optimization (Atlas-GIC inspired)
@@ -863,10 +839,6 @@ class MultiStrategyEngine:
 
             state_dir = self.ar_config.get("state_dir", "data/state")
             optimizer = PromptOptimizer(state_dir, self._analyzer)
-            outcomes_by_strategy = {
-                strategy.name: tuple(self._outcome_reader(strategy.name))
-                for strategy in self.paper_trade_strategies
-            }
             all_outcomes = tuple(
                 outcome for rows in outcomes_by_strategy.values() for outcome in rows
             )
@@ -926,12 +898,12 @@ class MultiStrategyEngine:
     # ------------------------------------------------------------------
 
     def _compute_strategy_confidence(self, strategy_name: str) -> float:
-        """Compute confidence from signal journal hit rates.
+        """Compute confidence from governed v2 directional accuracy.
 
         Maps hit_rate [0.3, 0.7] → confidence [0.2, 0.9].
         Returns 0.5 (neutral) if fewer than 10 signals with outcomes.
         """
-        outcomes = tuple(self._outcome_reader(strategy_name))
+        outcomes = self._read_strategy_outcomes(strategy_name)
         accuracy = directional_accuracy(outcomes)
         if accuracy.actionable_count < 10 or accuracy.rate is None:
             return 0.5  # neutral until proven
@@ -939,6 +911,14 @@ class MultiStrategyEngine:
 
         # Linear map: 30% hit rate → 0.2 confidence, 70% → 0.9
         return max(0.2, min(0.9, (hit_rate - 0.3) / 0.4 * 0.7 + 0.2))
+
+    def _read_strategy_outcomes(self, strategy_name: str) -> tuple[OutcomeRecord, ...]:
+        rows = tuple(self._outcome_reader(strategy_name))
+        if any(row.strategy != strategy_name for row in rows):
+            raise ValueError(f"outcome strategy does not match {strategy_name!r}")
+        return tuple(
+            row for row in rows if row.holding_sessions == _DIAGNOSTIC_HOLDING_SESSIONS
+        )
 
     # ------------------------------------------------------------------
     # Regime model helpers
@@ -1032,10 +1012,17 @@ class MultiStrategyEngine:
             return "benign"
         return "normal"
 
-    def _should_trigger_learning_loop(self) -> bool:
-        """Check if learning loop should fire."""
+    def _should_trigger_learning_loop(
+        self,
+        outcomes_by_strategy: Mapping[str, tuple[OutcomeRecord, ...]] | None = None,
+    ) -> bool:
+        """Check whether governed outcome evidence is ready for diagnostics."""
         pt_config = self.ar_config.get("paper_trade", {})
         ll_state = self.state.load_learning_loop_state()
+        outcomes = outcomes_by_strategy or {
+            strategy.name: self._read_strategy_outcomes(strategy.name)
+            for strategy in self.paper_trade_strategies
+        }
 
         # Calendar check
         last_run = ll_state.get("last_run")
@@ -1045,9 +1032,11 @@ class MultiStrategyEngine:
             if (datetime.now() - last_dt).days >= calendar_days:
                 return True
         else:
-            # Never run before — trigger if we have any completed trades
-            trades = self.state.load_paper_trades(status="closed")
-            if trades:
+            # Never run before — trigger if any governed outcome is actionable.
+            if any(
+                directional_accuracy(rows).actionable_count
+                for rows in outcomes.values()
+            ):
                 return True
 
         # Trade count check
@@ -1055,8 +1044,10 @@ class MultiStrategyEngine:
         min_trades = pt_config.get("min_trades_for_evaluation", 20)
         qualifying = 0
         for s in self.paper_trade_strategies:
-            trades = self.state.load_paper_trades(strategy=s.name, status="closed")
-            if len(trades) >= min_trades:
+            if (
+                directional_accuracy(outcomes.get(s.name, ())).actionable_count
+                >= min_trades
+            ):
                 qualifying += 1
 
         return qualifying >= min_strategies

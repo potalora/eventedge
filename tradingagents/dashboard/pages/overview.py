@@ -1,7 +1,6 @@
 """Autoresearch Overview — generation status, regime, capital deployment."""
-from __future__ import annotations
 
-from datetime import datetime
+from __future__ import annotations
 
 import streamlit as st
 
@@ -11,6 +10,7 @@ from tradingagents.dashboard.charts import (
     make_regime_timeline,
 )
 from tradingagents.dashboard.data_loaders import (
+    cohort_metric_books,
     get_active_generations,
     load_all_trades,
     load_capital_deployment,
@@ -75,10 +75,10 @@ def _render_regime_banner(gen: dict) -> None:
         f'<div style="background-color:{color}22; border-left:4px solid {color}; '
         f'padding:12px 16px; border-radius:4px; margin-bottom:8px;">'
         f'<b style="color:{color}; font-size:1.2em;">'
-        f'Regime: {overall.upper()}</b>'
+        f"Regime: {overall.upper()}</b>"
         f'<span style="margin-left:24px; color:#ccc;">'
-        f'VIX {vix:.1f} &nbsp;|&nbsp; Credit {credit:.0f}bps &nbsp;|&nbsp; '
-        f'Yield Curve {yc_slope:+.2f} &nbsp;|&nbsp; {ts}</span></div>',
+        f"VIX {vix:.1f} &nbsp;|&nbsp; Credit {credit:.0f}bps &nbsp;|&nbsp; "
+        f"Yield Curve {yc_slope:+.2f} &nbsp;|&nbsp; {ts}</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -98,12 +98,9 @@ def _render_gen_card(gen: dict) -> None:
             run_dates.add(r["date"])
 
     metrics = load_cohort_metrics(gen_id, state_dir)
-    cohorts = metrics.get("cohorts", {})
-    total_signals = sum(c.get("total_signals", 0) for c in cohorts.values())
-    total_trades = sum(c.get("total_trades", 0) for c in cohorts.values())
-
-    # Deduplicate signals: divide by 4 (4 sizes share signals per horizon)
-    unique_signals = total_signals // 4 if total_signals > 0 else 0
+    cohorts = cohort_metric_books(metrics)
+    total_decisions = sum(c.get("strategy_decisions", 0) for c in cohorts.values())
+    total_fills = sum(c.get("fills", 0) for c in cohorts.values())
 
     trades = load_all_trades(gen_id, state_dir)
     unique_tickers = len({t.get("ticker") for t in trades})
@@ -112,8 +109,8 @@ def _render_gen_card(gen: dict) -> None:
     st.caption(f"`{commit}` — {desc}")
     c1, c2, c3 = st.columns(3)
     c1.metric("Trading Days", len(run_dates))
-    c2.metric("Signals", f"{unique_signals:,}")
-    c3.metric("Trades", f"{total_trades:,}")
+    c2.metric("Decisions", f"{total_decisions:,}")
+    c3.metric("Fills", f"{total_fills:,}")
 
     c4, c5, c6 = st.columns(3)
     c4.metric("Started", created)

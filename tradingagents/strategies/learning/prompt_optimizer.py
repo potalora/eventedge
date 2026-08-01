@@ -36,6 +36,7 @@ LLM_STRATEGIES = {
 
 TRIAL_DAYS = 5
 MIN_SIGNALS_FOR_EVAL = 20
+DIAGNOSTIC_HOLDING_SESSIONS = 5
 
 
 class PromptOptimizer:
@@ -103,6 +104,9 @@ class PromptOptimizer:
         rows = tuple(outcomes)
         if any(row.strategy != strategy for row in rows):
             raise ValueError(f"outcome strategy does not match {strategy!r}")
+        rows = tuple(
+            row for row in rows if row.holding_sessions == DIAGNOSTIC_HOLDING_SESSIONS
+        )
         epoch_ids = {row.epoch_id for row in rows}
         if len(epoch_ids) > 1:
             raise ValueError("prompt diagnostics cannot mix metric epochs")
@@ -237,7 +241,12 @@ Return the complete modified prompt."""
             row for row in strategy_outcomes if row.entry_session >= start_session
         )
         trial_accuracy = directional_accuracy(trial_outcomes)
-        if trial_accuracy.actionable_count < 5 or trial_accuracy.rate is None:
+        actionable_trial_sessions = {
+            row.entry_session
+            for row in trial_outcomes
+            if row.status == "valid" and row.direction in {"long", "short"}
+        }
+        if len(actionable_trial_sessions) < TRIAL_DAYS or trial_accuracy.rate is None:
             return "ongoing"
         baseline_accuracy = directional_accuracy(
             tuple(row for row in strategy_outcomes if row.entry_session < start_session)

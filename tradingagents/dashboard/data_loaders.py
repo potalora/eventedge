@@ -61,11 +61,24 @@ def _open_metrics_service(gen_state_dir: str):
                     f"cohort directory {cohort_id!r} contains ledger {ledger.cohort_id!r}"
                 )
             bindings[cohort_id] = ledger
-        return MetricsService(root, bindings), tuple(ledgers)
+        return (
+            MetricsService(root, bindings, read_only=True),
+            tuple(ledgers),
+        )
     except BaseException:
         for ledger in ledgers:
             ledger.close()
         raise
+
+
+def cohort_metric_books(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return the cohort-level metric-v2 books without legacy aliases."""
+    headline = dict(report.get("headline_books", {}) or {})
+    stress = dict(report.get("stress_tests", {}) or {})
+    duplicates = sorted(set(headline) & set(stress))
+    if duplicates:
+        raise ValueError("duplicate cohort metric books: " + ", ".join(duplicates))
+    return {**headline, **stress}
 
 
 # ------------------------------------------------------------------
@@ -113,7 +126,13 @@ def load_cohort_metrics(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
             "headline_books": {},
             "scenario_panel": None,
             "scenario_panel_available": False,
-            "missing_headline_books": [],
+            "scenario_panel_unavailable_reason": "no_current_epoch",
+            "missing_headline_books": [
+                "horizon_1y_size_100k",
+                "horizon_30d_size_100k",
+                "horizon_3m_size_100k",
+                "horizon_6m_size_100k",
+            ],
             "stress_tests": {},
             "dependent_scenarios": True,
         }

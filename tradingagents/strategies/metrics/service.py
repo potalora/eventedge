@@ -34,6 +34,8 @@ class MetricsService:
         self,
         generation_state_dir: str | Path,
         cohort_ledgers: Mapping[str, PortfolioLedger],
+        *,
+        read_only: bool = False,
     ) -> None:
         bindings = dict(cohort_ledgers)
         seen_bindings: dict[str, str] = {}
@@ -56,7 +58,12 @@ class MetricsService:
             seen_databases[database_id] = cohort_id
         self.generation_state_dir = Path(generation_state_dir)
         self._cohort_ledgers = MappingProxyType(bindings)
-        self.store = MetricStore(self.generation_state_dir / "metrics_v2.sqlite3")
+        metric_store_path = self.generation_state_dir / "metrics_v2.sqlite3"
+        self.store = (
+            MetricStore.open_existing(metric_store_path)
+            if read_only
+            else MetricStore(metric_store_path)
+        )
 
     @property
     def cohort_ids(self) -> tuple[str, ...]:
@@ -145,6 +152,7 @@ class MetricsService:
                 "headline_books": {},
                 "scenario_panel": None,
                 "scenario_panel_available": False,
+                "scenario_panel_unavailable_reason": "no_current_epoch",
                 "missing_headline_books": sorted(_HEADLINE_BOOKS),
                 "stress_tests": {},
                 "dependent_scenarios": True,
@@ -159,7 +167,12 @@ class MetricsService:
         }
         missing = sorted(_HEADLINE_BOOKS - headline.keys())
         panel = None
-        if not missing:
+        panel_unavailable_reason = "missing_headline_books" if missing else None
+        headline_windows = {
+            (item.start_session, item.end_session, item.valid_sessions)
+            for item in headline.values()
+        }
+        if not missing and len(headline_windows) == 1:
             panel = {
                 "label": "equal-weighted dependent $100k scenario panel",
                 "dependent_scenarios": True,
@@ -167,12 +180,15 @@ class MetricsService:
                     item.total_return for item in headline.values()
                 ),
             }
+        elif not missing:
+            panel_unavailable_reason = "mismatched_headline_windows"
         return {
             "metric_schema_version": 2,
             "epoch": asdict(epoch),
             "headline_books": {key: asdict(value) for key, value in headline.items()},
             "scenario_panel": panel,
             "scenario_panel_available": panel is not None,
+            "scenario_panel_unavailable_reason": panel_unavailable_reason,
             "missing_headline_books": missing,
             "stress_tests": {
                 key: asdict(value)

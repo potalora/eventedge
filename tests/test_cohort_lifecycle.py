@@ -5,7 +5,7 @@ Simulates 30 trading days of the 2-cohort paper trading trial to verify:
 2. Exit checks fire when holding period / stop loss is reached
 3. PnL is computed on close
 4. Signal journal back-fills return_5d/10d/30d
-5. Learning loop reads closed-trade PnL and updates weights
+5. Learning diagnostics read governed v2 outcomes
 6. Adaptive confidence diverges from control after enough history
 7. Cohort comparison produces valid report
 
@@ -27,7 +27,7 @@ from tradingagents.strategies.orchestration.multi_strategy_engine import (
 from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.learning.signal_journal import SignalJournal
 from tradingagents.strategies.execution.models import MarketBar
-from tradingagents.strategies.metrics.models import SignalMetricRecord
+from tradingagents.strategies.metrics.models import OutcomeRecord, SignalMetricRecord
 from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules.base import Candidate
@@ -233,7 +233,13 @@ class TestExactSessionOutcomes:
 
 
 class TestLearningLoop:
-    def _build_engine(self, state_dir, strategies=None, adaptive=False):
+    def _build_engine(
+        self,
+        state_dir,
+        strategies=None,
+        adaptive=False,
+        outcome_reader=None,
+    ):
         """Build a MultiStrategyEngine with mocked dependencies."""
         config = {
             "autoresearch": {
@@ -251,66 +257,60 @@ class TestLearningLoop:
             state_manager=state,
             use_llm=False,
             adaptive_confidence=adaptive,
+            outcome_reader=outcome_reader,
         )
         return engine, state
 
-    def test_learning_loop_reads_pnl(self, tmp_path):
-        """Learning loop computes scores from closed trade PnL."""
+    @staticmethod
+    def _outcome(index: int, *, hit: bool) -> OutcomeRecord:
+        signed_return = Decimal("0.05" if hit else "-0.05")
+        return OutcomeRecord(
+            outcome_id=f"outcome-{index}",
+            signal_id=f"signal-{index}",
+            event_key=f"event-{index}",
+            epoch_id="epoch-1",
+            strategy="fake_strat",
+            policy_id="policy-1",
+            ticker="AAPL",
+            direction="long",
+            holding_sessions=5,
+            entry_session=date(2026, 3, 2),
+            exit_session=date(2026, 3, 9),
+            entry_price=Decimal("100"),
+            exit_price=Decimal("105" if hit else "95"),
+            raw_return=signed_return,
+            signed_return=signed_return,
+            status="valid",
+            invalid_reason="",
+        )
+
+    def test_learning_loop_uses_governed_directional_accuracy(self, tmp_path):
+        """Learning diagnostics never derive a local Sharpe from paper trades."""
         state_dir = str(tmp_path / "learn")
-        engine, state = self._build_engine(state_dir)
+        outcomes = tuple(self._outcome(index, hit=index < 2) for index in range(3))
+        calls: list[str] = []
+
+        def outcome_reader(strategy: str):
+            calls.append(strategy)
+            return outcomes if strategy == "fake_strat" else ()
+
+        engine, state = self._build_engine(
+            state_dir,
+            outcome_reader=outcome_reader,
+        )
 
         # Force learning loop to trigger
         state.save_learning_loop_state({"last_run": "2020-01-01T00:00:00"})
-
-        # Create closed trades with PnL
-        for i in range(3):
-            state.save_paper_trade(
-                {
-                    "strategy": "fake_strat",
-                    "ticker": f"T{i}",
-                    "direction": "long",
-                    "entry_price": 100.0,
-                    "exit_price": 110.0,
-                    "entry_date": "2026-03-01",
-                    "exit_date": "2026-03-15",
-                    "shares": 5,
-                    "status": "closed",
-                    "pnl": 50.0,
-                    "pnl_pct": 0.1,
-                }
-            )
+        state.load_paper_trades = lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy paper trades must not be read")
+        )
 
         result = engine.run_learning_loop()
         assert result["triggered"] is True
-        assert "fake_strat" in result["scores"]
-
-    def test_learning_loop_fallback_pnl(self, tmp_path):
-        """Learning loop computes PnL on-the-fly for trades missing the pnl field."""
-        state_dir = str(tmp_path / "fallback")
-        engine, state = self._build_engine(state_dir)
-
-        state.save_learning_loop_state({"last_run": "2020-01-01T00:00:00"})
-
-        # Simulate old-format closed trades (no pnl field)
-        for i in range(3):
-            state.save_paper_trade(
-                {
-                    "strategy": "fake_strat",
-                    "ticker": f"T{i}",
-                    "direction": "long",
-                    "entry_price": 100.0,
-                    "exit_price": 115.0,
-                    "entry_date": "2026-03-01",
-                    "exit_date": "2026-03-15",
-                    "shares": 5,
-                    "status": "closed",
-                    "exit_reason": "hold_period",
-                    # No pnl or pnl_pct field!
-                }
-            )
-
-        result = engine.run_learning_loop()
-        assert result["triggered"] is True
+        assert result["scores"]["fake_strat"] == pytest.approx(2 / 3)
+        assert result["scores"]["fake_strat_2"] is None
+        assert result["trade_counts"] == {"fake_strat": 3, "fake_strat_2": 0}
+        assert calls == ["fake_strat", "fake_strat_2"]
 
 
 # ---------------------------------------------------------------------------

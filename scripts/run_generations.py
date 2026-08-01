@@ -97,7 +97,11 @@ def _run_explicit_comparison(manager, pairs: tuple) -> dict[str, object]:
                         f"cohort {cohort_id!r} resolved to ledger {ledger.cohort_id!r}"
                     )
                 bindings[cohort_id] = ledger
-            services[generation_id] = MetricsService(root, bindings)
+            services[generation_id] = MetricsService(
+                root,
+                bindings,
+                read_only=True,
+            )
 
         for pair in pairs:
             for generation_id, epoch_id in (

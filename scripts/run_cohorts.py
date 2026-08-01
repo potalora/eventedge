@@ -182,7 +182,11 @@ def main():
             cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
         }
         generation_state_dir = config["autoresearch"]["state_dir"]
-        service = MetricsService(generation_state_dir, ledgers)
+        service = MetricsService(
+            generation_state_dir,
+            ledgers,
+            read_only=True,
+        )
         print(
             json.dumps(
                 CohortComparison(metrics_service=service).compare(),

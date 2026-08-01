@@ -48,10 +48,11 @@ def _outcome(
     epoch_id: str = "epoch-1",
     entry_session: date = date(2026, 4, 1),
     hit: bool = True,
+    holding_sessions: int = 5,
 ) -> OutcomeRecord:
     signed = Decimal("0.01" if hit else "-0.01")
     return OutcomeRecord(
-        outcome_id=f"outcome-{index}",
+        outcome_id=f"outcome-{holding_sessions}-{index}",
         signal_id=f"signal-{index}",
         event_key=f"event-{index}",
         epoch_id=epoch_id,
@@ -59,7 +60,7 @@ def _outcome(
         policy_id="policy-1",
         ticker="AAPL",
         direction="long",
-        holding_sessions=5,
+        holding_sessions=holding_sessions,
         entry_session=entry_session,
         exit_session=date(2026, 4, 30),
         entry_price=Decimal("100"),
@@ -99,9 +100,12 @@ def test_evaluate_uses_directional_accuracy_and_honest_unavailable_fields(
         governed,
     )
     rows = tuple(_outcome(index, hit=index < 15) for index in range(20))
-    score = optimizer.evaluate_prompts({"litigation": (row for row in rows)})[
-        "litigation"
-    ]
+    other_horizons = tuple(
+        _outcome(index, hit=False, holding_sessions=10) for index in range(20)
+    )
+    score = optimizer.evaluate_prompts(
+        {"litigation": (row for row in rows + other_horizons)}
+    )["litigation"]
 
     assert score == {
         "hit_rate": pytest.approx(0.75),
@@ -173,8 +177,20 @@ def test_trial_split_uses_exact_entry_session_and_directional_accuracy(
     baseline = tuple(
         _outcome(i, entry_session=date(2026, 4, 9), hit=i < 3) for i in range(10)
     )
-    trial = tuple(
+    same_session_trial = tuple(
         _outcome(i + 10, entry_session=date(2026, 4, 10), hit=i < 4) for i in range(5)
+    )
+    assert optimizer.check_trial(trial_id, baseline + same_session_trial) == "ongoing"
+    trial_sessions = (
+        date(2026, 4, 10),
+        date(2026, 4, 13),
+        date(2026, 4, 14),
+        date(2026, 4, 15),
+        date(2026, 4, 16),
+    )
+    trial = tuple(
+        _outcome(i + 20, entry_session=session, hit=i < 4)
+        for i, session in enumerate(trial_sessions)
     )
     assert optimizer.check_trial(trial_id, baseline + trial) == "keep"
 
@@ -186,7 +202,20 @@ def test_trial_reverts_when_not_improved(optimizer) -> None:
         _outcome(i, entry_session=date(2026, 4, 9), hit=i < 8) for i in range(10)
     )
     trial = tuple(
-        _outcome(i + 10, entry_session=date(2026, 4, 10), hit=i < 2) for i in range(5)
+        _outcome(
+            i + 10,
+            entry_session=session,
+            hit=i < 2,
+        )
+        for i, session in enumerate(
+            (
+                date(2026, 4, 10),
+                date(2026, 4, 13),
+                date(2026, 4, 14),
+                date(2026, 4, 15),
+                date(2026, 4, 16),
+            )
+        )
     )
     assert optimizer.check_trial(trial_id, baseline + trial) == "revert"
 

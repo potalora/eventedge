@@ -1,4 +1,5 @@
 """Cohort Matrix — 4x4 heatmap of horizon x size performance."""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -6,6 +7,7 @@ import streamlit as st
 
 from tradingagents.dashboard.charts import make_cohort_heatmap
 from tradingagents.dashboard.data_loaders import (
+    cohort_metric_books,
     get_active_generations,
     load_capital_deployment,
     load_cohort_heatmap,
@@ -14,17 +16,17 @@ from tradingagents.dashboard.data_loaders import (
 
 # Metrics that have data now vs ones requiring closed trades
 AVAILABLE_METRICS = {
-    "total_trades": "Total Trades",
-    "total_signals": "Total Signals",
-    "hit_rate_5d": "Hit Rate (5d)",
-    "avg_return_5d": "Avg Return (5d)",
-    "open_trades": "Open Trades",
+    "fills": "Fills",
+    "strategy_decisions": "Strategy Decisions",
+    "closed_trades": "Closed Trades",
+    "total_return": "Net Total Return",
+    "gross_weight": "Gross Weight",
+    "cash_weight": "Cash Weight",
 }
 CLOSED_TRADE_METRICS = {
-    "sharpe": "Sharpe Ratio",
-    "win_rate": "Win Rate",
-    "avg_pnl": "Avg P&L ($)",
-    "max_drawdown_estimate": "Max Drawdown ($)",
+    "annualized_daily_net_sharpe": "Annualized Daily Net Sharpe",
+    "annualized_matched_information_ratio": "Matched Information Ratio",
+    "max_drawdown": "Net Max Drawdown",
 }
 
 
@@ -52,16 +54,11 @@ def render() -> None:
             + ["---"]
             + [f"{v} (requires closed trades)" for v in CLOSED_TRADE_METRICS.values()]
         )
-        metric_keys = (
-            list(AVAILABLE_METRICS.keys())
-            + ["__sep__"]
-            + list(CLOSED_TRADE_METRICS.keys())
-        )
         selected_label = st.selectbox(
             "Metric", [m for m in metric_labels if m != "---"], key="matrix_metric"
         )
         # Map label back to key
-        selected_metric = "total_trades"
+        selected_metric = "fills"
         for k, lbl in all_metrics.items():
             if lbl in selected_label:
                 selected_metric = k
@@ -79,8 +76,8 @@ def render() -> None:
 
     if all_none and selected_metric in CLOSED_TRADE_METRICS:
         st.info(
-            "No closed trades yet — Sharpe, win rate, and P&L metrics will "
-            "populate after the first 30-day cycle completes (~April 30)."
+            "This metric is unavailable until its governed v2 sample "
+            "requirements are met."
         )
 
     metric_display = all_metrics.get(selected_metric, selected_metric)
@@ -94,23 +91,29 @@ def render() -> None:
     dep_map = {d["cohort"]: d for d in deployment}
 
     rows = []
-    for name, m in sorted(metrics.get("cohorts", {}).items()):
+    for name, m in sorted(cohort_metric_books(metrics).items()):
         parts = name.split("_")
         horizon = parts[1] if len(parts) >= 2 else ""
         size = parts[3] if len(parts) >= 4 else ""
         dep = dep_map.get(name, {})
 
-        hr = m.get("hit_rate_5d")
-        rows.append({
-            "Horizon": horizon,
-            "Size": f"${size.upper()}" if size != "100k" else "$100K",
-            "Signals": m.get("total_signals", 0),
-            "Trades": m.get("total_trades", 0),
-            "Open": m.get("open_trades", 0),
-            "Hit Rate 5d": f"{hr*100:.1f}%" if hr is not None else "—",
-            "Deployed": f"${dep.get('deployed', 0):,.0f}",
-            "Deploy %": f"{dep.get('pct', 0):.0f}%",
-        })
+        total_return = m.get("total_return")
+        sharpe = m.get("annualized_daily_net_sharpe")
+        rows.append(
+            {
+                "Horizon": horizon,
+                "Size": f"${size.upper()}" if size != "100k" else "$100K",
+                "Decisions": m.get("strategy_decisions", 0),
+                "Fills": m.get("fills", 0),
+                "Closed": m.get("closed_trades", 0),
+                "Net Return": (
+                    f"{total_return * 100:.2f}%" if total_return is not None else "—"
+                ),
+                "Sharpe": f"{sharpe:.2f}" if sharpe is not None else "—",
+                "Deployed": f"${dep.get('deployed', 0):,.0f}",
+                "Deploy %": f"{dep.get('pct', 0):.0f}%",
+            }
+        )
 
     if rows:
         df = pd.DataFrame(rows)
