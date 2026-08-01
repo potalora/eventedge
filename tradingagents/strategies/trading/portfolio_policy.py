@@ -30,26 +30,31 @@ class PolicyPosition:
     risk_tags: tuple[str, ...]
     annualized_volatility: float
 
+    def __post_init__(self) -> None:
+        """Prevent mutable tag collections from entering a frozen position."""
+        object.__setattr__(self, "strategy_tags", tuple(self.strategy_tags))
+        object.__setattr__(self, "risk_tags", tuple(self.risk_tags))
+
 
 @dataclass(frozen=True)
 class PortfolioPolicyConfig:
     """Versioned policy settings for one explicitly selected cohort profile."""
 
-    version: str = "portfolio_policy_v1"
-    max_positions: int = 20
-    max_position_pct: float = 0.08
-    max_sector_exposure_pct: float = 0.25
-    max_strategy_exposure_pct: float = 0.20
-    max_event_cluster_exposure_pct: float = 0.10
-    max_position_risk_contribution_pct: float = 0.25
-    risk_contribution_min_positions: int = 4
-    max_short_exposure_pct: float = 0.20
-    max_single_short_pct: float = 0.05
-    cash_reserve_pct: float = 0.15
-    margin_cash_buffer_pct: float = 0.15
-    volatility_lookback_sessions: int = 60
-    annualized_volatility_floor: float = 0.15
-    congressional_exposure_pct: float = 0.12
+    version: str
+    max_positions: int
+    max_position_pct: float
+    max_sector_exposure_pct: float
+    max_strategy_exposure_pct: float
+    max_event_cluster_exposure_pct: float
+    max_position_risk_contribution_pct: float
+    risk_contribution_min_positions: int
+    max_short_exposure_pct: float
+    max_single_short_pct: float
+    cash_reserve_pct: float
+    margin_cash_buffer_pct: float
+    volatility_lookback_sessions: int
+    annualized_volatility_floor: float
+    congressional_exposure_pct: float
 
     @classmethod
     def from_size_profile(

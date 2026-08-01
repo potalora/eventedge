@@ -10,11 +10,19 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
 )
 from tradingagents.strategies.trading.portfolio_policy import (
     PortfolioPolicyConfig,
+    PolicyPosition,
     PortfolioRiskContext,
     annualized_volatility,
     build_portfolio_risk_context,
 )
 from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
+
+
+def _policy_config(size: str = "100k") -> PortfolioPolicyConfig:
+    return PortfolioPolicyConfig.from_size_profile(
+        SIZE_PROFILES[size],
+        DEFAULT_CONFIG["autoresearch"]["portfolio_policy"],
+    )
 
 
 def test_candidate_and_recommendation_preserve_policy_attribution() -> None:
@@ -119,7 +127,7 @@ def test_context_includes_current_and_pending_positions_with_full_tags() -> None
         borrow_available={"MSFT": True},
         margin_used=0.0,
         consumed_event_keys={"event-old"},
-        config=PortfolioPolicyConfig(),
+        config=_policy_config(),
     )
 
     assert context.positions[0].weight == 0.10
@@ -144,7 +152,7 @@ def test_context_mappings_resist_source_and_instance_mutation() -> None:
         borrow_available={"MSFT": True},
         margin_used=0.0,
         consumed_event_keys={"event-old"},
-        config=PortfolioPolicyConfig(),
+        config=_policy_config(),
     )
 
     earnings_dates["MSFT"] = 99
@@ -170,7 +178,7 @@ def test_direct_context_constructor_normalizes_mutable_collections() -> None:
         borrow_available={"MSFT": True},
         margin_used=0.0,
         consumed_event_keys={"event-old"},
-        config=PortfolioPolicyConfig(),
+        config=_policy_config(),
     )
 
     earnings_dates["MSFT"] = 99
@@ -179,6 +187,47 @@ def test_direct_context_constructor_normalizes_mutable_collections() -> None:
     assert context.earnings_dates["MSFT"] == 12
     with pytest.raises(TypeError):
         context.sectors["AAPL"] = "Technology"  # type: ignore[index]
+
+
+def test_policy_position_normalizes_direct_constructor_tag_lists() -> None:
+    strategy_tags = ["congressional_trades"]
+    risk_tags = ["member:jane-doe"]
+    position = PolicyPosition(
+        ticker="MSFT",
+        direction="long",
+        weight=0.08,
+        sector="Technology",
+        strategy_tags=strategy_tags,
+        risk_tags=risk_tags,
+        annualized_volatility=0.20,
+    )
+    context = PortfolioRiskContext(
+        portfolio_value=10_000.0,
+        cash=9_000.0,
+        positions=[position],
+        pending_positions=[],
+        sectors={"MSFT": "Technology"},
+        annualized_volatility={"MSFT": 0.20},
+        earnings_dates={},
+        short_interest={},
+        borrow_available={},
+        margin_used=0.0,
+        consumed_event_keys=set(),
+        config=_policy_config(),
+    )
+
+    strategy_tags.append("filing_analysis")
+    risk_tags.append("event:changed")
+
+    assert position.strategy_tags == ("congressional_trades",)
+    assert position.risk_tags == ("member:jane-doe",)
+    assert context.positions[0].strategy_tags == ("congressional_trades",)
+    assert context.positions[0].risk_tags == ("member:jane-doe",)
+
+
+def test_policy_config_requires_size_profile_factory() -> None:
+    with pytest.raises(TypeError):
+        PortfolioPolicyConfig()
 
 
 @pytest.mark.parametrize("size", ["5k", "10k", "50k", "100k"])
