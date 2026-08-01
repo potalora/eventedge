@@ -1317,6 +1317,14 @@ git commit -m "feat(metrics): compute exact XNYS-session outcomes"
 - Produces: `portfolio_metrics(...) -> PortfolioMetrics`.
 - Produces: `paired_comparison(candidate_returns, baseline_returns) -> PairedComparison`.
 - A return is emitted only when two valid snapshots are consecutive XNYS sessions in the same epoch.
+- `PortfolioMetrics` is emitted only for one requested cohort+epoch with a
+  duplicate-free, complete contiguous valid XNYS snapshot window and complete
+  cohort+epoch-scoped total-return-adjusted SPY/BIL coverage. Invalid or
+  missing sessions/benchmark rows raise; consumers must surface metrics as
+  unavailable rather than bridge or compound disjoint windows. Successful
+  metrics therefore have zero missing/stale-mark counts. Sharpe visibility is
+  based on 30 actual daily return observations (31 snapshots), not row count
+  alone.
 
 - [ ] **Step 1: Write failing known-sequence tests**
 

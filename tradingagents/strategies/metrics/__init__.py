@@ -20,6 +20,18 @@ from .models import (
 )
 from .store import MetricStore
 from .outcomes import DirectionalAccuracy, OutcomeCalculator, directional_accuracy
+from .portfolio import (
+    DatedReturn,
+    annualized_sharpe,
+    daily_net_returns,
+    drawdowns,
+    matched_benchmark_returns,
+    matched_return,
+    paired_comparison,
+    portfolio_metrics,
+    reconcile_costs,
+    total_return,
+)
 
 __all__ = [
     "LEGACY_SCHEMA_LABEL",
@@ -27,6 +39,7 @@ __all__ = [
     "OUTCOME_WINDOWS",
     "DeduplicationResult",
     "Direction",
+    "DatedReturn",
     "EpochStatus",
     "EpochContext",
     "EpochManager",
@@ -44,8 +57,17 @@ __all__ = [
     "StrategyHealthRecord",
     "XNYSCalendar",
     "deduplicate_signals",
+    "daily_net_returns",
+    "drawdowns",
     "event_key",
     "execution_id",
+    "matched_benchmark_returns",
+    "matched_return",
+    "paired_comparison",
+    "portfolio_metrics",
+    "reconcile_costs",
     "directional_accuracy",
     "signal_id",
+    "total_return",
+    "annualized_sharpe",
 ]

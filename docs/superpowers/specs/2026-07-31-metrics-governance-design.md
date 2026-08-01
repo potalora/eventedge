@@ -45,11 +45,17 @@ conflicts, not first-record wins.
 - Neutral signals are reported separately.
 - Outcome entry is next-session open.
 - N-session outcome exits at the close of the Nth held XNYS session.
-- Total return uses net-equity endpoints.
+- `PortfolioMetrics` is emitted only for one complete, contiguous, valid XNYS
+  snapshot window for one cohort and epoch, with complete scoped persisted SPY
+  and BIL coverage. An invalid or missing session makes full-window metrics
+  unavailable rather than selecting or compounding a disjoint segment.
+- Total return uses the net-equity endpoints of that complete window.
 - Daily returns use consecutive valid sessions within one epoch.
 - Sharpe annualizes daily excess returns by `sqrt(252)` and is hidden before 30
-  sessions.
-- Drawdown uses the running peak of net equity.
+  actual return observations (31 contiguous snapshots).
+- Drawdown uses the running peak of net equity in that complete window.
+- Successful full-window metrics have zero missing/stale-mark counts; consumers
+  must surface unavailable metrics instead of bridging a gap.
 - Strategy contribution uses actual size, marks, and costs.
 - Candidate comparisons use paired common-session returns.
 
