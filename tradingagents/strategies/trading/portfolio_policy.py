@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, fields, replace
-from math import sqrt
+from datetime import date, datetime
+from math import isfinite, sqrt
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
@@ -27,6 +28,41 @@ _PORTFOLIO_POLICY_FACTORY_TOKEN = object()
 def _immutable_mapping(values: Mapping[str, Any]) -> Mapping[str, Any]:
     """Copy scalar mapping data into an immutable mapping with normal get access."""
     return MappingProxyType(dict(values))
+
+
+def _canonical_ticker(value: object) -> str:
+    ticker = str(value).strip().upper()
+    if not ticker:
+        raise ValueError("volatility evidence ticker must be non-empty")
+    return ticker
+
+
+def _validated_volatility_evidence(
+    evidence: Mapping[str, float],
+) -> dict[str, float]:
+    """Normalize a governed volatility map and reject unusable scalars."""
+    normalized: dict[str, float] = {}
+    for raw_ticker, raw_value in evidence.items():
+        ticker = _canonical_ticker(raw_ticker)
+        if isinstance(raw_value, bool):
+            raise ValueError(
+                f"annualized volatility evidence for {ticker} must be finite and positive"
+            )
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"annualized volatility evidence for {ticker} must be finite and positive"
+            ) from exc
+        if not isfinite(value) or value <= 0:
+            raise ValueError(
+                f"annualized volatility evidence for {ticker} must be finite and positive"
+            )
+        previous = normalized.get(ticker)
+        if previous is not None and previous != value:
+            raise ValueError(f"conflicting annualized volatility evidence for {ticker}")
+        normalized[ticker] = value
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -166,10 +202,29 @@ class PortfolioRiskContext:
         object.__setattr__(self, "positions", tuple(self.positions))
         object.__setattr__(self, "pending_positions", tuple(self.pending_positions))
         object.__setattr__(self, "sectors", _immutable_mapping(self.sectors))
+        volatility_evidence = _validated_volatility_evidence(self.annualized_volatility)
+        for position in self.positions + self.pending_positions:
+            ticker = _canonical_ticker(position.ticker)
+            expected = volatility_evidence.get(ticker)
+            if (
+                not isfinite(float(position.annualized_volatility))
+                or float(position.annualized_volatility) <= 0
+            ):
+                raise ValueError(
+                    f"annualized volatility for governed position {ticker} "
+                    "must be finite and positive"
+                )
+            if (
+                expected is not None
+                and float(position.annualized_volatility) != expected
+            ):
+                raise ValueError(
+                    f"annualized volatility evidence is inconsistent for {ticker}"
+                )
         object.__setattr__(
             self,
             "annualized_volatility",
-            _immutable_mapping(self.annualized_volatility),
+            _immutable_mapping(volatility_evidence),
         )
         object.__setattr__(
             self,
@@ -219,23 +274,134 @@ def annualized_volatility(
     return max(float(floor), value)
 
 
+def build_annualized_volatility_evidence(
+    price_cache: Mapping[str, pd.DataFrame],
+    required_tickers: Iterable[str],
+    *,
+    lookback_sessions: int,
+    floor: float,
+    expected_sessions: Iterable[date | datetime | pd.Timestamp],
+) -> dict[str, float]:
+    """Build exact measured volatility evidence for every governed ticker.
+
+    A 60-session policy requires 61 consecutive usable closes. Missing, partial,
+    non-finite, or non-positive price history is a hard error; the volatility
+    floor applies only after a valid return series has been measured.
+    """
+    if lookback_sessions <= 0:
+        raise ValueError("lookback_sessions must be positive")
+    if not isfinite(float(floor)) or float(floor) <= 0:
+        raise ValueError("annualized volatility floor must be finite and positive")
+
+    def normalized_session(value: object) -> date:
+        if isinstance(value, pd.Timestamp):
+            if pd.isna(value):
+                raise ValueError("volatility session index contains an invalid date")
+            return value.date()
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        raise ValueError("volatility session index must contain dates or datetimes")
+
+    expected = tuple(normalized_session(value) for value in expected_sessions)
+    if len(expected) != lookback_sessions + 1:
+        raise ValueError(
+            "expected volatility sessions must contain exactly "
+            f"{lookback_sessions + 1} sessions"
+        )
+    if len(set(expected)) != len(expected) or any(
+        later <= earlier for earlier, later in zip(expected, expected[1:])
+    ):
+        raise ValueError(
+            "expected volatility sessions must be strictly increasing and unique"
+        )
+
+    normalized_cache: dict[str, pd.DataFrame] = {}
+    for raw_ticker, prices in price_cache.items():
+        ticker = _canonical_ticker(raw_ticker)
+        if ticker in normalized_cache and normalized_cache[ticker] is not prices:
+            raise ValueError(f"conflicting price history for {ticker}")
+        normalized_cache[ticker] = prices
+
+    evidence: dict[str, float] = {}
+    for ticker in sorted({_canonical_ticker(value) for value in required_tickers}):
+        prices = normalized_cache.get(ticker)
+        if not isinstance(prices, pd.DataFrame) or "Close" not in prices.columns:
+            raise ValueError(
+                f"missing valid {lookback_sessions}-session volatility evidence "
+                f"for {ticker}"
+            )
+        closes = prices["Close"]
+        if not isinstance(closes, pd.Series):
+            raise ValueError(
+                f"missing valid {lookback_sessions}-session volatility evidence "
+                f"for {ticker}"
+            )
+        actual_sessions = tuple(normalized_session(value) for value in prices.index)
+        if len(set(actual_sessions)) != len(actual_sessions) or any(
+            later <= earlier
+            for earlier, later in zip(actual_sessions, actual_sessions[1:])
+        ):
+            raise ValueError(
+                f"invalid volatility session sequence for {ticker}: "
+                "sessions must be strictly increasing and unique"
+            )
+        if actual_sessions[-len(expected) :] != expected:
+            raise ValueError(
+                f"invalid volatility session sequence for {ticker}: "
+                "sessions do not match the expected XNYS window"
+            )
+        window = pd.to_numeric(closes, errors="coerce").tail(len(expected))
+        values = tuple(float(value) for value in window)
+        if len(values) != lookback_sessions + 1 or any(
+            not isfinite(value) or value <= 0 for value in values
+        ):
+            raise ValueError(
+                f"missing valid {lookback_sessions}-session volatility evidence "
+                f"for {ticker}"
+            )
+        measured = annualized_volatility(
+            pd.DataFrame({"Close": values}),
+            lookback_sessions=lookback_sessions,
+            floor=floor,
+        )
+        if not isfinite(measured) or measured <= 0:  # pragma: no cover - invariant
+            raise ValueError(
+                f"invalid measured annualized volatility evidence for {ticker}"
+            )
+        evidence[ticker] = measured
+    return evidence
+
+
 def _position(
     row: Mapping[str, Any],
     portfolio_value: float,
     price_cache: Mapping[str, pd.DataFrame],
     config: PortfolioPolicyConfig,
+    annualized_volatility_evidence: Mapping[str, float] | None = None,
 ) -> PolicyPosition:
     ticker = str(row["ticker"])
+    evidence_ticker = _canonical_ticker(ticker)
     marked_value = float(row["marked_value"])
-    volatility = (
-        annualized_volatility(
-            price_cache[ticker],
-            lookback_sessions=config.volatility_lookback_sessions,
-            floor=config.annualized_volatility_floor,
+    if annualized_volatility_evidence is not None:
+        try:
+            volatility = annualized_volatility_evidence[evidence_ticker]
+        except KeyError as exc:
+            raise ValueError(
+                "missing annualized volatility evidence for governed ticker "
+                f"{evidence_ticker}"
+            ) from exc
+    else:
+        volatility = (
+            annualized_volatility(
+                price_cache[ticker],
+                lookback_sessions=config.volatility_lookback_sessions,
+                floor=config.annualized_volatility_floor,
+            )
+            if ticker in price_cache
+            else config.annualized_volatility_floor
         )
-        if ticker in price_cache
-        else config.annualized_volatility_floor
-    )
     return PolicyPosition(
         ticker=ticker,
         direction=str(row.get("direction", "long")),
@@ -253,7 +419,8 @@ def build_portfolio_risk_context(
     cash: float,
     current_positions: Iterable[Mapping[str, Any]],
     pending_positions: Iterable[Mapping[str, Any]],
-    price_cache: Mapping[str, pd.DataFrame],
+    price_cache: Mapping[str, pd.DataFrame] | None = None,
+    annualized_volatility_evidence: Mapping[str, float] | None = None,
     earnings_dates: Mapping[str, int],
     short_interest: Mapping[str, float],
     borrow_available: Mapping[str, bool],
@@ -267,26 +434,40 @@ def build_portfolio_risk_context(
     if portfolio_value <= 0:
         raise ValueError("portfolio_value must be positive")
 
+    current_rows = tuple(current_positions)
+    pending_rows = tuple(pending_positions)
+    cache = price_cache or {}
+    explicit_evidence = (
+        _validated_volatility_evidence(annualized_volatility_evidence)
+        if annualized_volatility_evidence is not None
+        else None
+    )
+
     current = tuple(
-        _position(row, portfolio_value, price_cache, config)
-        for row in current_positions
+        _position(row, portfolio_value, cache, config, explicit_evidence)
+        for row in current_rows
     )
     pending = tuple(
-        _position(row, portfolio_value, price_cache, config)
-        for row in pending_positions
+        _position(row, portfolio_value, cache, config, explicit_evidence)
+        for row in pending_rows
     )
     all_positions = current + pending
     sector_map = {p.ticker: p.sector for p in all_positions}
     sector_map.update(
         {str(ticker): str(sector) for ticker, sector in (sectors or {}).items()}
     )
-    volatility_map = {p.ticker: p.annualized_volatility for p in all_positions}
-    for ticker, prices in price_cache.items():
-        volatility_map[str(ticker)] = annualized_volatility(
-            prices,
-            lookback_sessions=config.volatility_lookback_sessions,
-            floor=config.annualized_volatility_floor,
-        )
+    if explicit_evidence is not None:
+        volatility_map = explicit_evidence
+    else:
+        volatility_map = {
+            _canonical_ticker(p.ticker): p.annualized_volatility for p in all_positions
+        }
+        for ticker, prices in cache.items():
+            volatility_map[_canonical_ticker(ticker)] = annualized_volatility(
+                prices,
+                lookback_sessions=config.volatility_lookback_sessions,
+                floor=config.annualized_volatility_floor,
+            )
     return PortfolioRiskContext(
         portfolio_value=float(portfolio_value),
         cash=float(cash),
@@ -650,7 +831,21 @@ def portfolio_risk_context_from_document(
 ) -> PortfolioRiskContext:
     """Rehydrate the exact typed context from an immutable ledger binding."""
 
+    volatility_evidence = _validated_volatility_evidence(
+        document["annualized_volatility"]
+    )
+
     def position(value: Mapping[str, Any]) -> PolicyPosition:
+        ticker = _canonical_ticker(value["ticker"])
+        if ticker not in volatility_evidence:
+            raise ValueError(
+                f"missing annualized volatility evidence for governed ticker {ticker}"
+            )
+        serialized_volatility = float(value["annualized_volatility"])
+        if serialized_volatility != volatility_evidence[ticker]:
+            raise ValueError(
+                f"annualized volatility evidence is inconsistent for {ticker}"
+            )
         return PolicyPosition(
             ticker=str(value["ticker"]),
             direction=str(value["direction"]),
@@ -669,10 +864,7 @@ def portfolio_risk_context_from_document(
             position(item) for item in document["pending_positions"]
         ),
         sectors={str(key): str(value) for key, value in document["sectors"].items()},
-        annualized_volatility={
-            str(key): float(value)
-            for key, value in document["annualized_volatility"].items()
-        },
+        annualized_volatility=volatility_evidence,
         earnings_dates={
             str(key): int(value) for key, value in document["earnings_dates"].items()
         },

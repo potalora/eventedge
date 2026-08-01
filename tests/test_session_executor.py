@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 import pytest
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -2361,6 +2362,148 @@ def test_screen_and_stage_persists_all_events_partitions_late_and_replays(tmp_pa
         ledger.close()
 
 
+def _policy_enabled_staging_fixture(tmp_path):
+    state_dir = str(tmp_path / "state")
+    config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"].update(
+        {"state_dir": state_dir, "horizon": "30d", "total_capital": 5000}
+    )
+    config["autoresearch"]["paper_trade"]["portfolio_committee_enabled"] = False
+    profile = SIZE_PROFILES["5k"]
+    config["autoresearch"]["risk_gate"].update(
+        {
+            "max_positions": profile.max_positions,
+            "max_position_pct": profile.max_position_pct,
+            "min_position_value": profile.min_position_value,
+            "cash_reserve_pct": profile.cash_reserve_pct,
+            "long_only": True,
+        }
+    )
+    ledger = PortfolioLedger(
+        Path(state_dir) / "portfolio.db", "cohort", Decimal("5000")
+    )
+    lifecycle = SessionExecutor(
+        ledger, config, size_profile=profile
+    ).execute_open_and_mark(
+        FRIDAY,
+        "epoch",
+        FakePriceSource(
+            adjusted={
+                ("SPY", FRIDAY): Decimal("649"),
+                ("BIL", FRIDAY): Decimal("91"),
+            }
+        ),
+        {},
+        datetime(2026, 7, 31, 22, tzinfo=UTC),
+    )
+    assert lifecycle.snapshot is not None
+    engine = MultiStrategyEngine(
+        config=config,
+        strategies=[_NeverExitStrategy()],
+        state_manager=StateManager(state_dir),
+        ledger=ledger,
+    )
+    candidate = {
+        "ticker": "AAPL",
+        "direction": "long",
+        "score": 2.0,
+        "strategy": "strategy",
+        "event_key": "event-aapl",
+        "source_event_keys": ("native-aapl",),
+        "strategy_tags": ("strategy",),
+        "risk_tags": ("event:aapl",),
+        "metadata": {
+            "event_key": "event-aapl",
+            "observed_at": "2026-07-31T19:30:00+00:00",
+        },
+    }
+    call = {
+        "trading_date": FRIDAY.isoformat(),
+        "data": {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+        "shared_signals": [candidate],
+        "shared_regime": {},
+        "enrichment": {"profiles": {"AAPL": {"sector": "Technology"}}},
+        "size_profile": profile,
+        "marked_account": lifecycle.snapshot,
+    }
+    return ledger, engine, call
+
+
+@pytest.mark.parametrize("evidence_argument", ["omitted", "none"])
+def test_fresh_policy_staging_requires_explicit_volatility_evidence(
+    tmp_path, evidence_argument
+):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    try:
+        if evidence_argument == "none":
+            call["annualized_volatility_evidence"] = None
+        with pytest.raises(ValueError, match="annualized volatility evidence"):
+            engine.screen_and_stage(**call)
+        assert ledger.read_policy_session_context(
+            FRIDAY, binding_kind="staging"
+        ) is None
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("missing", ["current", "pending", "candidate"])
+def test_fresh_policy_staging_requires_complete_volatility_evidence(
+    tmp_path, missing
+):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    held = {
+        "ticker": "HELD",
+        "direction": "long",
+        "marked_value": Decimal("500"),
+        "sector": "Technology",
+        "strategy_tags": ("strategy",),
+        "risk_tags": ("event:held",),
+    }
+    pending = {
+        **held,
+        "ticker": "PENDING",
+        "eligible_session": MONDAY,
+    }
+    current_rows = (held,) if missing == "current" else ()
+    pending_rows = (pending,) if missing == "pending" else ()
+    evidence = {"AAPL": 0.31, "HELD": 0.32, "PENDING": 0.33}
+    evidence.pop(
+        {"current": "HELD", "pending": "PENDING", "candidate": "AAPL"}[missing]
+    )
+    call["annualized_volatility_evidence"] = evidence
+    try:
+        with (
+            patch.object(
+                ledger, "policy_open_lot_projection", return_value=current_rows
+            ),
+            patch.object(
+                ledger, "policy_pending_entry_projection", return_value=pending_rows
+            ),
+            pytest.raises(ValueError, match="annualized volatility evidence"),
+        ):
+            engine.screen_and_stage(**call)
+        assert ledger.read_policy_session_context(
+            FRIDAY, binding_kind="staging"
+        ) is None
+    finally:
+        ledger.close()
+
+
+def test_short_cache_cannot_fabricate_floor_when_staging_evidence_is_absent(
+    tmp_path,
+):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    engine._price_cache["AAPL"] = pd.DataFrame({"Close": [100.0] * 12})
+    try:
+        with pytest.raises(ValueError, match="annualized volatility evidence"):
+            engine.screen_and_stage(**call)
+        assert ledger.read_policy_session_context(
+            FRIDAY, binding_kind="staging"
+        ) is None
+    finally:
+        ledger.close()
+
+
 def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
     tmp_path,
 ) -> None:
@@ -2470,6 +2613,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
                 {"profiles": {"AAPL": {"sector": "Technology"}}},
                 profile,
                 friday.snapshot,
+                annualized_volatility_evidence={"AAPL": 0.31},
             )
         assert ledger.read_policy_candidate_decisions() == ()
         assert ledger.read_policy_staging_audit_manifests() == ()
@@ -2487,6 +2631,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
                 {"profiles": {"AAPL": {"sector": "Technology"}}},
                 profile,
                 friday.snapshot,
+                annualized_volatility_evidence={"AAPL": 0.31},
             )
         assert len(result["intents_staged"]) == 1
         decisions = ledger.read_policy_candidate_decisions()
@@ -2655,6 +2800,7 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
             {"profiles": {"MSFT": {"sector": "Technology"}}},
             profile,
             friday.snapshot,
+            annualized_volatility_evidence={"MSFT": 0.31},
         )
         assert len(staged["intents_staged"]) == 1
         intent_id = staged["intents_staged"][0]

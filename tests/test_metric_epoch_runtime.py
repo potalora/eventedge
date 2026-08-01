@@ -158,7 +158,7 @@ def _executor(tmp_path: Path, name: str, config_changes: dict | None = None):
 
 
 def test_contract_versions_are_centralized_exact_values() -> None:
-    assert POLICY_DOCUMENT_VERSION == "execution-policy-v2"
+    assert POLICY_DOCUMENT_VERSION == "execution-policy-v3"
     assert EXECUTION_CLOCK_VERSION == "exact-next-xnys-open-v1"
     assert PRICING_VERSION == "raw-unadjusted-daily-ohlc-v1"
     assert COST_MODEL_VERSION == "adverse-equity-fill-v1"

@@ -836,6 +836,7 @@ class CohortOrchestrator:
         )
         from tradingagents.strategies.orchestration.trading_calendar import (
             is_session,
+            previous_session,
             session_close,
         )
 
@@ -1257,6 +1258,88 @@ class CohortOrchestrator:
         all_signals = [
             signal for signals, _, _ in horizon_signals.values() for signal in signals
         ]
+        shared_volatility_evidence = None
+        policy_settings = self._base_config.get("autoresearch", {}).get(
+            "portfolio_policy"
+        )
+        if isinstance(policy_settings, dict):
+            governed_tickers = {
+                str(signal.get("ticker", "")).strip().upper()
+                for signal in all_signals
+                if str(signal.get("ticker", "")).strip()
+            }
+            try:
+                for cohort in valid_cohorts:
+                    governed_tickers.update(
+                        str(row["ticker"]).strip().upper()
+                        for row in cohort["ledger"].policy_open_lot_projection(session)
+                    )
+                    governed_tickers.update(
+                        str(row["ticker"]).strip().upper()
+                        for row in cohort["ledger"].policy_pending_entry_projection()
+                    )
+
+                from tradingagents.strategies.trading.portfolio_policy import (
+                    build_annualized_volatility_evidence,
+                )
+
+                volatility_lookback_sessions = int(
+                    policy_settings.get("volatility_lookback_sessions", 60)
+                )
+                volatility_floor = float(
+                    policy_settings.get("annualized_volatility_floor", 0.15)
+                )
+                expected_sessions_descending = [previous_session(session)]
+                for _ in range(volatility_lookback_sessions):
+                    expected_sessions_descending.append(
+                        previous_session(expected_sessions_descending[-1])
+                    )
+                expected_volatility_sessions = tuple(
+                    reversed(expected_sessions_descending)
+                )
+                histories_to_refetch: list[str] = []
+                for ticker in sorted(governed_tickers):
+                    try:
+                        build_annualized_volatility_evidence(
+                            first_engine._price_cache,
+                            (ticker,),
+                            lookback_sessions=volatility_lookback_sessions,
+                            floor=volatility_floor,
+                            expected_sessions=expected_volatility_sessions,
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        histories_to_refetch.append(ticker)
+                if histories_to_refetch:
+                    volatility_buffer_days = max(
+                        120, 2 * volatility_lookback_sessions
+                    )
+                    volatility_start = (
+                        datetime.strptime(trading_date, "%Y-%m-%d")
+                        - timedelta(days=volatility_buffer_days)
+                    ).date()
+                    volatility_start = min(
+                        volatility_start, expected_volatility_sessions[0]
+                    ).isoformat()
+                    first_engine._fetch_missing_prices(
+                        histories_to_refetch, volatility_start, trading_date
+                    )
+
+                shared_volatility_evidence = build_annualized_volatility_evidence(
+                    first_engine._price_cache,
+                    governed_tickers,
+                    lookback_sessions=volatility_lookback_sessions,
+                    floor=volatility_floor,
+                    expected_sessions=expected_volatility_sessions,
+                )
+            except Exception as error:
+                reason = f"shared staging volatility evidence failed: {error}"
+                for cohort in valid_cohorts:
+                    results[cohort["config"].name] = {
+                        "error": True,
+                        "invalid_reason": reason,
+                    }
+                return results
+
         enrichment = self._fetch_openbb_enrichment(all_signals)
         reference_tickers = {
             str(signal.get("ticker", "")).strip().upper()
@@ -1311,6 +1394,7 @@ class CohortOrchestrator:
                     enrichment=enrichment,
                     size_profile=cohort.get("size_profile"),
                     marked_account=cohort["marked_account"],
+                    annualized_volatility_evidence=shared_volatility_evidence,
                 )
                 fills = cohort["ledger"].read_fills(session, session)
                 staged["trades_opened"] = [

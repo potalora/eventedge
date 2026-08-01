@@ -422,6 +422,7 @@ class MultiStrategyEngine:
         enrichment: dict,
         size_profile: Any,
         marked_account: Any,
+        annualized_volatility_evidence: Mapping[str, float] | None = None,
     ) -> dict:
         """Persist cutoff-safe signals and next-session intents without economics."""
         from tradingagents.strategies.execution import (
@@ -515,6 +516,7 @@ class MultiStrategyEngine:
         risk_context = None
         policy_binding = None
         if policy_config is not None:
+            baseline_current = self.ledger.policy_open_lot_projection(session)
             baseline_pending = tuple(
                 row
                 for row in self.ledger.policy_pending_entry_projection()
@@ -540,9 +542,9 @@ class MultiStrategyEngine:
                 authoritative = build_portfolio_risk_context(
                     portfolio_value=float(marked_account.net_equity),
                     cash=float(marked_account.cash),
-                    current_positions=self.ledger.policy_open_lot_projection(session),
+                    current_positions=baseline_current,
                     pending_positions=baseline_pending,
-                    price_cache={},
+                    annualized_volatility_evidence=(risk_context.annualized_volatility),
                     earnings_dates=risk_context.earnings_dates,
                     short_interest=risk_context.short_interest,
                     borrow_available=risk_context.borrow_available,
@@ -562,6 +564,7 @@ class MultiStrategyEngine:
                             item.sector,
                             item.strategy_tags,
                             item.risk_tags,
+                            item.annualized_volatility,
                         )
                         for item in items
                     )
@@ -576,6 +579,8 @@ class MultiStrategyEngine:
                     != economic_positions(risk_context.positions)
                     or economic_positions(authoritative.pending_positions)
                     != economic_positions(risk_context.pending_positions)
+                    or authoritative.annualized_volatility
+                    != risk_context.annualized_volatility
                 ):
                     raise LedgerConflictError(
                         "authoritative staging context changed on replay"
@@ -591,12 +596,19 @@ class MultiStrategyEngine:
                     for signal in shared_signals
                     if signal.get("ticker")
                 }
+                if annualized_volatility_evidence is None:
+                    raise ValueError(
+                        "fresh policy staging requires explicit annualized "
+                        "volatility evidence"
+                    )
+                staging_volatility_evidence = annualized_volatility_evidence
                 risk_context = build_portfolio_risk_context(
                     portfolio_value=float(marked_account.net_equity),
                     cash=float(marked_account.cash),
-                    current_positions=self.ledger.policy_open_lot_projection(session),
+                    current_positions=baseline_current,
                     pending_positions=baseline_pending,
-                    price_cache=self._price_cache,
+                    price_cache=None,
+                    annualized_volatility_evidence=staging_volatility_evidence,
                     earnings_dates={},
                     short_interest={},
                     borrow_available={},
@@ -606,6 +618,19 @@ class MultiStrategyEngine:
                     sectors=sectors,
                     require_borrow=False,
                 )
+                candidate_tickers = {
+                    str(signal.get("ticker", "")).strip().upper()
+                    for signal in shared_signals
+                    if str(signal.get("ticker", "")).strip()
+                }
+                missing_candidates = sorted(
+                    candidate_tickers - set(risk_context.annualized_volatility)
+                )
+                if missing_candidates:
+                    raise ValueError(
+                        "missing annualized volatility evidence for governed "
+                        "ticker(s): " + ", ".join(missing_candidates)
+                    )
                 policy_binding = self.ledger.bind_policy_session_context(
                     session,
                     binding_kind="staging",

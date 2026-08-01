@@ -21,14 +21,39 @@ from tradingagents.strategies.state.portfolio_ledger import (
     MissingMarkError,
     PortfolioLedger,
 )
-from tradingagents.strategies.trading.portfolio_policy import PortfolioRiskContext
+from tradingagents.strategies.trading.portfolio_policy import (
+    PolicyPosition,
+    PortfolioRiskContext,
+    portfolio_risk_context_document,
+)
 
 
 UTC = timezone.utc
 FRIDAY = date(2026, 7, 31)
+THURSDAY = date(2026, 7, 30)
 MONDAY = date(2026, 8, 3)
 TUESDAY = date(2026, 8, 4)
 PROCESSED = datetime(2026, 8, 3, 22, tzinfo=UTC)
+_DEFAULT_VOLATILITY_TICKERS = {
+    "AAPL",
+    "DUE",
+    "FIRST",
+    "FUTURE",
+    "GAP",
+    "HELD",
+    "HIGH",
+    "LOW0",
+    "LOW1",
+    "LOW2",
+    "LOW3",
+    "MSFT",
+    "NEW",
+    "OLD",
+    "SECOND",
+    "SMALL",
+    "TODAY",
+    "TOO_BIG",
+}
 
 
 class _Prices:
@@ -137,19 +162,36 @@ def _stage_entry(
     *,
     suffix: str,
     policy_provenance: bool = True,
+    staging_context: dict[str, object] | None = None,
+    reference_session: date = FRIDAY,
 ) -> OrderIntent:
-    signal = _signal(ticker, FRIDAY, suffix=suffix)
+    signal = _signal(ticker, reference_session, suffix=suffix)
     ledger.record_signal(signal)
     policy = executor.portfolio_policy_config
     assert policy is not None
     if policy_provenance:
+        if staging_context is None:
+            existing_binding = ledger.read_policy_session_context(
+                reference_session, binding_kind="staging"
+            )
+            staging_context = (
+                existing_binding["context"]
+                if existing_binding is not None
+                else _staging_context(
+                    executor,
+                    volatility={
+                        ticker: policy.annualized_volatility_floor
+                        for ticker in _DEFAULT_VOLATILITY_TICKERS
+                    },
+                )
+            )
         binding = ledger.bind_policy_session_context(
-            FRIDAY,
+            reference_session,
             binding_kind="staging",
             epoch_id="epoch",
             policy_version=policy.version,
             policy_config=executor.portfolio_policy_document() or {},
-            context={"fixture": "staging"},
+            context=staging_context,
             bound_at=PROCESSED,
         )
         ledger.record_signal_policy_provenance(
@@ -173,7 +215,7 @@ def _stage_entry(
         ledger.cohort_id,
         "buy",
         quantity,
-        session_close(FRIDAY),
+        session_close(reference_session),
         eligible_session,
         "next_session_open",
         "pending",
@@ -201,6 +243,106 @@ def _stage_entry(
             captured_at=PROCESSED,
         )
     return intent
+
+
+def _policy_position(ticker: str, weight: float, volatility: float) -> PolicyPosition:
+    return PolicyPosition(
+        ticker=ticker,
+        direction="long",
+        weight=weight,
+        sector=ticker,
+        strategy_tags=(f"strategy:{ticker}",),
+        risk_tags=(f"event:{ticker}",),
+        annualized_volatility=volatility,
+    )
+
+
+def _staging_context(
+    executor: SessionExecutor,
+    *,
+    positions: tuple[PolicyPosition, ...] = (),
+    pending: tuple[PolicyPosition, ...] = (),
+    volatility: dict[str, float],
+) -> dict[str, object]:
+    policy = executor.portfolio_policy_config
+    assert policy is not None
+    all_positions = positions + pending
+    return portfolio_risk_context_document(
+        PortfolioRiskContext(
+            portfolio_value=5000.0,
+            cash=5000.0 - sum(item.weight * 5000.0 for item in positions),
+            positions=positions,
+            pending_positions=pending,
+            sectors={item.ticker: item.sector for item in all_positions},
+            annualized_volatility=volatility,
+            earnings_dates={},
+            short_interest={},
+            borrow_available={},
+            margin_used=0.0,
+            consumed_event_keys=frozenset(),
+            config=policy,
+        )
+    )
+
+
+def _seed_post_exit_volatility_case(
+    ledger: PortfolioLedger,
+    executor: SessionExecutor,
+) -> OrderIntent:
+    positions = tuple(_policy_position(f"LOW{i}", 0.10, 0.15) for i in range(4))
+    context = _staging_context(
+        executor,
+        positions=positions,
+        volatility={**{f"LOW{i}": 0.15 for i in range(4)}, "HIGH": 1.0},
+    )
+    existing: list[tuple[OrderIntent, Fill]] = []
+    for i in range(4):
+        intent = _stage_entry(
+            ledger,
+            executor,
+            f"LOW{i}",
+            FRIDAY,
+            5,
+            suffix=f"low-{i}",
+            staging_context=context,
+        )
+        existing.append((intent, _apply_fill(ledger, intent, FRIDAY)))
+    ledger.record_marks(
+        MONDAY,
+        {f"LOW{i}": _bar(f"LOW{i}", MONDAY) for i in range(4)},
+        PROCESSED,
+    )
+
+    old_intent, old_fill = existing[0]
+    exit_signal = _signal("LOW0", FRIDAY, suffix="low-0-exit")
+    ledger.record_signal(exit_signal)
+    exit_intent = OrderIntent(
+        "exit-low-0",
+        (exit_signal.signal_id,),
+        ledger.cohort_id,
+        "sell",
+        5,
+        session_close(FRIDAY),
+        MONDAY,
+        "next_session_open",
+        "pending",
+        None,
+        None,
+    )
+    ledger.stage_exit_intent(
+        exit_intent,
+        ((stable_id("lot", old_fill.fill_id), old_intent.requested_qty),),
+    )
+    candidate = _stage_entry(
+        ledger,
+        executor,
+        "HIGH",
+        MONDAY,
+        1,
+        suffix="high",
+        staging_context=context,
+    )
+    return candidate
 
 
 def _apply_fill(ledger: PortfolioLedger, intent: OrderIntent, session: date) -> Fill:
@@ -288,6 +430,323 @@ def test_execution_context_excludes_self_prices_due_at_open_and_keeps_future_res
         )
         assert {row["intent_id"] for row in all_pending} == {current.intent_id, future.intent_id}
         assert next(row for row in all_pending if row["intent_id"] == current.intent_id)["marked_value"] == Decimal("1250")
+    finally:
+        ledger.close()
+
+
+def test_post_exit_fill_revalidation_uses_exact_staged_volatility(tmp_path) -> None:
+    profile = replace(
+        _profile(max_positions=6),
+        max_position_risk_contribution_pct=0.25,
+    )
+    ledger = _ledger(tmp_path)
+    try:
+        config = _config(tmp_path, profile)
+        config["autoresearch"]["risk_gate"]["per_strategy_max"] = 10
+        executor = SessionExecutor(ledger, config, size_profile=profile)
+        candidate = _seed_post_exit_volatility_case(ledger, executor)
+        bars = {
+            (ticker, MONDAY): _bar(ticker, MONDAY)
+            for ticker in ("LOW0", "LOW1", "LOW2", "LOW3", "HIGH")
+        }
+
+        result = executor.execute_open_and_mark(
+            MONDAY, "epoch", _Prices(bars), {}, PROCESSED
+        )
+
+        assert result.valid
+        assert ledger.intent(candidate.intent_id).status == "rejected"
+        reason = ledger.connection.execute(
+            "SELECT reason FROM order_status_transitions WHERE intent_id = ? ",
+            (candidate.intent_id,),
+        ).fetchone()[0]
+        assert reason == "portfolio_policy:max_risk_contribution"
+        binding = ledger.read_policy_session_context(MONDAY, binding_kind="execution")
+        assert binding is not None
+        assert binding["context"]["annualized_volatility"]["HIGH"] == 1.0
+        assert {item["ticker"] for item in binding["context"]["positions"]} == {
+            "LOW1",
+            "LOW2",
+            "LOW3",
+        }
+    finally:
+        ledger.close()
+
+
+def test_sequential_intent_rebuild_preserves_current_pending_and_self_volatility(
+    tmp_path,
+) -> None:
+    profile = replace(
+        _profile(max_positions=6),
+        max_position_risk_contribution_pct=0.25,
+    )
+    ledger = _ledger(tmp_path)
+    try:
+        executor = SessionExecutor(
+            ledger, _config(tmp_path, profile), size_profile=profile
+        )
+        held = _stage_entry(ledger, executor, "HELD", MONDAY, 2, suffix="held")
+        _apply_fill(ledger, held, MONDAY)
+        due = _stage_entry(ledger, executor, "DUE", MONDAY, 1, suffix="due")
+        _stage_entry(ledger, executor, "FUTURE", TUESDAY, 1, suffix="future")
+        policy = executor.portfolio_policy_config
+        assert policy is not None
+        baseline = PortfolioRiskContext(
+            portfolio_value=5000.0,
+            cash=4800.0,
+            positions=(),
+            pending_positions=(),
+            sectors={"HELD": "Held", "DUE": "Due", "FUTURE": "Future"},
+            annualized_volatility={"HELD": 0.75, "DUE": 1.0, "FUTURE": 0.85},
+            earnings_dates={},
+            short_interest={},
+            borrow_available={},
+            margin_used=0.0,
+            consumed_event_keys=frozenset(),
+            config=policy,
+        )
+
+        rebuilt = executor._current_intent_policy_context(
+            MONDAY,
+            due.intent_id,
+            {"DUE": Decimal("100")},
+            {},
+            baseline,
+        )
+
+        assert rebuilt.positions[0].annualized_volatility == 0.75
+        assert rebuilt.pending_positions[0].annualized_volatility == 0.85
+        assert rebuilt.annualized_volatility == {
+            "HELD": 0.75,
+            "DUE": 1.0,
+            "FUTURE": 0.85,
+        }
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("evidence", ["missing", "conflicting", "tampered"])
+def test_fill_fails_closed_for_invalid_referenced_staging_volatility(
+    tmp_path, evidence: str
+) -> None:
+    profile = replace(
+        _profile(max_positions=6),
+        max_position_risk_contribution_pct=0.25,
+    )
+    ledger = _ledger(tmp_path)
+    try:
+        executor = SessionExecutor(
+            ledger, _config(tmp_path, profile), size_profile=profile
+        )
+        context = _staging_context(executor, volatility={"AAPL": 0.90})
+        if evidence == "missing":
+            context["annualized_volatility"] = {}
+        elif evidence == "conflicting":
+            context["positions"] = [
+                {
+                    "ticker": "AAPL",
+                    "direction": "long",
+                    "weight": 0.02,
+                    "sector": "AAPL",
+                    "strategy_tags": ["strategy:AAPL"],
+                    "risk_tags": ["event:AAPL"],
+                    "annualized_volatility": 0.20,
+                }
+            ]
+        else:
+            context["annualized_volatility"] = {"AAPL": "not-a-number"}
+        entry = _stage_entry(
+            ledger,
+            executor,
+            "AAPL",
+            MONDAY,
+            1,
+            suffix=f"invalid-vol-{evidence}",
+            staging_context=context,
+        )
+
+        with pytest.raises(LedgerConflictError, match="volatility"):
+            executor.execute_open_and_mark(
+                MONDAY,
+                "epoch",
+                _Prices({("AAPL", MONDAY): _bar("AAPL", MONDAY)}),
+                {},
+                PROCESSED,
+            )
+        assert ledger.intent(entry.intent_id).status == "pending"
+        assert ledger.read_fills(MONDAY, MONDAY) == []
+    finally:
+        ledger.close()
+
+
+def test_fill_fails_closed_for_conflicting_due_intent_staging_volatility(
+    tmp_path,
+) -> None:
+    profile = _profile(max_positions=6)
+    ledger = _ledger(tmp_path)
+    try:
+        executor = SessionExecutor(
+            ledger, _config(tmp_path, profile), size_profile=profile
+        )
+        first = _stage_entry(
+            ledger,
+            executor,
+            "AAPL",
+            MONDAY,
+            1,
+            suffix="first-vol-binding",
+            staging_context=_staging_context(
+                executor, volatility={"AAPL": 0.90, "MSFT": 0.80}
+            ),
+        )
+        second = _stage_entry(
+            ledger,
+            executor,
+            "MSFT",
+            MONDAY,
+            1,
+            suffix="second-vol-binding",
+            staging_context=_staging_context(
+                executor, volatility={"AAPL": 0.70, "MSFT": 0.80}
+            ),
+            reference_session=THURSDAY,
+        )
+
+        with pytest.raises(LedgerConflictError, match="volatility"):
+            executor.execute_open_and_mark(
+                MONDAY,
+                "epoch",
+                _Prices(
+                    {
+                        ("AAPL", MONDAY): _bar("AAPL", MONDAY),
+                        ("MSFT", MONDAY): _bar("MSFT", MONDAY),
+                    }
+                ),
+                {},
+                PROCESSED,
+            )
+        assert ledger.intent(first.intent_id).status == "pending"
+        assert ledger.intent(second.intent_id).status == "pending"
+        assert ledger.read_fills(MONDAY, MONDAY) == []
+    finally:
+        ledger.close()
+
+
+def test_restart_reuses_exact_staged_volatility_without_market_io(tmp_path) -> None:
+    profile = replace(
+        _profile(max_positions=6),
+        max_position_risk_contribution_pct=0.25,
+    )
+    config = _config(tmp_path, profile)
+    config["autoresearch"]["risk_gate"]["per_strategy_max"] = 10
+    ledger = _ledger(tmp_path)
+    try:
+        executor = SessionExecutor(ledger, config, size_profile=profile)
+        candidate = _seed_post_exit_volatility_case(ledger, executor)
+        bars = {
+            (ticker, MONDAY): _bar(ticker, MONDAY)
+            for ticker in ("LOW0", "LOW1", "LOW2", "LOW3", "HIGH")
+        }
+
+        def crash(phase: str) -> None:
+            if phase == "execute_entries":
+                raise RuntimeError("restart after volatility validation")
+
+        with pytest.raises(RuntimeError, match="restart after volatility validation"):
+            SessionExecutor(
+                ledger,
+                config,
+                size_profile=profile,
+                after_phase_mutation=crash,
+            ).execute_open_and_mark(MONDAY, "epoch", _Prices(bars), {}, PROCESSED)
+        assert ledger.intent(candidate.intent_id).status == "pending"
+        bound_execution = ledger.session_execution_context(MONDAY)
+        assert bound_execution is not None
+        economic_inputs = json.loads(bound_execution["economic_inputs_json"])
+        volatility_document = economic_inputs[
+            "portfolio_policy_volatility_evidence"
+        ]
+        assert volatility_document["annualized_volatility"]["HIGH"] == "1.0"
+        assert volatility_document["source_bindings"] == [
+            {
+                "candidate_tickers": ["HIGH"],
+                "context_digest": ledger.read_intent_policy_provenance(
+                    candidate.intent_id
+                )["bound_context_digest"],
+                "reference_session": FRIDAY.isoformat(),
+            }
+        ]
+    finally:
+        ledger.close()
+
+    reopened = _ledger(tmp_path)
+    try:
+        restarted = SessionExecutor(reopened, config, size_profile=profile)
+        result = restarted.execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            restarted.persisted_input_bundle(MONDAY),
+            restarted.persisted_borrow_rates(MONDAY),
+            PROCESSED,
+        )
+
+        assert result.valid
+        assert reopened.intent(candidate.intent_id).status == "rejected"
+        binding = reopened.read_policy_session_context(MONDAY, binding_kind="execution")
+        assert binding is not None
+        assert binding["context"]["annualized_volatility"]["HIGH"] == 1.0
+    finally:
+        reopened.close()
+
+
+def test_fully_complete_replay_revalidates_staged_volatility_without_market_io(
+    tmp_path,
+) -> None:
+    profile = _profile()
+    config = _config(tmp_path, profile)
+    ledger = _ledger(tmp_path)
+    try:
+        executor = SessionExecutor(ledger, config, size_profile=profile)
+        entry = _stage_entry(
+            ledger, executor, "AAPL", MONDAY, 2, suffix="complete-replay"
+        )
+        completed = executor.execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            _Prices({("AAPL", MONDAY): _bar("AAPL", MONDAY)}),
+            {},
+            PROCESSED,
+        )
+        assert completed.valid
+        assert ledger.intent(entry.intent_id).status == "filled"
+        fill_count = len(ledger.read_fills(MONDAY, MONDAY))
+
+        ledger.connection.execute(
+            "DELETE FROM policy_session_contexts "
+            "WHERE cohort_id = ? AND session = ? AND binding_kind = 'staging'",
+            (ledger.cohort_id, FRIDAY.isoformat()),
+        )
+        ledger.connection.commit()
+
+        with pytest.raises(
+            LedgerConflictError, match="staging volatility source binding mismatch"
+        ):
+            executor.validate_bound_context(MONDAY, "epoch")
+
+        class _NoMarketIO:
+            def get_daily_bars(self, *args, **kwargs):
+                raise AssertionError("fully complete replay fetched market data")
+
+        replayed = executor.execute_open_and_mark(
+            MONDAY,
+            "epoch",
+            _NoMarketIO(),
+            executor.persisted_borrow_rates(MONDAY),
+            PROCESSED,
+        )
+        assert not replayed.valid
+        assert "staging volatility source binding mismatch" in replayed.invalid_reason
+        assert len(ledger.read_fills(MONDAY, MONDAY)) == fill_count
     finally:
         ledger.close()
 
