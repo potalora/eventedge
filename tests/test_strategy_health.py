@@ -41,6 +41,27 @@ class _DefaultParamsFailureStrategy(_ScreenStrategy):
         raise ValueError("bad strategy parameters")
 
 
+class _OpenBBSource:
+    name = "openbb"
+
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _OpenBBRegistry:
+    def __init__(self, available: bool) -> None:
+        self.source = _OpenBBSource(available)
+
+    def get(self, name: str):
+        return self.source if name == "openbb" else None
+
+    def available_sources(self) -> list[str]:
+        return ["openbb"] if self.source.is_available() else []
+
+
 def test_zero_candidates_with_healthy_sources_is_legitimate_no_event() -> None:
     record = classify_strategy_run(
         epoch_id="epoch-1",
@@ -192,6 +213,44 @@ def test_unavailable_required_source_is_explicit_data_failure(tmp_path) -> None:
     )
 
     assert data["edgar"]["error"] == "source unavailable or skipped"
+    assert health[0].status == "data_failure"
+
+
+def test_available_openbb_enrichment_source_is_not_missing_data_failure(
+    tmp_path,
+) -> None:
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}},
+        strategies=[_ScreenStrategy("openbb_enriched", [], data_sources=("openbb",))],
+        registry=_OpenBBRegistry(available=True),
+    )
+    engine._build_regime_model = lambda data: {}
+    data = engine._fetch_all_data("2026-07-01", "2026-08-03")
+
+    _, _, health = engine.screen_and_enrich(
+        "2026-08-03", data, epoch_id="epoch-1", policy_id="policy-1"
+    )
+
+    assert data["openbb"] == {"enrichment_only": True}
+    assert health[0].status == "legitimate_no_event"
+
+
+def test_unavailable_openbb_enrichment_source_is_explicit_data_failure(
+    tmp_path,
+) -> None:
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}},
+        strategies=[_ScreenStrategy("openbb_enriched", [], data_sources=("openbb",))],
+        registry=_OpenBBRegistry(available=False),
+    )
+    engine._build_regime_model = lambda data: {}
+    data = engine._fetch_all_data("2026-07-01", "2026-08-03")
+
+    _, _, health = engine.screen_and_enrich(
+        "2026-08-03", data, epoch_id="epoch-1", policy_id="policy-1"
+    )
+
+    assert data["openbb"]["error"] == "source unavailable or skipped"
     assert health[0].status == "data_failure"
 
 

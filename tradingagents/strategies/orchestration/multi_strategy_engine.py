@@ -1145,6 +1145,8 @@ class MultiStrategyEngine:
         logger.info("Needed sources: %s, available: %s", needed_sources, available)
         for source in sorted(needed_sources - available):
             data[source] = {"error": "source unavailable or skipped"}
+        if "openbb" in needed_sources and "openbb" in available:
+            data["openbb"] = {"enrichment_only": True}
 
         # Fetch yfinance data (VIX + core market data for regime model)
         if "yfinance" in needed_sources and "yfinance" in available:
