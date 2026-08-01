@@ -7,12 +7,15 @@ only to calculate historical volatility.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from math import sqrt
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 import pandas as pd
+
+
+_PORTFOLIO_POLICY_FACTORY_TOKEN = object()
 
 
 def _immutable_mapping(values: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -36,10 +39,11 @@ class PolicyPosition:
         object.__setattr__(self, "risk_tags", tuple(self.risk_tags))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class PortfolioPolicyConfig:
     """Versioned policy settings for one explicitly selected cohort profile."""
 
+    profile_name: str
     version: str
     max_positions: int
     max_position_pct: float
@@ -55,6 +59,31 @@ class PortfolioPolicyConfig:
     volatility_lookback_sessions: int
     annualized_volatility_floor: float
     congressional_exposure_pct: float
+
+    def __init__(
+        self,
+        *,
+        _factory_token: object | None = None,
+        **values: Any,
+    ) -> None:
+        """Reject arbitrary configuration outside the profile-bound factory."""
+        if _factory_token is not _PORTFOLIO_POLICY_FACTORY_TOKEN:
+            raise TypeError(
+                "PortfolioPolicyConfig must be created with "
+                "PortfolioPolicyConfig.from_size_profile()"
+            )
+
+        expected_fields = {field.name for field in fields(type(self))}
+        supplied_fields = set(values)
+        if supplied_fields != expected_fields:
+            missing = expected_fields - supplied_fields
+            unexpected = supplied_fields - expected_fields
+            raise TypeError(
+                "PortfolioPolicyConfig factory received invalid fields: "
+                f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+            )
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
 
     @classmethod
     def from_size_profile(
@@ -73,6 +102,8 @@ class PortfolioPolicyConfig:
                 "congressional_exposure_by_size"
             ][profile.name]
             return cls(
+                _factory_token=_PORTFOLIO_POLICY_FACTORY_TOKEN,
+                profile_name=str(profile.name),
                 version=str(policy_settings["version"]),
                 max_positions=int(profile.max_positions),
                 max_position_pct=float(profile.max_position_pct),

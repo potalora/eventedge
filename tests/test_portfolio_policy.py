@@ -230,6 +230,16 @@ def test_policy_config_requires_size_profile_factory() -> None:
         PortfolioPolicyConfig()
 
 
+def test_policy_config_rejects_direct_full_value_construction() -> None:
+    valid_config = _policy_config()
+
+    with pytest.raises(
+        TypeError,
+        match=r"PortfolioPolicyConfig\.from_size_profile",
+    ):
+        PortfolioPolicyConfig(**dataclasses.asdict(valid_config))
+
+
 @pytest.mark.parametrize("size", ["5k", "10k", "50k", "100k"])
 def test_policy_config_factory_uses_every_profile_limit(size: str) -> None:
     settings = DEFAULT_CONFIG["autoresearch"]["portfolio_policy"]
@@ -238,6 +248,7 @@ def test_policy_config_factory_uses_every_profile_limit(size: str) -> None:
     config = PortfolioPolicyConfig.from_size_profile(profile, settings)
 
     assert config.max_positions == profile.max_positions
+    assert config.profile_name == size
     assert config.max_position_pct == profile.max_position_pct
     assert config.max_sector_exposure_pct == profile.sector_concentration_cap
     assert config.max_strategy_exposure_pct == profile.max_strategy_exposure_pct
