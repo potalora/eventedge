@@ -25,7 +25,7 @@ from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
 from tradingagents.strategies.trading.paper_trader import PaperTrader
-from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+from tradingagents.strategies.learning.signal_journal import SignalJournal
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.metrics.models import SignalMetricRecord
 from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
@@ -320,37 +320,47 @@ class TestLearningLoop:
 
 class TestAdaptiveConfidence:
     def test_confidence_from_journal(self, tmp_path):
-        """Adaptive engine derives confidence from signal journal hit rates."""
+        """Adaptive engine derives confidence from governed v2 outcomes."""
+        from tradingagents.strategies.metrics.models import OutcomeRecord
+
         state_dir = str(tmp_path / "adaptive")
         config = {
             "autoresearch": {"state_dir": state_dir, "total_capital": 5000},
             "execution": {"mode": "paper"},
         }
         state = StateManager(state_dir)
+        outcomes = tuple(
+            OutcomeRecord(
+                outcome_id=f"outcome-{index}",
+                signal_id=f"signal-{index}",
+                event_key=f"event-{index}",
+                epoch_id="epoch-1",
+                strategy="fake_strat",
+                policy_id="policy-1",
+                ticker="AAPL",
+                direction="long",
+                holding_sessions=5,
+                entry_session=date(2026, 3, 2),
+                exit_session=date(2026, 3, 9),
+                entry_price=Decimal("100"),
+                exit_price=Decimal("105" if index < 12 else "95"),
+                raw_return=Decimal("0.05" if index < 12 else "-0.05"),
+                signed_return=Decimal("0.05" if index < 12 else "-0.05"),
+                status="valid",
+                invalid_reason="",
+            )
+            for index in range(15)
+        )
         engine = MultiStrategyEngine(
             config=config,
             strategies=[FakeStrategy()],
             state_manager=state,
             use_llm=False,
             adaptive_confidence=True,
+            outcome_reader=lambda strategy: (
+                outcomes if strategy == "fake_strat" else ()
+            ),
         )
-
-        # Log 15 signals: 12 correct (80% hit rate)
-        journal = engine._journal
-        for i in range(15):
-            ret = 0.05 if i < 12 else -0.05
-            journal.log_signal(
-                JournalEntry(
-                    timestamp=f"2026-03-{i + 1:02d}",
-                    strategy="fake_strat",
-                    ticker="AAPL",
-                    direction="long",
-                    score=5.0,
-                    traded=True,
-                    entry_price=150.0,
-                    return_5d=ret,
-                )
-            )
 
         conf = engine._compute_strategy_confidence("fake_strat")
         assert conf > 0.5  # 80% hit rate should give above-average confidence
@@ -431,50 +441,19 @@ class TestMultiDaySimulation:
 
 class TestCohortComparison:
     def test_comparison_with_data(self, tmp_path):
-        """CohortComparison.compare() works with populated state dirs."""
+        """CohortComparison delegates exact historical epoch selection."""
+        from unittest.mock import Mock
+
+        from tradingagents.strategies.metrics.service import MetricsService
         from tradingagents.strategies.orchestration.cohort_comparison import (
             CohortComparison,
         )
 
-        # Set up two cohort state dirs with trades
-        for cohort_name in ("control", "adaptive"):
-            sd = str(tmp_path / cohort_name)
-            state = StateManager(sd)
-            for i in range(3):
-                exit_px = 110.0 if cohort_name == "adaptive" else 105.0
-                state.save_paper_trade(
-                    {
-                        "strategy": "fake_strat",
-                        "ticker": f"T{i}",
-                        "direction": "long",
-                        "entry_price": 100.0,
-                        "exit_price": exit_px,
-                        "entry_date": "2026-03-01",
-                        "exit_date": "2026-03-15",
-                        "shares": 5,
-                        "status": "closed",
-                        "pnl": (exit_px - 100.0) * 5,
-                        "pnl_pct": (exit_px - 100.0) / 100.0,
-                    }
-                )
-
-        comparison = CohortComparison(
-            {
-                "control": str(tmp_path / "control"),
-                "adaptive": str(tmp_path / "adaptive"),
-            }
-        )
-
-        result = comparison.compare()
-        assert "cohorts" in result
-        assert "control" in result["cohorts"]
-        assert "adaptive" in result["cohorts"]
-        # Adaptive should have higher PnL (exit at 110 vs 105)
-        assert (
-            result["cohorts"]["adaptive"]["avg_pnl"]
-            > result["cohorts"]["control"]["avg_pnl"]
-        )
-
-        report = comparison.format_report()
-        assert isinstance(report, str)
-        assert len(report) > 0
+        service = Mock(spec=MetricsService)
+        service.generation_report.return_value = {
+            "metric_schema_version": 2,
+            "epoch": {"epoch_id": "historical"},
+        }
+        result = CohortComparison(metrics_service=service).compare("historical")
+        assert result["epoch"]["epoch_id"] == "historical"
+        service.generation_report.assert_called_once_with(epoch_id="historical")

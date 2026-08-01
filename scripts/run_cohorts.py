@@ -8,6 +8,7 @@ Usage:
     python scripts/run_cohorts.py --reset               # clear all cohort state
     python scripts/run_cohorts.py --date 2026-04-05 --no-llm  # without LLM enrichment
 """
+
 from __future__ import annotations
 
 import argparse
@@ -40,6 +41,7 @@ def _raise_fd_limit() -> None:
     """
     try:
         from tradingagents.sys_limits import raise_fd_limit
+
         raise_fd_limit()
         return
     except Exception:
@@ -117,7 +119,6 @@ def main():
 
     load_dotenv()
 
-    from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         CohortOrchestrator,
         build_default_cohorts,
@@ -172,9 +173,23 @@ def main():
 
     # Route to the right action
     if args.compare:
-        state_dirs = {cc.name: cc.state_dir for cc in cohort_configs}
-        comparison = CohortComparison(state_dirs)
-        print(comparison.format_report())
+        from tradingagents.strategies.metrics.service import MetricsService
+        from tradingagents.strategies.orchestration.cohort_comparison import (
+            CohortComparison,
+        )
+
+        ledgers = {
+            cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
+        }
+        generation_state_dir = config["autoresearch"]["state_dir"]
+        service = MetricsService(generation_state_dir, ledgers)
+        print(
+            json.dumps(
+                CohortComparison(metrics_service=service).compare(),
+                indent=2,
+                default=str,
+            )
+        )
         return
 
     if args.reset:
@@ -206,9 +221,12 @@ def main():
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
             count_failed_cohorts,
         )
+
         n_failed, n_total, failed = count_failed_cohorts(result)
     except Exception:
-        failed = [k for k, v in result.items() if isinstance(v, dict) and v.get("error")]
+        failed = [
+            k for k, v in result.items() if isinstance(v, dict) and v.get("error")
+        ]
         n_failed, n_total = len(failed), len(result)
     if n_failed:
         print(

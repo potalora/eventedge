@@ -15,9 +15,11 @@ Usage:
     python scripts/run_generations.py resume gen_001
     python scripts/run_generations.py retire gen_001
 """
+
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from datetime import date
 from pathlib import Path
@@ -32,6 +34,86 @@ logger = logging.getLogger("run_generations")
 def _repo_root() -> str:
     """Find the repo root (parent of scripts/)."""
     return str(Path(__file__).resolve().parent.parent)
+
+
+def _parse_comparison_pair(value: str):
+    """Parse CAND_GEN:CAND_COHORT:CAND_EPOCH,BASE_GEN:BASE_COHORT:BASE_EPOCH."""
+    from tradingagents.strategies.orchestration.generation_comparison import (
+        ComparisonPair,
+    )
+
+    sides = value.split(",")
+    if len(sides) != 2:
+        raise argparse.ArgumentTypeError(
+            "--pair requires candidate and baseline separated by one comma"
+        )
+    parsed = []
+    for label, side in zip(("candidate", "baseline"), sides):
+        fields = side.split(":")
+        if len(fields) != 3 or any(not field.strip() for field in fields):
+            raise argparse.ArgumentTypeError(f"{label} must be GEN:COHORT:EPOCH")
+        parsed.extend(field.strip() for field in fields)
+    return ComparisonPair(*parsed)
+
+
+def _run_explicit_comparison(manager, pairs: tuple) -> dict[str, object]:
+    """Open only explicitly selected v2 ledgers and close them on every path."""
+    from tradingagents.strategies.metrics.service import MetricsService
+    from tradingagents.strategies.orchestration.generation_comparison import (
+        GenerationComparison,
+    )
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+    generations = {item.gen_id: item for item in manager.list_generations()}
+    requested: dict[str, set[str]] = {}
+    for pair in pairs:
+        requested.setdefault(pair.candidate_generation_id, set()).add(
+            pair.candidate_cohort_id
+        )
+        requested.setdefault(pair.baseline_generation_id, set()).add(
+            pair.baseline_cohort_id
+        )
+    unknown = sorted(set(requested) - set(generations))
+    if unknown:
+        raise KeyError(f"unknown generation IDs: {', '.join(unknown)}")
+
+    opened: list[PortfolioLedger] = []
+    services: dict[str, MetricsService] = {}
+    try:
+        for generation_id, cohort_ids in sorted(requested.items()):
+            root = Path(generations[generation_id].state_dir)
+            metrics_path = root / "metrics_v2.sqlite3"
+            if not metrics_path.is_file():
+                raise FileNotFoundError(f"missing v2 metric store: {metrics_path}")
+            bindings = {}
+            for cohort_id in sorted(cohort_ids):
+                ledger_path = root / cohort_id / "portfolio.db"
+                if not ledger_path.is_file():
+                    raise FileNotFoundError(f"missing cohort ledger: {ledger_path}")
+                ledger = PortfolioLedger.open_existing(ledger_path)
+                opened.append(ledger)
+                if ledger.cohort_id != cohort_id:
+                    raise ValueError(
+                        f"cohort {cohort_id!r} resolved to ledger {ledger.cohort_id!r}"
+                    )
+                bindings[cohort_id] = ledger
+            services[generation_id] = MetricsService(root, bindings)
+
+        for pair in pairs:
+            for generation_id, epoch_id in (
+                (pair.candidate_generation_id, pair.candidate_epoch_id),
+                (pair.baseline_generation_id, pair.baseline_epoch_id),
+            ):
+                epoch = services[generation_id].store.load_epoch(epoch_id)
+                if epoch.generation_id != generation_id:
+                    raise ValueError(
+                        f"epoch {epoch_id!r} belongs to {epoch.generation_id!r}, "
+                        f"not {generation_id!r}"
+                    )
+        return GenerationComparison(services).compare(pairs)
+    finally:
+        for ledger in opened:
+            ledger.close()
 
 
 def main():
@@ -54,8 +136,18 @@ def main():
     # compare
     p_compare = sub.add_parser("compare", help="Compare generations")
     p_compare.add_argument(
-        "--gens", default=None,
-        help="Comma-separated gen IDs to compare (default: all)",
+        "--pair",
+        action="append",
+        type=_parse_comparison_pair,
+        default=[],
+        help=(
+            "repeatable CAND_GEN:CAND_COHORT:CAND_EPOCH,BASE_GEN:BASE_COHORT:BASE_EPOCH"
+        ),
+    )
+    p_compare.add_argument(
+        "--gens",
+        default=None,
+        help="deprecated; use repeatable --pair",
     )
 
     # list
@@ -73,16 +165,23 @@ def main():
     p_retire = sub.add_parser("retire", help="Retire a generation")
     p_retire.add_argument("gen_id", help="Generation ID")
     p_retire.add_argument(
-        "--keep-worktree", action="store_true",
+        "--keep-worktree",
+        action="store_true",
         help="Keep the git worktree (default: delete it)",
     )
 
     # event-study
-    p_es = sub.add_parser("event-study", help="Run an event study (CAR) over journaled signals")
+    p_es = sub.add_parser(
+        "event-study", help="Run an event study (CAR) over journaled signals"
+    )
     p_es.add_argument("--gen", default=None, help="Generation ID (default: all active)")
     p_es.add_argument("--strategy", default=None, help="Limit to one strategy/group")
-    p_es.add_argument("--since", default=None, help="Only signals on/after this date (YYYY-MM-DD)")
-    p_es.add_argument("--json", default=None, help="Optional path to dump full result as JSON")
+    p_es.add_argument(
+        "--since", default=None, help="Only signals on/after this date (YYYY-MM-DD)"
+    )
+    p_es.add_argument(
+        "--json", default=None, help="Optional path to dump full result as JSON"
+    )
 
     args = parser.parse_args()
 
@@ -93,6 +192,7 @@ def main():
     # Load env
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
     except ImportError:
         pass
@@ -102,9 +202,12 @@ def main():
     # fetch fan-out exceeds (it errored all 16 cohorts on 2026-06-01). setrlimit
     # is inherited by the per-generation worktree subprocesses spawned below.
     from tradingagents.sys_limits import raise_fd_limit
+
     raise_fd_limit()
 
-    from tradingagents.strategies.orchestration.generation_manager import GenerationManager
+    from tradingagents.strategies.orchestration.generation_manager import (
+        GenerationManager,
+    )
 
     repo = _repo_root()
     manager = GenerationManager(repo)
@@ -151,34 +254,15 @@ def main():
             print(f"  {gen_id}: {status}")
 
     elif args.command == "compare":
-        from tradingagents.strategies.orchestration.generation_comparison import (
-            GenerationComparison,
-            GenerationInfo as ComparisonGenInfo,
-        )
-
-        gens = manager.list_generations()
-        if args.gens:
-            selected = set(args.gens.split(","))
-            gens = [g for g in gens if g.gen_id in selected]
-
-        if not gens:
-            print("No generations found.")
-            return
-
-        # Convert to comparison-compatible GenerationInfo
-        comp_gens = [
-            ComparisonGenInfo(
-                gen_id=g.gen_id,
-                state_dir=g.state_dir,
-                description=g.description,
-                created_at=g.created_at,
-                status=g.status,
-                git_commit=g.git_commit,
-            )
-            for g in gens
-        ]
-        comparison = GenerationComparison(comp_gens)
-        print(comparison.format_report())
+        if args.gens is not None:
+            parser.error("--gens is removed; use repeatable explicit --pair values")
+        if not args.pair:
+            parser.error("compare requires at least one explicit --pair")
+        try:
+            payload = _run_explicit_comparison(manager, tuple(args.pair))
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            parser.error(str(error))
+        print(json.dumps(payload, indent=2, default=str))
 
     elif args.command == "list":
         gens = manager.list_generations()
@@ -212,7 +296,9 @@ def main():
 
         from tradingagents.strategies.learning.signal_journal import SignalJournal
         from tradingagents.strategies.validation.engine import compute_car
-        from tradingagents.strategies.validation.journal_source import events_from_journals
+        from tradingagents.strategies.validation.journal_source import (
+            events_from_journals,
+        )
         from tradingagents.strategies.validation.price_adapter import yfinance_price_fn
         from tradingagents.strategies.validation.report import format_report
 
@@ -229,18 +315,20 @@ def main():
                 cohort_dir = path.rsplit("/", 1)[0]
                 journals.append(SignalJournal(cohort_dir))
 
-        events = events_from_journals(journals, strategy=args.strategy, since=args.since)
+        events = events_from_journals(
+            journals, strategy=args.strategy, since=args.since
+        )
         if not events:
             print("No journaled signals matched.")
             return
-        print(f"Studying {len(events)} unique events across {len(journals)} cohort journals...")
+        print(
+            f"Studying {len(events)} unique events across {len(journals)} cohort journals..."
+        )
 
         result = compute_car(events, yfinance_price_fn(), rng_seed=1)
         print(format_report(result))
 
         if args.json:
-            import json
-
             with open(args.json, "w") as f:
                 json.dump(
                     {

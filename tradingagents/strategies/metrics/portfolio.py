@@ -362,6 +362,34 @@ def _require_full_window(
         raise ValueError("portfolio metrics require a contiguous valid snapshot window")
 
 
+def validate_snapshot_window(
+    *,
+    cohort_id: str,
+    epoch_id: str,
+    snapshots: Iterable[AccountSnapshot],
+    calendar: XNYSCalendar | None = None,
+) -> tuple[AccountSnapshot, ...]:
+    """Materialize and validate one exact Task-5 portfolio snapshot window."""
+    session_calendar = calendar or XNYSCalendar()
+    rows = _ordered_snapshots(
+        [
+            row
+            for row in snapshots
+            if row.cohort_id == cohort_id and row.epoch_id == epoch_id
+        ]
+    )
+    _require_full_window(rows, session_calendar)
+    return tuple(rows)
+
+
+def equal_weighted_scenario_return(values: Iterable[float]) -> float:
+    """Return the equal-weighted result for exactly four dependent books."""
+    rows = tuple(_finite(value, name="scenario return") for value in values)
+    if len(rows) != 4:
+        raise ValueError("the scenario panel requires exactly four returns")
+    return statistics.fmean(rows)
+
+
 def portfolio_metrics(
     *,
     cohort_id: str,
@@ -372,13 +400,12 @@ def portfolio_metrics(
     fills: Iterable[Fill],
 ) -> PortfolioMetrics:
     calendar = XNYSCalendar()
-    rows = [
-        row
-        for row in snapshots
-        if row.cohort_id == cohort_id and row.epoch_id == epoch_id
-    ]
-    rows = _ordered_snapshots(rows)
-    _require_full_window(rows, calendar)
+    rows = validate_snapshot_window(
+        cohort_id=cohort_id,
+        epoch_id=epoch_id,
+        snapshots=snapshots,
+        calendar=calendar,
+    )
     benchmark_index = _benchmark_index(
         benchmark_observations,
         cohort_id=cohort_id,

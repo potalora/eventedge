@@ -19,18 +19,21 @@ from .models import (
     StrategyHealthRecord,
 )
 from .store import MetricStore
+from .service import MetricsService
 from .outcomes import DirectionalAccuracy, OutcomeCalculator, directional_accuracy
 from .portfolio import (
     DatedReturn,
     annualized_sharpe,
     daily_net_returns,
     drawdowns,
+    equal_weighted_scenario_return,
     matched_benchmark_returns,
     matched_return,
     paired_comparison,
     portfolio_metrics,
     reconcile_costs,
     total_return,
+    validate_snapshot_window,
 )
 
 __all__ = [
@@ -46,6 +49,7 @@ __all__ = [
     "HealthStatus",
     "MetricEpoch",
     "MetricStore",
+    "MetricsService",
     "DirectionalAccuracy",
     "OutcomeCalculator",
     "OutcomeRecord",
@@ -59,6 +63,7 @@ __all__ = [
     "deduplicate_signals",
     "daily_net_returns",
     "drawdowns",
+    "equal_weighted_scenario_return",
     "event_key",
     "execution_id",
     "matched_benchmark_returns",
@@ -69,5 +74,6 @@ __all__ = [
     "directional_accuracy",
     "signal_id",
     "total_return",
+    "validate_snapshot_window",
     "annualized_sharpe",
 ]

@@ -2,6 +2,7 @@
 
 Covers: paper-trade strategies, state manager, data sources, engine.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -21,6 +22,7 @@ class TestStrategyModules:
     @pytest.fixture
     def strategies(self):
         from tradingagents.strategies.modules import get_all_strategies
+
         return get_all_strategies()
 
     def test_all_strategies_have_required_attributes(self, strategies):
@@ -93,8 +95,6 @@ class TestStrategyModules:
                 assert high <= 45, f"{strategy.name}: {hold_key} ceiling {high} > 45"
 
 
-
-
 # ---------------------------------------------------------------------------
 # State manager tests
 # ---------------------------------------------------------------------------
@@ -104,6 +104,7 @@ class TestStateManager:
     @pytest.fixture
     def state(self, tmp_path):
         from tradingagents.strategies.state.state import StateManager
+
         return StateManager(str(tmp_path / "state"))
 
     def test_save_load_generation(self, state):
@@ -165,7 +166,9 @@ class TestStateManager:
 
 class TestDataSourceRegistry:
     def test_build_default_registry(self):
-        from tradingagents.strategies.data_sources.registry import build_default_registry
+        from tradingagents.strategies.data_sources.registry import (
+            build_default_registry,
+        )
 
         registry = build_default_registry()
         assert registry.get("yfinance") is not None
@@ -180,10 +183,12 @@ class TestDataSourceRegistry:
             "rate_delay_s": 0.25,
             "workflow_budget_s": 12.0,
         }
-        registry = build_default_registry({
-            "finnhub_api_key": "not-real",
-            "finnhub_reliability": reliability,
-        })
+        registry = build_default_registry(
+            {
+                "finnhub_api_key": "not-real",
+                "finnhub_reliability": reliability,
+            }
+        )
 
         source = registry.get("finnhub")
         assert source is not None
@@ -217,12 +222,19 @@ class TestDataSourceRegistry:
 class TestMultiStrategyEngine:
     @pytest.fixture
     def engine(self, tmp_path):
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.modules import get_all_strategies
 
         state = StateManager(str(tmp_path / "state"))
-        config = {"autoresearch": {"state_dir": str(tmp_path / "state"), "total_capital": 5000}}
+        config = {
+            "autoresearch": {
+                "state_dir": str(tmp_path / "state"),
+                "total_capital": 5000,
+            }
+        }
 
         return MultiStrategyEngine(
             config=config,
@@ -238,7 +250,11 @@ class TestMultiStrategyEngine:
 
     def test_engine_build_regime_model(self, engine):
         data = {
-            "yfinance": {"vix": pd.DataFrame({"Close": [20.0]}, index=pd.to_datetime(["2024-06-01"]))},
+            "yfinance": {
+                "vix": pd.DataFrame(
+                    {"Close": [20.0]}, index=pd.to_datetime(["2024-06-01"])
+                )
+            },
             "fred": {},
         }
         regime = engine._build_regime_model(data)
@@ -250,13 +266,13 @@ class TestMultiStrategyEngine:
         source = MagicMock()
         source.new_workflow_deadline.return_value = 42.0
         source.fetch_recent_earnings.return_value = []
-        source.fetch_company_news.side_effect = (
-            lambda symbol, _from, to, deadline: [{
+        source.fetch_company_news.side_effect = lambda symbol, _from, to, deadline: [
+            {
                 "headline": f"{symbol} supplier disruption",
                 "summary": "Factory delay",
                 "source": "wire",
-            }]
-        )
+            }
+        ]
         source.fetch_supply_chains.return_value = {}
         engine.registry = MagicMock()
         engine.registry.get.return_value = source
@@ -285,6 +301,7 @@ class TestPlaybookState:
     @pytest.fixture
     def state(self, tmp_path):
         from tradingagents.strategies.state.state import StateManager
+
         return StateManager(str(tmp_path / "state"))
 
     def test_save_load_playbook(self, state):
@@ -301,6 +318,7 @@ class TestVintageState:
     @pytest.fixture
     def state(self, tmp_path):
         from tradingagents.strategies.state.state import StateManager
+
         return StateManager(str(tmp_path / "state"))
 
     def test_save_load_vintage(self, state):
@@ -344,19 +362,25 @@ class TestVintageTracking:
         """PaperTrader cannot create legacy vintage trades."""
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.trading.paper_trader import PaperTrader
+
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
         with pytest.raises(RuntimeError, match="read-only"):
             trader.open_trade(
-                strategy="test_strat", ticker="AAPL", direction="long",
-                entry_price=150.0, entry_date="2024-01-01",
-                vintage_id="v-001", is_exploration=True,
+                strategy="test_strat",
+                ticker="AAPL",
+                direction="long",
+                entry_price=150.0,
+                entry_date="2024-01-01",
+                vintage_id="v-001",
+                is_exploration=True,
             )
 
     def test_vintage_performance_no_trades(self, tmp_path):
         """Vintage with no completed trades returns zero metrics."""
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.trading.paper_trader import PaperTrader
+
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
         perf = trader.get_vintage_performance("nonexistent")
@@ -367,16 +391,27 @@ class TestVintageTracking:
         """Vintage with completed trades returns correct metrics."""
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.trading.paper_trader import PaperTrader
+
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
-        for ticker, entry, exit_price in (("AAPL", 100.0, 110.0), ("MSFT", 200.0, 190.0)):
-            state.save_paper_trade({
-                "strategy": "s", "ticker": ticker, "direction": "long",
-                "entry_price": entry, "exit_price": exit_price,
-                "entry_date": "2024-01-01", "exit_date": "2024-02-01",
-                "status": "closed", "vintage_id": "v-001",
-                "pnl_pct": (exit_price - entry) / entry,
-            })
+        for ticker, entry, exit_price in (
+            ("AAPL", 100.0, 110.0),
+            ("MSFT", 200.0, 190.0),
+        ):
+            state.save_paper_trade(
+                {
+                    "strategy": "s",
+                    "ticker": ticker,
+                    "direction": "long",
+                    "entry_price": entry,
+                    "exit_price": exit_price,
+                    "entry_date": "2024-01-01",
+                    "exit_date": "2024-02-01",
+                    "status": "closed",
+                    "vintage_id": "v-001",
+                    "pnl_pct": (exit_price - entry) / entry,
+                }
+            )
 
         perf = trader.get_vintage_performance("v-001")
         assert perf["num_completed"] == 2
@@ -386,18 +421,32 @@ class TestVintageTracking:
         """Strategy summary returns per-vintage breakdown."""
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.trading.paper_trader import PaperTrader
+
         state = StateManager(str(tmp_path))
         trader = PaperTrader(state)
-        state.save_paper_trade({
-            "strategy": "s", "ticker": "AAPL", "direction": "long",
-            "entry_price": 100.0, "entry_date": "2024-01-01",
-            "status": "open", "vintage_id": "v-001",
-        })
-        state.save_paper_trade({
-            "strategy": "s", "ticker": "MSFT", "direction": "long",
-            "entry_price": 200.0, "entry_date": "2024-01-01",
-            "status": "open", "vintage_id": "v-002", "is_exploration": True,
-        })
+        state.save_paper_trade(
+            {
+                "strategy": "s",
+                "ticker": "AAPL",
+                "direction": "long",
+                "entry_price": 100.0,
+                "entry_date": "2024-01-01",
+                "status": "open",
+                "vintage_id": "v-001",
+            }
+        )
+        state.save_paper_trade(
+            {
+                "strategy": "s",
+                "ticker": "MSFT",
+                "direction": "long",
+                "entry_price": 200.0,
+                "entry_date": "2024-01-01",
+                "status": "open",
+                "vintage_id": "v-002",
+                "is_exploration": True,
+            }
+        )
         summary = trader.get_strategy_vintage_summary("s")
         assert len(summary) == 2
         vintages = {s["vintage_id"] for s in summary}
@@ -406,18 +455,38 @@ class TestVintageTracking:
 
 class TestPortfolioCommittee:
     def test_empty_signals_returns_empty(self):
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
+        )
+
+        pc = PortfolioCommittee(
+            {"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}}
+        )
         result = pc.synthesize(signals=[])
         assert result == []
 
     def test_rule_based_aggregation(self):
         """Two strategies agreeing on same ticker should produce a recommendation."""
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
+        )
+
+        pc = PortfolioCommittee(
+            {"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}}
+        )
         signals = [
-            {"ticker": "AAPL", "direction": "long", "score": 0.8, "strategy": "earnings"},
-            {"ticker": "AAPL", "direction": "long", "score": 0.6, "strategy": "insider"},
+            {
+                "ticker": "AAPL",
+                "direction": "long",
+                "score": 0.8,
+                "strategy": "earnings",
+            },
+            {
+                "ticker": "AAPL",
+                "direction": "long",
+                "score": 0.6,
+                "strategy": "insider",
+            },
         ]
         result = pc.synthesize(
             signals=signals,
@@ -430,58 +499,102 @@ class TestPortfolioCommittee:
 
     def test_single_strategy_needs_material_event(self):
         """Single strategy signal filtered unless weighted score >= 0.5 (material event)."""
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
+        )
+
+        pc = PortfolioCommittee(
+            {"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}}
+        )
 
         # Weak event (score 0.5 * conf 0.5 = 0.25) -> filtered
         signals = [
-            {"ticker": "AAPL", "direction": "long", "score": 0.5, "strategy": "earnings"},
+            {
+                "ticker": "AAPL",
+                "direction": "long",
+                "score": 0.5,
+                "strategy": "earnings",
+            },
         ]
         result = pc.synthesize(signals=signals, strategy_confidence={"earnings": 0.5})
         assert len(result) == 0
 
         # Strong event (score 2.0 * conf 0.5 = 1.0) -> included
         signals = [
-            {"ticker": "AAPL", "direction": "long", "score": 2.0, "strategy": "earnings"},
+            {
+                "ticker": "AAPL",
+                "direction": "long",
+                "score": 2.0,
+                "strategy": "earnings",
+            },
         ]
         result = pc.synthesize(signals=signals, strategy_confidence={"earnings": 0.5})
         assert len(result) >= 1
 
     def test_max_position_enforced(self):
         """Position size should not exceed max_single_position_pct."""
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        pc = PortfolioCommittee({"autoresearch": {"paper_trade": {
-            "portfolio_committee_enabled": False,
-            "max_single_position_pct": 0.05,
-        }}})
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
+        )
+
+        pc = PortfolioCommittee(
+            {
+                "autoresearch": {
+                    "paper_trade": {
+                        "portfolio_committee_enabled": False,
+                        "max_single_position_pct": 0.05,
+                    }
+                }
+            }
+        )
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 5.0, "strategy": "a"},
             {"ticker": "AAPL", "direction": "long", "score": 5.0, "strategy": "b"},
         ]
-        result = pc.synthesize(signals=signals, strategy_confidence={"a": 1.0, "b": 1.0})
+        result = pc.synthesize(
+            signals=signals, strategy_confidence={"a": 1.0, "b": 1.0}
+        )
         if result:
             assert result[0].position_size_pct <= 0.05
 
     def test_regime_misalignment_reduces_confidence(self):
         """Crisis regime + long should get lower confidence than neutral."""
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
+        )
+
+        pc = PortfolioCommittee(
+            {"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}}
+        )
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 0.8, "strategy": "a"},
             {"ticker": "AAPL", "direction": "long", "score": 0.8, "strategy": "b"},
         ]
         conf = {"a": 0.8, "b": 0.8}
 
-        normal = pc.synthesize(signals=signals, strategy_confidence=conf, regime_context={"overall_regime": "normal"})
-        crisis = pc.synthesize(signals=signals, strategy_confidence=conf, regime_context={"overall_regime": "crisis"})
+        normal = pc.synthesize(
+            signals=signals,
+            strategy_confidence=conf,
+            regime_context={"overall_regime": "normal"},
+        )
+        crisis = pc.synthesize(
+            signals=signals,
+            strategy_confidence=conf,
+            regime_context={"overall_regime": "crisis"},
+        )
 
         if normal and crisis:
             assert crisis[0].confidence < normal[0].confidence
 
     def test_conflicting_directions_resolved(self):
         """When strategies disagree, majority weighted vote wins."""
-        from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
-        pc = PortfolioCommittee({"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}})
+        from tradingagents.strategies.trading.portfolio_committee import (
+            PortfolioCommittee,
+        )
+
+        pc = PortfolioCommittee(
+            {"autoresearch": {"paper_trade": {"portfolio_committee_enabled": False}}}
+        )
         signals = [
             {"ticker": "AAPL", "direction": "long", "score": 0.9, "strategy": "a"},
             {"ticker": "AAPL", "direction": "short", "score": 0.3, "strategy": "b"},
@@ -505,17 +618,30 @@ class TestTwoPhaseEngine:
 
     def test_learning_loop_not_triggered_without_history(self):
         """Learning loop should not trigger when there's no history."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.state.state import StateManager
         from tradingagents.strategies.modules import get_all_strategies
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = StateManager(tmpdir)
-            config = {"autoresearch": {"state_dir": tmpdir, "total_capital": 5000, "paper_trade": {"min_trades_for_evaluation": 20}}}
-            engine = MultiStrategyEngine(config=config, strategies=get_all_strategies(), state_manager=state)
+            config = {
+                "autoresearch": {
+                    "state_dir": tmpdir,
+                    "total_capital": 5000,
+                    "paper_trade": {"min_trades_for_evaluation": 20},
+                }
+            }
+            engine = MultiStrategyEngine(
+                config=config, strategies=get_all_strategies(), state_manager=state
+            )
 
             result = engine.run_learning_loop()
-            assert result.get("triggered") is False or result.get("strategies_evaluated", 0) == 0
+            assert (
+                result.get("triggered") is False
+                or result.get("strategies_evaluated", 0) == 0
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +653,10 @@ class TestSignalJournal:
     """Tests for the signal journal (append-only JSONL log)."""
 
     def test_log_and_read_signals(self):
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import (
+            JournalEntry,
+            SignalJournal,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
@@ -579,35 +708,44 @@ class TestSignalJournal:
             assert len(aapl) == 2
 
     def test_convergence_detection(self):
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import (
+            JournalEntry,
+            SignalJournal,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
 
             # 3 strategies agree on AAPL long
             for strat in ["earnings_call", "supply_chain", "insider_activity"]:
-                journal.log_signal(JournalEntry(
-                    timestamp="2026-03-30",
-                    strategy=strat,
-                    ticker="AAPL",
-                    direction="long",
-                    score=0.7,
-                    traded=True,
-                    entry_price=175.0,
-                ))
+                journal.log_signal(
+                    JournalEntry(
+                        timestamp="2026-03-30",
+                        strategy=strat,
+                        ticker="AAPL",
+                        direction="long",
+                        score=0.7,
+                        traded=True,
+                        entry_price=175.0,
+                    )
+                )
 
             # Only 1 strategy on GOOGL
-            journal.log_signal(JournalEntry(
-                timestamp="2026-03-30",
-                strategy="filing_analysis",
-                ticker="GOOGL",
-                direction="short",
-                score=0.5,
-                traded=False,
-                entry_price=140.0,
-            ))
+            journal.log_signal(
+                JournalEntry(
+                    timestamp="2026-03-30",
+                    strategy="filing_analysis",
+                    ticker="GOOGL",
+                    direction="short",
+                    score=0.5,
+                    traded=False,
+                    entry_price=140.0,
+                )
+            )
 
-            convergence = journal.get_convergence_signals("2026-03-30", min_strategies=2)
+            convergence = journal.get_convergence_signals(
+                "2026-03-30", min_strategies=2
+            )
             assert len(convergence) == 1
             assert convergence[0]["ticker"] == "AAPL"
             assert convergence[0]["count"] == 3
@@ -620,21 +758,26 @@ class TestSignalJournal:
             assert journal.get_convergence_signals("2026-03-30") == []
 
     def test_fill_outcomes(self):
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import (
+            JournalEntry,
+            SignalJournal,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
 
             # Log a signal from 10 days ago
-            journal.log_signal(JournalEntry(
-                timestamp="2026-03-20",
-                strategy="earnings_call",
-                ticker="AAPL",
-                direction="long",
-                score=0.7,
-                traded=True,
-                entry_price=170.0,
-            ))
+            journal.log_signal(
+                JournalEntry(
+                    timestamp="2026-03-20",
+                    strategy="earnings_call",
+                    ticker="AAPL",
+                    direction="long",
+                    score=0.7,
+                    traded=True,
+                    entry_price=170.0,
+                )
+            )
 
             # Mock price cache: AAPL now at 180
             mock_prices = pd.DataFrame({"Close": [180.0]})
@@ -653,21 +796,26 @@ class TestSignalJournal:
             assert abs(entries[0]["return_5d"] - 0.058824) < 0.001
 
     def test_fill_outcomes_no_update_when_recent(self):
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import (
+            JournalEntry,
+            SignalJournal,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             journal = SignalJournal(tmpdir)
 
             # Signal from 2 days ago — too recent for any outcome
-            journal.log_signal(JournalEntry(
-                timestamp="2026-03-28",
-                strategy="earnings_call",
-                ticker="AAPL",
-                direction="long",
-                score=0.7,
-                traded=True,
-                entry_price=170.0,
-            ))
+            journal.log_signal(
+                JournalEntry(
+                    timestamp="2026-03-28",
+                    strategy="earnings_call",
+                    ticker="AAPL",
+                    direction="long",
+                    score=0.7,
+                    traded=True,
+                    entry_price=170.0,
+                )
+            )
 
             mock_prices = pd.DataFrame({"Close": [180.0]})
             updated = journal.fill_outcomes({"AAPL": mock_prices}, "2026-03-30")
@@ -680,13 +828,15 @@ class TestLLMAnalyzerRegime:
     def test_regime_suffix_with_context(self):
         from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
-        suffix = LLMAnalyzer._regime_suffix({
-            "overall_regime": "stressed",
-            "vix_level": 28.5,
-            "vix_regime": "elevated",
-            "credit_spread_bps": 450,
-            "credit_regime": "widening",
-        })
+        suffix = LLMAnalyzer._regime_suffix(
+            {
+                "overall_regime": "stressed",
+                "vix_level": 28.5,
+                "vix_regime": "elevated",
+                "credit_spread_bps": 450,
+                "credit_regime": "widening",
+            }
+        )
         assert "stressed" in suffix
         assert "28.5" in suffix
         assert "450" in suffix
@@ -747,16 +897,15 @@ class TestPromptOptimizer:
         return optimizer, analyzer, tmp_path
 
     def test_evaluate_prompts_insufficient_data(self, optimizer_setup):
-        """With no journal data, all strategies should have 0 signals."""
-        from tradingagents.strategies.learning.signal_journal import SignalJournal
-
-        optimizer, _, tmp_path = optimizer_setup
-        journal = SignalJournal(str(tmp_path))
-        scores = optimizer.evaluate_prompts(journal)
+        """With no v2 outcomes, all strategies disclose no score."""
+        optimizer, _, _ = optimizer_setup
+        scores = optimizer.evaluate_prompts({})
 
         for strategy, score in scores.items():
             assert score["n_signals"] == 0
-            assert score["hit_rate"] == 0.0
+            assert score["hit_rate"] is None
+            assert score["avg_return"] is None
+            assert score["calibration"] is None
 
     def test_identify_worst_prompt_no_data(self, optimizer_setup):
         """With no eligible strategies, should return None."""
@@ -820,26 +969,44 @@ class TestPromptOptimizer:
 
 class TestSignalJournalFailures:
     def test_get_high_conviction_failures(self, tmp_path):
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import (
+            JournalEntry,
+            SignalJournal,
+        )
 
         journal = SignalJournal(str(tmp_path))
 
         # Log some signals with outcomes
         entries = [
             JournalEntry(
-                timestamp="2024-06-01", strategy="litigation", ticker="AAPL",
-                direction="short", score=0.8, llm_conviction=0.9,
-                entry_price=100.0, return_5d=0.05,  # Wrong! Short but price went up
+                timestamp="2024-06-01",
+                strategy="litigation",
+                ticker="AAPL",
+                direction="short",
+                score=0.8,
+                llm_conviction=0.9,
+                entry_price=100.0,
+                return_5d=0.05,  # Wrong! Short but price went up
             ),
             JournalEntry(
-                timestamp="2024-06-02", strategy="litigation", ticker="MSFT",
-                direction="short", score=0.7, llm_conviction=0.8,
-                entry_price=200.0, return_5d=-0.03,  # Correct
+                timestamp="2024-06-02",
+                strategy="litigation",
+                ticker="MSFT",
+                direction="short",
+                score=0.7,
+                llm_conviction=0.8,
+                entry_price=200.0,
+                return_5d=-0.03,  # Correct
             ),
             JournalEntry(
-                timestamp="2024-06-03", strategy="litigation", ticker="GOOGL",
-                direction="short", score=0.6, llm_conviction=0.3,
-                entry_price=150.0, return_5d=0.02,  # Wrong but low conviction
+                timestamp="2024-06-03",
+                strategy="litigation",
+                ticker="GOOGL",
+                direction="short",
+                score=0.6,
+                llm_conviction=0.3,
+                entry_price=150.0,
+                return_5d=0.02,  # Wrong but low conviction
             ),
         ]
         journal.log_signals(entries)
@@ -849,12 +1016,19 @@ class TestSignalJournalFailures:
         assert failures[0]["ticker"] == "AAPL"
 
     def test_prompt_version_field_in_journal(self, tmp_path):
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.learning.signal_journal import (
+            JournalEntry,
+            SignalJournal,
+        )
 
         journal = SignalJournal(str(tmp_path))
         entry = JournalEntry(
-            timestamp="2024-06-01", strategy="test", ticker="AAPL",
-            direction="long", score=0.5, prompt_version="abc123def456",
+            timestamp="2024-06-01",
+            strategy="test",
+            ticker="AAPL",
+            direction="long",
+            score=0.5,
+            prompt_version="abc123def456",
         )
         journal.log_signal(entry)
 
@@ -869,84 +1043,93 @@ class TestSignalJournalFailures:
 
 
 class TestStrategyConfidence:
-    """Test journal-derived strategy confidence."""
+    """Test v2 OutcomeRecord-derived strategy confidence."""
+
+    @staticmethod
+    def _outcomes(count, hits, strategy="earnings_call"):
+        from datetime import date
+        from decimal import Decimal
+
+        from tradingagents.strategies.metrics.models import OutcomeRecord
+
+        return tuple(
+            OutcomeRecord(
+                outcome_id=f"outcome-{index}",
+                signal_id=f"signal-{index}",
+                event_key=f"event-{index}",
+                epoch_id="epoch-1",
+                strategy=strategy,
+                policy_id="policy-1",
+                ticker="AAPL",
+                direction="long",
+                holding_sessions=5,
+                entry_session=date(2026, 1, 2),
+                exit_session=date(2026, 1, 12),
+                entry_price=Decimal("100"),
+                exit_price=Decimal("101" if index < hits else "99"),
+                raw_return=Decimal("0.01" if index < hits else "-0.01"),
+                signed_return=Decimal("0.01" if index < hits else "-0.01"),
+                status="valid",
+                invalid_reason="",
+            )
+            for index in range(count)
+        )
 
     def test_insufficient_data_returns_neutral(self, tmp_path):
         """With < 10 outcomes, confidence = 0.5."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
             strategies=get_paper_trade_strategies(),
+            outcome_reader=lambda _strategy: self._outcomes(9, 9),
         )
         assert engine._compute_strategy_confidence("earnings_call") == 0.5
 
     def test_all_hits_returns_high_confidence(self, tmp_path):
         """100% hit rate -> 0.9 confidence (capped)."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
-        journal = SignalJournal(str(tmp_path))
-        for i in range(15):
-            journal.log_signal(JournalEntry(
-                timestamp=f"2026-01-{i+1:02d}",
-                strategy="earnings_call",
-                ticker="AAPL",
-                direction="long",
-                score=0.8,
-                return_5d=0.05,  # positive = correct for long
-            ))
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
             strategies=get_paper_trade_strategies(),
+            outcome_reader=lambda _strategy: iter(self._outcomes(15, 15)),
         )
         conf = engine._compute_strategy_confidence("earnings_call")
         assert conf == pytest.approx(0.9)
 
     def test_all_misses_returns_low_confidence(self, tmp_path):
         """0% hit rate -> 0.2 confidence (floored)."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
-        journal = SignalJournal(str(tmp_path))
-        for i in range(15):
-            journal.log_signal(JournalEntry(
-                timestamp=f"2026-01-{i+1:02d}",
-                strategy="earnings_call",
-                ticker="AAPL",
-                direction="long",
-                score=0.8,
-                return_5d=-0.05,  # negative = wrong for long
-            ))
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
             strategies=get_paper_trade_strategies(),
+            outcome_reader=lambda _strategy: self._outcomes(15, 0),
         )
         conf = engine._compute_strategy_confidence("earnings_call")
         assert conf == pytest.approx(0.2)
 
     def test_50pct_hit_rate_maps_correctly(self, tmp_path):
         """50% hit rate -> should be about 0.55 confidence."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
-        from tradingagents.strategies.learning.signal_journal import JournalEntry, SignalJournal
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
-        journal = SignalJournal(str(tmp_path))
-        for i in range(20):
-            journal.log_signal(JournalEntry(
-                timestamp=f"2026-01-{i+1:02d}",
-                strategy="earnings_call",
-                ticker="AAPL",
-                direction="long",
-                score=0.8,
-                return_5d=0.05 if i < 10 else -0.05,
-            ))
         engine = MultiStrategyEngine(
             config={"autoresearch": {"state_dir": str(tmp_path)}},
             strategies=get_paper_trade_strategies(),
+            outcome_reader=lambda _strategy: self._outcomes(20, 10),
         )
         conf = engine._compute_strategy_confidence("earnings_call")
         # 50% hit rate: (0.5 - 0.3) / 0.4 * 0.7 + 0.2 = 0.55
@@ -954,7 +1137,9 @@ class TestStrategyConfidence:
 
     def test_adaptive_flag_uses_journal(self, tmp_path):
         """Engine with adaptive_confidence=True uses journal."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
         engine = MultiStrategyEngine(
@@ -966,7 +1151,9 @@ class TestStrategyConfidence:
 
     def test_non_adaptive_flag_uses_fixed(self, tmp_path):
         """Engine with adaptive_confidence=False uses 0.5."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            MultiStrategyEngine,
+        )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
         engine = MultiStrategyEngine(
@@ -1050,11 +1237,19 @@ class TestExecutionBridgeNoWeights:
         stage = list(inspect.signature(ExecutionBridge.stage_intent).parameters)
         execute = list(inspect.signature(ExecutionBridge.execute_due_intent).parameters)
         assert stage == [
-            "self", "recommendation", "signal_records", "marked_account",
-            "decision_at", "eligible_session",
+            "self",
+            "recommendation",
+            "signal_records",
+            "marked_account",
+            "decision_at",
+            "eligible_session",
         ]
         assert execute == [
-            "self", "intent", "opening_bar", "marked_account", "risk_context",
+            "self",
+            "intent",
+            "opening_bar",
+            "marked_account",
+            "risk_context",
             "cost_model",
         ]
         assert "current_price" not in stage + execute
@@ -1071,7 +1266,9 @@ class TestCohortOrchestrator:
 
     def test_build_default_cohorts(self):
         """build_default_cohorts returns 16 cohorts (4 horizons x 4 sizes)."""
-        from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            build_default_cohorts,
+        )
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
         assert len(cohorts) == 16
@@ -1083,7 +1280,9 @@ class TestCohortOrchestrator:
 
     def test_separate_state_dirs(self):
         """Each cohort gets its own state directory."""
-        from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            build_default_cohorts,
+        )
 
         cohorts = build_default_cohorts({"autoresearch": {"state_dir": "data/state"}})
         dirs = [c.state_dir for c in cohorts]
@@ -1091,11 +1290,26 @@ class TestCohortOrchestrator:
 
     def test_orchestrator_creates_engines(self, tmp_path):
         """Orchestrator creates one engine per cohort."""
-        from tradingagents.strategies.orchestration.cohort_orchestrator import CohortConfig, CohortOrchestrator
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            CohortConfig,
+            CohortOrchestrator,
+        )
 
         configs = [
-            CohortConfig(name="a", state_dir=str(tmp_path / "a"), horizon="30d", size_profile="5k", use_llm=False),
-            CohortConfig(name="b", state_dir=str(tmp_path / "b"), horizon="3m", size_profile="10k", use_llm=False),
+            CohortConfig(
+                name="a",
+                state_dir=str(tmp_path / "a"),
+                horizon="30d",
+                size_profile="5k",
+                use_llm=False,
+            ),
+            CohortConfig(
+                name="b",
+                state_dir=str(tmp_path / "b"),
+                horizon="3m",
+                size_profile="10k",
+                use_llm=False,
+            ),
         ]
         orch = CohortOrchestrator(
             configs,
@@ -1114,39 +1328,40 @@ class TestCohortOrchestrator:
 
 
 class TestCohortComparison:
-    """Test cross-cohort comparison."""
+    """Test the v2 service adapter."""
 
-    def test_empty_comparison(self, tmp_path):
-        """Comparison with empty journals returns zeros."""
-        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+    def test_compare_delegates_current_report(self):
+        from unittest.mock import Mock
 
-        dirs = {
-            "control": str(tmp_path / "control"),
-            "adaptive": str(tmp_path / "adaptive"),
+        from tradingagents.strategies.metrics.service import MetricsService
+        from tradingagents.strategies.orchestration.cohort_comparison import (
+            CohortComparison,
+        )
+
+        service = Mock(spec=MetricsService)
+        service.generation_report.return_value = {"metric_schema_version": 2}
+        assert CohortComparison(metrics_service=service).compare() == {
+            "metric_schema_version": 2
         }
-        # Create dirs
-        (tmp_path / "control").mkdir()
-        (tmp_path / "adaptive").mkdir()
-        comp = CohortComparison(dirs)
-        result = comp.compare()
-        assert "cohorts" in result
-        for name in ["control", "adaptive"]:
-            assert result["cohorts"][name]["total_signals"] == 0
+        service.generation_report.assert_called_once_with()
 
-    def test_format_report_returns_string(self, tmp_path):
-        """format_report returns a non-empty string."""
-        from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+    def test_heatmap_projects_report_scalar(self):
+        from unittest.mock import Mock
 
-        dirs = {
-            "control": str(tmp_path / "control"),
-            "adaptive": str(tmp_path / "adaptive"),
+        from tradingagents.strategies.metrics.service import MetricsService
+        from tradingagents.strategies.orchestration.cohort_comparison import (
+            CohortComparison,
+        )
+
+        service = Mock(spec=MetricsService)
+        service.generation_report.return_value = {
+            "headline_books": {"horizon_30d_size_100k": {"total_return": 0.1}},
+            "stress_tests": {"horizon_30d_size_5k": {"total_return": -0.1}},
         }
-        (tmp_path / "control").mkdir()
-        (tmp_path / "adaptive").mkdir()
-        comp = CohortComparison(dirs)
-        report = comp.format_report()
-        assert isinstance(report, str)
-        assert "Cohort Comparison" in report or "comparison" in report.lower() or len(report) > 0
+        heatmap = CohortComparison(metrics_service=service).heatmap("total_return")
+        assert heatmap["30d"]["100k"] == 0.1
+        assert heatmap["30d"]["5k"] == -0.1
+        assert heatmap["1y"]["50k"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1164,12 +1379,23 @@ class TestEdgarDataFlow:
         analyzer = LLMAnalyzer.__new__(LLMAnalyzer)
         # Mock _call_llm to capture the prompt
         calls = []
-        analyzer._call_llm = lambda system, user: (calls.append((system, user)), '{"direction": "neutral"}')[1]
+        analyzer._call_llm = lambda system, user: (
+            calls.append((system, user)),
+            '{"direction": "neutral"}',
+        )[1]
         analyzer._regime_suffix = lambda ctx: ""
 
         analyzer.analyze_insider_context(
-            [{"transaction_type": "buy", "transaction_code": "P", "shares": 1000,
-              "price_per_share": 50.0, "owner_name": "Jane CEO", "is_officer": True}],
+            [
+                {
+                    "transaction_type": "buy",
+                    "transaction_code": "P",
+                    "shares": 1000,
+                    "price_per_share": 50.0,
+                    "owner_name": "Jane CEO",
+                    "is_officer": True,
+                }
+            ],
             "AAPL",
         )
         assert len(calls) == 1
@@ -1190,13 +1416,15 @@ class TestEdgarDataFlow:
 
         mock_source = MagicMock()
         mock_source.is_available.return_value = True
-        mock_source.search_filings.return_value = [{
-            "form_type": "10-K",
-            "file_url": "https://sec.gov/current.htm",
-            "file_date": "2026-03-15",
-            "ticker": "AAPL",
-            "ciks": ["320193"],
-        }]
+        mock_source.search_filings.return_value = [
+            {
+                "form_type": "10-K",
+                "file_url": "https://sec.gov/current.htm",
+                "file_date": "2026-03-15",
+                "ticker": "AAPL",
+                "ciks": ["320193"],
+            }
+        ]
         # Current filing text
         mock_source.get_filing_text.side_effect = [
             "<html>Current 10-K content</html>",
@@ -1204,8 +1432,11 @@ class TestEdgarDataFlow:
         ]
         # Prior filing lookup
         mock_source.get_company_filings.return_value = [
-            {"filing_date": "2025-03-15", "accession_number": "0001-23-456",
-             "primary_document": "prior.htm"},
+            {
+                "filing_date": "2025-03-15",
+                "accession_number": "0001-23-456",
+                "primary_document": "prior.htm",
+            },
         ]
 
         registry = MagicMock()
@@ -1213,7 +1444,9 @@ class TestEdgarDataFlow:
 
         monitor = EventMonitor(registry)
         filings = monitor.poll_edgar_filings(
-            form_types=["10-K"], days_back=7, max_text_fetches=5,
+            form_types=["10-K"],
+            days_back=7,
+            max_text_fetches=5,
         )
 
         assert len(filings) == 1
@@ -1228,13 +1461,15 @@ class TestEdgarDataFlow:
 
         mock_source = MagicMock()
         mock_source.is_available.return_value = True
-        mock_source.search_filings.return_value = [{
-            "form_type": "10-Q",
-            "file_url": "https://sec.gov/current.htm",
-            "file_date": "2026-03-15",
-            "ticker": "AAPL",
-            "ciks": [],  # No CIK
-        }]
+        mock_source.search_filings.return_value = [
+            {
+                "form_type": "10-Q",
+                "file_url": "https://sec.gov/current.htm",
+                "file_date": "2026-03-15",
+                "ticker": "AAPL",
+                "ciks": [],  # No CIK
+            }
+        ]
         mock_source.get_filing_text.return_value = "<html>Current content</html>"
 
         registry = MagicMock()
@@ -1255,13 +1490,15 @@ class TestEdgarDataFlow:
 
         mock_source = MagicMock()
         mock_source.is_available.return_value = True
-        mock_source.search_filings.return_value = [{
-            "form_type": "DEF 14A",
-            "file_url": "https://sec.gov/proxy.htm",
-            "file_date": "2026-03-15",
-            "ticker": "AAPL",
-            "ciks": ["320193"],
-        }]
+        mock_source.search_filings.return_value = [
+            {
+                "form_type": "DEF 14A",
+                "file_url": "https://sec.gov/proxy.htm",
+                "file_date": "2026-03-15",
+                "ticker": "AAPL",
+                "ciks": ["320193"],
+            }
+        ]
         mock_source.get_filing_text.return_value = "<html>Proxy content</html>"
 
         registry = MagicMock()

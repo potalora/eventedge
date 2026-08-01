@@ -3,6 +3,7 @@
 Bridges JSON state files in data/generations/ to Streamlit pages using
 @st.cache_data for efficient caching (data changes once per day).
 """
+
 from __future__ import annotations
 
 import json
@@ -33,9 +34,44 @@ def _cohort_dirs(gen_state_dir: str) -> dict[str, str]:
     return dirs
 
 
+def _open_metrics_service(gen_state_dir: str):
+    """Open the exact existing v2 ledgers for one cached dashboard read."""
+    from tradingagents.strategies.metrics.service import MetricsService
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+    root = Path(gen_state_dir)
+    metrics_path = root / "metrics_v2.sqlite3"
+    ledger_paths = {
+        cohort_id: Path(cohort_dir) / "portfolio.db"
+        for cohort_id, cohort_dir in _cohort_dirs(gen_state_dir).items()
+        if (Path(cohort_dir) / "portfolio.db").is_file()
+    }
+    if not ledger_paths:
+        return None, ()
+    if not metrics_path.is_file():
+        raise FileNotFoundError(f"missing v2 metric store: {metrics_path}")
+    ledgers = []
+    try:
+        bindings = {}
+        for cohort_id, path in ledger_paths.items():
+            ledger = PortfolioLedger.open_existing(path)
+            ledgers.append(ledger)
+            if ledger.cohort_id != cohort_id:
+                raise ValueError(
+                    f"cohort directory {cohort_id!r} contains ledger {ledger.cohort_id!r}"
+                )
+            bindings[cohort_id] = ledger
+        return MetricsService(root, bindings), tuple(ledgers)
+    except BaseException:
+        for ledger in ledgers:
+            ledger.close()
+        raise
+
+
 # ------------------------------------------------------------------
 # Manifest / generation metadata
 # ------------------------------------------------------------------
+
 
 @st.cache_data(ttl=3600)
 def get_active_generations() -> list[dict[str, Any]]:
@@ -61,38 +97,56 @@ def get_all_generations() -> list[dict[str, Any]]:
 # Cohort comparison metrics
 # ------------------------------------------------------------------
 
+
 @st.cache_data(ttl=3600)
 def load_cohort_metrics(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
     """Load full comparison metrics for a generation's 16 cohorts."""
-    from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+    from tradingagents.strategies.orchestration.cohort_comparison import (
+        CohortComparison,
+    )
 
-    dirs = _cohort_dirs(gen_state_dir)
-    # Only include dirs that actually exist
-    existing = {k: v for k, v in dirs.items() if Path(v).exists()}
-    if not existing:
-        return {"cohorts": {}, "per_strategy": {}}
-
-    cmp = CohortComparison(existing)
-    return cmp.compare()
+    service, ledgers = _open_metrics_service(gen_state_dir)
+    if service is None:
+        return {
+            "metric_schema_version": 2,
+            "epoch": None,
+            "headline_books": {},
+            "scenario_panel": None,
+            "scenario_panel_available": False,
+            "missing_headline_books": [],
+            "stress_tests": {},
+            "dependent_scenarios": True,
+        }
+    try:
+        return CohortComparison(metrics_service=service).compare()
+    finally:
+        for ledger in ledgers:
+            ledger.close()
 
 
 @st.cache_data(ttl=3600)
-def load_cohort_heatmap(gen_id: str, gen_state_dir: str, metric: str) -> dict[str, dict[str, float | None]]:
+def load_cohort_heatmap(
+    gen_id: str, gen_state_dir: str, metric: str
+) -> dict[str, dict[str, float | None]]:
     """Load horizon x size heatmap for a single metric."""
-    from tradingagents.strategies.orchestration.cohort_comparison import CohortComparison
+    from tradingagents.strategies.orchestration.cohort_comparison import (
+        CohortComparison,
+    )
 
-    dirs = _cohort_dirs(gen_state_dir)
-    existing = {k: v for k, v in dirs.items() if Path(v).exists()}
-    if not existing:
+    service, ledgers = _open_metrics_service(gen_state_dir)
+    if service is None:
         return {}
-
-    cmp = CohortComparison(existing)
-    return cmp.heatmap(metric)
+    try:
+        return CohortComparison(metrics_service=service).heatmap(metric)
+    finally:
+        for ledger in ledgers:
+            ledger.close()
 
 
 # ------------------------------------------------------------------
 # Trades
 # ------------------------------------------------------------------
+
 
 @st.cache_data(ttl=3600)
 def load_all_trades(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
@@ -119,6 +173,7 @@ def load_all_trades(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
 # ------------------------------------------------------------------
 # Regime history
 # ------------------------------------------------------------------
+
 
 @st.cache_data(ttl=3600)
 def load_regime_history(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
@@ -154,6 +209,7 @@ def load_regime_history(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]
 # ------------------------------------------------------------------
 # Signal stats (deduplicated across size cohorts)
 # ------------------------------------------------------------------
+
 
 @st.cache_data(ttl=3600)
 def load_signal_stats(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
@@ -193,7 +249,8 @@ def load_signal_stats(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
         traded = [e for e in entries if e.get("traded")]
         eligible = [e for e in entries if e.get("return_5d") is not None]
         hits = sum(
-            1 for e in eligible
+            1
+            for e in eligible
             if (e.get("direction") == "long" and e["return_5d"] > 0)
             or (e.get("direction") == "short" and e["return_5d"] < 0)
         )
@@ -227,8 +284,11 @@ def load_signal_stats(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
 # Equity history & live PnL
 # ------------------------------------------------------------------
 
+
 @st.cache_data(ttl=900)
-def load_equity_history(gen_id: str, gen_state_dir: str) -> dict[str, list[dict[str, Any]]]:
+def load_equity_history(
+    gen_id: str, gen_state_dir: str
+) -> dict[str, list[dict[str, Any]]]:
     """Read equity_snapshots.jsonl per cohort. Returns {cohort_name: [snapshots]}."""
     from tradingagents.strategies.state.equity_snapshot import load_snapshots
 
@@ -259,13 +319,18 @@ def load_current_prices(tickers: tuple[str, ...]) -> dict[str, float]:
     sym_map = dict(zip(yf_syms, tickers))
     try:
         raw = yf.download(
-            yf_syms, period="5d", progress=False, group_by="ticker", threads=True,
+            yf_syms,
+            period="5d",
+            progress=False,
+            group_by="ticker",
+            threads=True,
             auto_adjust=False,
         )
     except Exception:
         return {}
 
     import pandas as pd
+
     out: dict[str, float] = {}
     if isinstance(raw.columns, pd.MultiIndex):
         for yf_sym in yf_syms:
@@ -290,10 +355,16 @@ def load_position_pnl(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
     Returns flat list with: cohort, horizon, size, ticker, strategy, direction,
     entry_price, current_price, shares, position_value, pnl, pnl_pct, status, days_held.
     """
-    from datetime import datetime
-
     trades = load_all_trades(gen_id, gen_state_dir)
-    open_tickers = tuple(sorted({t["ticker"] for t in trades if t.get("status") == "open" and t.get("ticker")}))
+    open_tickers = tuple(
+        sorted(
+            {
+                t["ticker"]
+                for t in trades
+                if t.get("status") == "open" and t.get("ticker")
+            }
+        )
+    )
     cur = load_current_prices(open_tickers)
 
     today = datetime.now().date()
@@ -321,29 +392,39 @@ def load_position_pnl(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
         days_held = 0
         entry_date = t.get("entry_date", "")
         try:
-            ed = datetime.strptime(entry_date, "%Y-%m-%d").date() if entry_date else today
-            xd = datetime.strptime(t.get("exit_date", ""), "%Y-%m-%d").date() if t.get("exit_date") else today
+            ed = (
+                datetime.strptime(entry_date, "%Y-%m-%d").date()
+                if entry_date
+                else today
+            )
+            xd = (
+                datetime.strptime(t.get("exit_date", ""), "%Y-%m-%d").date()
+                if t.get("exit_date")
+                else today
+            )
             days_held = (xd - ed).days
         except (ValueError, TypeError):
             pass
 
-        rows.append({
-            "cohort": t.get("cohort", ""),
-            "horizon": t.get("horizon", ""),
-            "size": t.get("size", ""),
-            "ticker": ticker,
-            "strategy": t.get("strategy", ""),
-            "direction": direction,
-            "entry_price": entry,
-            "current_price": current,
-            "shares": shares,
-            "position_value": shares * current * (1 if direction == "long" else -1),
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "status": status,
-            "days_held": days_held,
-            "entry_date": entry_date,
-        })
+        rows.append(
+            {
+                "cohort": t.get("cohort", ""),
+                "horizon": t.get("horizon", ""),
+                "size": t.get("size", ""),
+                "ticker": ticker,
+                "strategy": t.get("strategy", ""),
+                "direction": direction,
+                "entry_price": entry,
+                "current_price": current,
+                "shares": shares,
+                "position_value": shares * current * (1 if direction == "long" else -1),
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "status": status,
+                "days_held": days_held,
+                "entry_date": entry_date,
+            }
+        )
     return rows
 
 
@@ -358,13 +439,19 @@ def load_strategy_pnl(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
     by_strat: dict[str, dict[str, float]] = {}
     for p in positions:
         s = p["strategy"] or "unknown"
-        d = by_strat.setdefault(s, {
-            "strategy": s,
-            "realized_long": 0.0, "realized_short": 0.0,
-            "unrealized_long": 0.0, "unrealized_short": 0.0,
-            "open_long_count": 0, "open_short_count": 0,
-            "closed_count": 0,
-        })
+        d = by_strat.setdefault(
+            s,
+            {
+                "strategy": s,
+                "realized_long": 0.0,
+                "realized_short": 0.0,
+                "unrealized_long": 0.0,
+                "unrealized_short": 0.0,
+                "open_long_count": 0,
+                "open_short_count": 0,
+                "closed_count": 0,
+            },
+        )
         if p["status"] == "closed":
             if p["direction"] == "short":
                 d["realized_short"] += p["pnl"]
@@ -381,8 +468,10 @@ def load_strategy_pnl(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
     rows = list(by_strat.values())
     for r in rows:
         r["total_pnl"] = (
-            r["realized_long"] + r["realized_short"]
-            + r["unrealized_long"] + r["unrealized_short"]
+            r["realized_long"]
+            + r["realized_short"]
+            + r["unrealized_long"]
+            + r["unrealized_short"]
         )
     return sorted(rows, key=lambda r: r["total_pnl"], reverse=True)
 
@@ -414,12 +503,16 @@ def load_capital_deployment(gen_id: str, gen_state_dir: str) -> list[dict[str, A
 
             profile = SIZE_PROFILES.get(s)
             total_capital = profile.total_capital if profile else 0
-            result.append({
-                "cohort": name,
-                "horizon": h,
-                "size": s,
-                "total_capital": total_capital,
-                "deployed": round(deployed, 2),
-                "pct": round(deployed / total_capital * 100, 1) if total_capital > 0 else 0,
-            })
+            result.append(
+                {
+                    "cohort": name,
+                    "horizon": h,
+                    "size": s,
+                    "total_capital": total_capital,
+                    "deployed": round(deployed, 2),
+                    "pct": round(deployed / total_capital * 100, 1)
+                    if total_capital > 0
+                    else 0,
+                }
+            )
     return result

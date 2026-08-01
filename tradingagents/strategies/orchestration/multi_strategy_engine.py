@@ -15,6 +15,7 @@ import statistics
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from collections.abc import Iterable
 from typing import Any, Callable
 
 import pandas as pd
@@ -27,6 +28,8 @@ from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.modules.base import Candidate
 from tradingagents.strategies.metrics.identity import signal_id as metric_signal_id
+from tradingagents.strategies.metrics.models import OutcomeRecord
+from tradingagents.strategies.metrics.outcomes import directional_accuracy
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 logger = logging.getLogger(__name__)
@@ -217,6 +220,7 @@ class MultiStrategyEngine:
         use_llm: bool = False,
         adaptive_confidence: bool = False,
         ledger: PortfolioLedger | None = None,
+        outcome_reader: Callable[[str], Iterable[OutcomeRecord]] | None = None,
     ):
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
@@ -248,6 +252,7 @@ class MultiStrategyEngine:
         # Adaptive confidence: journal-derived (True) or fixed 0.5 (False)
         self._adaptive_confidence = adaptive_confidence
         self.ledger = ledger
+        self._outcome_reader = outcome_reader or (lambda _strategy: ())
 
         # Signal journal (shared across methods)
         from tradingagents.strategies.learning.signal_journal import SignalJournal
@@ -858,11 +863,18 @@ class MultiStrategyEngine:
 
             state_dir = self.ar_config.get("state_dir", "data/state")
             optimizer = PromptOptimizer(state_dir, self._analyzer)
+            outcomes_by_strategy = {
+                strategy.name: tuple(self._outcome_reader(strategy.name))
+                for strategy in self.paper_trade_strategies
+            }
+            all_outcomes = tuple(
+                outcome for rows in outcomes_by_strategy.values() for outcome in rows
+            )
 
             # Check active trial first
             trial_id, trial = optimizer.get_active_trial()
             if trial_id:
-                decision = optimizer.check_trial(trial_id, self._journal)
+                decision = optimizer.check_trial(trial_id, all_outcomes)
                 if decision in ("keep", "revert"):
                     optimizer.commit_or_revert(trial_id, decision)
                     prompt_optimization_result["trial_completed"] = {
@@ -873,7 +885,7 @@ class MultiStrategyEngine:
                     prompt_optimization_result["trial_ongoing"] = trial_id
             else:
                 # No active trial — evaluate and potentially start one
-                prompt_scores = optimizer.evaluate_prompts(self._journal)
+                prompt_scores = optimizer.evaluate_prompts(outcomes_by_strategy)
                 worst = optimizer.identify_worst_prompt(prompt_scores)
                 if worst:
                     current_prompt = self._analyzer.get_prompt(worst)
@@ -919,19 +931,11 @@ class MultiStrategyEngine:
         Maps hit_rate [0.3, 0.7] → confidence [0.2, 0.9].
         Returns 0.5 (neutral) if fewer than 10 signals with outcomes.
         """
-        entries = self._journal.get_entries(strategy=strategy_name)
-        with_outcomes = [e for e in entries if e.get("return_5d") is not None]
-
-        if len(with_outcomes) < 10:
+        outcomes = tuple(self._outcome_reader(strategy_name))
+        accuracy = directional_accuracy(outcomes)
+        if accuracy.actionable_count < 10 or accuracy.rate is None:
             return 0.5  # neutral until proven
-
-        hits = sum(
-            1
-            for e in with_outcomes
-            if (e["direction"] == "long" and e["return_5d"] > 0)
-            or (e["direction"] == "short" and e["return_5d"] < 0)
-        )
-        hit_rate = hits / len(with_outcomes)
+        hit_rate = accuracy.rate
 
         # Linear map: 30% hit rate → 0.2 confidence, 70% → 0.9
         return max(0.2, min(0.9, (hit_rate - 0.3) / 0.4 * 0.7 + 0.2))

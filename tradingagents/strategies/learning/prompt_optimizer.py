@@ -1,21 +1,26 @@
-"""Atlas-GIC-inspired prompt optimization loop.
+"""Diagnostic prompt-trial scoring over explicit metrics-v2 outcomes.
 
-LLM analyzer prompts are the trainable parameters. Market outcomes
-(from the signal journal) are the loss function. The optimizer:
+LLM analyzer prompts are the trainable parameters. Persisted ``OutcomeRecord``
+inputs are the diagnostic evidence. The optimizer:
 1. Scores each strategy's prompt by realized signal outcomes.
 2. Identifies the worst-performing prompt (by hit rate).
 3. Proposes a targeted modification via meta-prompt.
 4. Trials the new prompt for 5 trading days.
-5. Keeps or reverts based on Sharpe comparison.
+5. Keeps or reverts based on directional-accuracy comparison.
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-from datetime import datetime
+from collections.abc import Iterable, Mapping
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+
+from tradingagents.strategies.metrics.models import OutcomeRecord
+from tradingagents.strategies.metrics.outcomes import directional_accuracy
 
 logger = logging.getLogger(__name__)
 
@@ -49,78 +54,59 @@ class PromptOptimizer:
     # Evaluate prompt performance
     # ------------------------------------------------------------------
 
-    def evaluate_prompts(self, journal: Any) -> dict[str, dict]:
+    def evaluate_prompts(
+        self, outcomes_by_strategy: Mapping[str, Iterable[OutcomeRecord]]
+    ) -> dict[str, dict]:
         """Score each LLM-using strategy's prompt by realized outcomes.
 
         For each strategy:
-        - Get all signals with return_5d filled
-        - Split by high-conviction (llm_conviction > 0.6) vs low
-        - Compute hit_rate (direction matched actual return sign),
-          avg_return, conviction_calibration
+        - Consume persisted v2 outcome records
+        - Compute directional accuracy once through the governed metric helper
+        - Surface unavailable return/conviction diagnostics honestly as ``None``
 
-        Returns {strategy_name: {hit_rate, avg_return, calibration, n_signals}}.
+        Returns per-strategy accuracy and sample-size disclosures.
         """
         scores: dict[str, dict] = {}
 
         for strategy in LLM_STRATEGIES:
-            entries = journal.get_entries(strategy=strategy)
-            with_outcomes = [
-                e for e in entries
-                if e.get("return_5d") is not None and e.get("llm_conviction", 0) > 0
-            ]
+            outcomes = self._validated_outcomes(
+                strategy, outcomes_by_strategy.get(strategy, ())
+            )
+            accuracy = directional_accuracy(outcomes)
 
-            if len(with_outcomes) < MIN_SIGNALS_FOR_EVAL:
+            if accuracy.actionable_count < MIN_SIGNALS_FOR_EVAL:
                 scores[strategy] = {
-                    "hit_rate": 0.0,
-                    "avg_return": 0.0,
-                    "calibration": 0.0,
-                    "n_signals": len(with_outcomes),
-                    "high_conviction_hits": 0,
-                    "high_conviction_total": 0,
+                    "hit_rate": accuracy.rate,
+                    "avg_return": None,
+                    "calibration": None,
+                    "n_signals": accuracy.actionable_count,
+                    "high_conviction_hits": None,
+                    "high_conviction_total": None,
                 }
                 continue
 
-            hits = 0
-            returns = []
-            high_conv_hits = 0
-            high_conv_total = 0
-
-            for e in with_outcomes:
-                ret_5d = e["return_5d"]
-                direction = e.get("direction", "long")
-                conviction = e.get("llm_conviction", 0.5)
-
-                # Did direction match the actual return?
-                correct = (direction == "long" and ret_5d > 0) or (
-                    direction == "short" and ret_5d < 0
-                )
-                if correct:
-                    hits += 1
-
-                returns.append(ret_5d)
-
-                if conviction > 0.6:
-                    high_conv_total += 1
-                    if correct:
-                        high_conv_hits += 1
-
-            hit_rate = hits / len(with_outcomes) if with_outcomes else 0.0
-            avg_return = sum(returns) / len(returns) if returns else 0.0
-
-            # Calibration: high-conviction signals should have higher hit rate
-            hc_hit_rate = high_conv_hits / high_conv_total if high_conv_total > 0 else 0.0
-            calibration = hc_hit_rate - hit_rate  # positive = well-calibrated
-
             scores[strategy] = {
-                "hit_rate": hit_rate,
-                "avg_return": avg_return,
-                "calibration": calibration,
-                "n_signals": len(with_outcomes),
-                "high_conviction_hits": high_conv_hits,
-                "high_conviction_total": high_conv_total,
+                "hit_rate": accuracy.rate,
+                "avg_return": None,
+                "calibration": None,
+                "n_signals": accuracy.actionable_count,
+                "high_conviction_hits": None,
+                "high_conviction_total": None,
             }
 
         return scores
+
+    @staticmethod
+    def _validated_outcomes(
+        strategy: str, outcomes: Iterable[OutcomeRecord]
+    ) -> tuple[OutcomeRecord, ...]:
+        rows = tuple(outcomes)
+        if any(row.strategy != strategy for row in rows):
+            raise ValueError(f"outcome strategy does not match {strategy!r}")
+        epoch_ids = {row.epoch_id for row in rows}
+        if len(epoch_ids) > 1:
+            raise ValueError("prompt diagnostics cannot mix metric epochs")
+        return rows
 
     def identify_worst_prompt(self, scores: dict[str, dict]) -> str | None:
         """Return strategy name with lowest hit_rate (min signals required).
@@ -128,7 +114,8 @@ class PromptOptimizer:
         Returns None if no strategy has enough data.
         """
         eligible = {
-            name: s for name, s in scores.items()
+            name: s
+            for name, s in scores.items()
             if s["n_signals"] >= MIN_SIGNALS_FOR_EVAL
         }
 
@@ -189,7 +176,7 @@ Return the complete modified prompt."""
         result = result.strip()
         if result.startswith("```"):
             lines = result.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             result = "\n".join(lines).strip()
 
         return result
@@ -225,7 +212,7 @@ Return the complete modified prompt."""
         logger.info("Started prompt trial %s for %s", trial_id, strategy_name)
         return trial_id
 
-    def check_trial(self, trial_id: str, journal: Any) -> str:
+    def check_trial(self, trial_id: str, outcomes: Iterable[OutcomeRecord]) -> str:
         """After TRIAL_DAYS trading days, compare trial vs baseline.
 
         Returns "keep" | "revert" | "ongoing".
@@ -235,45 +222,31 @@ Return the complete modified prompt."""
         if not trial or trial["status"] != "active":
             return "ongoing"
 
-        start_date = trial["start_date"][:10]  # YYYY-MM-DD
+        try:
+            start_session = date.fromisoformat(trial["start_date"][:10])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "trial start_date must contain an ISO session date"
+            ) from error
         strategy = trial["strategy"]
+        strategy_outcomes = self._validated_outcomes(
+            strategy, (row for row in tuple(outcomes) if row.strategy == strategy)
+        )
 
-        # Get signals since trial started
-        entries = journal.get_entries(strategy=strategy, since=start_date)
-        with_outcomes = [e for e in entries if e.get("return_5d") is not None]
-
-        if len(with_outcomes) < 5:
+        trial_outcomes = tuple(
+            row for row in strategy_outcomes if row.entry_session >= start_session
+        )
+        trial_accuracy = directional_accuracy(trial_outcomes)
+        if trial_accuracy.actionable_count < 5 or trial_accuracy.rate is None:
             return "ongoing"
-
-        # Compute trial hit rate
-        hits = sum(
-            1 for e in with_outcomes
-            if (e["direction"] == "long" and e["return_5d"] > 0)
-            or (e["direction"] == "short" and e["return_5d"] < 0)
+        baseline_accuracy = directional_accuracy(
+            tuple(row for row in strategy_outcomes if row.entry_session < start_session)
         )
-        trial_hit_rate = hits / len(with_outcomes)
-
-        # Compare against baseline (pre-trial signals)
-        all_entries = journal.get_entries(strategy=strategy)
-        pre_trial = [
-            e for e in all_entries
-            if e.get("return_5d") is not None
-            and e.get("timestamp", "") < start_date
-            and e.get("llm_conviction", 0) > 0
-        ]
-
-        if not pre_trial:
-            return "keep" if trial_hit_rate > 0.5 else "revert"
-
-        baseline_hits = sum(
-            1 for e in pre_trial
-            if (e["direction"] == "long" and e["return_5d"] > 0)
-            or (e["direction"] == "short" and e["return_5d"] < 0)
-        )
-        baseline_hit_rate = baseline_hits / len(pre_trial)
+        if baseline_accuracy.rate is None:
+            return "keep" if trial_accuracy.rate > 0.5 else "revert"
 
         # Keep if trial improves hit rate by at least 2pp
-        if trial_hit_rate >= baseline_hit_rate + 0.02:
+        if trial_accuracy.rate >= baseline_accuracy.rate + 0.02:
             return "keep"
         return "revert"
 
@@ -297,7 +270,9 @@ Return the complete modified prompt."""
         if decision == "keep":
             # Archive baseline
             if baseline_path.exists():
-                history_path = self._history_dir / f"{strategy}_{timestamp}_baseline.txt"
+                history_path = (
+                    self._history_dir / f"{strategy}_{timestamp}_baseline.txt"
+                )
                 history_path.write_text(baseline_path.read_text())
 
             # Promote trial to active
@@ -313,7 +288,9 @@ Return the complete modified prompt."""
         elif decision == "revert":
             # Archive failed trial
             if trial_path.exists():
-                history_path = self._history_dir / f"{strategy}_{timestamp}_reverted.txt"
+                history_path = (
+                    self._history_dir / f"{strategy}_{timestamp}_reverted.txt"
+                )
                 history_path.write_text(trial_path.read_text())
                 trial_path.unlink()
 
