@@ -1,0 +1,564 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from tradingagents.strategies.execution import Fill, MarketBar, OrderIntent, SignalRecord
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    MissingMarkError,
+    PortfolioLedger,
+)
+
+
+UTC = timezone.utc
+COHORT = "horizon_30d_size_5k"
+FRIDAY = date(2026, 7, 31)
+MONDAY = date(2026, 8, 3)
+TUESDAY = date(2026, 8, 4)
+CAPTURED_AT = datetime(2026, 7, 31, 20, tzinfo=UTC)
+
+
+def _ledger(tmp_path) -> PortfolioLedger:
+    return PortfolioLedger(tmp_path / "portfolio.db", COHORT, Decimal("5000"))
+
+
+def _signal(
+    signal_id: str = "signal-1",
+    *,
+    ticker: str = "AAPL",
+    event_key: str = "event-1",
+    strategy: str = "litigation",
+    reference_close: Decimal = Decimal("100"),
+) -> SignalRecord:
+    return SignalRecord(
+        signal_id=signal_id,
+        epoch_id="epoch-1",
+        policy_id="param-policy-1",
+        event_key=event_key,
+        strategy=strategy,
+        ticker=ticker,
+        direction="long",
+        event_at=CAPTURED_AT,
+        observed_at=CAPTURED_AT,
+        reference_session=FRIDAY,
+        reference_close=reference_close,
+        decision_at=CAPTURED_AT,
+        evidence_hash=f"evidence-{signal_id}",
+    )
+
+
+def _intent(
+    intent_id: str = "intent-1",
+    *,
+    signal_ids: tuple[str, ...] = ("signal-1",),
+    side: str = "buy",
+    requested_qty: int = 10,
+    eligible_session: date = MONDAY,
+) -> OrderIntent:
+    return OrderIntent(
+        intent_id=intent_id,
+        signal_ids=signal_ids,
+        cohort_id=COHORT,
+        side=side,
+        requested_qty=requested_qty,
+        created_at=CAPTURED_AT,
+        eligible_session=eligible_session,
+        price_rule="next_session_open",
+        status="pending",
+        stop_price=None,
+        external_order_id=None,
+    )
+
+
+def _fill(intent_id: str = "intent-1", *, session: date = MONDAY) -> Fill:
+    effective = datetime(2026, 8, session.day, 13, 30, tzinfo=UTC)
+    return Fill(
+        fill_id=f"fill-{intent_id}",
+        intent_id=intent_id,
+        side="buy",
+        session=session,
+        effective_at=effective,
+        processed_at=effective,
+        reference_price=Decimal("101"),
+        fill_price=Decimal("101.10"),
+        quantity=10,
+        slippage=Decimal("1"),
+        commission=Decimal("0"),
+        other_fees=Decimal("0"),
+    )
+
+
+def _bar(session: date, close: Decimal) -> MarketBar:
+    return MarketBar(
+        ticker="AAPL",
+        session=session,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        source="fixture",
+        fetched_at=datetime(2026, 8, session.day, 21, tzinfo=UTC),
+        adjusted=False,
+    )
+
+
+def _record_signal_policy(
+    ledger: PortfolioLedger,
+    signal: SignalRecord,
+    *,
+    sector: str = "Technology",
+) -> dict[str, object]:
+    ledger.record_signal(signal)
+    return ledger.record_signal_policy_provenance(
+        signal.signal_id,
+        policy_version="portfolio_policy_v1",
+        event_key=signal.event_key,
+        source_event_keys=(f"source:{signal.event_key}",),
+        strategy_tags=(signal.strategy,),
+        risk_tags=(f"event:{signal.event_key}",),
+        sector=sector,
+        journal_only=False,
+        order_eligible=True,
+        decision="accepted",
+        reason_codes=("accepted",),
+        bound_context_digest="context-digest-1",
+        captured_at=CAPTURED_AT,
+    )
+
+
+def _record_intent_policy(
+    ledger: PortfolioLedger,
+    intent: OrderIntent,
+    signal: SignalRecord,
+    *,
+    sector: str = "Technology",
+) -> dict[str, object]:
+    return ledger.record_intent_policy_provenance(
+        intent.intent_id,
+        signal_ids=intent.signal_ids,
+        policy_version="portfolio_policy_v1",
+        event_key=signal.event_key,
+        source_event_keys=(f"source:{signal.event_key}",),
+        strategy_tags=(signal.strategy,),
+        risk_tags=(f"event:{signal.event_key}",),
+        sector=sector,
+        journal_only=False,
+        order_eligible=True,
+        decision="accepted",
+        reason_codes=("accepted",),
+        bound_context_digest="context-digest-1",
+        captured_at=CAPTURED_AT,
+    )
+
+
+def _stage_policy_entry(
+    ledger: PortfolioLedger,
+    *,
+    signal: SignalRecord | None = None,
+    intent: OrderIntent | None = None,
+) -> tuple[SignalRecord, OrderIntent]:
+    signal = signal or _signal()
+    intent = intent or _intent(signal_ids=(signal.signal_id,))
+    _record_signal_policy(ledger, signal)
+    ledger.stage_intent(intent)
+    _record_intent_policy(ledger, intent, signal)
+    return signal, intent
+
+
+def test_companion_provenance_is_insert_once_reopenable_and_normalized(tmp_path) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    signal = _signal()
+    intent = _intent()
+    try:
+        signal_policy = _record_signal_policy(ledger, signal)
+        ledger.stage_intent(intent)
+        intent_policy = _record_intent_policy(ledger, intent, signal)
+
+        replay = ledger.record_intent_policy_provenance(
+            intent.intent_id,
+            signal_ids=intent.signal_ids,
+            policy_version="portfolio_policy_v1",
+            event_key=signal.event_key,
+            source_event_keys=("source:event-1", "source:event-1"),
+            strategy_tags=("litigation", "litigation"),
+            risk_tags=("event:event-1",),
+            sector="Technology",
+            journal_only=False,
+            order_eligible=True,
+            decision="accepted",
+            reason_codes=("accepted", "accepted"),
+            bound_context_digest="context-digest-1",
+            captured_at=datetime(2026, 8, 1, 20, tzinfo=UTC),
+        )
+        assert replay == intent_policy
+        assert signal_policy["source_event_keys"] == ("source:event-1",)
+        assert intent_policy["strategy_tags"] == ("litigation",)
+        assert json.loads(str(intent_policy["payload_json"]))["signal_ids"] == [
+            "signal-1"
+        ]
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        assert reopened.read_signal_policy_provenance("signal-1") == signal_policy
+        assert reopened.read_intent_policy_provenance("intent-1") == intent_policy
+    finally:
+        reopened.close()
+
+
+def test_companion_provenance_conflict_and_tamper_fail_closed(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    signal, intent = _stage_policy_entry(ledger)
+    try:
+        with pytest.raises(LedgerConflictError, match="intent policy provenance"):
+            ledger.record_intent_policy_provenance(
+                intent.intent_id,
+                signal_ids=intent.signal_ids,
+                policy_version="portfolio_policy_v1",
+                event_key=signal.event_key,
+                source_event_keys=("source:event-1",),
+                strategy_tags=("changed-strategy",),
+                risk_tags=("event:event-1",),
+                sector="Technology",
+                journal_only=False,
+                order_eligible=True,
+                decision="accepted",
+                reason_codes=("accepted",),
+                bound_context_digest="context-digest-1",
+                captured_at=CAPTURED_AT,
+            )
+
+        ledger.connection.execute(
+            "UPDATE intent_policy_provenance SET payload_json = ? WHERE intent_id = ?",
+            ('{"tampered":true}', intent.intent_id),
+        )
+        with pytest.raises(LedgerConflictError, match="tampered intent policy"):
+            ledger.read_intent_policy_provenance(intent.intent_id)
+    finally:
+        ledger.close()
+
+
+def test_noncanonical_companion_column_tamper_raises_ledger_conflict(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        _stage_policy_entry(ledger)
+        ledger.connection.execute(
+            "UPDATE intent_policy_provenance SET strategy_tags_json = '{' "
+            "WHERE intent_id = 'intent-1'"
+        )
+
+        with pytest.raises(LedgerConflictError, match="tampered intent policy"):
+            ledger.read_intent_policy_provenance("intent-1")
+    finally:
+        ledger.close()
+
+
+def test_non_boolean_companion_flag_tamper_raises_ledger_conflict(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        _stage_policy_entry(ledger)
+        ledger.connection.execute(
+            "UPDATE intent_policy_provenance SET order_eligible = 2 "
+            "WHERE intent_id = 'intent-1'"
+        )
+
+        with pytest.raises(LedgerConflictError, match="tampered intent policy"):
+            ledger.read_intent_policy_provenance("intent-1")
+    finally:
+        ledger.close()
+
+
+def test_bound_policy_context_is_canonical_idempotent_and_tamper_evident(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        first = ledger.bind_policy_session_context(
+            MONDAY,
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            policy_config={"max_positions": 5, "limits": {"sector": 0.5}},
+            context={"cash": "5000", "positions": []},
+            bound_at=datetime(2026, 8, 3, 12, tzinfo=UTC),
+        )
+        replay = ledger.bind_policy_session_context(
+            MONDAY,
+            epoch_id="epoch-1",
+            policy_version="portfolio_policy_v1",
+            policy_config={"limits": {"sector": 0.5}, "max_positions": 5},
+            context={"positions": [], "cash": "5000"},
+            bound_at=datetime(2026, 8, 3, 13, tzinfo=UTC),
+        )
+        assert replay == first
+        assert replay["bound_at"] == datetime(2026, 8, 3, 12, tzinfo=UTC)
+        assert replay["policy_config_digest"]
+        assert replay["context_digest"]
+
+        with pytest.raises(LedgerConflictError, match="policy session context"):
+            ledger.bind_policy_session_context(
+                MONDAY,
+                epoch_id="epoch-1",
+                policy_version="portfolio_policy_v1",
+                policy_config={"max_positions": 6, "limits": {"sector": 0.5}},
+                context={"cash": "5000", "positions": []},
+                bound_at=datetime(2026, 8, 3, 13, tzinfo=UTC),
+            )
+
+        ledger.connection.execute(
+            "UPDATE policy_session_contexts SET context_digest = 'bad' WHERE session = ?",
+            (MONDAY.isoformat(),),
+        )
+        with pytest.raises(LedgerConflictError, match="tampered policy session context"):
+            ledger.read_policy_session_context(MONDAY)
+    finally:
+        ledger.close()
+
+
+def test_pending_projection_includes_future_entries_and_supports_self_exclusion(
+    tmp_path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        first_signal = _signal()
+        first_intent = _intent()
+        _stage_policy_entry(ledger, signal=first_signal, intent=first_intent)
+
+        future_signal = _signal(
+            "signal-2",
+            ticker="MSFT",
+            event_key="event-2",
+            strategy="earnings_call",
+            reference_close=Decimal("50"),
+        )
+        future_intent = _intent(
+            "intent-2",
+            signal_ids=(future_signal.signal_id,),
+            requested_qty=4,
+            eligible_session=TUESDAY,
+        )
+        _stage_policy_entry(ledger, signal=future_signal, intent=future_intent)
+
+        projection = ledger.policy_pending_entry_projection()
+        assert [row["intent_id"] for row in projection] == ["intent-1", "intent-2"]
+        assert [row["marked_value"] for row in projection] == [
+            Decimal("1000"),
+            Decimal("200"),
+        ]
+        assert projection[1]["eligible_session"] == TUESDAY
+        assert [row["intent_id"] for row in ledger.policy_pending_entry_projection(
+            exclude_intent_id="intent-1"
+        )] == ["intent-2"]
+    finally:
+        ledger.close()
+
+
+def test_pending_projection_rejects_missing_or_ambiguous_provenance(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        signal = _signal()
+        _record_signal_policy(ledger, signal)
+        intent = _intent()
+        ledger.stage_intent(intent)
+        with pytest.raises(LedgerConflictError, match="missing intent policy provenance"):
+            ledger.policy_pending_entry_projection()
+
+        second = _signal(
+            "signal-2", event_key="event-2", reference_close=Decimal("101")
+        )
+        _record_signal_policy(ledger, second)
+        ambiguous = _intent(
+            "intent-2", signal_ids=(signal.signal_id, second.signal_id)
+        )
+        ledger.stage_intent(ambiguous)
+        ledger.record_intent_policy_provenance(
+            ambiguous.intent_id,
+            signal_ids=ambiguous.signal_ids,
+            policy_version="portfolio_policy_v1",
+            event_key="event-1",
+            source_event_keys=("source:event-1", "source:event-2"),
+            strategy_tags=("litigation",),
+            risk_tags=("event:event-1", "event:event-2"),
+            sector="Technology",
+            journal_only=False,
+            order_eligible=True,
+            decision="accepted",
+            reason_codes=("accepted",),
+            bound_context_digest="context-digest-1",
+            captured_at=CAPTURED_AT,
+        )
+        with pytest.raises(LedgerConflictError, match="unambiguous reference_close"):
+            ledger.policy_pending_entry_projection(exclude_intent_id="intent-1")
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("journal_only", "order_eligible"),
+    [(True, False), (False, False)],
+)
+def test_entry_intent_cannot_override_ineligible_signal_policy(
+    tmp_path, journal_only: bool, order_eligible: bool
+) -> None:
+    ledger = _ledger(tmp_path)
+    signal = _signal()
+    intent = _intent()
+    try:
+        ledger.record_signal(signal)
+        ledger.record_signal_policy_provenance(
+            signal.signal_id,
+            policy_version="portfolio_policy_v1",
+            event_key=signal.event_key,
+            source_event_keys=("source:event-1",),
+            strategy_tags=(signal.strategy,),
+            risk_tags=("event:event-1",),
+            sector="Technology",
+            journal_only=journal_only,
+            order_eligible=order_eligible,
+            decision="rejected",
+            reason_codes=("position_cap",),
+            bound_context_digest="context-digest-1",
+            captured_at=CAPTURED_AT,
+        )
+        ledger.stage_intent(intent)
+
+        with pytest.raises(
+            LedgerConflictError,
+            match="ineligible signal policy provenance signal-1 for intent-1",
+        ):
+            _record_intent_policy(ledger, intent, signal)
+    finally:
+        ledger.close()
+
+
+def test_open_lot_projection_uses_fill_only_same_session_then_requires_raw_mark(
+    tmp_path,
+) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        _, intent = _stage_policy_entry(ledger)
+        ledger.apply_fill(intent, _fill())
+
+        same_session = ledger.policy_open_lot_projection(MONDAY)
+        assert same_session[0]["marked_value"] == Decimal("1010")
+        assert same_session[0]["mark_source"] == "opening_reference"
+
+        with pytest.raises(MissingMarkError, match="AAPL"):
+            ledger.policy_open_lot_projection(TUESDAY)
+
+        ledger.record_marks(
+            TUESDAY,
+            {"AAPL": _bar(TUESDAY, Decimal("105"))},
+            datetime(2026, 8, 4, 21, tzinfo=UTC),
+        )
+        marked = ledger.policy_open_lot_projection(TUESDAY)
+        assert marked[0]["marked_value"] == Decimal("1050")
+        assert marked[0]["mark_source"] == "fixture"
+    finally:
+        ledger.close()
+
+
+def test_consumed_event_keys_require_filled_entry_and_verified_provenance(tmp_path) -> None:
+    path = tmp_path / "portfolio.db"
+    ledger = _ledger(tmp_path)
+    try:
+        _, intent = _stage_policy_entry(ledger)
+        assert ledger.consumed_event_keys() == frozenset()
+        ledger.apply_fill(intent, _fill())
+        assert ledger.consumed_event_keys() == frozenset({"event-1"})
+    finally:
+        ledger.close()
+
+    reopened = PortfolioLedger.open_existing(path)
+    try:
+        assert reopened.consumed_event_keys() == frozenset({"event-1"})
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            reopened.bind_policy_session_context(
+                TUESDAY,
+                epoch_id="epoch-1",
+                policy_version="portfolio_policy_v1",
+                policy_config={"max_positions": 5},
+                context={"cash": "3988"},
+                bound_at=datetime(2026, 8, 4, 12, tzinfo=UTC),
+            )
+    finally:
+        reopened.close()
+
+
+def test_consumed_event_keys_include_every_filled_contributor_only(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        first = _signal("signal-a", event_key="event-a")
+        second = _signal("signal-b", event_key="event-b")
+        _record_signal_policy(ledger, first)
+        _record_signal_policy(ledger, second)
+        filled = _intent(
+            "intent-filled", signal_ids=(first.signal_id, second.signal_id)
+        )
+        ledger.stage_intent(filled)
+        ledger.record_intent_policy_provenance(
+            filled.intent_id,
+            signal_ids=filled.signal_ids,
+            policy_version="portfolio_policy_v1",
+            event_key="event-a",
+            source_event_keys=("source:event-a", "source:event-b"),
+            strategy_tags=("litigation",),
+            risk_tags=("event:event-a", "event:event-b"),
+            sector="Technology",
+            journal_only=False,
+            order_eligible=True,
+            decision="accepted",
+            reason_codes=("accepted",),
+            bound_context_digest="context-digest-1",
+            captured_at=CAPTURED_AT,
+        )
+
+        pending_signal = _signal("signal-pending", event_key="event-pending")
+        pending = _intent("intent-pending", signal_ids=(pending_signal.signal_id,))
+        _stage_policy_entry(ledger, signal=pending_signal, intent=pending)
+        rejected_signal = _signal("signal-rejected", event_key="event-rejected")
+        rejected = _intent(
+            "intent-rejected", signal_ids=(rejected_signal.signal_id,)
+        )
+        _stage_policy_entry(ledger, signal=rejected_signal, intent=rejected)
+        ledger.reject_intent(
+            rejected.intent_id,
+            datetime(2026, 8, 3, 12, tzinfo=UTC),
+            "test rejection",
+        )
+
+        assert ledger.consumed_event_keys() == frozenset()
+        ledger.apply_fill(filled, _fill(filled.intent_id))
+
+        assert ledger.consumed_event_keys() == frozenset({"event-a", "event-b"})
+    finally:
+        ledger.close()
+
+
+def test_policy_projections_are_hard_bounded_without_silent_truncation(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    try:
+        for index in range(3):
+            signal = _signal(
+                f"signal-{index}",
+                event_key=f"event-{index}",
+                reference_close=Decimal("10"),
+            )
+            intent = _intent(
+                f"intent-{index}",
+                signal_ids=(signal.signal_id,),
+                requested_qty=1,
+                eligible_session=MONDAY,
+            )
+            _stage_policy_entry(ledger, signal=signal, intent=intent)
+
+        with pytest.raises(LedgerConflictError, match="projection limit"):
+            ledger.policy_pending_entry_projection(limit=2)
+        with pytest.raises(ValueError, match="between 1 and 256"):
+            ledger.policy_pending_entry_projection(limit=257)
+    finally:
+        ledger.close()
