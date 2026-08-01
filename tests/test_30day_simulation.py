@@ -159,6 +159,47 @@ class FakeStrategy2(FakeStrategy):
         ]
 
 
+class _HealthPaddingStrategy:
+    """Deterministic no-event strategy used only to satisfy health coverage."""
+
+    track = "paper_trade"
+    data_sources: list[str] = []
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def get_default_params(self, horizon: str = "30d") -> dict:
+        return {}
+
+    def screen(self, data, date, params) -> list[Candidate]:
+        return []
+
+    def check_exit(
+        self, ticker, entry_price, current_price, holding_days, params, data
+    ):
+        return False, ""
+
+    def build_propose_prompt(self, context):
+        return "fixture health padding"
+
+
+def _with_health_padding(strategies: list[object]) -> list[object]:
+    """Pad test strategies to production's exact 12-strategy health contract."""
+    names = {strategy.name for strategy in strategies}
+    if len(names) != len(strategies):
+        raise ValueError("authoritative fixture strategies must have unique names")
+    if len(strategies) > 12:
+        raise ValueError("authoritative fixture supports at most 12 strategies")
+    index = 1
+    while len(strategies) < 12:
+        name = f"fixture_health_padding_{index}"
+        index += 1
+        if name not in names:
+            strategies.append(_HealthPaddingStrategy(name))
+            names.add(name)
+    return strategies
+
+
 def _base_config(state_dir: str) -> dict:
     """Minimal config for test isolation."""
     return {
@@ -392,13 +433,16 @@ def _authoritative_orchestrator(
             },
         },
     }
-    with patch(
-        "tradingagents.strategies.modules.get_paper_trade_strategies",
-        return_value=(
+    active_strategies = _with_health_padding(
+        list(
             strategy_modules
             if strategy_modules is not None
             else [FakeStrategy(hold_days=hold_days), FakeStrategy2()]
-        ),
+        )
+    )
+    with patch(
+        "tradingagents.strategies.modules.get_paper_trade_strategies",
+        return_value=active_strategies,
     ):
         orchestrator = CohortOrchestrator(
             configs,
@@ -515,7 +559,9 @@ class TestIdempotencyDoubleRun:
                 result = orchestrator.run_daily(session.isoformat())
 
         assert all(not row["error"] for row in result.values())
-        stores = {id(cohort["executor"].metric_store) for cohort in orchestrator.cohorts}
+        stores = {
+            id(cohort["executor"].metric_store) for cohort in orchestrator.cohorts
+        }
         assert len(stores) == 1
         store = orchestrator.cohorts[0]["executor"].metric_store
         epoch = store.current_epoch()
@@ -524,9 +570,7 @@ class TestIdempotencyDoubleRun:
         for cohort in orchestrator.cohorts:
             ledger = cohort["ledger"]
             snapshots = ledger.read_snapshots(sessions[0], sessions[-1])
-            benchmarks = ledger.read_benchmark_observations(
-                sessions[0], sessions[-1]
-            )
+            benchmarks = ledger.read_benchmark_observations(sessions[0], sessions[-1])
             signals = ledger.read_signals(sessions[0], sessions[-1])
             assert snapshots and benchmarks and signals
             assert {row.epoch_id for row in snapshots} == {epoch.epoch_id}
@@ -609,8 +653,7 @@ class TestIdempotencyDoubleRun:
                     else:
                         bars[("AAPL", start)] = replace(
                             bars[("AAPL", start)],
-                            fetched_at=datetime.now(timezone.utc)
-                            - timedelta(hours=48),
+                            fetched_at=datetime.now(timezone.utc) - timedelta(hours=48),
                         )
                 return bars
 
@@ -797,9 +840,9 @@ class TestIdempotencyDoubleRun:
                 return bars
 
             source.get_daily_bars = missing_exit
-            orchestrator._after_gap_p0_invalidation = lambda marker: (_ for _ in ()).throw(
-                RuntimeError("crash before epoch invalidation")
-            )
+            orchestrator._after_gap_p0_invalidation = lambda marker: (
+                _ for _ in ()
+            ).throw(RuntimeError("crash before epoch invalidation"))
             with pytest.raises(RuntimeError, match="crash before epoch invalidation"):
                 orchestrator.run_daily(sessions[-1].isoformat())
 
@@ -871,19 +914,21 @@ class TestIdempotencyDoubleRun:
                 return original_invalidate(*args, **kwargs)
 
             store.upsert_outcome = recording_upsert
-            orchestrator.cohorts[0]["executor"].invalidate_metric_epoch = (
-                recording_invalidate
-            )
-            orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("screening must stop after critical gap")
-            )
+            orchestrator.cohorts[0][
+                "executor"
+            ].invalidate_metric_epoch = recording_invalidate
+            orchestrator._screen_for_horizon = lambda *args, **kwargs: (
+                _ for _ in ()
+            ).throw(AssertionError("screening must stop after critical gap"))
             result = orchestrator.run_daily(sessions[-1].isoformat())
 
         assert all(row["error"] for row in result.values())
         assert [event[0] for event in events] == ["outcome", "invalidate"]
         assert len(store.read_outcomes(orchestrator._epoch_id)) == 1
 
-    def test_shared_fetch_failure_without_due_outcomes_invalidates_and_stops(self, tmp_path):
+    def test_shared_fetch_failure_without_due_outcomes_invalidates_and_stops(
+        self, tmp_path
+    ):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
         )
@@ -900,9 +945,9 @@ class TestIdempotencyDoubleRun:
         source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
             RuntimeError("benchmark fetch failed")
         )
-        orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("screening must stop after shared fetch failure")
-        )
+        orchestrator._screen_for_horizon = lambda *args, **kwargs: (
+            _ for _ in ()
+        ).throw(AssertionError("screening must stop after shared fetch failure"))
 
         result = orchestrator.run_daily(session.isoformat())
 
@@ -922,9 +967,9 @@ class TestIdempotencyDoubleRun:
         cohort = orchestrator.cohorts[0]
         store = cohort["executor"].metric_store
         original_stage = cohort["engine"].screen_and_stage
-        cohort["engine"].screen_and_stage = lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("staging must stop after candidate reference gap")
-        )
+        cohort["engine"].screen_and_stage = lambda *args, **kwargs: (
+            _ for _ in ()
+        ).throw(AssertionError("staging must stop after candidate reference gap"))
 
         with (
             patch(
@@ -940,9 +985,12 @@ class TestIdempotencyDoubleRun:
         assert epoch.status == "invalid" and epoch.end_session == session
         assert store.pending_critical_gap() is None
         with sqlite3.connect(store.path) as connection:
-            assert connection.execute(
-                "SELECT COUNT(*) FROM critical_gap_markers WHERE status = 'completed'"
-            ).fetchone()[0] == 1
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM critical_gap_markers WHERE status = 'completed'"
+                ).fetchone()[0]
+                == 1
+            )
         snapshot = cohort["ledger"].read_snapshots(
             session, session, epoch_id=epoch_id, valid_only=True
         )
@@ -964,7 +1012,9 @@ class TestIdempotencyDoubleRun:
         assert not clean["cohort_0"]["error"]
         assert orchestrator._epoch_id != epoch_id
 
-    def test_execution_only_missing_required_bar_invalidates_shared_epoch(self, tmp_path):
+    def test_execution_only_missing_required_bar_invalidates_shared_epoch(
+        self, tmp_path
+    ):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
         )
@@ -983,9 +1033,9 @@ class TestIdempotencyDoubleRun:
             return bars
 
         source.get_daily_bars = missing_required
-        orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("screening must stop after execution bundle failure")
-        )
+        orchestrator._screen_for_horizon = lambda *args, **kwargs: (
+            _ for _ in ()
+        ).throw(AssertionError("screening must stop after execution bundle failure"))
         result = orchestrator.run_daily(execution_session.isoformat())
 
         epoch = orchestrator.cohorts[0]["executor"].metric_store.current_epoch()
@@ -1032,9 +1082,9 @@ class TestIdempotencyDoubleRun:
 
         store.begin_critical_gap = recording_begin
         cohort["ledger"].reject_corporate_action_batch = recording_reject
-        orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("screening must stop after corporate action gap")
-        )
+        orchestrator._screen_for_horizon = lambda *args, **kwargs: (
+            _ for _ in ()
+        ).throw(AssertionError("screening must stop after corporate action gap"))
 
         result = orchestrator.run_daily(execution_session.isoformat())
 
@@ -1043,9 +1093,13 @@ class TestIdempotencyDoubleRun:
         assert epoch is not None and epoch.status == "invalid"
         assert epoch.end_session == execution_session
         assert events == ["marker", "p0_rejection"]
-        rejection_count = cohort["ledger"].connection.execute(
-            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-        ).fetchone()[0]
+        rejection_count = (
+            cohort["ledger"]
+            .connection.execute(
+                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+            )
+            .fetchone()[0]
+        )
         assert rejection_count == 1
 
     def test_corporate_action_audit_failure_stays_pending_and_replays_without_fetch(
@@ -1077,19 +1131,19 @@ class TestIdempotencyDoubleRun:
         store = cohort["executor"].metric_store
         original_reject = cohort["ledger"].reject_corporate_action_batch
 
-        cohort["ledger"].reject_corporate_action_batch = (
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                RuntimeError("audit write failed")
-            )
-        )
+        cohort["ledger"].reject_corporate_action_batch = lambda *args, **kwargs: (
+            _ for _ in ()
+        ).throw(RuntimeError("audit write failed"))
         with pytest.raises(RuntimeError, match="audit write failed"):
             orchestrator.run_daily(execution_session.isoformat())
 
         assert store.pending_critical_gap() is not None
         assert (
-            cohort["ledger"].connection.execute(
+            cohort["ledger"]
+            .connection.execute(
                 "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-            ).fetchone()[0]
+            )
+            .fetchone()[0]
             == 0
         )
         calls_before_replay = (
@@ -1104,9 +1158,11 @@ class TestIdempotencyDoubleRun:
         assert replay["cohort_0"]["error"]
         assert store.pending_critical_gap() is None
         assert (
-            cohort["ledger"].connection.execute(
+            cohort["ledger"]
+            .connection.execute(
                 "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-            ).fetchone()[0]
+            )
+            .fetchone()[0]
             == 1
         )
         assert (
@@ -1174,7 +1230,9 @@ class TestIdempotencyDoubleRun:
                 len(source.benchmark_calls),
             ) == calls_before
 
-    def test_marker_persistence_failure_directly_invalidates_exact_epoch(self, tmp_path):
+    def test_marker_persistence_failure_directly_invalidates_exact_epoch(
+        self, tmp_path
+    ):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
         )
@@ -1270,9 +1328,7 @@ class TestIdempotencyDoubleRun:
         with pytest.raises(RuntimeError, match="crash after minimal marker"):
             orchestrator.run_daily(gap_session.isoformat())
 
-        marker = orchestrator.cohorts[0][
-            "executor"
-        ].metric_store.pending_critical_gap()
+        marker = orchestrator.cohorts[0]["executor"].metric_store.pending_critical_gap()
         assert marker is not None
         assert marker.cohort_invalid_reasons == {}
         assert marker.corporate_action_rejections == {}
@@ -1340,9 +1396,7 @@ class TestIdempotencyDoubleRun:
         "topology",
         ("removed", "renamed", "changed_state_path", "duplicate"),
     )
-    def test_restart_requires_every_original_ledger_binding(
-        self, tmp_path, topology
-    ):
+    def test_restart_requires_every_original_ledger_binding(self, tmp_path, topology):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
         )
@@ -1440,13 +1494,14 @@ class TestIdempotencyDoubleRun:
 
         assert store.pending_critical_gap() is not None
         with sqlite3.connect(tmp_path / "cohort_1" / "portfolio.db") as connection:
-            assert connection.execute(
-                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-            ).fetchone()[0] == 0
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+                ).fetchone()[0]
+                == 0
+            )
 
-    def test_committed_interleaved_runner_still_persists_required_audit(
-        self, tmp_path
-    ):
+    def test_committed_interleaved_runner_still_persists_required_audit(self, tmp_path):
         marker_owner, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
         )
@@ -1509,40 +1564,47 @@ class TestIdempotencyDoubleRun:
             committed_ledger.phase_completed(gap_session, phase) for phase in PHASES
         )
         original_reject = committed_ledger.reject_corporate_action_batch
-        committed_ledger.reject_corporate_action_batch = (
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                RuntimeError("committed audit write failed")
-            )
-        )
+        committed_ledger.reject_corporate_action_batch = lambda *args, **kwargs: (
+            _ for _ in ()
+        ).throw(RuntimeError("committed audit write failed"))
 
         with pytest.raises(RuntimeError, match="committed audit write failed"):
             marker_owner.run_daily(gap_session.isoformat())
 
         assert store.pending_critical_gap() == pending
         assert store.load_epoch(epoch_id).status == "invalid"
-        assert committed_ledger.connection.execute(
-            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-        ).fetchone()[0] == 0
-        committed_ledger.reject_corporate_action_batch = original_reject
-        marker_owner._after_gap_metric_invalidation = lambda marker: (_ for _ in ()).throw(
-            RuntimeError("crash after committed audit")
+        assert (
+            committed_ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+            ).fetchone()[0]
+            == 0
         )
+        committed_ledger.reject_corporate_action_batch = original_reject
+        marker_owner._after_gap_metric_invalidation = lambda marker: (
+            _ for _ in ()
+        ).throw(RuntimeError("crash after committed audit"))
 
         with pytest.raises(RuntimeError, match="crash after committed audit"):
             marker_owner.run_daily(gap_session.isoformat())
 
         assert store.pending_critical_gap() is not None
-        assert committed_ledger.connection.execute(
-            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-        ).fetchone()[0] == 1
+        assert (
+            committed_ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+            ).fetchone()[0]
+            == 1
+        )
         marker_owner._after_gap_metric_invalidation = lambda marker: None
         recovered = marker_owner.run_daily(gap_session.isoformat())
 
         assert recovered["cohort_0"]["error"]
         assert store.pending_critical_gap() is None
-        assert committed_ledger.connection.execute(
-            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
-        ).fetchone()[0] == 1
+        assert (
+            committed_ledger.connection.execute(
+                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+            ).fetchone()[0]
+            == 1
+        )
         assert committed_ledger.read_snapshots(
             gap_session, gap_session, epoch_id=epoch_id, valid_only=True
         ) == [snapshot_before]
@@ -1682,9 +1744,9 @@ class TestIdempotencyDoubleRun:
         ):
             for session in sessions[:-1]:
                 orchestrator.run_daily(session.isoformat())
-            fresh_executor.execute_open_and_mark = lambda *args, **kwargs: (_ for _ in ()).throw(
-                RuntimeError("fresh peer crash")
-            )
+            fresh_executor.execute_open_and_mark = lambda *args, **kwargs: (
+                _ for _ in ()
+            ).throw(RuntimeError("fresh peer crash"))
             first_exit = orchestrator.run_daily(sessions[-1].isoformat())
             fresh_executor.execute_open_and_mark = original_execute
 
@@ -1705,9 +1767,7 @@ class TestIdempotencyDoubleRun:
                 return original_record_due(*args, **kwargs)
 
             def recording_record_invalid(*args, **kwargs):
-                committed_invalid_calls.append(
-                    kwargs.get("preserve_existing", False)
-                )
+                committed_invalid_calls.append(kwargs.get("preserve_existing", False))
                 return original_record_invalid(*args, **kwargs)
 
             completed_executor.record_due_outcomes = recording_record_due
@@ -1720,9 +1780,9 @@ class TestIdempotencyDoubleRun:
                 return bars
 
             source.get_daily_bars = missing_exit
-            orchestrator._screen_for_horizon = lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("screening must stop after fresh peer gap")
-            )
+            orchestrator._screen_for_horizon = lambda *args, **kwargs: (
+                _ for _ in ()
+            ).throw(AssertionError("screening must stop after fresh peer gap"))
             replay = orchestrator.run_daily(sessions[-1].isoformat())
 
         epoch = store.current_epoch()
@@ -1732,17 +1792,15 @@ class TestIdempotencyDoubleRun:
         assert not replay["cohort_0"]["error"]
         assert replay["cohort_1"]["error"]
         assert completed_ledger.session_invalid_reason(sessions[-1]) == ""
-        assert completed_ledger.read_snapshots(
-            sessions[-1], sessions[-1]
-        ) == [completed_snapshot]
+        assert completed_ledger.read_snapshots(sessions[-1], sessions[-1]) == [
+            completed_snapshot
+        ]
         assert store.read_outcomes(orchestrator._epoch_id) == (valid_outcome,)
         assert valid_outcome.status == "valid"
         assert committed_due_calls == [False]
         assert committed_invalid_calls == [True]
         assert epoch is not None and epoch.status == "invalid"
-        assert orchestrator.cohorts[1]["ledger"].session_invalid_reason(
-            sessions[-1]
-        )
+        assert orchestrator.cohorts[1]["ledger"].session_invalid_reason(sessions[-1])
 
     def test_critical_outcome_conflict_invalidates_before_reraising(self, tmp_path):
         orchestrator, source = _authoritative_orchestrator(
@@ -1770,9 +1828,7 @@ class TestIdempotencyDoubleRun:
             store.upsert_outcome = lambda outcome: (_ for _ in ()).throw(
                 ValueError("immutable outcome conflict sentinel")
             )
-            with pytest.raises(
-                ValueError, match="immutable outcome conflict sentinel"
-            ):
+            with pytest.raises(ValueError, match="immutable outcome conflict sentinel"):
                 orchestrator.run_daily(sessions[-1].isoformat())
 
         epoch = store.current_epoch()
@@ -1871,9 +1927,9 @@ class TestIdempotencyDoubleRun:
             for session in sessions[1:-1]:
                 orchestrator.run_daily(session.isoformat())
 
-            fresh_executor.execute_open_and_mark = lambda *args, **kwargs: (_ for _ in ()).throw(
-                RuntimeError("fresh cohort execution crash")
-            )
+            fresh_executor.execute_open_and_mark = lambda *args, **kwargs: (
+                _ for _ in ()
+            ).throw(RuntimeError("fresh cohort execution crash"))
             first_exit = orchestrator.run_daily(sessions[-1].isoformat())
             fresh_executor.execute_open_and_mark = original_execute
             shared_due = next(
@@ -1990,9 +2046,7 @@ class TestIdempotencyDoubleRun:
         assert epoch.status == "invalid" and epoch.end_session == sessions[-1]
         assert store.pending_critical_gap() is None
         assert cohort["ledger"].session_invalid_reason(sessions[-1]) == ""
-        assert cohort["ledger"].read_snapshots(
-            sessions[-1], sessions[-1]
-        ) == [snapshot]
+        assert cohort["ledger"].read_snapshots(sessions[-1], sessions[-1]) == [snapshot]
         assert len(source.raw_calls) == calls_before
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
@@ -2064,9 +2118,9 @@ class TestIdempotencyDoubleRun:
         ):
             for session in sessions[:-1]:
                 orchestrator.run_daily(session.isoformat())
-            cohort["engine"].screen_and_stage = lambda *args, **kwargs: (_ for _ in ()).throw(
-                RuntimeError("stage-only fixture crash")
-            )
+            cohort["engine"].screen_and_stage = lambda *args, **kwargs: (
+                _ for _ in ()
+            ).throw(RuntimeError("stage-only fixture crash"))
             first = orchestrator.run_daily(sessions[-1].isoformat())
         assert first["cohort_0"]["error"]
         cohort["engine"].screen_and_stage = original_stage
@@ -2093,9 +2147,7 @@ class TestIdempotencyDoubleRun:
         assert marker is not None and marker.detail_status == "ready"
         assert store.read_outcomes(epoch_id) == ()
         assert cohort["ledger"].session_invalid_reason(sessions[-1]) == ""
-        assert cohort["ledger"].read_snapshots(
-            sessions[-1], sessions[-1]
-        ) == [snapshot]
+        assert cohort["ledger"].read_snapshots(sessions[-1], sessions[-1]) == [snapshot]
         for replay_session in (
             sessions[-1],
             next_session(sessions[-1]),
@@ -2161,9 +2213,7 @@ class TestIdempotencyDoubleRun:
         assert first["cohort_0"]["error"]
         executor._after_phase_commit = lambda phase: None
         epoch_id = orchestrator._epoch_id
-        due_signal, window = executor.due_outcome_signals(
-            sessions[-1], epoch_id
-        )[0]
+        due_signal, window = executor.due_outcome_signals(sessions[-1], epoch_id)[0]
         bars = dict(executor.persisted_input_bundle(sessions[-1]).bars)
         entry_session = executor.outcome_calculator.calendar.next_session(
             due_signal.reference_session

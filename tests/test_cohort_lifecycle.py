@@ -113,22 +113,6 @@ class FakeStrategy2(FakeStrategy):
         ]
 
 
-def _twelve_lifecycle_strategies(hold_days: int = 10) -> list[object]:
-    """Supply the production's full strategy-health coverage in simulations."""
-    from test_30day_simulation import FakeStrategy as AuthoritativeFakeStrategy
-    from test_30day_simulation import FakeStrategy2 as AuthoritativeFakeStrategy2
-
-    strategies: list[object] = [
-        AuthoritativeFakeStrategy(hold_days=hold_days),
-        AuthoritativeFakeStrategy2(),
-    ]
-    for index in range(3, 13):
-        strategies.append(
-            AuthoritativeFakeStrategy(name=f"fake_strat_{index}", hold_days=hold_days)
-        )
-    return strategies
-
-
 @pytest.fixture
 def state_dir(tmp_path):
     """Temporary state directory."""
@@ -405,11 +389,7 @@ class TestMultiDaySimulation:
             next_session,
         )
 
-        orchestrator, _ = _authoritative_orchestrator(
-            tmp_path,
-            hold_days=2,
-            strategy_modules=_twelve_lifecycle_strategies(hold_days=2),
-        )
+        orchestrator, _ = _authoritative_orchestrator(tmp_path, hold_days=2)
         sessions = [date(2026, 3, 30)]
         for _ in range(5):
             sessions.append(next_session(sessions[-1]))
@@ -438,11 +418,7 @@ class TestMultiDaySimulation:
             _authoritative_orchestrator,
         )
 
-        orchestrator, source = _authoritative_orchestrator(
-            tmp_path,
-            cohorts=2,
-            strategy_modules=_twelve_lifecycle_strategies(),
-        )
+        orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
             side_effect=_authoritative_committee,

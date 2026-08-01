@@ -402,7 +402,9 @@ class CohortOrchestrator:
             .get("paper_ledger", {})
             .get("policy_id")
         )
-        return str(configured_policy_id or f"foundation-{horizon}")
+        if configured_policy_id:
+            return f"{configured_policy_id}:health:{horizon}"
+        return f"foundation-{horizon}"
 
     def _screen_for_horizon(
         self,
@@ -430,21 +432,21 @@ class CohortOrchestrator:
         policy_id: str,
     ) -> bool:
         """Persist one shared horizon's evidence and enforce full coverage."""
-        for record in health:
-            self._metric_store.save_strategy_health(record)
-        if (
+        valid = (
             len(health) == len(self._active_strategy_names) == 12
             and {record.strategy for record in health} == self._active_strategy_names
             and all(record.epoch_id == self._epoch_id for record in health)
             and all(record.session == session for record in health)
             and all(record.policy_id == policy_id for record in health)
-        ):
+        )
+        if valid:
+            for record in health:
+                self._metric_store.save_strategy_health(record)
             return True
-
-        from tradingagents.strategies.metrics.epochs import EpochManager
-
-        EpochManager(self._metric_store).invalidate_current(
-            session, "unclassified_strategy_silence"
+        if self._epoch_id is None:
+            raise RuntimeError("metric epoch must exist before health validation")
+        self._metric_store.invalidate_epoch(
+            self._epoch_id, session, "unclassified_strategy_silence"
         )
         return False
 

@@ -12,6 +12,7 @@ genuinely-hung fetch so it can't block the run until the outer 3600s kill:
 - yfinance price fetches pass an explicit ``timeout`` (curl_cffi-backed; not
   caught by a process-wide socket default).
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -37,14 +38,14 @@ def test_gather_returns_all_results_normally():
     assert out == {"a": {"v": 1}, "b": {"v": 2}}
 
 
-def test_gather_records_empty_for_failing_fetch():
+def test_gather_records_explicit_error_for_failing_fetch():
     def boom():
         raise RuntimeError("upstream 500")
 
     fetches = {"ok": (lambda: {"v": 1}, ()), "bad": (boom, ())}
     out = _gather_with_timeout(fetches, timeout_s=5.0)
     assert out["ok"] == {"v": 1}
-    assert out["bad"] == {}  # error -> empty, not a raise
+    assert out["bad"] == {"error": "RuntimeError: upstream 500"}
 
 
 def test_gather_abandons_hung_fetch_without_blocking():
@@ -67,7 +68,7 @@ def test_gather_abandons_hung_fetch_without_blocking():
     # Returned promptly after the deadline rather than waiting 30s on the thread.
     assert elapsed < 5.0
     assert out["fast"] == {"v": "quick"}
-    assert out["stuck"] == {}  # never returned -> default empty
+    assert out["stuck"] == {"error": "timeout after 0.3s"}
 
 
 def test_gather_empty_input():
@@ -102,7 +103,9 @@ def test_generation_timeout_message_matches_constant(tmp_path):
     }
 
     def _raise_timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="run_cohorts", timeout=gm._GENERATION_TIMEOUT_S)
+        raise subprocess.TimeoutExpired(
+            cmd="run_cohorts", timeout=gm._GENERATION_TIMEOUT_S
+        )
 
     with patch.object(gm.subprocess, "run", side_effect=_raise_timeout):
         result = mgr._run_cohorts_subprocess(gen_data, [])
@@ -118,7 +121,7 @@ def test_positions_to_price_includes_held_short_not_signaled():
     signals = [{"ticker": "AAPL"}, {"ticker": "MSFT"}]
     open_trades = [
         {"ticker": "ADMA", "direction": "short"},  # held, not in signals
-        {"ticker": "AAPL", "direction": "long"},   # held and signaled
+        {"ticker": "AAPL", "direction": "long"},  # held and signaled
     ]
     out = _positions_to_price(signals, open_trades, price_cache={})
     assert "ADMA" in out  # the bug: this was previously dropped -> frozen at entry
@@ -128,7 +131,9 @@ def test_positions_to_price_includes_held_short_not_signaled():
 def test_positions_to_price_excludes_already_cached():
     signals = [{"ticker": "AAPL"}]
     open_trades = [{"ticker": "ADMA", "direction": "short"}]
-    out = _positions_to_price(signals, open_trades, price_cache={"AAPL": object(), "ADMA": object()})
+    out = _positions_to_price(
+        signals, open_trades, price_cache={"AAPL": object(), "ADMA": object()}
+    )
     assert out == []
 
 

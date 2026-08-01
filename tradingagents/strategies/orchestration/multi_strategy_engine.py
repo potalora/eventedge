@@ -172,8 +172,8 @@ def _gather_with_timeout(
     """Run each ``name -> (fn, args)`` fetch in a thread pool, returning
     ``{name: result}``.
 
-    Every source defaults to ``{}`` so any that error or do not return within
-    ``timeout_s`` are recorded as empty rather than delaying the caller. Python
+    Every source defaults to ``{}``; failures and timeouts retain an explicit
+    error payload rather than being mistaken for healthy empty results. Python
     cannot safely stop a running thread, so this is not request cancellation.
     On timeout the pool is shut down with ``wait=False`` so its teardown does
     not re-block the caller; sources need cooperative scheduling deadlines to
@@ -199,9 +199,9 @@ def _gather_with_timeout(
                 name = futures[future]
                 try:
                     results[name] = future.result()
-                except Exception:
+                except Exception as error:
                     logger.error("Failed to fetch %s", name, exc_info=True)
-                    results[name] = {}
+                    results[name] = {"error": f"{type(error).__name__}: {error}"}
         except FuturesTimeout:
             stuck = sorted(futures[f] for f in futures if not f.done())
             logger.error(
@@ -209,6 +209,8 @@ def _gather_with_timeout(
                 timeout_s,
                 stuck,
             )
+            for name in stuck:
+                results[name] = {"error": f"timeout after {timeout_s:g}s"}
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -338,8 +340,8 @@ class MultiStrategyEngine:
         health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
             self._emit("strategy_start", name=strategy.name, track="paper_trade")
-            params = strategy.get_default_params(horizon=horizon)
             try:
+                params = strategy.get_default_params(horizon=horizon)
                 candidates = strategy.screen(data, trading_date, params)
                 error = None
             except Exception as exc:
