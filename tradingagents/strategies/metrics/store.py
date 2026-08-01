@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from .calendar import XNYSCalendar
 from .models import MetricEpoch, OutcomeRecord, StrategyHealthRecord
 
 _SCHEMA = """
@@ -33,6 +34,7 @@ class MetricStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._calendar = XNYSCalendar()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as connection:
             connection.executescript(_SCHEMA)
@@ -147,6 +149,8 @@ class MetricStore:
         reason: str,
         invalid: bool = False,
     ) -> MetricEpoch:
+        if not self._calendar.is_session(end_session):
+            raise ValueError(f"{end_session} is not an XNYS session")
         target_status = "invalid" if invalid else "closed"
         with sqlite3.connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")

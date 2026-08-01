@@ -309,3 +309,37 @@ def test_closure_allows_only_exact_open_transition(tmp_path) -> None:
     ) == closed
     with pytest.raises(ValueError, match="conflicting epoch closure"):
         store.invalidate_epoch("epoch-1", date(2026, 8, 4), "critical_gap")
+
+
+def test_direct_store_close_rejects_weekend_boundary_without_mutation(
+    tmp_path,
+) -> None:
+    store = MetricStore(tmp_path / "metrics_v2.sqlite3")
+    epoch = _epoch()
+    store.save_epoch(epoch)
+
+    with pytest.raises(ValueError, match="not an XNYS session"):
+        store.close_epoch(
+            epoch.epoch_id,
+            date(2026, 8, 8),
+            "weekend_boundary",
+        )
+
+    assert store.load_epoch(epoch.epoch_id) == epoch
+
+
+def test_direct_store_invalidate_rejects_exchange_holiday_without_mutation(
+    tmp_path,
+) -> None:
+    store = MetricStore(tmp_path / "metrics_v2.sqlite3")
+    epoch = _epoch()
+    store.save_epoch(epoch)
+
+    with pytest.raises(ValueError, match="not an XNYS session"):
+        store.invalidate_epoch(
+            epoch.epoch_id,
+            date(2026, 9, 7),
+            "holiday_boundary",
+        )
+
+    assert store.load_epoch(epoch.epoch_id) == epoch
