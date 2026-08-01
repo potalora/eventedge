@@ -2,6 +2,7 @@
 
 All charts use the plotly_dark template with a consistent color palette.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -70,17 +71,19 @@ def make_cohort_heatmap(
         for s in SIZE_KEYS
     )
 
-    fig = go.Figure(data=go.Heatmap(
-        z=z,
-        x=SIZE_LABELS,
-        y=HORIZON_LABELS,
-        text=text,
-        texttemplate="%{text}",
-        textfont=dict(size=14),
-        colorscale="RdYlGn" if not all_none else "Greys",
-        showscale=True,
-        hovertemplate="Horizon: %{y}<br>Size: %{x}<br>Value: %{text}<extra></extra>",
-    ))
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=SIZE_LABELS,
+            y=HORIZON_LABELS,
+            text=text,
+            texttemplate="%{text}",
+            textfont=dict(size=14),
+            colorscale="RdYlGn" if not all_none else "Greys",
+            showscale=True,
+            hovertemplate="Horizon: %{y}<br>Size: %{x}<br>Value: %{text}<extra></extra>",
+        )
+    )
 
     fig.update_layout(
         title=f"Cohort Matrix: {metric_name}",
@@ -105,31 +108,70 @@ def make_regime_timeline(regime_snapshots: list[dict[str, Any]]) -> go.Figure:
     regimes = [snap.get("overall_regime", "normal") for snap in regime_snapshots]
 
     # VIX line
-    fig.add_trace(go.Scatter(
-        x=dates, y=vix,
-        mode="lines+markers",
-        name="VIX",
-        line=dict(color=BLUE, width=2),
-        marker=dict(
-            size=8,
-            color=[REGIME_COLORS.get(r, GRAY) for r in regimes],
-        ),
-        hovertemplate="Date: %{x}<br>VIX: %{y:.1f}<extra></extra>",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=vix,
+            mode="lines+markers",
+            name="VIX",
+            line=dict(color=BLUE, width=2),
+            marker=dict(
+                size=8,
+                color=[REGIME_COLORS.get(r, GRAY) for r in regimes],
+            ),
+            hovertemplate="Date: %{x}<br>VIX: %{y:.1f}<extra></extra>",
+        )
+    )
 
     # Regime threshold bands
     max_vix = max(vix) if vix else 40
     y_max = max(max_vix * 1.15, 40)
 
     shapes = [
-        dict(type="rect", x0=dates[0], x1=dates[-1], y0=0, y1=15,
-             fillcolor=GREEN, opacity=0.08, line_width=0, layer="below"),
-        dict(type="rect", x0=dates[0], x1=dates[-1], y0=15, y1=25,
-             fillcolor=AMBER, opacity=0.06, line_width=0, layer="below"),
-        dict(type="rect", x0=dates[0], x1=dates[-1], y0=25, y1=35,
-             fillcolor=AMBER, opacity=0.1, line_width=0, layer="below"),
-        dict(type="rect", x0=dates[0], x1=dates[-1], y0=35, y1=y_max,
-             fillcolor=RED, opacity=0.1, line_width=0, layer="below"),
+        dict(
+            type="rect",
+            x0=dates[0],
+            x1=dates[-1],
+            y0=0,
+            y1=15,
+            fillcolor=GREEN,
+            opacity=0.08,
+            line_width=0,
+            layer="below",
+        ),
+        dict(
+            type="rect",
+            x0=dates[0],
+            x1=dates[-1],
+            y0=15,
+            y1=25,
+            fillcolor=AMBER,
+            opacity=0.06,
+            line_width=0,
+            layer="below",
+        ),
+        dict(
+            type="rect",
+            x0=dates[0],
+            x1=dates[-1],
+            y0=25,
+            y1=35,
+            fillcolor=AMBER,
+            opacity=0.1,
+            line_width=0,
+            layer="below",
+        ),
+        dict(
+            type="rect",
+            x0=dates[0],
+            x1=dates[-1],
+            y0=35,
+            y1=y_max,
+            fillcolor=RED,
+            opacity=0.1,
+            line_width=0,
+            layer="below",
+        ),
     ]
 
     fig.update_layout(
@@ -149,7 +191,9 @@ def make_capital_bars(deployment_data: list[dict[str, Any]]) -> go.Figure:
     fig = go.Figure()
 
     if not deployment_data:
-        fig.update_layout(title="Capital Deployment (no data)", **_DARK_LAYOUT, height=300)
+        fig.update_layout(
+            title="Capital Deployment (no data)", **_DARK_LAYOUT, height=300
+        )
         return fig
 
     # Aggregate across horizons per size
@@ -167,16 +211,24 @@ def make_capital_bars(deployment_data: list[dict[str, Any]]) -> go.Figure:
     total_4h = [t * 4 for t in total]
     available = [t - d for t, d in zip(total_4h, deployed)]
 
-    fig.add_trace(go.Bar(
-        x=sizes, y=deployed, name="Deployed",
-        marker_color=BLUE,
-        hovertemplate="%{x}: $%{y:,.0f} deployed<extra></extra>",
-    ))
-    fig.add_trace(go.Bar(
-        x=sizes, y=available, name="Available",
-        marker_color=GRAY,
-        hovertemplate="%{x}: $%{y:,.0f} available<extra></extra>",
-    ))
+    fig.add_trace(
+        go.Bar(
+            x=sizes,
+            y=deployed,
+            name="Deployed",
+            marker_color=BLUE,
+            hovertemplate="%{x}: $%{y:,.0f} deployed<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=sizes,
+            y=available,
+            name="Available",
+            marker_color=GRAY,
+            hovertemplate="%{x}: $%{y:,.0f} available<extra></extra>",
+        )
+    )
 
     fig.update_layout(
         title="Capital Deployment (all horizons combined)",
@@ -195,7 +247,9 @@ def make_strategy_bars(
     fig = go.Figure()
 
     if not per_strategy:
-        fig.update_layout(title="Strategy Signals (no data)", **_DARK_LAYOUT, height=400)
+        fig.update_layout(
+            title="Strategy Signals (no data)", **_DARK_LAYOUT, height=400
+        )
         return fig
 
     # Sort by signal count descending
@@ -205,39 +259,21 @@ def make_strategy_bars(
     )
     names = [s[0].replace("_", " ").title() for s in sorted_strats]
     signals = [s[1].get("signals", 0) for s in sorted_strats]
-    hit_rates = [s[1].get("hit_rate_5d") for s in sorted_strats]
+    colors = [GRAY] * len(sorted_strats)
+    hover_text = [
+        f"Governed decisions: {item[1].get('signals', 0)}" for item in sorted_strats
+    ]
 
-    # Color by hit rate (None → gray)
-    colors = []
-    for hr in hit_rates:
-        if hr is None:
-            colors.append(GRAY)
-        elif hr >= 0.6:
-            colors.append(GREEN)
-        elif hr >= 0.4:
-            colors.append(AMBER)
-        else:
-            colors.append(RED)
-
-    hover_text = []
-    for s in sorted_strats:
-        d = s[1]
-        hr = d.get("hit_rate_5d")
-        hr_str = f"{hr*100:.0f}%" if hr is not None else "N/A"
-        hover_text.append(
-            f"Signals: {d.get('signals', 0)}<br>"
-            f"Trades: {d.get('trades', 0)}<br>"
-            f"Hit Rate: {hr_str}<br>"
-            f"Trade Rate: {d.get('trade_rate', 0)*100:.0f}%"
+    fig.add_trace(
+        go.Bar(
+            y=names,
+            x=signals,
+            orientation="h",
+            marker_color=colors,
+            hovertext=hover_text,
+            hoverinfo="text",
         )
-
-    fig.add_trace(go.Bar(
-        y=names, x=signals,
-        orientation="h",
-        marker_color=colors,
-        hovertext=hover_text,
-        hoverinfo="text",
-    ))
+    )
 
     fig.update_layout(
         title="Signal Volume by Strategy",
@@ -255,7 +291,8 @@ def make_equity_curves_facet(
     from plotly.subplots import make_subplots
 
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=2,
+        cols=2,
         subplot_titles=[f"Horizon {h}" for h in HORIZON_LABELS],
         shared_xaxes=False,
         vertical_spacing=0.15,
@@ -287,20 +324,26 @@ def make_equity_curves_facet(
         seen_sizes.add(s)
         fig.add_trace(
             go.Scatter(
-                x=dates, y=ret, name=size_label.get(s, s),
+                x=dates,
+                y=ret,
+                name=size_label.get(s, s),
                 mode="lines",
                 line=dict(color=size_color.get(s, GRAY), width=2),
                 legendgroup=s,
                 showlegend=showlegend,
                 hovertemplate=f"{size_label.get(s, s)}<br>%{{x}}<br>%{{y:+.2f}}%<extra></extra>",
             ),
-            row=row, col=col,
+            row=row,
+            col=col,
         )
         # Zero line
         if dates:
             fig.add_hline(
-                y=0, line_dash="dot", line_color="#444",
-                row=row, col=col,
+                y=0,
+                line_dash="dot",
+                line_color="#444",
+                row=row,
+                col=col,
             )
 
     fig.update_layout(
@@ -316,54 +359,10 @@ def make_gen_comparison(
     histories: dict[str, dict[str, list[dict[str, Any]]]],
     aggregate: str = "mean",
 ) -> go.Figure:
-    """Gen-vs-gen overlay: aggregated return % across cohorts per gen.
-
-    aggregate: 'mean' (avg across 16 cohorts) or 'capital_weighted'.
-    """
+    """Compatibility placeholder: v2 exposes no cross-generation return series."""
     fig = go.Figure()
-    if not histories:
-        fig.update_layout(title="Generation Comparison (no data)", **_DARK_LAYOUT, height=350)
-        return fig
-
-    palette = ["#3b82f6", "#22c55e", "#a855f7", "#ef4444", "#fbbf24", "#06b6d4"]
-    for i, (gen_id, hist) in enumerate(sorted(histories.items())):
-        # Build {date: [returns]} across all cohorts
-        bucket: dict[str, list[float]] = {}
-        weights: dict[str, list[tuple[float, float]]] = {}
-        for cohort, snaps in hist.items():
-            for r in snaps:
-                d = r["date"]
-                bucket.setdefault(d, []).append(r["total_return_pct"])
-                cap = r.get("total_capital", 1) or 1
-                weights.setdefault(d, []).append((r["total_return_pct"], cap))
-
-        if not bucket:
-            continue
-        dates = sorted(bucket)
-        if aggregate == "capital_weighted":
-            ys = []
-            for d in dates:
-                pairs = weights[d]
-                total_cap = sum(c for _, c in pairs)
-                ys.append(sum(r * c for r, c in pairs) / total_cap if total_cap else 0)
-        else:
-            ys = [sum(bucket[d]) / len(bucket[d]) for d in dates]
-
-        color = palette[i % len(palette)]
-        fig.add_trace(go.Scatter(
-            x=dates, y=ys, name=gen_id,
-            mode="lines+markers",
-            line=dict(color=color, width=2.5),
-            marker=dict(size=6),
-            hovertemplate=f"{gen_id}<br>%{{x}}<br>%{{y:+.2f}}%<extra></extra>",
-        ))
-
-    fig.add_hline(y=0, line_dash="dot", line_color="#666")
-    label = "Capital-Weighted" if aggregate == "capital_weighted" else "Equal-Weighted"
     fig.update_layout(
-        title=f"Generation Comparison — {label} Return Across Cohorts",
-        yaxis_title="Return %",
-        yaxis_ticksuffix="%",
+        title="Generation comparison unavailable from governed metric-v2 projections",
         height=380,
         **_DARK_LAYOUT,
     )
@@ -371,36 +370,11 @@ def make_gen_comparison(
 
 
 def make_drawdown_chart(snapshots: list[dict[str, Any]], label: str = "") -> go.Figure:
-    """Underwater plot: cumulative return vs running peak."""
+    """Compatibility placeholder; drawdown must come from PortfolioMetrics."""
     fig = go.Figure()
-    if not snapshots:
-        fig.update_layout(title=f"Drawdown {label} (no data)", **_DARK_LAYOUT, height=300)
-        return fig
-
-    dates = [s["date"] for s in snapshots]
-    pv = [s["portfolio_value"] for s in snapshots]
-    peak = []
-    cur_peak = pv[0]
-    for v in pv:
-        cur_peak = max(cur_peak, v)
-        peak.append(cur_peak)
-    dd_pct = [((v - p) / p * 100) if p else 0 for v, p in zip(pv, peak)]
-
-    fig.add_trace(go.Scatter(
-        x=dates, y=dd_pct,
-        mode="lines",
-        fill="tozeroy",
-        line=dict(color=RED, width=1.5),
-        fillcolor="rgba(239,68,68,0.25)",
-        name="Drawdown",
-        hovertemplate="%{x}<br>%{y:.2f}%<extra></extra>",
-    ))
     fig.update_layout(
-        title=f"Drawdown {label}".strip(),
-        yaxis_title="Drawdown %",
-        yaxis_ticksuffix="%",
+        title=f"Governed drawdown unavailable {label}".strip(),
         height=260,
-        showlegend=False,
         **_DARK_LAYOUT,
     )
     return fig
@@ -427,13 +401,16 @@ def make_strategy_pnl_chart(rows: list[dict[str, Any]]) -> go.Figure:
         vals = [r[key] for r in rows]
         if not any(v != 0 for v in vals):
             continue
-        fig.add_trace(go.Bar(
-            y=names, x=vals,
-            name=label,
-            orientation="h",
-            marker_color=color,
-            hovertemplate=f"{label}: $%{{x:,.0f}}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Bar(
+                y=names,
+                x=vals,
+                name=label,
+                orientation="h",
+                marker_color=color,
+                hovertemplate=f"{label}: $%{{x:,.0f}}<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title="Strategy P&L Attribution",
@@ -446,22 +423,30 @@ def make_strategy_pnl_chart(rows: list[dict[str, Any]]) -> go.Figure:
 
 
 def make_winners_losers_bars(
-    positions: list[dict[str, Any]], top_n: int = 10,
+    positions: list[dict[str, Any]],
+    top_n: int = 10,
 ) -> go.Figure:
     """Side-by-side: top winners (green) and losers (red) by P&L."""
     fig = go.Figure()
     if not positions:
-        fig.update_layout(title="Winners & Losers (no data)", **_DARK_LAYOUT, height=350)
+        fig.update_layout(
+            title="Winners & Losers (no data)", **_DARK_LAYOUT, height=350
+        )
         return fig
 
     # Aggregate per (ticker, strategy, direction) across cohorts
     grouped: dict[tuple, dict] = {}
     for p in positions:
         key = (p["ticker"], p["strategy"], p["direction"])
-        d = grouped.setdefault(key, {
-            "ticker": p["ticker"], "strategy": p["strategy"],
-            "direction": p["direction"], "pnl": 0.0,
-        })
+        d = grouped.setdefault(
+            key,
+            {
+                "ticker": p["ticker"],
+                "strategy": p["strategy"],
+                "direction": p["direction"],
+                "pnl": 0.0,
+            },
+        )
         d["pnl"] += p["pnl"]
 
     items = sorted(grouped.values(), key=lambda x: x["pnl"], reverse=True)
@@ -473,23 +458,27 @@ def make_winners_losers_bars(
         return f"{d['ticker']} {side} ({d['strategy'][:8]})"
 
     if winners:
-        fig.add_trace(go.Bar(
-            y=[_label(w) for w in winners],
-            x=[w["pnl"] for w in winners],
-            orientation="h",
-            marker_color=GREEN,
-            name="Winners",
-            hovertemplate="%{y}<br>P&L: $%{x:,.0f}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Bar(
+                y=[_label(w) for w in winners],
+                x=[w["pnl"] for w in winners],
+                orientation="h",
+                marker_color=GREEN,
+                name="Winners",
+                hovertemplate="%{y}<br>P&L: $%{x:,.0f}<extra></extra>",
+            )
+        )
     if losers:
-        fig.add_trace(go.Bar(
-            y=[_label(l) for l in losers],
-            x=[l["pnl"] for l in losers],
-            orientation="h",
-            marker_color=RED,
-            name="Losers",
-            hovertemplate="%{y}<br>P&L: $%{x:,.0f}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Bar(
+                y=[_label(loser) for loser in losers],
+                x=[loser["pnl"] for loser in losers],
+                orientation="h",
+                marker_color=RED,
+                name="Losers",
+                hovertemplate="%{y}<br>P&L: $%{x:,.0f}<extra></extra>",
+            )
+        )
 
     fig.update_layout(
         title=f"Top {top_n} Winners & Losers (aggregated across cohorts)",
@@ -506,7 +495,9 @@ def make_position_treemap(trades: list[dict[str, Any]]) -> go.Figure:
     fig = go.Figure()
 
     if not trades:
-        fig.update_layout(title="Position Concentration (no data)", **_DARK_LAYOUT, height=400)
+        fig.update_layout(
+            title="Position Concentration (no data)", **_DARK_LAYOUT, height=400
+        )
         return fig
 
     labels = ["Portfolio"]
@@ -516,9 +507,18 @@ def make_position_treemap(trades: list[dict[str, Any]]) -> go.Figure:
 
     # Strategy palette
     strategy_palette = [
-        "#3b82f6", "#22c55e", "#ef4444", "#fbbf24", "#8b5cf6",
-        "#06b6d4", "#f97316", "#ec4899", "#14b8a6", "#a855f7",
-        "#6366f1", "#84cc16",
+        "#3b82f6",
+        "#22c55e",
+        "#ef4444",
+        "#fbbf24",
+        "#8b5cf6",
+        "#06b6d4",
+        "#f97316",
+        "#ec4899",
+        "#14b8a6",
+        "#a855f7",
+        "#6366f1",
+        "#84cc16",
     ]
     strat_color_map: dict[str, str] = {}
 
@@ -549,16 +549,18 @@ def make_position_treemap(trades: list[dict[str, Any]]) -> go.Figure:
             values.append(round(val, 2))
             colors.append(color)
 
-    fig = go.Figure(go.Treemap(
-        labels=labels,
-        parents=parents,
-        values=values,
-        marker=dict(colors=colors),
-        textinfo="label+value",
-        texttemplate="%{label}<br>$%{value:,.0f}",
-        hovertemplate="%{label}<br>$%{value:,.0f}<extra>%{parent}</extra>",
-        branchvalues="total",
-    ))
+    fig = go.Figure(
+        go.Treemap(
+            labels=labels,
+            parents=parents,
+            values=values,
+            marker=dict(colors=colors),
+            textinfo="label+value",
+            texttemplate="%{label}<br>$%{value:,.0f}",
+            hovertemplate="%{label}<br>$%{value:,.0f}<extra>%{parent}</extra>",
+            branchvalues="total",
+        )
+    )
 
     fig.update_layout(
         title="Position Concentration (by strategy & ticker)",

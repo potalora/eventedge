@@ -119,3 +119,27 @@ def test_report_discloses_epoch_quality_counts_and_costs() -> None:
         "Costs",
     )
     assert all(label in rendered for label in required)
+
+
+def test_dashboard_surfaces_have_no_legacy_accuracy_or_local_aggregation() -> None:
+    dashboard = Path("tradingagents/dashboard")
+    sources = "\n".join(path.read_text() for path in dashboard.rglob("*.py"))
+    for forbidden in (
+        "hit_rate_5d",
+        "return_5d",
+        "capital_weighted",
+        "cur_peak",
+    ):
+        assert forbidden not in sources
+
+
+def test_matrix_uses_exact_governed_labels_and_unavailable_copy() -> None:
+    source = Path("tradingagents/dashboard/pages/cohort_matrix.py").read_text()
+    for required in (
+        "Annualized daily net Sharpe",
+        "Annualized matched-benchmark information ratio",
+        "Insufficient history (<30 valid sessions)",
+        "concentration stress tests",
+        "Dependent scenario portfolios",
+    ):
+        assert required in source

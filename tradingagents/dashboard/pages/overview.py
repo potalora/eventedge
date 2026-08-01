@@ -6,14 +6,11 @@ import streamlit as st
 
 from tradingagents.dashboard.charts import (
     REGIME_COLORS,
-    make_capital_bars,
     make_regime_timeline,
 )
 from tradingagents.dashboard.data_loaders import (
-    cohort_metric_books,
     get_active_generations,
-    load_capital_deployment,
-    load_cohort_metrics,
+    load_generation_metrics,
     load_regime_history,
 )
 
@@ -39,14 +36,9 @@ def render() -> None:
 
     st.markdown("---")
 
-    # ---- Capital deployment ----
-    st.subheader("Capital Deployment")
-    gen_tabs = st.tabs([g["gen_id"] for g in gens])
-    for tab, gen in zip(gen_tabs, gens):
-        with tab:
-            dep = load_capital_deployment(gen["gen_id"], gen["state_dir"])
-            fig = make_capital_bars(dep)
-            st.plotly_chart(fig, use_container_width=True)
+    st.info(
+        "$5k/$10k/$50k concentration stress tests are dependent scenarios, not combined fund AUM."
+    )
 
     # ---- Regime timeline ----
     st.subheader("Market Regime Timeline")
@@ -96,10 +88,11 @@ def _render_gen_card(gen: dict) -> None:
         if r.get("success"):
             run_dates.add(r["date"])
 
-    metrics = load_cohort_metrics(gen_id, state_dir)
-    cohorts = cohort_metric_books(metrics)
-    total_decisions = sum(c.get("strategy_decisions", 0) for c in cohorts.values())
-    total_fills = sum(c.get("fills", 0) for c in cohorts.values())
+    metrics = load_generation_metrics(gen_id, state_dir)
+    headline = dict(metrics.get("headline_books", {}) or {})
+    total_decisions = sum(c.get("strategy_decisions", 0) for c in headline.values())
+    total_fills = sum(c.get("fills", 0) for c in headline.values())
+    epoch = metrics.get("epoch") or {}
 
     st.markdown(f"### {gen_id}")
     st.caption(f"`{commit}` — {desc}")
@@ -111,4 +104,13 @@ def _render_gen_card(gen: dict) -> None:
     c4, c5, c6 = st.columns(3)
     c4.metric("Started", created)
     c5.metric("Tickers", "Unavailable (no v2 positions projection)")
-    c6.metric("Cohorts", len(cohorts))
+    c6.metric("Headline Books", len(headline))
+    st.caption(
+        f"Metric epoch: {epoch.get('epoch_id', 'unavailable')} · "
+        f"Schema v{metrics.get('metric_schema_version', 2)} · "
+        f"missing headline books: {len(metrics.get('missing_headline_books', []))}"
+    )
+    st.caption(
+        "Four $100k horizon books are dependent scenario portfolios; shared "
+        "signals and market data mean they are not independent observations."
+    )

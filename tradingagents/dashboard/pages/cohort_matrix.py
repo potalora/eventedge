@@ -9,7 +9,6 @@ from tradingagents.dashboard.charts import make_cohort_heatmap
 from tradingagents.dashboard.data_loaders import (
     cohort_metric_books,
     get_active_generations,
-    load_capital_deployment,
     load_cohort_heatmap,
     load_cohort_metrics,
 )
@@ -24,14 +23,18 @@ AVAILABLE_METRICS = {
     "cash_weight": "Cash Weight",
 }
 CLOSED_TRADE_METRICS = {
-    "annualized_daily_net_sharpe": "Annualized Daily Net Sharpe",
-    "annualized_matched_information_ratio": "Matched Information Ratio",
+    "annualized_daily_net_sharpe": "Annualized daily net Sharpe",
+    "annualized_matched_information_ratio": "Annualized matched-benchmark information ratio",
     "max_drawdown": "Net Max Drawdown",
 }
 
 
 def render() -> None:
     st.title("Cohort Matrix")
+    st.caption(
+        "Dependent scenario portfolios: four $100k horizon books are headline "
+        "books; $5k/$10k/$50k concentration stress tests are not combined AUM."
+    )
 
     gens = get_active_generations()
     if not gens:
@@ -87,18 +90,16 @@ def render() -> None:
     # ---- Detail table ----
     st.subheader("Cohort Details")
     metrics = load_cohort_metrics(gen["gen_id"], gen["state_dir"])
-    deployment = load_capital_deployment(gen["gen_id"], gen["state_dir"])
-    dep_map = {d["cohort"]: d for d in deployment}
 
     rows = []
     for name, m in sorted(cohort_metric_books(metrics).items()):
         parts = name.split("_")
         horizon = parts[1] if len(parts) >= 2 else ""
         size = parts[3] if len(parts) >= 4 else ""
-        dep = dep_map.get(name, {})
-
         total_return = m.get("total_return")
         sharpe = m.get("annualized_daily_net_sharpe")
+        information_ratio = m.get("annualized_matched_information_ratio")
+        unavailable = "Insufficient history (<30 valid sessions)"
         rows.append(
             {
                 "Horizon": horizon,
@@ -109,9 +110,15 @@ def render() -> None:
                 "Net Return": (
                     f"{total_return * 100:.2f}%" if total_return is not None else "—"
                 ),
-                "Sharpe": f"{sharpe:.2f}" if sharpe is not None else "—",
-                "Deployed": f"${dep.get('deployed', 0):,.0f}",
-                "Deploy %": f"{dep.get('pct', 0):.0f}%",
+                "Book role": "Headline $100k horizon book"
+                if size == "100k"
+                else "Concentration stress test",
+                "Annualized daily net Sharpe": f"{sharpe:.2f}"
+                if sharpe is not None
+                else unavailable,
+                "Annualized matched-benchmark information ratio": f"{information_ratio:.2f}"
+                if information_ratio is not None
+                else unavailable,
             }
         )
 

@@ -226,16 +226,7 @@ def load_regime_history(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]
 
 @st.cache_data(ttl=3600)
 def load_signal_stats(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
-    """Aggregate signal stats across horizons (one cohort per horizon to avoid 4x counting).
-
-    Returns:
-        {
-            "per_strategy": {name: {signals, trades, hit_rate_5d, trade_rate}},
-            "total_signals": int,
-            "total_traded": int,
-            "knowledge_gaps": [...],
-        }
-    """
+    """Project governed decision totals; strategy attribution is unavailable."""
     report = load_generation_metrics(gen_id, gen_state_dir)
     books = dict(report.get("headline_books", {}) or {})
     # V2 records only governed aggregate decision counts.  Do not revive the
