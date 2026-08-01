@@ -96,6 +96,7 @@ def test_generation_timeout_message_matches_constant(tmp_path):
     mgr = gm.GenerationManager(repo_root=str(tmp_path))
     gen_data = {
         "gen_id": "gen_test",
+        "git_commit": "synthetic-commit-gen-test",
         "worktree_path": str(tmp_path),
         "state_dir": str(tmp_path / "state"),
     }

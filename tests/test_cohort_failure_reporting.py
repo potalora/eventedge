@@ -82,6 +82,7 @@ def _run_with_proc(tmp_path, proc):
     mgr._venv_python = "python"
     gen_data = {
         "gen_id": "gen_001",
+        "git_commit": "synthetic-commit-gen-001",
         "state_dir": str(tmp_path / "state"),
         "worktree_path": str(tmp_path / "wt"),
     }
