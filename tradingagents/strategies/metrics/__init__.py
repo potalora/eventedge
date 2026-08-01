@@ -1,4 +1,5 @@
 from .calendar import XNYSCalendar
+from .epochs import EpochContext, EpochManager
 from .identity import deduplicate_signals, event_key, execution_id, signal_id
 from .models import (
     LEGACY_SCHEMA_LABEL,
@@ -17,6 +18,7 @@ from .models import (
     SignalMetricRecord,
     StrategyHealthRecord,
 )
+from .store import MetricStore
 
 __all__ = [
     "LEGACY_SCHEMA_LABEL",
@@ -25,8 +27,11 @@ __all__ = [
     "DeduplicationResult",
     "Direction",
     "EpochStatus",
+    "EpochContext",
+    "EpochManager",
     "HealthStatus",
     "MetricEpoch",
+    "MetricStore",
     "OutcomeRecord",
     "OutcomeStatus",
     "PairedComparison",

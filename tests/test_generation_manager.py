@@ -219,6 +219,7 @@ class TestGenerationDailyRun:
         # Directly call _run_cohorts_subprocess with a mocked subprocess
         gen_data = {
             "gen_id": info.gen_id,
+            "git_commit": info.git_commit,
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
@@ -230,6 +231,8 @@ class TestGenerationDailyRun:
         assert "scripts/run_cohorts.py" in cmd[1]
         assert kwargs["env"]["AUTORESEARCH_STATE_DIR"] == info.state_dir
         assert kwargs["env"]["PYTHONPATH"] == str(Path(info.worktree_path).resolve())
+        assert kwargs["env"]["EVENTEDGE_GENERATION_ID"] == info.gen_id
+        assert kwargs["env"]["EVENTEDGE_GENERATION_COMMIT"] == info.git_commit
         assert kwargs["cwd"] == info.worktree_path
 
     def test_run_daily_records_history(self, git_repo, manager):
@@ -270,6 +273,7 @@ class TestGenerationDailyRun:
         )
         gen_data = {
             "gen_id": info.gen_id,
+            "git_commit": info.git_commit,
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
@@ -536,7 +540,12 @@ class TestRunLogPersistence:
         state_dir.mkdir()
         wt = tmp_path / "wt"
         wt.mkdir()
-        gen_data = {"gen_id": "gen_100", "state_dir": str(state_dir), "worktree_path": str(wt)}
+        gen_data = {
+            "gen_id": "gen_100",
+            "git_commit": "frozen-commit-100",
+            "state_dir": str(state_dir),
+            "worktree_path": str(wt),
+        }
 
         class _Proc:
             returncode = 0

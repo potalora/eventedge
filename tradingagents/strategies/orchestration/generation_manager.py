@@ -352,6 +352,8 @@ class GenerationManager:
         env = os.environ.copy()
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
         env["PYTHONPATH"] = str(Path(gen_data["worktree_path"]).resolve())
+        env["EVENTEDGE_GENERATION_ID"] = gen_data["gen_id"]
+        env["EVENTEDGE_GENERATION_COMMIT"] = gen_data["git_commit"]
 
         cmd = [
             str(self._venv_python),
