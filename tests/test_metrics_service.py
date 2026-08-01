@@ -225,7 +225,7 @@ def test_cohort_report_reads_once_bounds_fills_and_aggregates_once(
     def read_fills(*args, **kwargs):
         counts["fills"] += 1
         assert args == (SESSIONS[0], SESSIONS[2])
-        assert kwargs == {}
+        assert kwargs == {"epoch_id": "epoch-1"}
         return original_fills(*args, **kwargs)
 
     def aggregate(**kwargs):

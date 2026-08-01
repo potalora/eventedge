@@ -112,7 +112,13 @@ class MetricsService:
         deduped = deduplicate_signals(self._metric_signal(row) for row in signals)
         if deduped.conflicts:
             raise ValueError("conflicting signal identities")
-        fills = tuple(ledger.read_fills(window[0].session, window[-1].session))
+        fills = tuple(
+            ledger.read_fills(
+                window[0].session,
+                window[-1].session,
+                epoch_id=epoch_id,
+            )
+        )
         return window, benchmarks, deduped.records, fills
 
     def cohort_report(self, cohort_id: str, epoch_id: str) -> PortfolioMetrics:
