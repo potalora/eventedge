@@ -649,19 +649,32 @@ class MetricStore:
         return self._health(row[0])
 
     def read_strategy_health(
-        self, epoch_id: str, *, limit: int = 1_000
+        self,
+        epoch_id: str | None = None,
+        *,
+        session: date | None = None,
+        limit: int = 1_000,
     ) -> tuple[StrategyHealthRecord, ...]:
         self._validate_limit(limit)
+        clauses: list[str] = []
+        values: list[object] = []
+        if epoch_id is not None:
+            clauses.append("epoch_id = ?")
+            values.append(epoch_id)
+        if session is not None:
+            clauses.append("session = ?")
+            values.append(session.isoformat())
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT payload_json
                 FROM strategy_health
-                WHERE epoch_id = ?
+                {where}
                 ORDER BY session, health_id
                 LIMIT ?
                 """,
-                (epoch_id, limit),
+                (*values, limit),
             ).fetchall()
         return tuple(self._health(row[0]) for row in rows)
 

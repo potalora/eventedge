@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 
@@ -382,7 +384,11 @@ class TestOrchestratorHorizonScreening:
                     generation_commit="test-commit",
                 )
 
-        # Call the horizon screening method directly
+        # Register the production-valid metric epoch before direct screening.
+        epoch = orch.cohorts[0]["executor"].ensure_metric_epoch(
+            orch._metric_epoch_context, date(2026, 1, 15)
+        )
+        orch._epoch_id = epoch.epoch_id
         orch._screen_for_horizon({}, "2026-01-15", "3m")
         mock_strategy.get_default_params.assert_called_with(horizon="3m")
 

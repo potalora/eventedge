@@ -27,7 +27,8 @@ from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.modules.base import Candidate
 from tradingagents.strategies.metrics.identity import signal_id as metric_signal_id
-from tradingagents.strategies.metrics.models import OutcomeRecord
+from tradingagents.strategies.metrics.health import classify_strategy_run
+from tradingagents.strategies.metrics.models import OutcomeRecord, StrategyHealthRecord
 from tradingagents.strategies.metrics.outcomes import directional_accuracy
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
@@ -35,6 +36,19 @@ logger = logging.getLogger(__name__)
 
 _FINNHUB_FETCH_SAFETY_MARGIN_S = 30.0
 _DIAGNOSTIC_HOLDING_SESSIONS = 5
+
+
+def _provider_errors(data: Mapping[str, Any], sources: Iterable[str]) -> dict[str, str]:
+    """Return only explicit provider failures from the shared fetch payload."""
+    errors: dict[str, str] = {}
+    for source in sources:
+        payload = data.get(source)
+        if not isinstance(payload, Mapping):
+            continue
+        error = payload.get("error")
+        if error not in (None, ""):
+            errors[str(source)] = str(error)
+    return errors
 
 
 def _fetch_timeout_s() -> float:
@@ -308,20 +322,42 @@ class MultiStrategyEngine:
         trading_date: str,
         data: dict,
         horizon: str = "30d",
-    ) -> tuple[list[dict], dict]:
+        *,
+        epoch_id: str,
+        policy_id: str,
+    ) -> tuple[list[dict], dict, list[StrategyHealthRecord]]:
         """Run strategy screening and LLM enrichment (steps 1-2).
 
-        Returns enriched, deduped signals and regime model. These can be
+        Returns enriched, deduped signals, regime model, and health records. These can be
         shared across cohorts so LLM non-determinism doesn't confound results.
         """
         regime_model = self._build_regime_model(data)
         self.state.save_regime_snapshot(regime_model)
 
         all_signals: list[dict] = []
+        health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
             self._emit("strategy_start", name=strategy.name, track="paper_trade")
             params = strategy.get_default_params(horizon=horizon)
-            candidates = strategy.screen(data, trading_date, params)
+            try:
+                candidates = strategy.screen(data, trading_date, params)
+                error = None
+            except Exception as exc:
+                candidates = []
+                error = exc
+                logger.exception("Strategy %s screen failed", strategy.name)
+            health.append(
+                classify_strategy_run(
+                    epoch_id=epoch_id,
+                    session=date.fromisoformat(trading_date),
+                    policy_id=policy_id,
+                    strategy=strategy.name,
+                    data_sources=tuple(strategy.data_sources),
+                    candidates=candidates,
+                    provider_errors=_provider_errors(data, strategy.data_sources),
+                    exception=error,
+                )
+            )
             if candidates:
                 candidates = self._enrich_with_llm(
                     candidates, strategy.name, regime_context=regime_model
@@ -357,7 +393,7 @@ class MultiStrategyEngine:
             if removed:
                 logger.info("Blocked %d signals for tickers: %s", removed, blocked)
 
-        return deduped_signals, regime_model
+        return deduped_signals, regime_model, health
 
     def screen_and_stage(
         self,

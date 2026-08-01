@@ -1,6 +1,7 @@
 from .calendar import XNYSCalendar
 from .epochs import EpochContext, EpochManager
 from .identity import deduplicate_signals, event_key, execution_id, signal_id
+from .health import classify_strategy_run
 from .models import (
     LEGACY_SCHEMA_LABEL,
     METRIC_SCHEMA_VERSION,
@@ -76,4 +77,5 @@ __all__ = [
     "total_return",
     "validate_snapshot_window",
     "annualized_sharpe",
+    "classify_strategy_run",
 ]

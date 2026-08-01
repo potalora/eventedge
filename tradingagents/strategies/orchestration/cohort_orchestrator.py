@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from tradingagents.strategies.metrics.models import CriticalGapMarker
+    from tradingagents.strategies.metrics.models import (
+        CriticalGapMarker,
+        StrategyHealthRecord,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -253,33 +256,30 @@ class CohortOrchestrator:
             for index, key in enumerate(model_keys)
         }
         for key, value in models.items():
-            if value is not None and (
-                not isinstance(value, str) or not value.strip()
-            ):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"model {key} must be non-empty text")
 
         self.cohorts: list[dict[str, Any]] = []
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
         strategies = get_paper_trade_strategies()
-        strategy_names = tuple(getattr(strategy, "name", None) for strategy in strategies)
+        strategy_names = tuple(
+            getattr(strategy, "name", None) for strategy in strategies
+        )
         if any(
             not isinstance(name, str) or not name.strip() for name in strategy_names
         ):
             raise ValueError("strategy names must be non-empty text")
         if len(set(strategy_names)) != len(strategy_names):
             raise ValueError("duplicate strategy name")
+        self._active_strategy_names = frozenset(strategy_names)
         cohort_names = [cfg.name for cfg in cohort_configs]
-        if any(
-            not isinstance(name, str) or not name.strip() for name in cohort_names
-        ):
+        if any(not isinstance(name, str) or not name.strip() for name in cohort_names):
             raise ValueError("cohort names must be non-empty text")
         if len(set(cohort_names)) != len(cohort_names):
             raise ValueError("duplicate cohort name")
         configured_policy_id = (
-            base_config.get("autoresearch", {})
-            .get("paper_ledger", {})
-            .get("policy_id")
+            base_config.get("autoresearch", {}).get("paper_ledger", {}).get("policy_id")
         )
         policy_ids: dict[str, str] = {}
         for cfg in cohort_configs:
@@ -396,15 +396,57 @@ class CohortOrchestrator:
                 "Install with: pip install -e '[.openbb]' and set FMP_API_KEY"
             )
 
+    def _policy_id_for_horizon(self, horizon: str) -> str:
+        configured_policy_id = (
+            self._base_config.get("autoresearch", {})
+            .get("paper_ledger", {})
+            .get("policy_id")
+        )
+        return str(configured_policy_id or f"foundation-{horizon}")
+
     def _screen_for_horizon(
         self,
         data: dict,
         trading_date: str,
         horizon: str,
-    ) -> tuple[list[dict], dict]:
+    ) -> tuple[list[dict], dict, list[StrategyHealthRecord]]:
         """Screen all strategies with horizon-specific params."""
         first_engine = self.cohorts[0]["engine"]
-        return first_engine.screen_and_enrich(trading_date, data, horizon=horizon)
+        policy_id = self._policy_id_for_horizon(horizon)
+        if self._epoch_id is None:
+            raise RuntimeError("metric epoch must exist before strategy screening")
+        return first_engine.screen_and_enrich(
+            trading_date,
+            data,
+            horizon=horizon,
+            epoch_id=self._epoch_id,
+            policy_id=policy_id,
+        )
+
+    def _persist_horizon_health(
+        self,
+        health: list[StrategyHealthRecord],
+        session: date,
+        policy_id: str,
+    ) -> bool:
+        """Persist one shared horizon's evidence and enforce full coverage."""
+        for record in health:
+            self._metric_store.save_strategy_health(record)
+        if (
+            len(health) == len(self._active_strategy_names) == 12
+            and {record.strategy for record in health} == self._active_strategy_names
+            and all(record.epoch_id == self._epoch_id for record in health)
+            and all(record.session == session for record in health)
+            and all(record.policy_id == policy_id for record in health)
+        ):
+            return True
+
+        from tradingagents.strategies.metrics.epochs import EpochManager
+
+        EpochManager(self._metric_store).invalidate_current(
+            session, "unclassified_strategy_silence"
+        )
+        return False
 
     def _bound_critical_gap_cohorts(
         self, marker: CriticalGapMarker
@@ -775,8 +817,7 @@ class CohortOrchestrator:
         if pending_gap is not None:
             if session < pending_gap.gap_session:
                 raise ValueError(
-                    f"{session} precedes pending critical gap "
-                    f"{pending_gap.gap_session}"
+                    f"{session} precedes pending critical gap {pending_gap.gap_session}"
                 )
             if not self.cohorts:
                 boundary_error = ValueError(
@@ -1157,16 +1198,27 @@ class CohortOrchestrator:
         logger.info("Shared data fetched: %s", list(shared_data.keys()))
 
         horizons = sorted({cohort["config"].horizon for cohort in valid_cohorts})
-        horizon_signals: dict[str, tuple[list[dict], dict]] = {}
+        horizon_signals: dict[
+            str, tuple[list[dict], dict, list[StrategyHealthRecord]]
+        ] = {}
         for horizon in horizons:
-            signals, regime = self._screen_for_horizon(
+            signals, regime, health = self._screen_for_horizon(
                 shared_data, trading_date, horizon
             )
-            horizon_signals[horizon] = (signals, regime)
+            if not self._persist_horizon_health(
+                health, session, self._policy_id_for_horizon(horizon)
+            ):
+                for cohort in valid_cohorts:
+                    results[cohort["config"].name] = {
+                        "error": True,
+                        "invalid_reason": "unclassified_strategy_silence",
+                    }
+                return results
+            horizon_signals[horizon] = (signals, regime, health)
             logger.info("Horizon %s: %d signals", horizon, len(signals))
 
         all_signals = [
-            signal for signals, _ in horizon_signals.values() for signal in signals
+            signal for signals, _, _ in horizon_signals.values() for signal in signals
         ]
         enrichment = self._fetch_openbb_enrichment(all_signals)
         reference_tickers = {
@@ -1212,7 +1264,7 @@ class CohortOrchestrator:
         for cohort in valid_cohorts:
             cfg = cohort["config"]
             name = cfg.name
-            signals, regime = horizon_signals[cfg.horizon]
+            signals, regime, _health = horizon_signals[cfg.horizon]
             try:
                 staged = cohort["engine"].screen_and_stage(
                     trading_date=trading_date,
