@@ -1368,10 +1368,11 @@ class CohortOrchestrator:
         return enrichment
 
     def reset(self) -> None:
-        """Reset all cohort state (for testing/fresh start)."""
-        for cohort in self.cohorts:
-            cohort["state"].reset()
-            logger.info("Reset state for cohort: %s", cohort["config"].name)
+        """Refuse destructive reset once portfolio ledgers are authoritative."""
+        raise RuntimeError(
+            "reset is disabled for ledger-backed generation state; "
+            "start a fresh generation instead"
+        )
 
 
 def build_default_cohorts(base_config: dict) -> list[CohortConfig]:

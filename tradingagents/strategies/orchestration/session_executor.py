@@ -35,6 +35,7 @@ from tradingagents.strategies.execution.price_source import (
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     session_close,
+    session_open,
 )
 from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, SignalMetricRecord
 from tradingagents.strategies.metrics.epochs import EpochContext, EpochManager
@@ -583,6 +584,8 @@ class SessionExecutor:
         invalid_reason = self.ledger.session_invalid_reason(session)
         if invalid_reason:
             return SessionExecutionResult(session, False, None, invalid_reason, ())
+
+        self.ledger.cancel_overdue_next_open_intents(session, session_open(session))
 
         bound_context = self.ledger.session_execution_context(session)
         if bound_context is not None and bound_context["epoch_id"] != epoch_id:

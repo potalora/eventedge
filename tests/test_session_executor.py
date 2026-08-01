@@ -298,6 +298,62 @@ def test_friday_intent_never_fills_until_exact_monday_open(tmp_path):
         ledger.close()
 
 
+def test_overdue_next_open_exit_is_cancelled_and_releases_its_lot(tmp_path):
+    ledger = _ledger(tmp_path)
+    tuesday_processed = datetime(2026, 8, 4, 22, tzinfo=UTC)
+    adjusted = {("SPY", TUESDAY): "650", ("BIL", TUESDAY): "91"}
+    try:
+        _open_long(ledger, "AAPL", 2)
+        overdue = _intent(ledger, "AAPL", "sell", MONDAY, 2)
+        lot = ledger.open_exit_positions()[0]
+        ledger.stage_exit_intent(overdue, ((str(lot["lot_id"]), 2),))
+
+        result = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            TUESDAY,
+            "epoch",
+            FakePriceSource(
+                {("AAPL", TUESDAY): _bar("AAPL", TUESDAY)}, adjusted=adjusted
+            ),
+            {},
+            tuesday_processed,
+        )
+
+        assert result.valid
+        assert ledger.intent(overdue.intent_id).status == "cancelled"
+        assert ledger.read_fills(TUESDAY, TUESDAY) == []
+
+        replacement = _intent(
+            ledger,
+            "AAPL",
+            "sell",
+            next_session(TUESDAY),
+            2,
+            reference_session=MONDAY,
+        )
+        ledger.stage_exit_intent(replacement, ((str(lot["lot_id"]), 2),))
+        assert ledger.intent(replacement.intent_id).status == "pending"
+
+        replay = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            TUESDAY,
+            "epoch",
+            FakePriceSource(
+                {("AAPL", TUESDAY): _bar("AAPL", TUESDAY)}, adjusted=adjusted
+            ),
+            {},
+            tuesday_processed,
+        )
+        assert replay.valid
+        transitions = ledger.connection.execute(
+            "SELECT status, reason FROM order_status_transitions WHERE intent_id = ?",
+            (overdue.intent_id,),
+        ).fetchall()
+        assert [(row["status"], row["reason"]) for row in transitions] == [
+            ("cancelled", "missed exact eligible session")
+        ]
+    finally:
+        ledger.close()
+
+
 def test_exact_xnys_weekend_holiday_and_early_close_transitions():
     assert next_session(FRIDAY) == MONDAY
     assert next_session(date(2026, 7, 2)) == date(2026, 7, 6)

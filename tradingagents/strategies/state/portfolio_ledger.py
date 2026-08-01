@@ -1520,6 +1520,29 @@ class PortfolioLedger:
         """Durably terminalize an intent after broker-confirmed cancellation."""
         return self._terminalize_intent(intent_id, "cancelled", occurred_at, reason)
 
+    def cancel_overdue_next_open_intents(
+        self, session: date, occurred_at: datetime
+    ) -> tuple[OrderIntent, ...]:
+        """Cancel next-open intents whose one eligible execution session passed."""
+        self._require_timezone_aware(occurred_at, "occurred_at")
+        with self.transaction():
+            rows = self._connection.execute(
+                """SELECT intent_id FROM order_intents
+                   WHERE cohort_id = ? AND status = 'pending'
+                     AND price_rule = 'next_session_open' AND eligible_session < ?
+                   ORDER BY eligible_session, created_at, intent_id""",
+                (self.cohort_id, self._encode(session)),
+            ).fetchall()
+            return tuple(
+                self._terminalize_intent(
+                    str(row["intent_id"]),
+                    "cancelled",
+                    occurred_at,
+                    "missed exact eligible session",
+                )
+                for row in rows
+            )
+
     def _terminalize_intent(
         self,
         intent_id: str,

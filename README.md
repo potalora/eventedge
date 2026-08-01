@@ -31,7 +31,7 @@ Data comes from about a dozen sources: yfinance, Finnhub, SEC EDGAR, OpenBB, FRE
 
 ## How it runs
 
-The provided systemd timer is configured for 18:00 ET, after XNYS daily bars finalize. Python checks the requested date against the XNYS calendar, so a weekday holiday is rejected rather than silently rolled to a different session. A signal observed at one session's close can only stage an intent for execution at the next exact XNYS session open.
+Production should be scheduled for 18:00 ET, after XNYS daily bars finalize; the repository does not install or change that schedule. Python checks the requested date against the XNYS calendar, so a weekday holiday is rejected rather than silently rolled to a different session. A signal observed at one session's close can only stage an intent for execution at the next exact XNYS session open.
 
 Each cohort has its own authoritative SQLite `portfolio.db`. Signals, next-open intents, fills, lots, marks, benchmark observations, and account snapshots are recorded there with explicit slippage, commission, other fees, borrow costs, and financing. The familiar JSON files are deterministic read-compatible projections from SQLite; they are not accounting authority.
 
@@ -68,7 +68,8 @@ python scripts/run_generations.py start "description of what changed"
 python scripts/run_generations.py list
 
 # Compare generations side-by-side
-python scripts/run_generations.py compare
+python scripts/run_generations.py compare \
+  --pair gen_005:horizon_30d_size_100k:candidate_epoch_id,gen_004:horizon_30d_size_100k:baseline_epoch_id
 
 # Streamlit dashboard (interactive, in a browser)
 python -m streamlit run tradingagents/dashboard/app.py

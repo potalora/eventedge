@@ -12,12 +12,15 @@ from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
 from .identity import deduplicate_signals
 from .models import MetricEpoch, PairedComparison, PortfolioMetrics, SignalMetricRecord
+from .outcomes import directional_accuracy
 from .portfolio import (
     daily_net_returns,
     equal_weighted_scenario_return,
     matched_benchmark_returns,
     paired_comparison,
     portfolio_metrics,
+    reconcile_costs,
+    validate_snapshot_series,
     validate_snapshot_window,
 )
 from .store import MetricStore
@@ -113,7 +116,13 @@ class MetricsService:
         except KeyError as error:
             raise KeyError(f"unknown cohort {cohort_id!r}") from error
 
-    def _inputs(self, cohort_id: str, epoch_id: str):
+    def _inputs(
+        self,
+        cohort_id: str,
+        epoch_id: str,
+        *,
+        allow_insufficient: bool = False,
+    ):
         ledger = self._ledger(cohort_id)
         connection = ledger.connection
         owns_snapshot = not connection.in_transaction
@@ -123,20 +132,32 @@ class MetricsService:
             snapshots = tuple(ledger.read_snapshots(epoch_id=epoch_id))
             benchmarks = tuple(ledger.read_benchmark_observations(epoch_id=epoch_id))
             signals = tuple(ledger.read_signals(epoch_id=epoch_id))
-            window = validate_snapshot_window(
-                cohort_id=cohort_id,
-                epoch_id=epoch_id,
-                snapshots=snapshots,
+            window = (
+                validate_snapshot_series(
+                    cohort_id=cohort_id,
+                    epoch_id=epoch_id,
+                    snapshots=snapshots,
+                )
+                if allow_insufficient
+                else validate_snapshot_window(
+                    cohort_id=cohort_id,
+                    epoch_id=epoch_id,
+                    snapshots=snapshots,
+                )
             )
             deduped = deduplicate_signals(self._metric_signal(row) for row in signals)
             if deduped.conflicts:
                 raise ValueError("conflicting signal identities")
-            fills = tuple(
-                ledger.read_fills(
-                    window[0].session,
-                    window[-1].session,
-                    epoch_id=epoch_id,
+            fills = (
+                tuple(
+                    ledger.read_fills(
+                        window[0].session,
+                        window[-1].session,
+                        epoch_id=epoch_id,
+                    )
                 )
+                if window
+                else ()
             )
         finally:
             if owns_snapshot:
@@ -164,13 +185,25 @@ class MetricsService:
             fills=fills,
         )
 
+    @staticmethod
+    def _directional_accuracy_5d(signals: tuple, outcomes: tuple) -> float | None:
+        signal_ids = {row.signal_id for row in signals}
+        summary = directional_accuracy(
+            row
+            for row in outcomes
+            if row.holding_sessions == 5 and row.signal_id in signal_ids
+        )
+        return summary.rate
+
     def cohort_report(self, cohort_id: str, epoch_id: str) -> PortfolioMetrics:
         epoch = self._epoch(epoch_id)
         if epoch is None:
             raise KeyError("no metric epoch is available")
         self._require_available_epoch(epoch, epoch_id)
         report = self._portfolio_from_inputs(
-            cohort_id, epoch_id, self._inputs(cohort_id, epoch_id)
+            cohort_id,
+            epoch_id,
+            self._inputs(cohort_id, epoch_id),
         )
         self._assert_epoch_unchanged(epoch, self.store.load_epoch(epoch_id))
         return report
@@ -196,11 +229,16 @@ class MetricsService:
                 "dependent_scenarios": True,
             }
         self._require_available_epoch(epoch, epoch.epoch_id)
+        outcomes = self.store.read_outcomes(epoch.epoch_id)
         materialized = {
-            cohort_id: self._materialize_cohort(cohort_id, epoch.epoch_id)
+            cohort_id: self._materialize_cohort(
+                cohort_id, epoch.epoch_id, outcomes
+            )
             for cohort_id in self.cohort_ids
         }
-        reports = {key: value[0] for key, value in materialized.items()}
+        reports = {
+            key: self._book_payload(value[0]) for key, value in materialized.items()
+        }
         series = {key: value[1] for key, value in materialized.items()}
         final_epoch = self.store.load_epoch(epoch.epoch_id)
         self._assert_epoch_unchanged(epoch, final_epoch)
@@ -218,15 +256,21 @@ class MetricsService:
         panel = None
         panel_unavailable_reason = "missing_headline_books" if missing else None
         headline_windows = {
-            (item.start_session, item.end_session, item.valid_sessions)
+            (item["start_session"], item["end_session"], item["valid_sessions"])
             for item in headline.values()
+            if item.get("metrics_available", True)
         }
-        if not missing and len(headline_windows) == 1:
+        unavailable_headline = any(
+            not item.get("metrics_available", True) for item in headline.values()
+        )
+        if not missing and unavailable_headline:
+            panel_unavailable_reason = "insufficient_history"
+        elif not missing and len(headline_windows) == 1:
             panel = {
                 "label": "equal-weighted dependent $100k scenario panel",
                 "dependent_scenarios": True,
                 "total_return": equal_weighted_scenario_return(
-                    item.total_return for item in headline.values()
+                    item["total_return"] for item in headline.values()
                 ),
             }
         elif not missing:
@@ -234,13 +278,13 @@ class MetricsService:
         return {
             "metric_schema_version": 2,
             "epoch": asdict(epoch),
-            "headline_books": {key: asdict(value) for key, value in headline.items()},
+            "headline_books": headline,
             "scenario_panel": panel,
             "scenario_panel_available": panel is not None,
             "scenario_panel_unavailable_reason": panel_unavailable_reason,
             "missing_headline_books": missing,
             "stress_tests": {
-                key: asdict(value)
+                key: value
                 for key, value in reports.items()
                 if key in _STRESS_BOOKS
             },
@@ -252,19 +296,132 @@ class MetricsService:
         }
 
     def _materialize_cohort(
-        self, cohort_id: str, epoch_id: str
-    ) -> tuple[PortfolioMetrics, dict[str, object]]:
+        self, cohort_id: str, epoch_id: str, outcomes: tuple = ()
+    ) -> tuple[PortfolioMetrics | dict[str, object], dict[str, object]]:
         """Build metrics and reporting series from one SQLite snapshot."""
-        inputs = self._inputs(cohort_id, epoch_id)
-        return (
-            self._portfolio_from_inputs(cohort_id, epoch_id, inputs),
-            self._cohort_series_from_inputs(inputs),
+        inputs = self._inputs(cohort_id, epoch_id, allow_insufficient=True)
+        series = self._cohort_series_from_inputs(inputs)
+        if len(inputs[0]) < 2:
+            return self._insufficient_book(cohort_id, epoch_id, inputs, outcomes), series
+        report = self._book_payload(
+            self._portfolio_from_inputs(cohort_id, epoch_id, inputs)
         )
+        report["directional_accuracy_5d"] = self._directional_accuracy_5d(
+            inputs[2], outcomes
+        )
+        return (
+            report,
+            series,
+        )
+
+    @staticmethod
+    def _book_payload(report: PortfolioMetrics | dict[str, object]) -> dict[str, object]:
+        if isinstance(report, PortfolioMetrics):
+            return {
+                **asdict(report),
+                "metrics_available": True,
+                "unavailable_reason": None,
+            }
+        return report
+
+    @staticmethod
+    def _insufficient_book(
+        cohort_id: str,
+        epoch_id: str,
+        inputs: tuple,
+        outcomes: tuple,
+    ) -> dict[str, object]:
+        snapshots, benchmarks, signals, fills = inputs
+        latest = snapshots[-1] if snapshots else None
+        latest_benchmarks = (
+            [
+                row.observed_at
+                for row in benchmarks
+                if latest is not None
+                and row.session == latest.session
+                and row.symbol in {"SPY", "BIL"}
+                and row.valid
+            ]
+            if latest is not None
+            else []
+        )
+        if latest is not None:
+            reconcile_costs(latest)
+            equity = float(latest.net_equity)
+            costs = {
+                "slippage": float(latest.slippage_cost),
+                "commission": float(latest.commission_cost),
+                "other_fees": float(latest.other_fees),
+                "borrow": float(latest.borrow_cost),
+                "financing": float(latest.financing_cost),
+            }
+        else:
+            equity = 0.0
+            costs = {
+                "slippage": 0.0,
+                "commission": 0.0,
+                "other_fees": 0.0,
+                "borrow": 0.0,
+                "financing": 0.0,
+            }
+        unique_fills = {row.fill_id: row for row in fills}
+        return {
+            "cohort_id": cohort_id,
+            "epoch_id": epoch_id,
+            "metric_schema_version": 2,
+            "metrics_available": False,
+            "unavailable_reason": "insufficient_history",
+            "start_session": snapshots[0].session if snapshots else None,
+            "end_session": latest.session if latest is not None else None,
+            "valuation_at": latest.valuation_at if latest is not None else None,
+            "benchmark_at": max(latest_benchmarks) if latest_benchmarks else None,
+            "valid_sessions": len(snapshots),
+            "total_return": None,
+            "gross_return": None,
+            "matched_benchmark_return": None,
+            "matched_excess_return": None,
+            "annualized_daily_net_sharpe": None,
+            "sharpe_return_count": 0,
+            "annualized_matched_information_ratio": None,
+            "information_ratio_return_count": 0,
+            "max_drawdown": None,
+            "long_weight": (
+                float(latest.long_market_value) / equity if equity else None
+            ),
+            "short_weight": (
+                float(latest.short_liability) / equity if equity else None
+            ),
+            "gross_weight": float(latest.gross_exposure) / equity if equity else None,
+            "net_weight": float(latest.net_exposure) / equity if equity else None,
+            "cash_weight": float(latest.cash) / equity if equity else None,
+            "cumulative_costs": costs,
+            "unique_catalysts": len({row.event_key for row in signals}),
+            "strategy_decisions": len({row.signal_id for row in signals}),
+            "fills": len(unique_fills),
+            "closed_trades": len(
+                {
+                    row.intent_id
+                    for row in unique_fills.values()
+                    if row.side in {"sell", "cover"}
+                }
+            ),
+            "missing_mark_count": 0,
+            "stale_mark_count": 0,
+            "directional_accuracy_5d": MetricsService._directional_accuracy_5d(
+                signals, outcomes
+            ),
+        }
 
     @staticmethod
     def _cohort_series_from_inputs(inputs: tuple) -> dict[str, object]:
         """Serialize one valid ledger window and its persisted benchmarks."""
         snapshots, benchmarks, _signals, _fills = inputs
+        if not snapshots:
+            return {
+                "net_equity_history": [],
+                "benchmarks": {"SPY": [], "BIL": []},
+                "matched_benchmark_returns": [],
+            }
         benchmark_rows = tuple(
             row for row in benchmarks if row.valid and row.symbol in {"SPY", "BIL"}
         )

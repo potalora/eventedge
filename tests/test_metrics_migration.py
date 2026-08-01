@@ -119,6 +119,96 @@ def test_cli_write_writes_only_requested_registry_file(tmp_path) -> None:
     assert set(tmp_path.iterdir()) == {manifest_path, sentinel, output_path}
 
 
+def test_cli_write_refuses_to_overwrite_manifest(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    original = json.dumps(_manifest())
+    manifest_path.write_text(original)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/migrate_metrics_v2.py",
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(manifest_path),
+            "--write",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "protected generation history" in result.stderr
+    assert manifest_path.read_text() == original
+
+
+def test_cli_write_refuses_output_inside_legacy_generation(tmp_path) -> None:
+    legacy_state = tmp_path / "gen_003"
+    legacy_state.mkdir()
+    manifest = {
+        "generations": [
+            {"gen_id": "gen_003", "state_dir": str(legacy_state)},
+            {"gen_id": "gen_004", "state_dir": str(tmp_path / "gen_004")},
+        ]
+    }
+    manifest_path = tmp_path / "manifest.json"
+    output_path = legacy_state / "metrics-registry.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/migrate_metrics_v2.py",
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(output_path),
+            "--write",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "protected generation history" in result.stderr
+    assert not output_path.exists()
+
+
+def test_cli_write_refuses_output_inside_newer_generation(tmp_path) -> None:
+    generation_state = tmp_path / "gen_004"
+    generation_state.mkdir()
+    manifest = {
+        "generations": [
+            {"gen_id": "gen_004", "state_dir": str(generation_state)},
+        ]
+    }
+    manifest_path = tmp_path / "manifest.json"
+    output_path = generation_state / "metrics-registry.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/migrate_metrics_v2.py",
+            "--manifest",
+            str(manifest_path),
+            "--output",
+            str(output_path),
+            "--write",
+        ],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "protected generation history" in result.stderr
+    assert not output_path.exists()
+
+
 def test_generation_subprocess_env_includes_exact_generation_metadata(
     tmp_path,
 ) -> None:
@@ -149,4 +239,3 @@ def test_generation_subprocess_env_includes_exact_generation_metadata(
     assert captured["env"]["AUTORESEARCH_STATE_DIR"] == str(state_dir.resolve())
     assert captured["env"]["PYTHONPATH"] == str(worktree.resolve())
     assert captured["env"] is not os.environ
-

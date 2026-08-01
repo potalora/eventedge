@@ -22,6 +22,7 @@ from tradingagents.strategies.metrics.health import classify_strategy_run
 from tradingagents.strategies.metrics.models import (
     METRIC_SCHEMA_VERSION,
     MetricEpoch,
+    OutcomeRecord,
     PortfolioMetrics,
     SignalMetricRecord,
 )
@@ -385,7 +386,7 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     monkeypatch.setattr(
         service,
         "_materialize_cohort",
-        lambda cohort_id, epoch_id: (
+        lambda cohort_id, epoch_id, _outcomes=(): (
             _portfolio(cohort_id, epoch_id, values[cohort_id]),
             empty_series,
         ),
@@ -404,7 +405,7 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     monkeypatch.setattr(
         service,
         "_materialize_cohort",
-        lambda cohort_id, epoch_id: (
+        lambda cohort_id, epoch_id, _outcomes=(): (
             replace(
                 _portfolio(cohort_id, epoch_id, values[cohort_id]),
                 start_session=(
@@ -430,7 +431,7 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     monkeypatch.setattr(
         partial,
         "_materialize_cohort",
-        lambda cohort_id, epoch_id: (
+        lambda cohort_id, epoch_id, _outcomes=(): (
             _portfolio(cohort_id, epoch_id, values[cohort_id]),
             empty_series,
         ),
@@ -471,6 +472,88 @@ def test_generation_report_projects_persisted_series_without_network(
     ]
 
 
+def test_generation_report_keeps_first_valid_session_as_insufficient_history(
+    tmp_path, ledger_factory
+) -> None:
+    cohort_ids = tuple(
+        f"horizon_{horizon}_size_100k" for horizon in ("30d", "3m", "6m", "1y")
+    )
+    ledgers = {cohort_id: ledger_factory(cohort_id) for cohort_id in cohort_ids}
+    for ledger in ledgers.values():
+        _record_window(ledger, "epoch-1", SESSIONS[:1])
+    ledger = ledgers["horizon_30d_size_100k"]
+    service = MetricsService(tmp_path, ledgers)
+    service.store.save_epoch(_epoch())
+
+    report = service.generation_report()
+    book = report["headline_books"][ledger.cohort_id]
+
+    assert book["metrics_available"] is False
+    assert book["unavailable_reason"] == "insufficient_history"
+    assert book["valid_sessions"] == 1
+    assert book["total_return"] is None
+    assert report["cohort_series"][ledger.cohort_id]["net_equity_history"] == [
+        {
+            "session": SESSIONS[0].isoformat(),
+            "valuation_at": NOW.replace(day=SESSIONS[0].day).isoformat(),
+            "net_equity": 100000.0,
+            "gross_equity": 100000.0,
+            "gross_exposure": 0.0,
+            "net_exposure": 0.0,
+            "cash": 100000.0,
+            "cumulative_costs": {
+                "slippage": 0.0,
+                "commission": 0.0,
+                "other_fees": 0.0,
+                "borrow": 0.0,
+                "financing": 0.0,
+            },
+            "total_return": 0.0,
+        }
+    ]
+    assert report["scenario_panel_available"] is False
+    assert report["scenario_panel_unavailable_reason"] == "insufficient_history"
+
+
+def test_generation_report_projects_matching_persisted_five_session_accuracy(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _record_window(ledger, "epoch-1", SESSIONS)
+    matching_signal = _signal("matching")
+    ledger.record_signal(matching_signal)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    def outcome(signal_id: str, signed_return: str) -> OutcomeRecord:
+        return OutcomeRecord(
+            outcome_id=f"outcome-{signal_id}",
+            signal_id=signal_id,
+            event_key=f"event-{signal_id}",
+            epoch_id="epoch-1",
+            strategy="litigation",
+            policy_id="policy-1",
+            ticker="AAPL",
+            direction="long",
+            holding_sessions=5,
+            entry_session=SESSIONS[0],
+            exit_session=SESSIONS[-1],
+            entry_price=Decimal("100"),
+            exit_price=Decimal("110"),
+            raw_return=Decimal(signed_return),
+            signed_return=Decimal(signed_return),
+            status="valid",
+            invalid_reason="",
+        )
+
+    service.store.upsert_outcome(outcome(matching_signal.signal_id, "0.1"))
+    service.store.upsert_outcome(outcome("foreign-signal", "-0.1"))
+
+    book = service.generation_report()["headline_books"][ledger.cohort_id]
+
+    assert book["directional_accuracy_5d"] == 1.0
+
+
 def test_generation_report_classifies_exactly_four_headline_and_twelve_stress_books(
     tmp_path, ledger_factory, monkeypatch
 ) -> None:
@@ -490,7 +573,7 @@ def test_generation_report_classifies_exactly_four_headline_and_twelve_stress_bo
     monkeypatch.setattr(
         service,
         "_materialize_cohort",
-        lambda cohort_id, epoch_id: (
+        lambda cohort_id, epoch_id, _outcomes=(): (
             _portfolio(cohort_id, epoch_id, 0.01),
             empty_series,
         ),
@@ -528,10 +611,14 @@ def test_generation_report_reads_each_cohort_once_and_rejects_epoch_change(
     original_inputs = service._inputs
     reads = 0
 
-    def invalidate_after_read(cohort_id: str, epoch_id: str):
+    def invalidate_after_read(
+        cohort_id: str, epoch_id: str, *, allow_insufficient: bool = False
+    ):
         nonlocal reads
         reads += 1
-        result = original_inputs(cohort_id, epoch_id)
+        result = original_inputs(
+            cohort_id, epoch_id, allow_insufficient=allow_insufficient
+        )
         service.store.invalidate_epoch(epoch_id, SESSIONS[-1], "concurrent gap")
         return result
 

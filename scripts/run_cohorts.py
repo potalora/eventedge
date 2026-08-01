@@ -5,7 +5,7 @@ Usage:
     python scripts/run_cohorts.py --date 2026-04-05    # daily trading (LLM on by default)
     python scripts/run_cohorts.py --learning            # refused: production learning is disabled
     python scripts/run_cohorts.py --compare             # print comparison report
-    python scripts/run_cohorts.py --reset               # clear all cohort state
+    python scripts/run_cohorts.py --reset               # refused: start a fresh generation
     python scripts/run_cohorts.py --date 2026-04-05 --no-llm  # without LLM enrichment
 """
 
@@ -80,7 +80,7 @@ def main():
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="Reset all cohort state.",
+        help="Refuse destructive reset; start a fresh generation instead.",
     )
     parser.add_argument(
         "--no-llm",
@@ -100,6 +100,11 @@ def main():
             file=sys.stderr,
         )
         raise SystemExit(2)
+    if args.reset:
+        parser.error(
+            "reset is disabled for ledger-backed generation state; "
+            "start a fresh generation instead"
+        )
 
     if not (args.learning or args.compare or args.reset):
         requested = args.date or date.today().isoformat()
@@ -201,11 +206,6 @@ def main():
                 default=str,
             )
         )
-        return
-
-    if args.reset:
-        orchestrator.reset()
-        print("All cohort state has been cleared.")
         return
 
     # Default: daily trading

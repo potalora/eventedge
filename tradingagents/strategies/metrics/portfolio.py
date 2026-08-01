@@ -344,6 +344,11 @@ def _require_full_window(
 ) -> None:
     if len(rows) < 2:
         raise ValueError("at least two valid snapshots are required")
+
+
+def _validate_snapshot_rows(
+    rows: Sequence[AccountSnapshot], calendar: XNYSCalendar
+) -> None:
     for row in rows:
         if not row.valid:
             raise ValueError(
@@ -362,6 +367,26 @@ def _require_full_window(
         raise ValueError("portfolio metrics require a contiguous valid snapshot window")
 
 
+def validate_snapshot_series(
+    *,
+    cohort_id: str,
+    epoch_id: str,
+    snapshots: Iterable[AccountSnapshot],
+    calendar: XNYSCalendar | None = None,
+) -> tuple[AccountSnapshot, ...]:
+    """Validate zero or more governed snapshots without inventing a return."""
+    session_calendar = calendar or XNYSCalendar()
+    rows = _ordered_snapshots(
+        [
+            row
+            for row in snapshots
+            if row.cohort_id == cohort_id and row.epoch_id == epoch_id
+        ]
+    )
+    _validate_snapshot_rows(rows, session_calendar)
+    return tuple(rows)
+
+
 def validate_snapshot_window(
     *,
     cohort_id: str,
@@ -371,15 +396,14 @@ def validate_snapshot_window(
 ) -> tuple[AccountSnapshot, ...]:
     """Materialize and validate one exact Task-5 portfolio snapshot window."""
     session_calendar = calendar or XNYSCalendar()
-    rows = _ordered_snapshots(
-        [
-            row
-            for row in snapshots
-            if row.cohort_id == cohort_id and row.epoch_id == epoch_id
-        ]
+    rows = validate_snapshot_series(
+        cohort_id=cohort_id,
+        epoch_id=epoch_id,
+        snapshots=snapshots,
+        calendar=session_calendar,
     )
     _require_full_window(rows, session_calendar)
-    return tuple(rows)
+    return rows
 
 
 def equal_weighted_scenario_return(values: Iterable[float]) -> float:
