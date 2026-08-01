@@ -140,7 +140,15 @@ def _current_promotion_epoch(service, generation_id: str):
     return epoch
 
 
-def _build_promotion_evidence(candidate_id: str, baseline_id: str, repo: Path):
+def _build_promotion_evidence(
+    candidate_id: str,
+    baseline_id: str,
+    repo: Path,
+    *,
+    service_opener: Callable[
+        [str, Mapping[str, object]], tuple[object, tuple[object, ...]]
+    ] = _promotion_service,
+):
     """Resolve only authoritative v2 inputs, then refuse absent risk sensitivities.
 
     The ledger currently stores normal fill history, but not a versioned delayed-fill
@@ -155,9 +163,10 @@ def _build_promotion_evidence(candidate_id: str, baseline_id: str, repo: Path):
         raise PromotionAdvisoryUnavailable(
             f"unknown generation: {error.args[0]}"
         ) from error
-    candidate, candidate_ledgers = _promotion_service(candidate_id, candidate_record)
-    baseline, baseline_ledgers = _promotion_service(baseline_id, baseline_record)
+    candidate, candidate_ledgers = service_opener(candidate_id, candidate_record)
+    baseline_ledgers: tuple[object, ...] = ()
     try:
+        baseline, baseline_ledgers = service_opener(baseline_id, baseline_record)
         candidate_epoch = _current_promotion_epoch(candidate, candidate_id)
         baseline_epoch = _current_promotion_epoch(baseline, baseline_id)
         candidate_reports = candidate.generation_report(candidate_epoch.epoch_id)

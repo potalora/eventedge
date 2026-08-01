@@ -12,6 +12,7 @@ from tradingagents.strategies.metrics.promotion import (
     PromotionDecisionStatus,
     PromotionEvaluator,
     PromotionEvidence,
+    PromotionPolicy,
 )
 
 
@@ -105,6 +106,49 @@ def test_passing_evidence_is_advisory_only() -> None:
     assert not hasattr(decision, "apply")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("matched_excess_return", float("nan")),
+        ("delayed_fill_excess_return", float("inf")),
+        ("slippage_20bps_excess_return", float("-inf")),
+        ("clean_common_sessions", True),
+        ("winning_strategies", "two"),
+        ("candidate_max_drawdown", 0.01),
+    ],
+)
+def test_invalid_evidence_is_rejected_before_a_decision(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValueError):
+        replace(_passing(), **{field: value})
+
+
+def test_invalid_strategy_claim_count_and_mutation_are_rejected_or_isolated() -> None:
+    with pytest.raises(ValueError, match="strategy claim event count must be an int"):
+        replace(_passing(), strategy_claim_event_counts={"strategy": True})
+
+    mutable_counts = {"congressional_trades": 30}
+    evidence = replace(_passing(), strategy_claim_event_counts=mutable_counts)
+    mutable_counts["congressional_trades"] = 0
+    assert evidence.strategy_claim_event_counts["congressional_trades"] == 30
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("min_clean_common_sessions", True),
+        ("max_drawdown", float("nan")),
+        ("max_drawdown_delta", -0.01),
+    ],
+)
+def test_invalid_policy_is_rejected_before_evaluation(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValueError):
+        PromotionPolicy(**{field: value})
+
+
 def test_promotion_payload_supports_fixture_injection_without_filesystem_writes(
     tmp_path: Path,
 ) -> None:
@@ -125,6 +169,41 @@ def test_promotion_payload_supports_fixture_injection_without_filesystem_writes(
     assert payload["baseline"] == "baseline"
     assert payload["decision"]["status"] == "ELIGIBLE_FOR_MANUAL_REVIEW"
     assert watched.stat().st_mtime_ns == before
+
+
+def test_candidate_ledgers_close_when_baseline_opening_fails(tmp_path: Path) -> None:
+    from scripts.run_generations import (
+        PromotionAdvisoryUnavailable,
+        _build_promotion_evidence,
+    )
+
+    manifest = tmp_path / "data" / "generations"
+    manifest.mkdir(parents=True)
+    manifest.joinpath("manifest.json").write_text(
+        '{"generations":[{"gen_id":"candidate","state_dir":"candidate"},'
+        '{"gen_id":"baseline","state_dir":"baseline"}]}'
+    )
+
+    class Ledger:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    candidate_ledger = Ledger()
+
+    def opener(generation_id: str, _record):
+        if generation_id == "candidate":
+            return object(), (candidate_ledger,)
+        raise PromotionAdvisoryUnavailable("baseline ledger unavailable")
+
+    with pytest.raises(
+        PromotionAdvisoryUnavailable, match="baseline ledger unavailable"
+    ):
+        _build_promotion_evidence(
+            "candidate", "baseline", tmp_path, service_opener=opener
+        )
+    assert candidate_ledger.closed is True
 
 
 def test_cli_refuses_missing_evidence_before_manager_or_state_creation(

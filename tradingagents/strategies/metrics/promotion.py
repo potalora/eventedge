@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
+from numbers import Real
+from types import MappingProxyType
+from typing import Mapping
 
 
 class PromotionDecisionStatus(str, Enum):
@@ -23,12 +27,27 @@ class PromotionPolicy:
     max_drawdown: float = 0.15
     max_drawdown_delta: float = 0.02
 
+    def __post_init__(self) -> None:
+        for field in (
+            "min_clean_common_sessions",
+            "min_initial_ideas",
+            "min_manual_ideas",
+            "min_strategy_claim_events",
+        ):
+            _require_nonnegative_int(field, getattr(self, field))
+        for field in ("max_drawdown", "max_drawdown_delta"):
+            _require_finite_real(field, getattr(self, field))
+        if self.max_drawdown < 0:
+            raise ValueError("max_drawdown must be nonnegative")
+        if self.max_drawdown_delta < 0:
+            raise ValueError("max_drawdown_delta must be nonnegative")
+
 
 @dataclass(frozen=True)
 class PromotionEvidence:
     clean_common_sessions: int
     independent_completed_ideas: int
-    strategy_claim_event_counts: dict[str, int]
+    strategy_claim_event_counts: Mapping[str, int]
     missing_marks: int
     stale_marks: int
     sessions_aligned: bool
@@ -44,12 +63,69 @@ class PromotionEvidence:
     delayed_fill_excess_return: float
     slippage_20bps_excess_return: float
 
+    def __post_init__(self) -> None:
+        for field in (
+            "clean_common_sessions",
+            "independent_completed_ideas",
+            "missing_marks",
+            "stale_marks",
+            "classified_strategy_count",
+            "winning_strategies",
+        ):
+            _require_nonnegative_int(field, getattr(self, field))
+        if not isinstance(self.strategy_claim_event_counts, Mapping):
+            raise ValueError("strategy_claim_event_counts must be a mapping")
+        frozen_counts: dict[str, int] = {}
+        for strategy, count in self.strategy_claim_event_counts.items():
+            if not isinstance(strategy, str) or not strategy:
+                raise ValueError("strategy claim strategy must be a nonempty string")
+            _require_nonnegative_int("strategy claim event count", count)
+            frozen_counts[strategy] = count
+        object.__setattr__(
+            self, "strategy_claim_event_counts", MappingProxyType(frozen_counts)
+        )
+        for field in (
+            "sessions_aligned",
+            "stable_epoch_hashes",
+            "crosses_invalid_boundary",
+            "cost_categories_present",
+            "risk_limit_breach",
+        ):
+            if type(getattr(self, field)) is not bool:
+                raise ValueError(f"{field} must be a bool")
+        for field in (
+            "matched_excess_return",
+            "candidate_max_drawdown",
+            "baseline_max_drawdown",
+            "delayed_fill_excess_return",
+            "slippage_20bps_excess_return",
+        ):
+            _require_finite_real(field, getattr(self, field))
+        if self.candidate_max_drawdown > 0:
+            raise ValueError("candidate_max_drawdown must be nonpositive")
+        if self.baseline_max_drawdown > 0:
+            raise ValueError("baseline_max_drawdown must be nonpositive")
+
 
 @dataclass(frozen=True)
 class PromotionDecision:
     status: PromotionDecisionStatus
     reasons: tuple[str, ...]
     research_review_ready: bool
+
+
+def _require_nonnegative_int(field: str, value: object) -> None:
+    if type(value) is not int:
+        raise ValueError(f"{field} must be an int")
+    if value < 0:
+        raise ValueError(f"{field} must be nonnegative")
+
+
+def _require_finite_real(field: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{field} must be a finite real number")
+    if not isfinite(value):
+        raise ValueError(f"{field} must be finite")
 
 
 class PromotionEvaluator:
@@ -59,6 +135,8 @@ class PromotionEvaluator:
         self.policy = policy or PromotionPolicy()
 
     def evaluate(self, evidence: PromotionEvidence) -> PromotionDecision:
+        if not isinstance(evidence, PromotionEvidence):
+            raise TypeError("evidence must be PromotionEvidence")
         failures: list[str] = []
         if evidence.missing_marks or evidence.stale_marks:
             failures.append("missing_or_stale_marks")
