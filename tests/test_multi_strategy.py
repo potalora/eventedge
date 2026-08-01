@@ -616,8 +616,8 @@ class TestPortfolioCommittee:
 class TestTwoPhaseEngine:
     """Integration tests for the two-phase architecture."""
 
-    def test_learning_loop_not_triggered_without_history(self):
-        """Learning loop should not trigger when there's no history."""
+    def test_learning_loop_is_disabled_without_reading_history(self):
+        """Production learning refuses before reading history or writing state."""
         from tradingagents.strategies.orchestration.multi_strategy_engine import (
             MultiStrategyEngine,
         )
@@ -640,11 +640,8 @@ class TestTwoPhaseEngine:
                 AssertionError("learning triggers must not read legacy paper trades")
             )
 
-            result = engine.run_learning_loop()
-            assert (
-                result.get("triggered") is False
-                or result.get("strategies_evaluated", 0) == 0
-            )
+            with pytest.raises(RuntimeError, match="production learning is disabled"):
+                engine.run_learning_loop()
 
 
 # ---------------------------------------------------------------------------
@@ -1153,19 +1150,19 @@ class TestStrategyConfidence:
         # 50% hit rate: (0.5 - 0.3) / 0.4 * 0.7 + 0.2 = 0.55
         assert conf == pytest.approx(0.55)
 
-    def test_adaptive_flag_uses_journal(self, tmp_path):
-        """Engine with adaptive_confidence=True uses journal."""
+    def test_adaptive_flag_is_rejected(self, tmp_path):
+        """Production engines cannot enable adaptive confidence."""
         from tradingagents.strategies.orchestration.multi_strategy_engine import (
             MultiStrategyEngine,
         )
         from tradingagents.strategies.modules import get_paper_trade_strategies
 
-        engine = MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            strategies=get_paper_trade_strategies(),
-            adaptive_confidence=True,
-        )
-        assert engine._adaptive_confidence is True
+        with pytest.raises(ValueError, match="production learning is disabled"):
+            MultiStrategyEngine(
+                config={"autoresearch": {"state_dir": str(tmp_path)}},
+                strategies=get_paper_trade_strategies(),
+                adaptive_confidence=True,
+            )
 
     def test_non_adaptive_flag_uses_fixed(self, tmp_path):
         """Engine with adaptive_confidence=False uses 0.5."""

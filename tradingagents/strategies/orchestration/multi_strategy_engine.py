@@ -242,6 +242,10 @@ class MultiStrategyEngine:
         ledger: PortfolioLedger | None = None,
         outcome_reader: Callable[[str], Iterable[OutcomeRecord]] | None = None,
     ):
+        if adaptive_confidence:
+            raise ValueError(
+                "production learning is disabled; adaptive_confidence=True is rejected"
+            )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
 
@@ -854,86 +858,8 @@ class MultiStrategyEngine:
         return exit_specs, cancellations
 
     def run_learning_loop(self) -> dict:
-        """Evaluate governed outcome diagnostics and optimize prompts."""
-        outcomes_by_strategy = {
-            strategy.name: self._read_strategy_outcomes(strategy.name)
-            for strategy in self.paper_trade_strategies
-        }
-        if not self._should_trigger_learning_loop(outcomes_by_strategy):
-            return {"triggered": False, "strategies_evaluated": 0}
-
-        scores: dict[str, float | None] = {}
-        trade_counts: dict[str, int] = {}
-
-        for strategy in self.paper_trade_strategies:
-            accuracy = directional_accuracy(outcomes_by_strategy[strategy.name])
-            trade_counts[strategy.name] = accuracy.actionable_count
-            scores[strategy.name] = accuracy.rate
-
-        # ------------------------------------------------------------------
-        # Prompt optimization (Atlas-GIC inspired)
-        # ------------------------------------------------------------------
-        prompt_optimization_result: dict[str, Any] = {}
-        if self._analyzer:
-            from tradingagents.strategies.learning.prompt_optimizer import (
-                PromptOptimizer,
-            )
-
-            state_dir = self.ar_config.get("state_dir", "data/state")
-            optimizer = PromptOptimizer(state_dir, self._analyzer)
-            all_outcomes = tuple(
-                outcome for rows in outcomes_by_strategy.values() for outcome in rows
-            )
-
-            # Check active trial first
-            trial_id, trial = optimizer.get_active_trial()
-            if trial_id:
-                decision = optimizer.check_trial(trial_id, all_outcomes)
-                if decision in ("keep", "revert"):
-                    optimizer.commit_or_revert(trial_id, decision)
-                    prompt_optimization_result["trial_completed"] = {
-                        "trial_id": trial_id,
-                        "decision": decision,
-                    }
-                else:
-                    prompt_optimization_result["trial_ongoing"] = trial_id
-            else:
-                # No active trial — evaluate and potentially start one
-                prompt_scores = optimizer.evaluate_prompts(outcomes_by_strategy)
-                worst = optimizer.identify_worst_prompt(prompt_scores)
-                if worst:
-                    current_prompt = self._analyzer.get_prompt(worst)
-                    failures = self._journal.get_high_conviction_failures(
-                        worst, limit=10
-                    )
-                    if failures:
-                        new_prompt = optimizer.propose_modification(
-                            worst, current_prompt, failures
-                        )
-                        if new_prompt != current_prompt:
-                            new_trial_id = optimizer.start_trial(worst, new_prompt)
-                            prompt_optimization_result["trial_started"] = {
-                                "trial_id": new_trial_id,
-                                "strategy": worst,
-                            }
-                prompt_optimization_result["prompt_scores"] = {
-                    k: {"hit_rate": v["hit_rate"], "n_signals": v["n_signals"]}
-                    for k, v in prompt_scores.items()
-                }
-
-        # Update learning loop state
-        ll_state = self.state.load_learning_loop_state()
-        ll_state["last_run"] = datetime.now().isoformat()
-        ll_state["strategies_evaluated"] = list(scores.keys())
-        self.state.save_learning_loop_state(ll_state)
-
-        return {
-            "triggered": True,
-            "strategies_evaluated": len(scores),
-            "scores": scores,
-            "trade_counts": trade_counts,
-            "prompt_optimization": prompt_optimization_result,
-        }
+        """Refuse retired production learning before any state mutation."""
+        raise RuntimeError("production learning is disabled; no state was changed")
 
     # ------------------------------------------------------------------
     # Strategy confidence

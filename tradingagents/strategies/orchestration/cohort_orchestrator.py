@@ -279,6 +279,11 @@ class CohortOrchestrator:
             raise ValueError("cohort names must be non-empty text")
         if len(set(cohort_names)) != len(cohort_names):
             raise ValueError("duplicate cohort name")
+        for cfg in cohort_configs:
+            if type(cfg.learning_policy) is not LearningPolicy:
+                raise ValueError("cohort learning_policy must be exactly LearningPolicy")
+            if cfg.learning_policy.mode != "disabled":
+                raise ValueError("cohort learning_policy mode must be disabled")
         configured_policy_id = (
             base_config.get("autoresearch", {}).get("paper_ledger", {}).get("policy_id")
         )
@@ -307,8 +312,6 @@ class CohortOrchestrator:
         self._metric_store = metric_store
 
         for cfg in cohort_configs:
-            if not isinstance(cfg.learning_policy, LearningPolicy):
-                raise ValueError("cohort learning_policy must be a LearningPolicy")
             cohort_config = copy.deepcopy(base_config)
             cohort_config.setdefault("autoresearch", {})["state_dir"] = cfg.state_dir
             cohort_config["autoresearch"]["horizon"] = cfg.horizon

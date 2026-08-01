@@ -28,7 +28,7 @@ from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.learning.signal_journal import SignalJournal
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.metrics.models import OutcomeRecord, SignalMetricRecord
-from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
+from tradingagents.strategies.metrics.outcomes import OutcomeCalculator, directional_accuracy
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules.base import Candidate
 
@@ -284,33 +284,14 @@ class TestLearningLoop:
             invalid_reason="",
         )
 
-    def test_learning_loop_uses_governed_directional_accuracy(self, tmp_path):
-        """Learning diagnostics never derive a local Sharpe from paper trades."""
-        state_dir = str(tmp_path / "learn")
+    def test_directional_accuracy_uses_governed_outcomes(self, tmp_path):
+        """The learning diagnostic formula remains a pure v2 outcome calculation."""
         outcomes = tuple(self._outcome(index, hit=index < 2) for index in range(3))
-        calls: list[str] = []
 
-        def outcome_reader(strategy: str):
-            calls.append(strategy)
-            return outcomes if strategy == "fake_strat" else ()
+        accuracy = directional_accuracy(outcomes)
 
-        engine, state = self._build_engine(
-            state_dir,
-            outcome_reader=outcome_reader,
-        )
-
-        # Force learning loop to trigger
-        state.save_learning_loop_state({"last_run": "2020-01-01T00:00:00"})
-        state.load_paper_trades = lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("legacy paper trades must not be read")
-        )
-
-        result = engine.run_learning_loop()
-        assert result["triggered"] is True
-        assert result["scores"]["fake_strat"] == pytest.approx(2 / 3)
-        assert result["scores"]["fake_strat_2"] is None
-        assert result["trade_counts"] == {"fake_strat": 3, "fake_strat_2": 0}
-        assert calls == ["fake_strat", "fake_strat_2"]
+        assert accuracy.rate == pytest.approx(2 / 3)
+        assert accuracy.actionable_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +337,6 @@ class TestAdaptiveConfidence:
             strategies=[FakeStrategy()],
             state_manager=state,
             use_llm=False,
-            adaptive_confidence=True,
             outcome_reader=lambda strategy: (
                 outcomes if strategy == "fake_strat" else ()
             ),
@@ -365,8 +345,6 @@ class TestAdaptiveConfidence:
         conf = engine._compute_strategy_confidence("fake_strat")
         assert conf > 0.5  # 80% hit rate should give above-average confidence
 
-        # The foundation trial forces adaptive behavior off.
-        engine._adaptive_confidence = False
         assert engine._adaptive_confidence is False
 
 

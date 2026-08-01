@@ -67,6 +67,67 @@ def test_generation_manager_learning_refuses_without_subprocess(
     assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
 
 
+def test_engine_rejects_adaptive_confidence_before_state_creation(tmp_path) -> None:
+    from tradingagents.strategies.orchestration.multi_strategy_engine import (
+        MultiStrategyEngine,
+    )
+
+    with pytest.raises(ValueError, match="production learning is disabled"):
+        MultiStrategyEngine(
+            config={"autoresearch": {"state_dir": str(tmp_path)}},
+            adaptive_confidence=True,
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_engine_learning_loop_refuses_without_state_mutation(tmp_path) -> None:
+    from tradingagents.strategies.orchestration.multi_strategy_engine import (
+        MultiStrategyEngine,
+    )
+
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}}, strategies=[]
+    )
+    before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+
+    with pytest.raises(RuntimeError, match="production learning is disabled"):
+        engine.run_learning_loop()
+
+    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
+
+
+def test_subclassed_learning_policy_is_rejected_before_state_creation(tmp_path) -> None:
+    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        CohortConfig,
+        CohortOrchestrator,
+    )
+
+    class BypassPolicy(LearningPolicy):
+        pass
+
+    config = CohortConfig(
+        "cohort",
+        str(tmp_path / "cohort"),
+        "30d",
+        "5k",
+        use_llm=False,
+        learning_policy=BypassPolicy(),
+    )
+    with pytest.raises(ValueError, match="exactly LearningPolicy"):
+        CohortOrchestrator(
+            [config],
+            {
+                "execution": {"mode": "paper"},
+                "autoresearch": {"state_dir": str(tmp_path)},
+            },
+            generation_id="gen_test",
+            generation_commit="commit",
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_cohort_orchestrator_has_no_production_learning_path() -> None:
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         CohortOrchestrator,
