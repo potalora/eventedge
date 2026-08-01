@@ -9,6 +9,7 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
     SIZE_PROFILES,
 )
 from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicy,
     PortfolioPolicyConfig,
     PolicyPosition,
     PortfolioRiskContext,
@@ -256,7 +257,413 @@ def test_policy_config_factory_uses_every_profile_limit(size: str) -> None:
     assert config.max_position_risk_contribution_pct == (
         profile.max_position_risk_contribution_pct
     )
+    assert config.max_correlated_shorts == profile.max_correlated_shorts
     assert config.congressional_exposure_pct == settings[
         "congressional_exposure_by_size"
     ][size]
     assert config.version == settings["version"]
+
+
+def _position(
+    ticker: str,
+    weight: float,
+    *,
+    direction: str = "long",
+    sector: str = "Diversified",
+    strategies: tuple[str, ...] = ("existing",),
+    risks: tuple[str, ...] = ("existing-risk",),
+    volatility: float = 0.15,
+) -> PolicyPosition:
+    return PolicyPosition(
+        ticker=ticker,
+        direction=direction,
+        weight=weight,
+        sector=sector,
+        strategy_tags=strategies,
+        risk_tags=risks,
+        annualized_volatility=volatility,
+    )
+
+
+def _context(
+    *,
+    size: str = "100k",
+    positions: tuple[PolicyPosition, ...] = (),
+    pending: tuple[PolicyPosition, ...] = (),
+    cash: float = 100_000.0,
+    sectors: dict[str, str] | None = None,
+    volatility: dict[str, float] | None = None,
+    borrow_available: dict[str, bool] | None = None,
+    margin_used: float = 0.0,
+    consumed_event_keys: frozenset[str] = frozenset(),
+) -> PortfolioRiskContext:
+    return PortfolioRiskContext(
+        portfolio_value=100_000.0,
+        cash=cash,
+        positions=positions,
+        pending_positions=pending,
+        sectors=sectors or {},
+        annualized_volatility=volatility or {},
+        earnings_dates={},
+        short_interest={},
+        borrow_available=borrow_available or {},
+        margin_used=margin_used,
+        consumed_event_keys=consumed_event_keys,
+        config=_policy_config(size),
+    )
+
+
+def _recommendation(
+    ticker: str,
+    weight: float,
+    *,
+    direction: str = "long",
+    strategies: tuple[str, ...] = ("new-strategy",),
+    risks: tuple[str, ...] = ("new-risk",),
+    event_key: str | None = None,
+    journal_only: bool = False,
+) -> TradeRecommendation:
+    return TradeRecommendation(
+        ticker=ticker,
+        direction=direction,
+        position_size_pct=weight,
+        confidence=0.8,
+        rationale="test",
+        event_key=event_key or f"event:{ticker}",
+        strategy_tags=strategies,
+        risk_tags=risks,
+        journal_only=journal_only,
+    )
+
+
+def test_policy_counts_full_weight_against_every_strategy_tag() -> None:
+    existing = _position(
+        "AAPL",
+        0.18,
+        sector="Consumer",
+        strategies=("earnings_call", "filing_analysis"),
+        risks=("old-risk",),
+    )
+    recommendation = _recommendation(
+        "MSFT",
+        0.08,
+        strategies=("earnings_call", "filing_analysis"),
+        risks=("new-risk",),
+    )
+
+    accepted = PortfolioPolicy().apply(
+        [recommendation],
+        _context(positions=(existing,), sectors={"MSFT": "Technology"}),
+    )
+
+    assert [item.position_size_pct for item in accepted] == pytest.approx([0.02])
+
+
+def test_policy_applies_event_cluster_cap_independently() -> None:
+    existing = _position(
+        "AAPL",
+        0.09,
+        sector="Consumer",
+        strategies=("old-strategy",),
+        risks=("cluster:q2",),
+    )
+    recommendation = _recommendation(
+        "MSFT",
+        0.08,
+        strategies=("new-strategy",),
+        risks=("cluster:q2",),
+    )
+
+    accepted = PortfolioPolicy().apply(
+        [recommendation],
+        _context(positions=(existing,), sectors={"MSFT": "Technology"}),
+    )
+
+    assert [item.position_size_pct for item in accepted] == pytest.approx([0.01])
+
+
+def test_policy_applies_congressional_cap_independently() -> None:
+    existing = _position(
+        "AAPL",
+        0.10,
+        sector="Consumer",
+        strategies=("congressional_trades",),
+        risks=("member:old",),
+    )
+    recommendation = _recommendation(
+        "MSFT",
+        0.08,
+        strategies=("congressional_trades",),
+        risks=("member:new",),
+    )
+
+    accepted = PortfolioPolicy().apply(
+        [recommendation],
+        _context(positions=(existing,), sectors={"MSFT": "Technology"}),
+    )
+
+    assert [item.position_size_pct for item in accepted] == pytest.approx([0.02])
+
+
+def test_policy_counts_current_pending_and_prior_acceptances_in_order() -> None:
+    current = _position(
+        "AAPL",
+        0.04,
+        sector="Consumer",
+        strategies=("shared",),
+        risks=("risk:a",),
+    )
+    pending = _position(
+        "MSFT",
+        0.04,
+        sector="Technology",
+        strategies=("shared",),
+        risks=("risk:m",),
+    )
+    recommendations = [
+        _recommendation(
+            "JNJ", 0.08, strategies=("shared",), risks=("risk:j",)
+        ),
+        _recommendation(
+            "XOM", 0.08, strategies=("shared",), risks=("risk:x",)
+        ),
+    ]
+
+    accepted = PortfolioPolicy().apply(
+        recommendations,
+        _context(
+            positions=(current,),
+            pending=(pending,),
+            sectors={"JNJ": "Healthcare", "XOM": "Energy"},
+        ),
+    )
+
+    assert [item.ticker for item in accepted] == ["JNJ", "XOM"]
+    assert [item.position_size_pct for item in accepted] == pytest.approx(
+        [0.08, 0.04]
+    )
+
+
+def test_position_risk_contribution_waits_for_four_positions_then_caps() -> None:
+    positions = tuple(
+        _position(
+            f"T{i}",
+            0.05,
+            sector=f"Sector-{i}",
+            strategies=(f"strategy-{i}",),
+            risks=(f"risk-{i}",),
+            volatility=0.05,
+        )
+        for i in range(3)
+    )
+    recommendation = _recommendation("MSFT", 0.08)
+    before_activation = PortfolioPolicy().apply(
+        [recommendation],
+        _context(
+            positions=positions[:2],
+            sectors={"MSFT": "Technology"},
+            volatility={"MSFT": 0.60},
+        ),
+    )
+    after_activation = PortfolioPolicy().apply(
+        [recommendation],
+        _context(
+            positions=positions,
+            sectors={"MSFT": "Technology"},
+            volatility={"MSFT": 0.60},
+        ),
+    )
+
+    assert before_activation[0].position_size_pct == pytest.approx(0.08)
+    accepted_weight = after_activation[0].position_size_pct
+    base_risk = 3 * 0.05 * 0.15
+    candidate_risk = accepted_weight * 0.60
+    assert candidate_risk / (candidate_risk + base_risk) <= 0.25 + 1e-9
+    assert accepted_weight == pytest.approx(0.0125)
+
+
+@pytest.mark.parametrize("location", ["current", "pending"])
+def test_policy_rejects_duplicate_ticker_from_entire_book(location: str) -> None:
+    duplicate = _position("MSFT", 0.02)
+    positions = (duplicate,) if location == "current" else ()
+    pending = (duplicate,) if location == "pending" else ()
+
+    valid, reason = PortfolioPolicy().validate(
+        _recommendation("MSFT", 0.01),
+        _context(positions=positions, pending=pending),
+    )
+
+    assert (valid, reason) == (False, "duplicate_ticker")
+
+
+def test_policy_rejects_journal_only_recommendation() -> None:
+    recommendation = _recommendation("MSFT", 0.01, journal_only=True)
+    policy = PortfolioPolicy()
+
+    assert policy.apply([recommendation], _context()) == []
+    assert policy.validate(recommendation, _context()) == (False, "journal_only")
+
+
+def test_policy_rejects_consumed_event() -> None:
+    recommendation = _recommendation("MSFT", 0.01, event_key="event:used")
+
+    assert PortfolioPolicy().validate(
+        recommendation,
+        _context(consumed_event_keys=frozenset({"event:used"})),
+    ) == (False, "consumed_event")
+
+
+def test_policy_rejects_when_profile_max_positions_is_reached() -> None:
+    positions = tuple(
+        _position(
+            f"T{i}",
+            0.01,
+            sector=f"Sector-{i}",
+            strategies=(f"strategy-{i}",),
+            risks=(f"risk-{i}",),
+        )
+        for i in range(SIZE_PROFILES["5k"].max_positions)
+    )
+
+    assert PortfolioPolicy().validate(
+        _recommendation("MSFT", 0.01),
+        _context(size="5k", positions=positions),
+    ) == (False, "max_positions")
+
+
+def test_policy_scales_to_position_cap_and_validate_returns_stable_reason() -> None:
+    recommendation = _recommendation("MSFT", 0.12)
+    policy = PortfolioPolicy()
+
+    accepted = policy.apply([recommendation], _context())
+
+    assert accepted[0].position_size_pct == pytest.approx(0.08)
+    assert policy.validate(recommendation, _context()) == (False, "max_position")
+
+
+def test_policy_scales_to_sector_cap() -> None:
+    existing = _position("AAPL", 0.23, sector="Technology")
+
+    accepted = PortfolioPolicy().apply(
+        [_recommendation("MSFT", 0.08)],
+        _context(positions=(existing,), sectors={"MSFT": "Technology"}),
+    )
+
+    assert accepted[0].position_size_pct == pytest.approx(0.02)
+
+
+def test_policy_scales_single_short_to_profile_cap() -> None:
+    recommendation = _recommendation("MSFT", 0.08, direction="short")
+
+    accepted = PortfolioPolicy().apply(
+        [recommendation],
+        _context(
+            sectors={"MSFT": "Technology"},
+            borrow_available={"MSFT": True},
+        ),
+    )
+
+    assert accepted[0].position_size_pct == pytest.approx(0.05)
+
+
+def test_policy_scales_to_total_short_cap() -> None:
+    positions = tuple(
+        _position(
+            f"S{i}",
+            0.045,
+            direction="short",
+            sector=f"Sector-{i}",
+            strategies=(f"strategy-{i}",),
+            risks=(f"risk-{i}",),
+        )
+        for i in range(4)
+    )
+    recommendation = _recommendation("MSFT", 0.05, direction="short")
+
+    accepted = PortfolioPolicy().apply(
+        [recommendation],
+        _context(
+            positions=positions,
+            sectors={"MSFT": "Technology"},
+            borrow_available={"MSFT": True},
+        ),
+    )
+
+    assert accepted[0].position_size_pct == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("sector", ["Technology", "Unknown"])
+def test_policy_rejects_correlated_short_count_for_known_and_unknown_sectors(
+    sector: str,
+) -> None:
+    current = _position("AAPL", 0.02, direction="short", sector=sector)
+    pending = _position("NVDA", 0.02, direction="short", sector=sector)
+    sectors = {"MSFT": sector} if sector != "Unknown" else {}
+
+    assert PortfolioPolicy().validate(
+        _recommendation("MSFT", 0.02, direction="short"),
+        _context(
+            size="50k",
+            positions=(current,),
+            pending=(pending,),
+            sectors=sectors,
+            borrow_available={"MSFT": True},
+        ),
+    ) == (False, "max_correlated_shorts")
+
+
+@pytest.mark.parametrize("borrow_available", [{}, {"MSFT": False}])
+def test_policy_rejects_short_when_borrow_is_unknown_or_unavailable(
+    borrow_available: dict[str, bool],
+) -> None:
+    assert PortfolioPolicy().validate(
+        _recommendation("MSFT", 0.02, direction="short"),
+        _context(
+            sectors={"MSFT": "Technology"},
+            borrow_available=borrow_available,
+        ),
+    ) == (False, "borrow_unavailable")
+
+
+def test_policy_reserves_pending_long_notional_and_cash_floor() -> None:
+    pending = _position("AAPL", 0.10, sector="Consumer")
+
+    accepted = PortfolioPolicy().apply(
+        [_recommendation("MSFT", 0.08)],
+        _context(
+            pending=(pending,),
+            cash=30_000.0,
+            sectors={"MSFT": "Technology"},
+        ),
+    )
+
+    assert accepted[0].position_size_pct == pytest.approx(0.05)
+
+
+def test_policy_reserves_pending_short_margin_and_cash_buffer() -> None:
+    pending = _position(
+        "AAPL", 0.04, direction="short", sector="Consumer"
+    )
+
+    accepted = PortfolioPolicy().apply(
+        [_recommendation("MSFT", 0.05, direction="short")],
+        _context(
+            pending=(pending,),
+            cash=27_000.0,
+            sectors={"MSFT": "Technology"},
+            borrow_available={"MSFT": True},
+            margin_used=5_000.0,
+        ),
+    )
+
+    assert accepted[0].position_size_pct == pytest.approx(0.03)
+
+
+def test_policy_uses_deterministic_reason_priority_when_caps_tie() -> None:
+    existing = _position("AAPL", 0.17, sector="Technology")
+    recommendation = _recommendation("MSFT", 0.09)
+
+    assert PortfolioPolicy().validate(
+        recommendation,
+        _context(positions=(existing,), sectors={"MSFT": "Technology"}),
+    ) == (False, "max_position")

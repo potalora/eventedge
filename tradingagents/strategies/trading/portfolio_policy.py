@@ -7,12 +7,18 @@ only to calculate historical volatility.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from collections import defaultdict
+from dataclasses import dataclass, fields, replace
 from math import sqrt
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from tradingagents.strategies.trading.portfolio_committee import (
+        TradeRecommendation,
+    )
 
 
 _PORTFOLIO_POLICY_FACTORY_TOKEN = object()
@@ -54,6 +60,7 @@ class PortfolioPolicyConfig:
     risk_contribution_min_positions: int
     max_short_exposure_pct: float
     max_single_short_pct: float
+    max_correlated_shorts: int
     cash_reserve_pct: float
     margin_cash_buffer_pct: float
     volatility_lookback_sessions: int
@@ -120,6 +127,7 @@ class PortfolioPolicyConfig:
                 ),
                 max_short_exposure_pct=float(profile.max_short_exposure_pct),
                 max_single_short_pct=float(profile.max_single_short_pct),
+                max_correlated_shorts=int(profile.max_correlated_shorts),
                 cash_reserve_pct=float(profile.cash_reserve_pct),
                 margin_cash_buffer_pct=float(profile.margin_cash_buffer_pct),
                 volatility_lookback_sessions=int(
@@ -276,3 +284,230 @@ def build_portfolio_risk_context(
         consumed_event_keys=frozenset(str(key) for key in consumed_event_keys),
         config=config,
     )
+
+
+class PortfolioPolicy:
+    """Apply deterministic portfolio constraints to a prospective book."""
+
+    _EPSILON = 1e-9
+
+    def apply(
+        self,
+        recommendations: list["TradeRecommendation"],
+        context: PortfolioRiskContext,
+    ) -> list["TradeRecommendation"]:
+        """Scale or reject recommendations sequentially in their ranked order."""
+        accepted: list["TradeRecommendation"] = []
+        working = context
+        for recommendation in recommendations:
+            allowed, _ = self._max_allowed_weight(recommendation, working)
+            weight = min(float(recommendation.position_size_pct), allowed)
+            if weight <= self._EPSILON:
+                continue
+            constrained = replace(
+                recommendation,
+                position_size_pct=round(weight, 8),
+            )
+            accepted.append(constrained)
+            working = self._with_pending(working, constrained)
+        return accepted
+
+    def validate(
+        self,
+        recommendation: "TradeRecommendation",
+        context: PortfolioRiskContext,
+    ) -> tuple[bool, str]:
+        """Return whether a recommendation fits without policy scaling."""
+        allowed, reason = self._max_allowed_weight(recommendation, context)
+        if recommendation.position_size_pct <= allowed + self._EPSILON:
+            return True, ""
+        return False, reason
+
+    def _max_allowed_weight(
+        self,
+        recommendation: "TradeRecommendation",
+        context: PortfolioRiskContext,
+    ) -> tuple[float, str]:
+        cfg = context.config
+        book = context.positions + context.pending_positions
+
+        if recommendation.journal_only:
+            return 0.0, "journal_only"
+        if any(position.ticker == recommendation.ticker for position in book):
+            return 0.0, "duplicate_ticker"
+        if recommendation.event_key in context.consumed_event_keys:
+            return 0.0, "consumed_event"
+        if len(book) >= cfg.max_positions:
+            return 0.0, "max_positions"
+
+        sector = self._sector(context.sectors.get(recommendation.ticker))
+        strategy_tags = recommendation.strategy_tags or tuple(
+            recommendation.contributing_strategies
+        )
+        risk_tags = recommendation.risk_tags
+
+        strategy_exposure: defaultdict[str, float] = defaultdict(float)
+        risk_exposure: defaultdict[str, float] = defaultdict(float)
+        sector_exposure: defaultdict[str, float] = defaultdict(float)
+        short_exposure = 0.0
+        for position in book:
+            weight = abs(position.weight)
+            sector_exposure[self._sector(position.sector)] += weight
+            if position.direction == "short":
+                short_exposure += weight
+            for tag in position.strategy_tags:
+                strategy_exposure[tag] += weight
+            for tag in position.risk_tags:
+                risk_exposure[tag] += weight
+
+        caps: list[tuple[float, str]] = [
+            (cfg.max_position_pct, "max_position"),
+            (
+                cfg.max_sector_exposure_pct - sector_exposure[sector],
+                "max_sector_exposure",
+            ),
+        ]
+        for tag in strategy_tags:
+            cap = (
+                cfg.congressional_exposure_pct
+                if tag == "congressional_trades"
+                else cfg.max_strategy_exposure_pct
+            )
+            caps.append((cap - strategy_exposure[tag], f"strategy:{tag}"))
+        for tag in risk_tags:
+            caps.append(
+                (
+                    cfg.max_event_cluster_exposure_pct - risk_exposure[tag],
+                    f"risk_tag:{tag}",
+                )
+            )
+
+        if recommendation.direction == "long":
+            pending_long_notional = sum(
+                abs(position.weight) * context.portfolio_value
+                for position in context.pending_positions
+                if position.direction == "long"
+            )
+            reserved_cash = cfg.cash_reserve_pct * context.portfolio_value
+            caps.append(
+                (
+                    (
+                        context.cash
+                        - pending_long_notional
+                        - reserved_cash
+                    )
+                    / context.portfolio_value,
+                    "cash_reserve",
+                )
+            )
+
+        if recommendation.direction == "short":
+            if context.borrow_available.get(recommendation.ticker) is not True:
+                return 0.0, "borrow_unavailable"
+
+            correlated_shorts = sum(
+                1
+                for position in book
+                if position.direction == "short"
+                and self._sector(position.sector) == sector
+            )
+            if correlated_shorts >= cfg.max_correlated_shorts:
+                return 0.0, "max_correlated_shorts"
+
+            pending_short_notional = sum(
+                abs(position.weight) * context.portfolio_value
+                for position in context.pending_positions
+                if position.direction == "short"
+            )
+            margin_buffer = (
+                cfg.margin_cash_buffer_pct * context.portfolio_value
+            )
+            caps.extend(
+                [
+                    (cfg.max_single_short_pct, "max_single_short"),
+                    (
+                        cfg.max_short_exposure_pct - short_exposure,
+                        "max_short_exposure",
+                    ),
+                    (
+                        (
+                            context.cash
+                            - context.margin_used
+                            - pending_short_notional
+                            - margin_buffer
+                        )
+                        / context.portfolio_value,
+                        "margin_cash_buffer",
+                    ),
+                ]
+            )
+
+        prospective_count = len(book) + 1
+        if prospective_count >= cfg.risk_contribution_min_positions:
+            candidate_volatility = max(
+                context.annualized_volatility.get(
+                    recommendation.ticker,
+                    cfg.annualized_volatility_floor,
+                ),
+                cfg.annualized_volatility_floor,
+            )
+            base_risk = sum(
+                abs(position.weight)
+                * max(
+                    position.annualized_volatility,
+                    cfg.annualized_volatility_floor,
+                )
+                for position in book
+            )
+            contribution_cap = cfg.max_position_risk_contribution_pct
+            risk_weight_cap = (
+                contribution_cap
+                * base_risk
+                / (candidate_volatility * (1.0 - contribution_cap))
+                if candidate_volatility > 0 and contribution_cap < 1.0
+                else cfg.max_position_pct
+            )
+            caps.append((risk_weight_cap, "max_risk_contribution"))
+
+        allowed = min(cap for cap, _ in caps)
+        reason = next(
+            reason
+            for cap, reason in caps
+            if cap <= allowed + self._EPSILON
+        )
+        return max(0.0, allowed), reason
+
+    def _with_pending(
+        self,
+        context: PortfolioRiskContext,
+        recommendation: "TradeRecommendation",
+    ) -> PortfolioRiskContext:
+        cfg = context.config
+        position = PolicyPosition(
+            ticker=recommendation.ticker,
+            direction=recommendation.direction,
+            weight=abs(recommendation.position_size_pct),
+            sector=self._sector(context.sectors.get(recommendation.ticker)),
+            strategy_tags=recommendation.strategy_tags
+            or tuple(recommendation.contributing_strategies),
+            risk_tags=recommendation.risk_tags,
+            annualized_volatility=max(
+                context.annualized_volatility.get(
+                    recommendation.ticker,
+                    cfg.annualized_volatility_floor,
+                ),
+                cfg.annualized_volatility_floor,
+            ),
+        )
+        return replace(
+            context,
+            pending_positions=context.pending_positions + (position,),
+        )
+
+    @staticmethod
+    def _sector(value: object) -> str:
+        """Normalize all missing/unknown sector values into one group."""
+        sector = str(value).strip() if value is not None else ""
+        if not sector or sector.casefold() == "unknown":
+            return "Unknown"
+        return sector
