@@ -168,16 +168,20 @@ def daily_net_returns(
     return tuple(output)
 
 
-def _benchmark_map(
+BenchmarkMap = dict[tuple[str, date], BenchmarkObservation]
+BenchmarkIndex = dict[str, BenchmarkMap]
+
+
+def _benchmark_index(
     observations: Iterable[BenchmarkObservation],
     *,
     cohort_id: str,
-    epoch_id: str,
+    epoch_ids: set[str],
     calendar: XNYSCalendar,
-) -> dict[tuple[str, date], BenchmarkObservation]:
-    output: dict[tuple[str, date], BenchmarkObservation] = {}
+) -> BenchmarkIndex:
+    output: BenchmarkIndex = {epoch_id: {} for epoch_id in epoch_ids}
     for row in observations:
-        if row.cohort_id != cohort_id or row.epoch_id != epoch_id:
+        if row.cohort_id != cohort_id or row.epoch_id not in epoch_ids:
             continue
         if row.symbol not in {"SPY", "BIL"}:
             continue
@@ -186,17 +190,18 @@ def _benchmark_map(
         if row.observed_at.tzinfo is None or row.observed_at.utcoffset() is None:
             raise ValueError("benchmark observation timestamp must be timezone-aware")
         key = (row.symbol, row.session)
-        if key in output:
+        epoch_rows = output[row.epoch_id]
+        if key in epoch_rows:
             raise ValueError(
                 f"duplicate benchmark observation for {row.symbol}/{row.session}"
             )
         if not row.valid:
-            output[key] = row
+            epoch_rows[key] = row
             continue
         if row.return_basis != "total_return_adjusted":
             raise ValueError("benchmark must be total_return_adjusted")
         _finite(row.close, name="benchmark close", positive=True)
-        output[key] = row
+        epoch_rows[key] = row
     return output
 
 
@@ -210,18 +215,21 @@ def matched_benchmark_returns(
     if not rows:
         return ()
     cohort_id = rows[0].cohort_id
-    observation_rows = tuple(observations)
-    benchmark_by_epoch = {
-        epoch_id: _benchmark_map(
-            observation_rows,
-            cohort_id=cohort_id,
-            epoch_id=epoch_id,
-            calendar=session_calendar,
-        )
-        for epoch_id in {row.epoch_id for row in rows}
-    }
+    benchmark_by_epoch = _benchmark_index(
+        observations,
+        cohort_id=cohort_id,
+        epoch_ids={row.epoch_id for row in rows},
+        calendar=session_calendar,
+    )
+    return _matched_benchmark_returns(rows, benchmark_by_epoch, session_calendar)
+
+
+def _matched_benchmark_returns(
+    rows: Sequence[AccountSnapshot],
+    benchmark_by_epoch: BenchmarkIndex,
+    calendar: XNYSCalendar,
+) -> tuple[DatedReturn, ...]:
     output: list[DatedReturn] = []
-    # Mapping is deliberately keyed by cohort + epoch before a pair is examined.
     for previous, current in zip(rows, rows[1:]):
         if (
             not previous.valid
@@ -231,11 +239,11 @@ def matched_benchmark_returns(
             continue
         _valid_snapshot(previous)
         _valid_snapshot(current)
-        if not session_calendar.is_session(
-            previous.session
-        ) or not session_calendar.is_session(current.session):
+        if not calendar.is_session(previous.session) or not calendar.is_session(
+            current.session
+        ):
             raise ValueError("valid snapshots must use XNYS sessions")
-        if session_calendar.next_session(previous.session) != current.session:
+        if calendar.next_session(previous.session) != current.session:
             continue
         benchmarks = benchmark_by_epoch[previous.epoch_id]
         required = (
@@ -272,15 +280,10 @@ def matched_benchmark_returns(
 
 
 def _cash_proxy_returns(
-    observations: Iterable[BenchmarkObservation],
+    rows: BenchmarkMap,
     *,
-    cohort_id: str,
-    epoch_id: str,
     calendar: XNYSCalendar,
 ) -> tuple[DatedReturn, ...]:
-    rows = _benchmark_map(
-        observations, cohort_id=cohort_id, epoch_id=epoch_id, calendar=calendar
-    )
     sessions = sorted(
         session
         for symbol, session in rows
@@ -376,17 +379,21 @@ def portfolio_metrics(
     ]
     rows = _ordered_snapshots(rows)
     _require_full_window(rows, calendar)
-    observation_rows = tuple(benchmark_observations)
+    benchmark_index = _benchmark_index(
+        benchmark_observations,
+        cohort_id=cohort_id,
+        epoch_ids={epoch_id},
+        calendar=calendar,
+    )
+    scoped_benchmarks = benchmark_index[epoch_id]
     book = {row.session: row.value for row in daily_net_returns(rows, calendar)}
     benchmark = {
         row.session: row.value
-        for row in matched_benchmark_returns(rows, observation_rows, calendar)
+        for row in _matched_benchmark_returns(rows, benchmark_index, calendar)
     }
     cash = {
         row.session: row.value
-        for row in _cash_proxy_returns(
-            observation_rows, cohort_id=cohort_id, epoch_id=epoch_id, calendar=calendar
-        )
+        for row in _cash_proxy_returns(scoped_benchmarks, calendar=calendar)
     }
     return_sessions = tuple(row.session for row in rows[1:])
     if set(benchmark) != set(return_sessions) or not set(return_sessions) <= set(cash):
@@ -395,9 +402,6 @@ def portfolio_metrics(
     matched_excess = [book[session] - benchmark[session] for session in common]
     risk_free_excess = [book[session] - cash[session] for session in common]
     latest = rows[-1]
-    scoped_benchmarks = _benchmark_map(
-        observation_rows, cohort_id=cohort_id, epoch_id=epoch_id, calendar=calendar
-    )
     latest_times = [
         row.observed_at
         for (symbol, session), row in scoped_benchmarks.items()

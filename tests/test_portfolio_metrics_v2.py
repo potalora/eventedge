@@ -286,6 +286,50 @@ def test_benchmark_generator_has_same_result_as_list() -> None:
     ) == matched_benchmark_returns(snapshots, observations)
 
 
+def test_multi_epoch_benchmark_observations_are_indexed_once() -> None:
+    class CountingObservation:
+        def __init__(self, row: BenchmarkObservation) -> None:
+            self.row = row
+            self.scope_visits = 0
+
+        @property
+        def cohort_id(self) -> str:
+            self.scope_visits += 1
+            return self.row.cohort_id
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.row, name)
+
+    epoch_sessions = (
+        ("epoch-0", date(2026, 8, 3), date(2026, 8, 4)),
+        ("epoch-1", date(2026, 8, 5), date(2026, 8, 6)),
+        ("epoch-2", date(2026, 8, 7), date(2026, 8, 10)),
+    )
+    snapshots = [
+        _snapshot(session, equity, epoch_id=epoch_id)
+        for epoch_id, previous, current in epoch_sessions
+        for session, equity in ((previous, "100"), (current, "101"))
+    ]
+    observations = [
+        CountingObservation(_observation(session, symbol, close, epoch_id=epoch_id))
+        for epoch_id, previous, current in epoch_sessions
+        for session, spy, bil in (
+            (previous, "100", "100"),
+            (current, "101", "100.1"),
+        )
+        for symbol, close in (("SPY", spy), ("BIL", bil))
+    ]
+
+    result = matched_benchmark_returns(snapshots, observations)  # type: ignore[arg-type]
+
+    assert tuple(row.session for row in result) == (
+        date(2026, 8, 4),
+        date(2026, 8, 6),
+        date(2026, 8, 10),
+    )
+    assert sum(row.scope_visits for row in observations) == len(observations)
+
+
 def test_reconcile_costs_rejects_mismatch() -> None:
     with pytest.raises(ValueError, match="does not reconcile"):
         reconcile_costs(
