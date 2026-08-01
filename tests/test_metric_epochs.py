@@ -14,6 +14,7 @@ from tradingagents.strategies.metrics.epochs import (
     _semantic_hash,
 )
 from tradingagents.strategies.metrics.models import (
+    CriticalGapMarker,
     METRIC_SCHEMA_VERSION,
     MetricEpoch,
     OutcomeRecord,
@@ -90,6 +91,20 @@ def _health(health_id: str = "health-1") -> StrategyHealthRecord:
         status="legitimate_no_event",
         signal_count=0,
         evidence={"provider": "courtlistener", "result_count": 0},
+    )
+
+
+def _critical_gap(status: str = "pending") -> CriticalGapMarker:
+    return CriticalGapMarker(
+        marker_id="gap-epoch-1-2026-08-10",
+        epoch_id="epoch-1",
+        gap_session=date(2026, 8, 10),
+        reason="critical_market_data_gap",
+        cohort_invalid_reasons={
+            "cohort-a": {"AAPL": "missing_exit_bar"},
+            "cohort-b": {"MSFT": "critical_market_data_gap"},
+        },
+        status=status,
     )
 
 
@@ -236,8 +251,79 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
             )
         }
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-    assert tables == {"metric_epochs", "outcomes", "strategy_health"}
+    assert tables == {
+        "critical_gap_markers",
+        "metric_epochs",
+        "outcomes",
+        "strategy_health",
+    }
     assert journal_mode == "wal"
+
+
+def test_pending_critical_gap_round_trips_and_completes_idempotently(tmp_path) -> None:
+    path = tmp_path / "metrics_v2.sqlite3"
+    store = MetricStore(path)
+    marker = _critical_gap()
+
+    assert store.begin_critical_gap(marker) == marker
+    assert store.begin_critical_gap(marker) == marker
+    assert MetricStore(path).pending_critical_gap() == marker
+
+    completed = store.complete_critical_gap(marker.marker_id)
+    assert completed == replace(marker, status="completed")
+    assert store.complete_critical_gap(marker.marker_id) == completed
+    assert MetricStore(path).pending_critical_gap() is None
+    assert MetricStore(path).load_critical_gap(marker.marker_id) == completed
+
+
+def test_critical_gap_schema_migrates_existing_store_and_indexes_pending(tmp_path) -> None:
+    path = tmp_path / "metrics_v2.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE metric_epochs (epoch_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
+            CREATE TABLE outcomes (
+              outcome_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            CREATE TABLE strategy_health (
+              health_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL,
+              session TEXT NOT NULL, payload_json TEXT NOT NULL
+            );
+            """
+        )
+
+    store = MetricStore(path)
+    store.begin_critical_gap(_critical_gap())
+
+    with sqlite3.connect(path) as connection:
+        indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list('critical_gap_markers')")
+        }
+        payload = connection.execute(
+            "SELECT payload_json FROM critical_gap_markers"
+        ).fetchone()[0]
+    assert "idx_critical_gap_pending" in indexes
+    assert "prices" not in payload
+    assert "positions" not in payload
+    assert "state_dir" not in payload
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"reason": "raw provider error details"},
+        {"cohort_invalid_reasons": {"cohort-a": {"AAPL": "secret-token"}}},
+        {"cohort_invalid_reasons": {"": {"AAPL": "missing_exit_bar"}}},
+        {"cohort_invalid_reasons": {"cohort-a": {"": "missing_exit_bar"}}},
+    ),
+)
+def test_critical_gap_marker_rejects_unbounded_or_unstable_payload(
+    tmp_path, changes
+) -> None:
+    store = MetricStore(tmp_path / "metrics_v2.sqlite3")
+    with pytest.raises(ValueError):
+        store.begin_critical_gap(replace(_critical_gap(), **changes))
 
 
 def test_immutable_epoch_outcome_and_health_writes_are_idempotent(tmp_path) -> None:

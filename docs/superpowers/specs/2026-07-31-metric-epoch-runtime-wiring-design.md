@@ -2,7 +2,8 @@
 
 **Parent design:** `2026-07-31-metrics-governance-design.md`
 **Scope:** Close the runtime wiring gap before MetricsService readers land.
-**Status:** Approved implementation detail within the P0-P3 program.
+**Status:** Approved and implemented within the P0-P3 program, including the
+durable critical-gap recovery amendment below.
 
 ## Problem
 
@@ -64,6 +65,53 @@ write new session records under it. Only a strictly later XNYS session can open
 the replacement epoch. A different semantic context presented for the already
 invalidated session is a conflict and fails closed.
 
+### Durable critical-gap recovery boundary
+
+P0 cohort ledgers and the shared metrics store are separate SQLite databases,
+so a critical gap cannot depend on process-local ordering alone. The shared
+`MetricStore` is the recovery coordinator. Before any dependent outcome, P0
+invalidation, corporate-action rejection, or metric-epoch mutation, the
+orchestrator durably inserts one `pending` `CriticalGapMarker`. A partial unique
+index permits only one pending marker per generation store, and marker
+completion is idempotent.
+
+The marker is deliberately bounded and schema-validated. It contains the
+stable marker/epoch IDs, one exact XNYS gap session, the stable
+`critical_market_data_gap` reason, bounded cohort/ticker invalid-outcome
+reasons, and—only when a corporate-action batch must be rejected—a bounded
+canonical rejection intent per cohort. That intent includes only the exact
+corporate-action fields already required by the P0 rejection audit, the
+governed ticker names, and deterministic validation errors. It excludes market
+bars, positions, credentials, filesystem paths, provider response bodies, and
+arbitrary exception details, and it never participates in the semantic epoch
+hash.
+
+Recovery is an idempotent state machine:
+
+1. Write any missing due invalid outcomes from persisted entry evidence only,
+   preserving every existing immutable outcome.
+2. Replay any pending corporate-action rejection/audit/quarantine write from
+   the marker's canonical intent.
+3. Preserve cohorts whose P0 snapshot and complete phase chain already
+   committed; invalidate and cancel due work only for uncommitted cohorts.
+4. Invalidate the marker's exact original metric epoch with the stable reason.
+5. Mark the recovery complete only if both outcome recovery and every required
+   P0 rejection audit succeeded.
+
+An integrity error in completed, stage-only, partial-resume, or post-execution
+persisted context/outcome repair enters this same boundary. Committed P0 rows
+are not overwritten, the original error is surfaced after the safety closure,
+and a newly failed recovery write leaves the marker pending for another retry.
+
+At daily startup, after XNYS date/close validation but before epoch resolution
+or ledger early returns, the orchestrator checks for a pending marker. A replay
+of the gap session completes it and returns without any price/action/benchmark
+fetch. A strictly later session first completes the same zero-fetch recovery,
+then resolves a replacement epoch and performs only that later session's normal
+fetches. A session earlier than the pending gap fails closed. Deterministic
+crash hooks cover process death after marker persistence, after P0 invalidation,
+and after metric invalidation.
+
 ## Canonical semantic inputs
 
 The behavior document contains only:
@@ -72,6 +120,13 @@ The behavior document contains only:
 - configured LLM provider and model names used by the generation;
 - sorted active strategy names;
 - each cohort's `use_llm` flag.
+
+The context builder itself, not only its caller, enforces the exact model-key
+allowlist: `llm_provider`, `deep_think_llm`, `quick_think_llm`, `cache_model`,
+`live_model`, `strategist_model`, `cro_model`, and `autoresearch_model`. It also
+enforces exact top-level and nested execution-policy schemas and canonical
+scalar/string-list leaves. Unexpected or hidden state/secret keys are rejected
+before hashing.
 
 The configuration document contains a sorted entry per cohort:
 
@@ -101,12 +156,14 @@ metric `EpochContext`, preventing drift between two copies.
   epoch through the existing boundary semantics.
 - Missing generation metadata, an unsupported/noncanonical semantic value, or
   an epoch conflict fails closed before session mutation.
-- On a critical market-data gap, every due outcome that can be derived from the
-  persisted valid entry context is first written as an immutable invalid row;
-  no current price is fabricated. The orchestrator then invalidates the shared
-  current metric epoch once, stops further metric/session staging for the run,
-  and returns the existing cohort errors. A later clean session creates a new
-  epoch. Task 7 reuses the same manager for unclassified strategy silence.
+- On a critical market-data gap, the durable marker is written first. Every due
+  outcome that can be derived from the persisted valid entry context is then
+  written as an immutable invalid row; no current price is fabricated. Required
+  P0 rejection audits and cohort invalidations follow, then the orchestrator
+  invalidates the marker's exact shared metric epoch once, stops further
+  metric/session staging, and completes the marker only after all required
+  writes succeed. A later clean session recovers first and creates a new epoch.
+  Task 7 reuses the same manager for unclassified strategy silence.
 - Outcomes from a closed prior epoch are never attached to the new epoch.
 - No legacy generation artifact is rewritten, and no VPS, generation, service,
   or timer operation is part of this change.
@@ -125,6 +182,14 @@ Tests must prove:
 - a missing/stale due bar writes one invalid outcome, invalidates the shared
   epoch once, performs no further metric write, and an exact replay neither
   refetches data nor opens another epoch;
+- crashes after marker persistence, P0 invalidation, and metric invalidation
+  leave a pending boundary that a same-session replay completes without a
+  fetch; direct later-session recovery completes before replacement creation;
+- a failed corporate-action rejection audit leaves the marker pending, and its
+  zero-fetch replay writes exactly one idempotent rejection row before marker
+  completion;
+- completed, stage-only, partial-resume, and outcome-repair corruption preserve
+  committed P0, invalidate the original epoch, and surface the original error;
 - P0 `SignalRecord.signal_id`, v2 `SignalMetricRecord.signal_id`, and outcomes
   use the returned metric epoch identity consistently;
 - missing metadata and malformed context fail without creating state;

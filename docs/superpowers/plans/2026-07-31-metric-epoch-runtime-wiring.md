@@ -12,7 +12,9 @@ identity plus each cohort's existing canonical execution-policy document into
 `EpochContext`; `SessionExecutor` owns the shared `EpochManager` call. The
 returned metric epoch ID becomes the sole P0/v2 epoch for that session. Outcome
 repair uses the existing shared response and persisted entry context even when
-the valuation lifecycle is invalid.
+the valuation lifecycle is invalid. A bounded pending marker in the shared
+metrics store coordinates crash recovery across that store and the independent
+P0 cohort ledgers before any dependent mutation.
 
 **Tech Stack:** Python 3.10+, dataclasses, canonical JSON/SHA-256 identities,
 SQLite/WAL, exchange-calendars XNYS, pytest.
@@ -38,6 +40,8 @@ SQLite/WAL, exchange-calendars XNYS, pytest.
 - Create: `tradingagents/strategies/orchestration/metric_epoch_context.py`
 - Modify: `tradingagents/strategies/orchestration/session_executor.py`
 - Modify: `tradingagents/strategies/orchestration/cohort_orchestrator.py`
+- Modify: `tradingagents/strategies/metrics/models.py`
+- Modify: `tradingagents/strategies/metrics/store.py`
 - Modify: `tradingagents/strategies/metrics/epochs.py`
 - Modify: `scripts/run_cohorts.py`
 - Create: `tests/test_metric_epoch_runtime.py`
@@ -56,6 +60,9 @@ SQLite/WAL, exchange-calendars XNYS, pytest.
 - Produces `SessionExecutor.semantic_policy_document() -> dict[str, object]`.
 - Produces `SessionExecutor.ensure_metric_epoch(context, session) -> MetricEpoch`.
 - Produces `SessionExecutor.invalidate_metric_epoch(session, reason) -> MetricEpoch`.
+- Produces a bounded `CriticalGapMarker` and idempotent
+  `MetricStore.begin_critical_gap`, `pending_critical_gap`, and
+  `complete_critical_gap` recovery operations.
 - `CohortOrchestrator(..., generation_id: str, generation_commit: str, ...)`
   requires exact generation identity and uses the returned metric epoch ID for
   every P0 and v2 record in the session.
@@ -219,6 +226,12 @@ with string keys, `list`, `str`, `int`, `bool`, or `None`. Reject floats,
 `Decimal`, dates, paths, sets, arbitrary objects, and non-finite values instead
 of stringifying them. The executor policy is already canonical and should pass.
 Do not accept a full application config in this module.
+
+Enforce the exact eight-key model allowlist in this public builder, not only at
+its caller. Enforce exact top-level and nested schemas for the executor policy;
+allowed scalar or string-list leaves must not contain hidden mappings. Reject
+API keys/tokens, state paths, timestamps, live borrow rates, prices, positions,
+and every other unexpected key before hashing.
 
 Apply `_required_text` to every strategy name before sorting. Reject duplicate
 cohort names and duplicate strategy names so two semantically ambiguous input
@@ -396,6 +409,50 @@ replacement, observe the existing ledger invalidation, and perform neither a
 fetch nor a new metric write. Add focused tests for the write-before-invalidate
 order, one shared invalidation across multiple cohorts, and a clean next XNYS
 session opening a new epoch.
+
+- [x] **Step 9a: Amend critical-gap handling into a durable state machine**
+
+Add a migration-safe `critical_gap_markers` table to the shared generation
+`MetricStore`. A partial unique index allows one pending marker. Persist the
+marker before any outcome, cohort-ledger invalidation, corporate-action
+rejection, or metric-epoch invalidation. Bound and validate the marker's IDs,
+exact XNYS session, stable general reason, cohort/ticker counts and reasons, and
+total serialized size.
+
+For a corporate-action batch rejection, persist a bounded canonical audit
+intent in the marker: exact action fields, governed ticker names, and
+deterministic validation errors only. Do not persist market bars, positions,
+credentials, state paths, provider response bodies, or arbitrary exception
+payloads. Reconstruct the P0 rejection from this intent so a process restart
+can retry the audit/quarantine write without fetching.
+
+Complete a pending marker in this order:
+
+1. Write missing due invalid outcomes from persisted entry evidence only.
+2. Replay required corporate-action rejection/audit writes.
+3. Preserve complete P0 phase chains/snapshots and invalidate only uncommitted
+   cohort sessions.
+4. Invalidate the marker's exact original metric epoch.
+5. Complete the marker only when outcome and audit writes both succeeded.
+
+At `run_daily` startup, after XNYS date/close validation and before epoch
+resolution or every ledger early return, complete a pending marker. The exact
+gap-session replay returns its recovered errors with zero raw/action/benchmark
+fetches. A direct later-session run completes the same recovery first, opens a
+replacement epoch, and fetches only the later session. Reject sessions earlier
+than the pending gap.
+
+Route completed, stage-only, stored partial-resume, bound-context validation,
+and post-execution outcome-repair corruption through this boundary. Preserve
+committed P0 and existing immutable outcomes, surface the original integrity
+error after safety closure, and leave the marker pending if a new recovery
+write fails.
+
+Add deterministic crash hooks after marker persistence, P0 invalidation, and
+metric invalidation. Tests must cover every crash boundary, direct
+later-session recovery, audit-write failure followed by zero-fetch replay with
+exactly one rejection row, malformed completed/stage/partial contexts,
+immutable conflicts, committed-P0 preservation, and marker migration/bounds.
 
 - [ ] **Step 10: Run focused, full, and static verification**
 

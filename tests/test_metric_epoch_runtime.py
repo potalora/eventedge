@@ -43,8 +43,18 @@ def _execution_policy(**changes: object) -> dict[str, object]:
         "execution_clock_contract": EXECUTION_CLOCK_VERSION,
         "pricing_contract": PRICING_VERSION,
         "cost_model_contract": COST_MODEL_VERSION,
+        "execution": {"mode": "paper", "price_rules": ["next_session_open"]},
+        "calendar": {
+            "name": "XNYS",
+            "provider": "exchange-calendars",
+            "provider_version": "fixture",
+        },
         "risk_gate": {"max_positions": 5},
-        "cost_model": {"commission_per_share": "0.005"},
+        "cost_model": {"commission_per_fill": "0.005"},
+        "short_selling": {"borrow_cost_reject_above": "0.05"},
+        "bar_max_age_hours": 24,
+        "benchmark_symbols": ["SPY", "BIL"],
+        "schema_version": 1,
     }
     policy.update(changes)
     return policy
@@ -184,7 +194,7 @@ def test_every_allowlisted_semantic_change_rotates_context_hash(change: str) -> 
             cohort_policies=(
                 _policy(
                     execution_policy=_execution_policy(
-                        cost_model={"commission_per_share": "0.006"}
+                        cost_model={"commission_per_fill": "0.006"}
                     )
                 ),
             )
@@ -285,6 +295,73 @@ def test_generation_identity_must_be_nonempty_text(field: str, value: object) ->
 def test_model_values_must_be_text_or_none() -> None:
     with pytest.raises(ValueError, match="model autoresearch_model"):
         _context(models={"autoresearch_model": 7})
+
+
+@pytest.mark.parametrize(
+    "forbidden_key",
+    (
+        "fmp_api_key",
+        "courtlistener_token",
+        "state_dir",
+        "session_timestamp",
+        "live_borrow_rates",
+        "prices",
+        "positions",
+    ),
+)
+def test_builder_rejects_unexpected_model_keys(forbidden_key: str) -> None:
+    with pytest.raises(ValueError, match="unexpected model key"):
+        _context(models={"autoresearch_model": "sonnet", forbidden_key: "secret"})
+
+
+@pytest.mark.parametrize(
+    ("container", "forbidden_key"),
+    (
+        ("top", "fmp_api_key"),
+        ("top", "courtlistener_token"),
+        ("top", "state_dir"),
+        ("top", "session_timestamp"),
+        ("execution", "api_key"),
+        ("calendar", "state_path"),
+        ("cost_model", "prices"),
+        ("risk_gate", "positions"),
+        ("short_selling", "live_borrow_rates"),
+    ),
+)
+def test_builder_rejects_unexpected_execution_policy_keys(
+    container: str, forbidden_key: str
+) -> None:
+    policy = _execution_policy()
+    target = policy if container == "top" else policy[container]
+    assert isinstance(target, dict)
+    target[forbidden_key] = "forbidden-value"
+    with pytest.raises(ValueError, match="unexpected execution_policy"):
+        _context(cohort_policies=(_policy(execution_policy=policy),))
+
+
+@pytest.mark.parametrize(
+    ("container", "leaf", "forbidden_value"),
+    (
+        ("execution", "mode", {"api_key": "secret"}),
+        ("calendar", "name", {"state_path": "/private"}),
+        ("cost_model", "commission_per_fill", {"prices": {"AAPL": 100}}),
+        ("risk_gate", "max_positions", {"positions": ["AAPL"]}),
+        (
+            "short_selling",
+            "borrow_cost_reject_above",
+            {"live_borrow_rates": {"AAPL": "0.10"}},
+        ),
+    ),
+)
+def test_builder_rejects_nested_objects_hidden_under_allowed_policy_leaves(
+    container: str, leaf: str, forbidden_value: object
+) -> None:
+    policy = _execution_policy()
+    target = policy[container]
+    assert isinstance(target, dict)
+    target[leaf] = forbidden_value
+    with pytest.raises(TypeError, match="canonical scalar"):
+        _context(cohort_policies=(_policy(execution_policy=policy),))
 
 
 @pytest.mark.parametrize(

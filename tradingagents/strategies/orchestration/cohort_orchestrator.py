@@ -12,7 +12,10 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tradingagents.strategies.metrics.models import CriticalGapMarker
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +377,9 @@ class CohortOrchestrator:
         self._base_config = base_config
         self._price_source = price_source or YFinancePriceSource()
         self._epoch_id: str | None = None
+        self._after_gap_marker = lambda marker: None
+        self._after_gap_p0_invalidation = lambda marker: None
+        self._after_gap_metric_invalidation = lambda marker: None
 
         # OpenBB availability check — warn loudly if unavailable
         first_engine = self.cohorts[0]["engine"] if self.cohorts else None
@@ -405,47 +411,184 @@ class CohortOrchestrator:
         results: dict[str, Any],
         raw_bars: dict,
         reason: str,
+        *,
+        corporate_action_errors: dict[str, Any] | None = None,
+        original_error: Exception | None = None,
     ) -> dict[str, Any]:
-        """Write due invalid outcomes, invalidate once, and stop this daily run."""
-        from tradingagents.strategies.orchestration.session_executor import PHASES
+        """Start and complete one durable cross-database gap transition."""
+        from tradingagents.strategies.execution.ids import stable_id
+        from tradingagents.strategies.metrics.models import CriticalGapMarker
 
         if self._epoch_id is None:
             raise RuntimeError("metric epoch is not initialized")
+        store = self.cohorts[0]["executor"].metric_store
+        cohort_invalid_reasons: dict[str, dict[str, str]] = {}
+        for cohort in self.cohorts:
+            executor = cohort["executor"]
+            due = executor.due_outcome_signals(session, self._epoch_id)
+            if not due:
+                continue
+            _, invalid_reasons = executor.validated_outcome_bars(
+                session, self._epoch_id, raw_bars, processed_at
+            )
+            for signal, _ in due:
+                invalid_reasons.setdefault(signal.ticker, "critical_market_data_gap")
+            cohort_invalid_reasons[cohort["config"].name] = dict(
+                sorted(invalid_reasons.items())
+            )
+        corporate_action_rejections: dict[str, dict[str, object]] = {}
+        for cohort in self.cohorts:
+            name = cohort["config"].name
+            action_error = (corporate_action_errors or {}).get(name)
+            if action_error is None:
+                continue
+            actions = sorted(
+                action_error.actions,
+                key=lambda action: (
+                    action.action_id,
+                    action.ticker,
+                    action.session.isoformat(),
+                    action.action_type,
+                    str(action.ratio),
+                    str(action.cash_per_share),
+                    action.source,
+                    action.fetched_at.isoformat(),
+                    action.verified,
+                ),
+            )
+            corporate_action_rejections[name] = {
+                "actions": [
+                    {
+                        "action_id": action.action_id,
+                        "ticker": action.ticker,
+                        "session": action.session.isoformat(),
+                        "action_type": action.action_type,
+                        "ratio": (
+                            format(action.ratio, "f")
+                            if action.ratio is not None
+                            else None
+                        ),
+                        "cash_per_share": (
+                            format(action.cash_per_share, "f")
+                            if action.cash_per_share is not None
+                            else None
+                        ),
+                        "source": action.source,
+                        "fetched_at": action.fetched_at.isoformat(),
+                        "verified": action.verified,
+                    }
+                    for action in actions
+                ],
+                "governed_tickers": list(
+                    cohort["executor"].required_tickers(session, self._epoch_id)
+                ),
+                "errors": sorted(set(action_error.errors)),
+            }
+        marker = CriticalGapMarker(
+            marker_id=stable_id("critical_gap_marker", self._epoch_id, session),
+            epoch_id=self._epoch_id,
+            gap_session=session,
+            reason="critical_market_data_gap",
+            cohort_invalid_reasons=dict(sorted(cohort_invalid_reasons.items())),
+            status="pending",
+            corporate_action_rejections=dict(
+                sorted(corporate_action_rejections.items())
+            ),
+        )
+        marker = store.begin_critical_gap(marker)
+        self._after_gap_marker(marker)
+        return self._complete_pending_critical_gap(
+            marker,
+            processed_at,
+            results,
+            result_reason=reason,
+            original_error=original_error,
+        )
+
+    def _complete_pending_critical_gap(
+        self,
+        marker: CriticalGapMarker,
+        processed_at: datetime,
+        results: dict[str, Any] | None = None,
+        *,
+        result_reason: str | None = None,
+        original_error: Exception | None = None,
+    ) -> dict[str, Any]:
+        """Idempotently finish outcomes, P0 invalidation, epoch close, and marker."""
+        from tradingagents.strategies.execution.models import CorporateAction
+        from tradingagents.strategies.orchestration.session_executor import PHASES
+
+        results = results if results is not None else {}
+        self._epoch_id = marker.epoch_id
         committed = {
             cohort["config"].name
             for cohort in self.cohorts
             if cohort["ledger"].read_snapshots(
-                session, session, epoch_id=self._epoch_id, valid_only=True
+                marker.gap_session,
+                marker.gap_session,
+                epoch_id=marker.epoch_id,
+                valid_only=True,
             )
             and all(
-                cohort["ledger"].phase_completed(session, phase)
+                cohort["ledger"].phase_completed(marker.gap_session, phase)
                 for phase in PHASES
             )
         }
-        write_error: Exception | None = None
+        recovery_error: Exception | None = None
+        audit_error: Exception | None = None
         try:
             for cohort in self.cohorts:
                 executor = cohort["executor"]
-                due = executor.due_outcome_signals(session, self._epoch_id)
-                if due:
-                    valid_bars, invalid_reasons = executor.validated_outcome_bars(
-                        session, self._epoch_id, raw_bars, processed_at
-                    )
-                    for signal, _ in due:
-                        if signal.ticker not in invalid_reasons:
-                            invalid_reasons[signal.ticker] = (
-                                "critical_market_data_gap"
-                            )
-                            valid_bars.pop((signal.ticker, session), None)
-                    executor.record_due_outcomes(
-                        session,
-                        self._epoch_id,
-                        valid_bars,
+                invalid_reasons = marker.cohort_invalid_reasons.get(
+                    cohort["config"].name, {}
+                )
+                if invalid_reasons:
+                    executor.record_due_invalid_outcomes(
+                        marker.gap_session,
+                        marker.epoch_id,
                         invalid_reasons,
-                        preserve_existing_valid=True,
+                        preserve_existing=True,
                     )
         except Exception as error:
-            write_error = error
+            recovery_error = error
+        for cohort in self.cohorts:
+            name = cohort["config"].name
+            rejection = marker.corporate_action_rejections.get(name)
+            if rejection is None or name in committed:
+                continue
+            try:
+                actions = tuple(
+                    CorporateAction(
+                        str(action["action_id"]),
+                        str(action["ticker"]),
+                        date.fromisoformat(str(action["session"])),
+                        str(action["action_type"]),
+                        (
+                            Decimal(str(action["ratio"]))
+                            if action["ratio"] is not None
+                            else None
+                        ),
+                        (
+                            Decimal(str(action["cash_per_share"]))
+                            if action["cash_per_share"] is not None
+                            else None
+                        ),
+                        str(action["source"]),
+                        datetime.fromisoformat(str(action["fetched_at"])),
+                        bool(action["verified"]),
+                    )
+                    for action in rejection["actions"]
+                )
+                cohort["ledger"].reject_corporate_action_batch(
+                    marker.gap_session,
+                    actions,
+                    tuple(str(value) for value in rejection["governed_tickers"]),
+                    tuple(str(value) for value in rejection["errors"]),
+                    processed_at,
+                )
+            except Exception as error:
+                if audit_error is None:
+                    audit_error = error
         for cohort in self.cohorts:
             name = cohort["config"].name
             if name in committed:
@@ -453,22 +596,37 @@ class CohortOrchestrator:
                     name,
                     {
                         "error": True,
-                        "invalid_reason": "critical_market_data_gap",
+                        "invalid_reason": result_reason or marker.reason,
                     },
                 )
                 continue
             ledger = cohort["ledger"]
-            if not ledger.session_invalid_reason(session):
+            if not ledger.session_invalid_reason(marker.gap_session):
                 ledger.invalidate_session_and_cancel_due(
-                    session, reason, processed_at
+                    marker.gap_session, marker.reason, processed_at
                 )
             results[name] = {
                 "error": True,
-                "invalid_reason": ledger.session_invalid_reason(session) or reason,
+                "invalid_reason": ledger.session_invalid_reason(marker.gap_session)
+                or result_reason
+                or marker.reason,
             }
-        self.cohorts[0]["executor"].invalidate_metric_epoch(session)
-        if write_error is not None:
-            raise write_error
+        self._after_gap_p0_invalidation(marker)
+        self.cohorts[0]["executor"].invalidate_metric_epoch(
+            marker.gap_session,
+            epoch_id=marker.epoch_id,
+        )
+        self._after_gap_metric_invalidation(marker)
+        if recovery_error is None and audit_error is None:
+            self.cohorts[0]["executor"].metric_store.complete_critical_gap(
+                marker.marker_id
+            )
+        if original_error is not None:
+            raise original_error
+        if recovery_error is not None:
+            raise recovery_error
+        if audit_error is not None:
+            raise audit_error
         return results
 
     def run_daily(self, trading_date: str | None = None) -> dict[str, Any]:
@@ -497,6 +655,18 @@ class CohortOrchestrator:
         results: dict[str, Any] = {}
         if not self.cohorts:
             return results
+        pending_gap = self.cohorts[0]["executor"].metric_store.pending_critical_gap()
+        if pending_gap is not None:
+            if session < pending_gap.gap_session:
+                raise ValueError(
+                    f"{session} precedes pending critical gap "
+                    f"{pending_gap.gap_session}"
+                )
+            recovered = self._complete_pending_critical_gap(
+                pending_gap, processed_at, results
+            )
+            if session == pending_gap.gap_session:
+                return recovered
         metric_epoch = self.cohorts[0]["executor"].ensure_metric_epoch(
             self._metric_epoch_context, session
         )
@@ -546,7 +716,14 @@ class CohortOrchestrator:
                         "error": True,
                         "invalid_reason": str(error),
                     }
-                    continue
+                    return self._stop_for_critical_market_data_gap(
+                        session,
+                        processed_at,
+                        results,
+                        {},
+                        str(error),
+                        original_error=error,
+                    )
             if len(snapshots) == 1 and phases_complete and staging_complete:
                 completed_cohorts.append(cohort)
                 fills = ledger.read_fills(session, session)
@@ -593,6 +770,14 @@ class CohortOrchestrator:
                 )
             except Exception as error:
                 results[name] = {"error": True, "invalid_reason": str(error)}
+                return self._stop_for_critical_market_data_gap(
+                    session,
+                    processed_at,
+                    results,
+                    {},
+                    str(error),
+                    original_error=error,
+                )
         if not execution_needed and not stage_only:
             return results
 
@@ -620,7 +805,14 @@ class CohortOrchestrator:
                 except Exception as error:
                     logger.error("Cohort %s stored resume failed", name, exc_info=True)
                     results[name] = {"error": True, "invalid_reason": str(error)}
-                    continue
+                    return self._stop_for_critical_market_data_gap(
+                        session,
+                        processed_at,
+                        results,
+                        {},
+                        str(error),
+                        original_error=error,
+                    )
                 if not lifecycle.valid or lifecycle.snapshot is None:
                     results[name] = {
                         "error": True,
@@ -655,34 +847,27 @@ class CohortOrchestrator:
                 )
                 processed_at = datetime.now(timezone.utc)
             except CorporateActionBatchError as error:
+                corporate_errors = {}
                 for cohort in fresh_execution:
-                    required = cohort["executor"].required_tickers(
-                        session, self._epoch_id
-                    )
-                    reason = cohort["ledger"].reject_corporate_action_batch(
-                        session,
-                        error.actions,
-                        required,
-                        error.errors,
-                        processed_at,
+                    reason = "invalid corporate action batch: " + "; ".join(
+                        sorted(set(error.errors))
                     )
                     results[cohort["config"].name] = {
                         "error": True,
                         "invalid_reason": reason,
                     }
+                    corporate_errors[cohort["config"].name] = error
                 return self._stop_for_critical_market_data_gap(
                     session,
                     processed_at,
                     results,
                     bundle.bars,
                     "critical_market_data_gap",
+                    corporate_action_errors=corporate_errors,
                 )
             except Exception as error:
                 reason = f"shared session input fetch failed: {error}"
                 for cohort in fresh_execution:
-                    cohort["ledger"].invalidate_session_and_cancel_due(
-                        session, reason, processed_at
-                    )
                     results[cohort["config"].name] = {
                         "error": True,
                         "invalid_reason": reason,
@@ -713,9 +898,6 @@ class CohortOrchestrator:
                         f"{ticker} {invalid_reasons[ticker]}"
                         for ticker in sorted(invalid_reasons)
                     )
-                    cohort["ledger"].invalidate_session_and_cancel_due(
-                        session, reason, processed_at
-                    )
                     results[cohort["config"].name] = {
                         "error": True,
                         "invalid_reason": reason,
@@ -728,6 +910,45 @@ class CohortOrchestrator:
                         results,
                         bundle.bars,
                         "critical_market_data_gap",
+                    )
+                preflight_gap = False
+                preflight_corporate_errors = {}
+                for cohort in fresh_execution:
+                    name = cohort["config"].name
+                    executor = cohort["executor"]
+                    required = executor.required_tickers(session, self._epoch_id)
+                    try:
+                        executor.validate_execution_input_bundle(
+                            session,
+                            self._epoch_id,
+                            bundle.for_tickers(required),
+                            processed_at,
+                        )
+                    except CorporateActionBatchError as error:
+                        reason = "invalid corporate action batch: " + "; ".join(
+                            sorted(set(error.errors))
+                        )
+                        results[name] = {
+                            "error": True,
+                            "invalid_reason": reason,
+                        }
+                        preflight_corporate_errors[name] = error
+                        preflight_gap = True
+                    except Exception as error:
+                        reason = f"market data validation failed: {error}"
+                        results[name] = {
+                            "error": True,
+                            "invalid_reason": reason,
+                        }
+                        preflight_gap = True
+                if preflight_gap:
+                    return self._stop_for_critical_market_data_gap(
+                        session,
+                        processed_at,
+                        results,
+                        bundle.bars,
+                        "critical_market_data_gap",
+                        corporate_action_errors=preflight_corporate_errors,
                     )
                 execution_bundle_gap = False
                 for cohort in fresh_execution:
@@ -786,7 +1007,14 @@ class CohortOrchestrator:
                 )
             except Exception as error:
                 results[name] = {"error": True, "invalid_reason": str(error)}
-                continue
+                return self._stop_for_critical_market_data_gap(
+                    session,
+                    processed_at,
+                    results,
+                    {},
+                    str(error),
+                    original_error=error,
+                )
             outcome_ready.append(cohort)
         valid_cohorts = outcome_ready
         if not valid_cohorts:

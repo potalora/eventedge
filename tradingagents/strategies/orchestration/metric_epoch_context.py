@@ -14,6 +14,74 @@ from tradingagents.strategies.execution.ids import stable_id
 from tradingagents.strategies.metrics.epochs import EpochContext
 
 
+ALLOWED_MODEL_KEYS = frozenset(
+    {
+        "llm_provider",
+        "deep_think_llm",
+        "quick_think_llm",
+        "cache_model",
+        "live_model",
+        "strategist_model",
+        "cro_model",
+        "autoresearch_model",
+    }
+)
+
+_EXECUTION_POLICY_KEYS = frozenset(
+    {
+        "policy_document_version",
+        "execution",
+        "schema_version",
+        "pricing_contract",
+        "execution_clock_contract",
+        "cost_model_contract",
+        "calendar",
+        "bar_max_age_hours",
+        "benchmark_symbols",
+        "cost_model",
+        "risk_gate",
+        "short_selling",
+    }
+)
+_NESTED_POLICY_KEYS = {
+    "execution": frozenset({"mode", "price_rules"}),
+    "calendar": frozenset({"name", "provider", "provider_version"}),
+    "cost_model": frozenset(
+        {
+            "slippage_bps",
+            "commission_per_fill",
+            "other_fee_per_fill",
+            "margin_requirement",
+            "margin_financing_rate",
+            "idle_cash_yield_rate",
+            "existing_short_missing_borrow_rate",
+        }
+    ),
+    "risk_gate": frozenset(
+        {
+            "total_capital",
+            "max_positions",
+            "max_position_pct",
+            "min_position_value",
+            "daily_loss_limit_pct",
+            "max_drawdown_pct",
+            "per_strategy_max",
+            "global_stop_loss_pct",
+            "long_only",
+            "cash_reserve_pct",
+            "reentry_cooldown_days",
+            "earnings_blackout_days",
+            "max_borrow_cost_pct",
+            "max_margin_utilization_pct",
+            "short_squeeze_stop_pct",
+            "short_squeeze_window_days",
+            "premium_decay_floor_pct",
+        }
+    ),
+    "short_selling": frozenset({"borrow_cost_reject_above"}),
+}
+
+
 @dataclass(frozen=True)
 class CohortSemanticPolicy:
     name: str
@@ -49,6 +117,54 @@ def _validate_execution_policy(value: object, path: str = "execution_policy") ->
     )
 
 
+def _validate_execution_policy_schema(policy: object) -> None:
+    if not isinstance(policy, dict):
+        raise TypeError("execution_policy must be a dict")
+    unexpected = set(policy) - _EXECUTION_POLICY_KEYS
+    if unexpected:
+        raise ValueError(
+            f"unexpected execution_policy key {sorted(unexpected)[0]!r}"
+        )
+    for container, allowed in _NESTED_POLICY_KEYS.items():
+        if container not in policy:
+            continue
+        nested = policy[container]
+        if not isinstance(nested, dict):
+            raise TypeError(f"execution_policy.{container} must be a dict")
+        unexpected = set(nested) - allowed
+        if unexpected:
+            raise ValueError(
+                f"unexpected execution_policy.{container} key "
+                f"{sorted(unexpected)[0]!r}"
+            )
+        for key, value in nested.items():
+            if container == "execution" and key == "price_rules":
+                if not isinstance(value, list) or any(
+                    not isinstance(item, str) for item in value
+                ):
+                    raise TypeError(
+                        "execution_policy.execution.price_rules must be a string list"
+                    )
+                continue
+            if not (value is None or isinstance(value, (str, int, bool))):
+                raise TypeError(
+                    f"execution_policy.{container}.{key} must be a canonical scalar"
+                )
+    benchmarks = policy.get("benchmark_symbols")
+    if benchmarks is not None and (
+        not isinstance(benchmarks, list)
+        or any(not isinstance(item, str) for item in benchmarks)
+    ):
+        raise TypeError("execution_policy.benchmark_symbols must be a string list")
+    nested_keys = {*_NESTED_POLICY_KEYS, "benchmark_symbols"}
+    for key, value in policy.items():
+        if key in nested_keys:
+            continue
+        if not (value is None or isinstance(value, (str, int, bool))):
+            raise TypeError(f"execution_policy.{key} must be a canonical scalar")
+    _validate_execution_policy(policy)
+
+
 def build_epoch_context(
     *,
     generation_id: str,
@@ -60,6 +176,11 @@ def build_epoch_context(
     """Return a deterministic context from explicit, secret-free semantics."""
     generation_id = _required_text("generation_id", generation_id)
     generation_commit = _required_text("generation_commit", generation_commit)
+    unexpected_model_keys = set(models) - ALLOWED_MODEL_KEYS
+    if unexpected_model_keys:
+        raise ValueError(
+            f"unexpected model key {sorted(unexpected_model_keys)[0]!r}"
+        )
     model_document = {
         _required_text("model key", key): (
             _required_text(f"model {key}", value) if value is not None else None
@@ -82,7 +203,7 @@ def build_epoch_context(
             raise ValueError("cohort use_llm must be boolean")
         if not isinstance(policy.learning_enabled, bool):
             raise ValueError("cohort learning_enabled must be boolean")
-        _validate_execution_policy(policy.execution_policy)
+        _validate_execution_policy_schema(policy.execution_policy)
     if len(set(names)) != len(names):
         raise ValueError("duplicate cohort name")
 

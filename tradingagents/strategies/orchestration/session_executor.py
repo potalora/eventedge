@@ -201,9 +201,13 @@ class SessionExecutor:
         self,
         session: date,
         reason: str = "critical_market_data_gap",
+        *,
+        epoch_id: str | None = None,
     ) -> MetricEpoch:
         if reason != "critical_market_data_gap":
             raise ValueError("metric epoch invalidation reason must be stable")
+        if epoch_id is not None:
+            return self.metric_store.invalidate_epoch(epoch_id, session, reason)
         return EpochManager(self.metric_store).invalidate_current(session, reason)
 
     def required_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
@@ -330,6 +334,53 @@ class SessionExecutor:
             written += 1
         return written
 
+    def record_due_invalid_outcomes(
+        self,
+        session: date,
+        epoch_id: str,
+        invalid_reasons: Mapping[str, str],
+        *,
+        preserve_existing: bool = True,
+    ) -> int:
+        """Recover due invalid outcomes without current-session market input."""
+        written = 0
+        for signal, window in self.due_outcome_signals(session, epoch_id):
+            outcome_id = self.outcome_calculator.outcome_id(signal, window)
+            if preserve_existing:
+                try:
+                    self.metric_store.load_outcome(outcome_id)
+                except KeyError:
+                    pass
+                else:
+                    continue
+            entry_session = self.outcome_calculator.calendar.next_session(
+                signal.reference_session
+            )
+            bars: dict[tuple[str, date], MarketBar] = {}
+            if self.ledger.session_execution_context(entry_session) is not None:
+                try:
+                    bars.update(self.persisted_input_bundle(entry_session).bars)
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            outcome = self.outcome_calculator.build(signal, window, bars)
+            forced_reason = invalid_reasons.get(
+                signal.ticker, "critical_market_data_gap"
+            )
+            if not outcome.invalid_reason.endswith("entry_bar") and not (
+                outcome.invalid_reason.endswith("entry_price")
+            ):
+                outcome = replace(
+                    outcome,
+                    exit_price=None,
+                    raw_return=None,
+                    signed_return=None,
+                    status="invalid",
+                    invalid_reason=forced_reason,
+                )
+            self.metric_store.upsert_outcome(outcome)
+            written += 1
+        return written
+
     def validated_outcome_bars(
         self,
         session: date,
@@ -396,6 +447,25 @@ class SessionExecutor:
         return SessionInputBundle(
             session, tuple(sorted(tickers)), bars, actions, benchmarks
         )
+
+    def validate_execution_input_bundle(
+        self,
+        session: date,
+        epoch_id: str,
+        bundle: SessionInputBundle,
+        processed_at: datetime,
+    ) -> None:
+        """Preflight a fresh cohort bundle without mutating its P0 ledger."""
+        self._validate_clock(session, epoch_id, processed_at)
+        required = self.required_tickers(session, epoch_id)
+        _, actions, _ = self._validate_bundle(
+            bundle, required, session, processed_at
+        )
+        state_errors = self.ledger.corporate_action_batch_state_errors(
+            session, actions
+        )
+        if state_errors:
+            raise CorporateActionBatchError(actions, state_errors)
 
     def persisted_input_bundle(self, session: date) -> SessionInputBundle:
         """Rehydrate bound canonical economics for a partial-session resume."""

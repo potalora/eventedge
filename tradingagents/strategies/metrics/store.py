@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict, replace
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 from .calendar import XNYSCalendar
-from .models import MetricEpoch, OutcomeRecord, StrategyHealthRecord
+from .models import (
+    CriticalGapMarker,
+    MetricEpoch,
+    OutcomeRecord,
+    StrategyHealthRecord,
+)
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -27,7 +32,31 @@ CREATE TABLE IF NOT EXISTS strategy_health (
   session TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS critical_gap_markers (
+  marker_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  gap_session TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_gap_pending
+  ON critical_gap_markers(status) WHERE status = 'pending';
 """
+
+_CRITICAL_GAP_REASON = "critical_market_data_gap"
+_OUTCOME_GAP_REASONS = frozenset(
+    {
+        _CRITICAL_GAP_REASON,
+        "missing_exit_bar",
+        "stale_exit_bar",
+        "invalid_exit_bar",
+    }
+)
+_MAX_GAP_COHORTS = 64
+_MAX_GAP_TICKERS = 2_048
+_MAX_GAP_TEXT = 256
+_MAX_GAP_DETAIL_TEXT = 4_096
+_MAX_GAP_AUDIT_ITEMS = 2_048
+_MAX_GAP_PAYLOAD_BYTES = 2_000_000
 
 class MetricStore:
     """SQLite persistence for immutable, derived metrics-v2 records."""
@@ -76,6 +105,144 @@ class MetricStore:
         data = json.loads(payload)
         data["session"] = date.fromisoformat(data["session"])
         return StrategyHealthRecord(**data)
+
+    @staticmethod
+    def _critical_gap(payload: str) -> CriticalGapMarker:
+        data = json.loads(payload)
+        data["gap_session"] = date.fromisoformat(data["gap_session"])
+        return CriticalGapMarker(**data)
+
+    def _validate_critical_gap(self, marker: CriticalGapMarker) -> None:
+        for label, value in (
+            ("marker_id", marker.marker_id),
+            ("epoch_id", marker.epoch_id),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > _MAX_GAP_TEXT
+            ):
+                raise ValueError(f"critical gap {label} is invalid")
+        if not self._calendar.is_session(marker.gap_session):
+            raise ValueError(f"{marker.gap_session} is not an XNYS session")
+        if marker.reason != _CRITICAL_GAP_REASON:
+            raise ValueError("critical gap reason must be stable")
+        if marker.status not in {"pending", "completed"}:
+            raise ValueError("critical gap status is invalid")
+        if not isinstance(marker.cohort_invalid_reasons, dict):
+            raise ValueError("critical gap cohort reasons must be a mapping")
+        if len(marker.cohort_invalid_reasons) > _MAX_GAP_COHORTS:
+            raise ValueError("critical gap cohort count exceeds bound")
+        ticker_count = 0
+        for cohort, reasons in marker.cohort_invalid_reasons.items():
+            if (
+                not isinstance(cohort, str)
+                or not cohort.strip()
+                or len(cohort) > _MAX_GAP_TEXT
+                or not isinstance(reasons, dict)
+            ):
+                raise ValueError("critical gap cohort payload is invalid")
+            ticker_count += len(reasons)
+            for ticker, invalid_reason in reasons.items():
+                if (
+                    not isinstance(ticker, str)
+                    or not ticker.strip()
+                    or len(ticker) > _MAX_GAP_TEXT
+                    or invalid_reason not in _OUTCOME_GAP_REASONS
+                ):
+                    raise ValueError("critical gap ticker payload is invalid")
+        if ticker_count > _MAX_GAP_TICKERS:
+            raise ValueError("critical gap ticker count exceeds bound")
+        audit_intents = marker.corporate_action_rejections
+        if not isinstance(audit_intents, dict):
+            raise ValueError("critical gap corporate action intents must be a mapping")
+        if len(set(marker.cohort_invalid_reasons) | set(audit_intents)) > (
+            _MAX_GAP_COHORTS
+        ):
+            raise ValueError("critical gap total cohort count exceeds bound")
+        audit_items = 0
+        for cohort, intent in audit_intents.items():
+            if (
+                not isinstance(cohort, str)
+                or not cohort.strip()
+                or len(cohort) > _MAX_GAP_TEXT
+                or not isinstance(intent, dict)
+                or set(intent) != {"actions", "governed_tickers", "errors"}
+            ):
+                raise ValueError("critical gap corporate action intent is invalid")
+            actions = intent["actions"]
+            governed = intent["governed_tickers"]
+            errors = intent["errors"]
+            if not all(isinstance(value, list) for value in (actions, governed, errors)):
+                raise ValueError("critical gap corporate action lists are invalid")
+            if not errors:
+                raise ValueError("critical gap corporate action errors are required")
+            audit_items += len(actions) + len(governed) + len(errors)
+            if governed != sorted(set(governed)) or errors != sorted(set(errors)):
+                raise ValueError("critical gap corporate action lists are not canonical")
+            for ticker in governed:
+                if (
+                    not isinstance(ticker, str)
+                    or not ticker.strip()
+                    or len(ticker) > _MAX_GAP_TEXT
+                ):
+                    raise ValueError("critical gap governed ticker is invalid")
+            for error in errors:
+                if (
+                    not isinstance(error, str)
+                    or not error.strip()
+                    or len(error) > _MAX_GAP_DETAIL_TEXT
+                ):
+                    raise ValueError("critical gap corporate action error is invalid")
+            expected_action_keys = {
+                "action_id",
+                "ticker",
+                "session",
+                "action_type",
+                "ratio",
+                "cash_per_share",
+                "source",
+                "fetched_at",
+                "verified",
+            }
+            for action in actions:
+                if not isinstance(action, dict) or set(action) != expected_action_keys:
+                    raise ValueError("critical gap corporate action is invalid")
+                for key in (
+                    "action_id",
+                    "ticker",
+                    "session",
+                    "action_type",
+                    "source",
+                    "fetched_at",
+                ):
+                    value = action[key]
+                    if not isinstance(value, str) or len(value) > _MAX_GAP_TEXT:
+                        raise ValueError("critical gap corporate action text is invalid")
+                try:
+                    date.fromisoformat(action["session"])
+                    datetime.fromisoformat(action["fetched_at"])
+                    for key in ("ratio", "cash_per_share"):
+                        value = action[key]
+                        if value is not None:
+                            if not isinstance(value, str) or len(value) > _MAX_GAP_TEXT:
+                                raise ValueError
+                            Decimal(value)
+                except (TypeError, ValueError, ArithmeticError) as error:
+                    raise ValueError(
+                        "critical gap corporate action value is invalid"
+                    ) from error
+                if not isinstance(action["verified"], bool):
+                    raise ValueError("critical gap corporate action verified is invalid")
+        if audit_items > _MAX_GAP_AUDIT_ITEMS:
+            raise ValueError("critical gap corporate action item count exceeds bound")
+        payload_size = len(
+            json.dumps(
+                asdict(marker), sort_keys=True, separators=(",", ":"), default=str
+            ).encode("utf-8")
+        )
+        if payload_size > _MAX_GAP_PAYLOAD_BYTES:
+            raise ValueError("critical gap payload exceeds byte bound")
 
     @staticmethod
     def _insert_immutable(
@@ -183,6 +350,90 @@ class MetricStore:
         self, epoch_id: str, end_session: date, reason: str
     ) -> MetricEpoch:
         return self.close_epoch(epoch_id, end_session, reason, invalid=True)
+
+    def begin_critical_gap(self, marker: CriticalGapMarker) -> CriticalGapMarker:
+        """Persist one bounded recovery marker before any dependent mutation."""
+        self._validate_critical_gap(marker)
+        if marker.status != "pending":
+            raise ValueError("new critical gap marker must be pending")
+        payload = self._json(marker)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
+                (marker.marker_id,),
+            ).fetchone()
+            if row is not None:
+                existing = self._critical_gap(row[0])
+                if existing == marker:
+                    return existing
+                raise ValueError(
+                    f"critical gap marker {marker.marker_id!r} has unequal payload"
+                )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO critical_gap_markers
+                      (marker_id, status, gap_session, payload_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        marker.marker_id,
+                        marker.status,
+                        marker.gap_session.isoformat(),
+                        payload,
+                    ),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("another critical gap recovery is pending") from error
+        return marker
+
+    def load_critical_gap(self, marker_id: str) -> CriticalGapMarker:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
+                (marker_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(marker_id)
+        return self._critical_gap(row[0])
+
+    def pending_critical_gap(self) -> CriticalGapMarker | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM critical_gap_markers
+                WHERE status = 'pending'
+                ORDER BY gap_session, marker_id
+                LIMIT 1
+                """
+            ).fetchone()
+        return self._critical_gap(row[0]) if row else None
+
+    def complete_critical_gap(self, marker_id: str) -> CriticalGapMarker:
+        """Durably complete a recovered marker; repeated completion is a no-op."""
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
+                (marker_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(marker_id)
+            current = self._critical_gap(row[0])
+            if current.status == "completed":
+                return current
+            completed = replace(current, status="completed")
+            connection.execute(
+                """
+                UPDATE critical_gap_markers
+                SET status = 'completed', payload_json = ?
+                WHERE marker_id = ?
+                """,
+                (self._json(completed), marker_id),
+            )
+        return completed
 
     def upsert_outcome(self, outcome: OutcomeRecord) -> None:
         payload = self._json(outcome)

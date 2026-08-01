@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -11,6 +11,7 @@ EpochStatus = Literal["open", "closed", "invalid"]
 HealthStatus = Literal[
     "signals", "legitimate_no_event", "data_failure", "strategy_defect"
 ]
+CriticalGapStatus = Literal["pending", "completed"]
 
 METRIC_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_LABEL = "1_legacy_calendar_signed"
@@ -32,6 +33,21 @@ class MetricEpoch:
     end_session: date | None
     status: EpochStatus
     boundary_reason: str
+
+
+@dataclass(frozen=True)
+class CriticalGapMarker:
+    """Bounded shared recovery intent for a cross-database critical gap."""
+
+    marker_id: str
+    epoch_id: str
+    gap_session: date
+    reason: str
+    cohort_invalid_reasons: dict[str, dict[str, str]]
+    status: CriticalGapStatus
+    corporate_action_rejections: dict[str, dict[str, object]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
