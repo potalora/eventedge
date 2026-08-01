@@ -36,6 +36,24 @@ from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_COHORTS = REPO_ROOT / "scripts" / "run_cohorts.py"
 
+MODEL_KEYS = (
+    "llm_provider",
+    "deep_think_llm",
+    "quick_think_llm",
+    "cache_model",
+    "live_model",
+    "strategist_model",
+    "cro_model",
+    "autoresearch_model",
+)
+
+
+def _models(**changes: str | None) -> dict[str, str | None]:
+    models = {key: None for key in MODEL_KEYS}
+    models.update(llm_provider="anthropic", autoresearch_model="sonnet")
+    models.update(changes)
+    return models
+
 
 def _execution_policy(**changes: object) -> dict[str, object]:
     policy: dict[str, object] = {
@@ -49,8 +67,34 @@ def _execution_policy(**changes: object) -> dict[str, object]:
             "provider": "exchange-calendars",
             "provider_version": "fixture",
         },
-        "risk_gate": {"max_positions": 5},
-        "cost_model": {"commission_per_fill": "0.005"},
+        "risk_gate": {
+            "total_capital": "5000",
+            "max_positions": 5,
+            "max_position_pct": "0.25",
+            "min_position_value": "100",
+            "daily_loss_limit_pct": "0.03",
+            "max_drawdown_pct": "0.15",
+            "per_strategy_max": 3,
+            "global_stop_loss_pct": "0.10",
+            "long_only": True,
+            "cash_reserve_pct": "0.10",
+            "reentry_cooldown_days": 5,
+            "earnings_blackout_days": 2,
+            "max_borrow_cost_pct": "0.05",
+            "max_margin_utilization_pct": "0.50",
+            "short_squeeze_stop_pct": "0.10",
+            "short_squeeze_window_days": 5,
+            "premium_decay_floor_pct": "0.20",
+        },
+        "cost_model": {
+            "slippage_bps": "5",
+            "commission_per_fill": "0.005",
+            "other_fee_per_fill": "0",
+            "margin_requirement": "0.50",
+            "margin_financing_rate": "0.08",
+            "idle_cash_yield_rate": "0.04",
+            "existing_short_missing_borrow_rate": "0.05",
+        },
         "short_selling": {"borrow_cost_reject_above": "0.05"},
         "bar_max_age_hours": 24,
         "benchmark_symbols": ["SPY", "BIL"],
@@ -77,7 +121,9 @@ def _policy(
         policy_id=policy_id,
         use_llm=use_llm,
         learning_enabled=learning_enabled,
-        execution_policy=execution_policy or _execution_policy(),
+        execution_policy=(
+            execution_policy if execution_policy is not None else _execution_policy()
+        ),
     )
 
 
@@ -85,7 +131,7 @@ def _context(**changes: object):
     values = {
         "generation_id": "gen_004",
         "generation_commit": "abc123",
-        "models": {"llm_provider": "anthropic", "autoresearch_model": "sonnet"},
+        "models": _models(),
         "strategies": ("filing_analysis", "litigation"),
         "cohort_policies": (_policy(),),
     }
@@ -122,7 +168,7 @@ def test_epoch_context_is_stable_across_order_and_state_paths(tmp_path) -> None:
         first = build_epoch_context(
             generation_id="gen_004",
             generation_commit="abc123",
-            models={"llm_provider": "anthropic", "autoresearch_model": "sonnet"},
+            models=_models(),
             strategies=("filing_analysis", "litigation"),
             cohort_policies=(
                 _policy("b", execution_policy=second_executor.semantic_policy_document()),
@@ -132,7 +178,7 @@ def test_epoch_context_is_stable_across_order_and_state_paths(tmp_path) -> None:
         second = build_epoch_context(
             generation_id="gen_004",
             generation_commit="abc123",
-            models={"autoresearch_model": "sonnet", "llm_provider": "anthropic"},
+            models=dict(reversed(tuple(_models().items()))),
             strategies=("litigation", "filing_analysis"),
             cohort_policies=(
                 _policy("a", execution_policy=first_executor.semantic_policy_document()),
@@ -166,9 +212,7 @@ def test_every_allowlisted_semantic_change_rotates_context_hash(change: str) -> 
     if change == "generation_commit":
         changed = _context(generation_commit="def456")
     elif change == "model":
-        changed = _context(
-            models={"llm_provider": "anthropic", "autoresearch_model": "opus"}
-        )
+        changed = _context(models=_models(autoresearch_model="opus"))
     elif change == "active_strategy":
         changed = _context(
             strategies=("filing_analysis", "litigation", "supply_chain")
@@ -184,20 +228,16 @@ def test_every_allowlisted_semantic_change_rotates_context_hash(change: str) -> 
     elif change == "learning_flag":
         changed = _context(cohort_policies=(_policy(learning_enabled=True),))
     elif change == "risk_gate":
+        policy = _execution_policy()
+        policy["risk_gate"]["max_positions"] = 6
         changed = _context(
-            cohort_policies=(
-                _policy(execution_policy=_execution_policy(risk_gate={"max_positions": 6})),
-            )
+            cohort_policies=(_policy(execution_policy=policy),)
         )
     else:
+        policy = _execution_policy()
+        policy["cost_model"]["commission_per_fill"] = "0.006"
         changed = _context(
-            cohort_policies=(
-                _policy(
-                    execution_policy=_execution_policy(
-                        cost_model={"commission_per_fill": "0.006"}
-                    )
-                ),
-            )
+            cohort_policies=(_policy(execution_policy=policy),)
         )
     assert changed != _context()
 
@@ -294,7 +334,7 @@ def test_generation_identity_must_be_nonempty_text(field: str, value: object) ->
 
 def test_model_values_must_be_text_or_none() -> None:
     with pytest.raises(ValueError, match="model autoresearch_model"):
-        _context(models={"autoresearch_model": 7})
+        _context(models={**_models(), "autoresearch_model": 7})
 
 
 @pytest.mark.parametrize(
@@ -311,7 +351,20 @@ def test_model_values_must_be_text_or_none() -> None:
 )
 def test_builder_rejects_unexpected_model_keys(forbidden_key: str) -> None:
     with pytest.raises(ValueError, match="unexpected model key"):
-        _context(models={"autoresearch_model": "sonnet", forbidden_key: "secret"})
+        _context(models={**_models(), forbidden_key: "secret"})
+
+
+@pytest.mark.parametrize("missing_key", MODEL_KEYS)
+def test_builder_requires_every_exact_model_key(missing_key: str) -> None:
+    models = _models()
+    del models[missing_key]
+    with pytest.raises(ValueError, match="model key set"):
+        _context(models=models)
+
+
+def test_builder_rejects_empty_model_document() -> None:
+    with pytest.raises(ValueError, match="model key set"):
+        _context(models={})
 
 
 @pytest.mark.parametrize(
@@ -337,6 +390,57 @@ def test_builder_rejects_unexpected_execution_policy_keys(
     target[forbidden_key] = "forbidden-value"
     with pytest.raises(ValueError, match="unexpected execution_policy"):
         _context(cohort_policies=(_policy(execution_policy=policy),))
+
+
+@pytest.mark.parametrize("missing_key", tuple(_execution_policy()))
+def test_builder_requires_every_top_level_execution_policy_key(
+    missing_key: str,
+) -> None:
+    policy = _execution_policy()
+    del policy[missing_key]
+    with pytest.raises(ValueError, match="execution_policy key set"):
+        _context(cohort_policies=(_policy(execution_policy=policy),))
+
+
+@pytest.mark.parametrize(
+    ("container", "missing_key"),
+    tuple(
+        (container, key)
+        for container in (
+            "execution",
+            "calendar",
+            "cost_model",
+            "risk_gate",
+            "short_selling",
+        )
+        for key in _execution_policy()[container]
+    ),
+)
+def test_builder_requires_every_nested_execution_policy_key(
+    container: str, missing_key: str
+) -> None:
+    policy = _execution_policy()
+    del policy[container][missing_key]
+    with pytest.raises(ValueError, match=f"execution_policy.{container} key set"):
+        _context(cohort_policies=(_policy(execution_policy=policy),))
+
+
+@pytest.mark.parametrize(
+    "container",
+    ("execution", "calendar", "cost_model", "risk_gate", "short_selling"),
+)
+def test_builder_rejects_empty_nested_execution_policy_document(
+    container: str,
+) -> None:
+    policy = _execution_policy()
+    policy[container] = {}
+    with pytest.raises(ValueError, match=f"execution_policy.{container} key set"):
+        _context(cohort_policies=(_policy(execution_policy=policy),))
+
+
+def test_builder_rejects_empty_execution_policy_document() -> None:
+    with pytest.raises(ValueError, match="execution_policy key set"):
+        _context(cohort_policies=(_policy(execution_policy={}),))
 
 
 @pytest.mark.parametrize(

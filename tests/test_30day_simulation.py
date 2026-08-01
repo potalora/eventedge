@@ -40,7 +40,10 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
 from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
-from tradingagents.strategies.orchestration.session_executor import SessionExecutor
+from tradingagents.strategies.orchestration.session_executor import (
+    CorporateActionBatchError,
+    SessionExecutor,
+)
 from tradingagents.strategies.orchestration.trading_calendar import (
     next_session,
     previous_session,
@@ -344,21 +347,31 @@ class AuthoritativePriceSource:
         }
 
 
+def _cohort_config(tmp_path, name: str, state_name: str | None = None) -> CohortConfig:
+    return CohortConfig(
+        name=name,
+        state_dir=str(tmp_path / (state_name or name)),
+        horizon="30d",
+        size_profile="5k",
+        adaptive_confidence=True,
+        learning_enabled=True,
+        use_llm=False,
+    )
+
+
 def _authoritative_orchestrator(
-    tmp_path, cohorts=1, hold_days=2, strategy_modules=None, model="sonnet"
+    tmp_path,
+    cohorts=1,
+    hold_days=2,
+    strategy_modules=None,
+    model="sonnet",
+    *,
+    cohort_configs=None,
+    source=None,
 ):
-    source = AuthoritativePriceSource()
-    configs = [
-        CohortConfig(
-            name=f"cohort_{index}",
-            state_dir=str(tmp_path / f"cohort_{index}"),
-            horizon="30d",
-            size_profile="5k",
-            adaptive_confidence=True,
-            learning_enabled=True,
-            use_llm=False,
-        )
-        for index in range(cohorts)
+    source = source or AuthoritativePriceSource()
+    configs = cohort_configs or [
+        _cohort_config(tmp_path, f"cohort_{index}") for index in range(cohorts)
     ]
     config = {
         "execution": {"mode": "paper"},
@@ -413,6 +426,50 @@ def _authoritative_committee(signals, **kwargs):
             contributing_strategies=[signal["strategy"]],
         )
     ]
+
+
+def _unrepresentable_corporate_gap(
+    kind: str, session: date
+) -> CorporateActionBatchError:
+    normal = CorporateAction(
+        "bad-scope-action",
+        "MSFT",
+        session,
+        "split",
+        Decimal("2"),
+        None,
+        "fixture",
+        datetime.now(timezone.utc),
+        True,
+    )
+    if kind == "overlong_field":
+        actions = (replace(normal, action_id="x" * 257),)
+        errors = ("invalid corporate action",)
+    elif kind == "overlong_error":
+        actions = (normal,)
+        errors = ("e" * 4097,)
+    elif kind == "item_overflow":
+        actions = tuple(
+            replace(normal, action_id=f"overflow-{index}") for index in range(2049)
+        )
+        errors = ("too many actions",)
+    elif kind == "byte_overflow":
+        huge_decimal = Decimal("9" * 256)
+        actions = tuple(
+            replace(
+                normal,
+                action_id=f"{index:04d}-" + "x" * 250,
+                ticker="T" * 256,
+                ratio=huge_decimal,
+                cash_per_share=huge_decimal,
+                source="S" * 256,
+            )
+            for index in range(1900)
+        )
+        errors = ("oversized canonical audit",)
+    else:  # pragma: no cover - parametrization owns this invariant.
+        raise AssertionError(kind)
+    return CorporateActionBatchError(actions, errors)
 
 
 def _corrupt_persisted_market_bundle(ledger, session: date) -> None:
@@ -1004,6 +1061,344 @@ class TestIdempotencyDoubleRun:
             len(source.action_calls),
             len(source.benchmark_calls),
         ) == calls_before_replay
+
+    @pytest.mark.parametrize(
+        ("detail_kind", "expected_error"),
+        (
+            ("overlong_field", "corporate action text is invalid"),
+            ("overlong_error", "corporate action error is invalid"),
+            ("item_overflow", "item count exceeds bound"),
+            ("byte_overflow", "payload exceeds byte bound"),
+        ),
+    )
+    def test_unrepresentable_corporate_detail_keeps_minimal_blocker_and_closes_epoch(
+        self, tmp_path, detail_kind, expected_error
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        gap_error = _unrepresentable_corporate_gap(detail_kind, gap_session)
+        source.get_corporate_actions = lambda tickers, session: gap_error.actions
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        epoch_id = orchestrator._epoch_id
+
+        with patch.object(
+            SessionExecutor,
+            "validate_shared_action_response",
+            side_effect=gap_error,
+        ):
+            with pytest.raises(ValueError, match=expected_error):
+                orchestrator.run_daily(gap_session.isoformat())
+
+        pending = store.pending_critical_gap()
+        assert pending is not None
+        assert pending.detail_status == "minimal"
+        assert pending.affected_cohorts.keys() == {"cohort_0"}
+        assert pending.corporate_action_rejections == {}
+        assert store.load_epoch(epoch_id).status == "invalid"
+        calls_before = (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        )
+        source.get_corporate_actions = lambda tickers, session: ()
+
+        for replay_session in (gap_session, next_session(gap_session)):
+            with pytest.raises(ValueError, match="critical gap recovery detail"):
+                orchestrator.run_daily(replay_session.isoformat())
+
+            assert store.pending_critical_gap() == pending
+            assert (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+            ) == calls_before
+
+    def test_marker_persistence_failure_directly_invalidates_exact_epoch(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        epoch_id = orchestrator._epoch_id
+        original_begin = store.begin_critical_gap
+        store.begin_critical_gap = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("marker persistence failed")
+        )
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("benchmark gap")
+        )
+
+        with pytest.raises(RuntimeError, match="marker persistence failed"):
+            orchestrator.run_daily(gap_session.isoformat())
+
+        assert store.pending_critical_gap() is None
+        invalid = store.load_epoch(epoch_id)
+        assert invalid.status == "invalid" and invalid.end_session == gap_session
+        store.begin_critical_gap = original_begin
+        source.get_total_return_closes = (
+            AuthoritativePriceSource().get_total_return_closes
+        )
+        later = next_session(gap_session)
+        clean = orchestrator.run_daily(later.isoformat())
+        assert not clean["cohort_0"]["error"]
+        assert store.current_epoch().epoch_id != epoch_id
+
+    def test_no_due_shared_gap_marker_names_every_affected_ledger(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("shared benchmark gap")
+        )
+        orchestrator._after_gap_marker = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("crash after minimal marker")
+        )
+
+        with pytest.raises(RuntimeError, match="crash after minimal marker"):
+            orchestrator.run_daily(gap_session.isoformat())
+
+        marker = orchestrator.cohorts[0][
+            "executor"
+        ].metric_store.pending_critical_gap()
+        assert marker is not None
+        assert marker.cohort_invalid_reasons == {}
+        assert marker.corporate_action_rejections == {}
+        assert marker.affected_cohorts.keys() == {"cohort_0", "cohort_1"}
+        assert len(set(marker.affected_cohorts.values())) == 2
+        assert all(
+            binding.startswith("ledger_recovery_binding_")
+            for binding in marker.affected_cohorts.values()
+        )
+        assert str(tmp_path) not in json.dumps(
+            marker.__dict__, sort_keys=True, default=str
+        )
+
+    def test_crash_after_minimal_blocker_closes_epoch_and_cannot_be_bypassed(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        epoch_id = orchestrator._epoch_id
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("shared benchmark gap")
+        )
+        orchestrator._after_gap_blocker = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("crash after minimal blocker")
+        )
+
+        with pytest.raises(RuntimeError, match="crash after minimal blocker"):
+            orchestrator.run_daily(gap_session.isoformat())
+
+        pending = store.pending_critical_gap()
+        assert pending is not None and pending.detail_status == "minimal"
+        invalid = store.load_epoch(epoch_id)
+        assert invalid.status == "invalid" and invalid.end_session == gap_session
+        orchestrator._after_gap_blocker = lambda marker: None
+        source.get_total_return_closes = (
+            AuthoritativePriceSource().get_total_return_closes
+        )
+        calls_before = (
+            len(source.raw_calls),
+            len(source.action_calls),
+            len(source.benchmark_calls),
+        )
+
+        for replay_session in (gap_session, next_session(gap_session)):
+            with pytest.raises(ValueError, match="critical gap recovery detail"):
+                orchestrator.run_daily(replay_session.isoformat())
+
+            assert store.pending_critical_gap() == pending
+            assert (
+                len(source.raw_calls),
+                len(source.action_calls),
+                len(source.benchmark_calls),
+            ) == calls_before
+
+    @pytest.mark.parametrize(
+        "topology",
+        ("removed", "renamed", "changed_state_path", "duplicate"),
+    )
+    def test_restart_requires_every_original_ledger_binding(
+        self, tmp_path, topology
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("shared benchmark gap")
+        )
+        orchestrator._after_gap_marker = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("restart boundary")
+        )
+        with pytest.raises(RuntimeError, match="restart boundary"):
+            orchestrator.run_daily(gap_session.isoformat())
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        for cohort in orchestrator.cohorts:
+            cohort["ledger"].close()
+
+        configs = [_cohort_config(tmp_path, "cohort_0")]
+        if topology == "renamed":
+            configs.append(_cohort_config(tmp_path, "renamed", "renamed_state"))
+        elif topology == "changed_state_path":
+            configs.append(_cohort_config(tmp_path, "cohort_1", "fresh_cohort_1"))
+        elif topology == "duplicate":
+            configs.append(_cohort_config(tmp_path, "cohort_1"))
+        restarted, restarted_source = _authoritative_orchestrator(
+            tmp_path,
+            strategy_modules=[FakeStrategy()],
+            cohort_configs=configs,
+        )
+        if topology == "duplicate":
+            restarted.cohorts.append(restarted.cohorts[0])
+        calls_before = (
+            len(restarted_source.raw_calls),
+            len(restarted_source.action_calls),
+            len(restarted_source.benchmark_calls),
+        )
+
+        with pytest.raises(ValueError, match="critical gap cohort binding"):
+            restarted.run_daily(gap_session.isoformat())
+
+        assert store.pending_critical_gap() is not None
+        assert (
+            len(restarted_source.raw_calls),
+            len(restarted_source.action_calls),
+            len(restarted_source.benchmark_calls),
+        ) == calls_before
+
+    def test_restart_missing_corporate_audit_cohort_stays_pending(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        invalid_action = CorporateAction(
+            "bad-scope-action",
+            "MSFT",
+            gap_session,
+            "split",
+            Decimal("2"),
+            None,
+            "fixture",
+            datetime.now(timezone.utc),
+            True,
+        )
+        source.get_corporate_actions = lambda tickers, session: (invalid_action,)
+        orchestrator._after_gap_marker = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("audit restart boundary")
+        )
+        with pytest.raises(RuntimeError, match="audit restart boundary"):
+            orchestrator.run_daily(gap_session.isoformat())
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        marker = store.pending_critical_gap()
+        assert marker is not None
+        assert marker.corporate_action_rejections.keys() == {"cohort_0", "cohort_1"}
+        for cohort in orchestrator.cohorts:
+            cohort["ledger"].close()
+
+        restarted, _ = _authoritative_orchestrator(
+            tmp_path,
+            strategy_modules=[FakeStrategy()],
+            cohort_configs=[_cohort_config(tmp_path, "cohort_0")],
+        )
+        with pytest.raises(ValueError, match="critical gap cohort binding"):
+            restarted.run_daily(gap_session.isoformat())
+
+        assert store.pending_critical_gap() is not None
+        with sqlite3.connect(tmp_path / "cohort_1" / "portfolio.db") as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+            ).fetchone()[0] == 0
+
+    def test_added_cohort_can_start_only_after_exact_original_recovery(self, tmp_path):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        old_epoch_id = orchestrator._epoch_id
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("shared benchmark gap")
+        )
+        orchestrator._after_gap_marker = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("restart boundary")
+        )
+        with pytest.raises(RuntimeError, match="restart boundary"):
+            orchestrator.run_daily(gap_session.isoformat())
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        for cohort in orchestrator.cohorts:
+            cohort["ledger"].close()
+
+        restarted, restarted_source = _authoritative_orchestrator(
+            tmp_path,
+            strategy_modules=[FakeStrategy()],
+            cohort_configs=[
+                _cohort_config(tmp_path, "cohort_0"),
+                _cohort_config(tmp_path, "cohort_1"),
+                _cohort_config(tmp_path, "cohort_2"),
+            ],
+        )
+        later_session = next_session(gap_session)
+        calls_before = (
+            len(restarted_source.raw_calls),
+            len(restarted_source.action_calls),
+            len(restarted_source.benchmark_calls),
+        )
+        recovered = restarted.run_daily(later_session.isoformat())
+
+        assert store.pending_critical_gap() is None
+        assert store.load_epoch(old_epoch_id).status == "invalid"
+        assert restarted._epoch_id != old_epoch_id
+        assert set(recovered) == {"cohort_0", "cohort_1", "cohort_2"}
+        assert all(not result["error"] for result in recovered.values())
+        assert len(restarted_source.raw_calls) > calls_before[0]
 
     def test_completed_valid_cohort_is_preserved_when_fresh_peer_has_critical_gap(
         self, tmp_path

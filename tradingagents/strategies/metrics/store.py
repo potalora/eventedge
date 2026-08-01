@@ -110,6 +110,9 @@ class MetricStore:
     def _critical_gap(payload: str) -> CriticalGapMarker:
         data = json.loads(payload)
         data["gap_session"] = date.fromisoformat(data["gap_session"])
+        if "affected_cohorts" not in data:
+            data["affected_cohorts"] = {}
+            data["detail_status"] = "legacy_unbound"
         return CriticalGapMarker(**data)
 
     def _validate_critical_gap(self, marker: CriticalGapMarker) -> None:
@@ -129,8 +132,38 @@ class MetricStore:
             raise ValueError("critical gap reason must be stable")
         if marker.status not in {"pending", "completed"}:
             raise ValueError("critical gap status is invalid")
+        if marker.detail_status not in {"minimal", "ready", "legacy_unbound"}:
+            raise ValueError("critical gap detail status is invalid")
+        if not isinstance(marker.affected_cohorts, dict):
+            raise ValueError("critical gap affected cohorts must be a mapping")
+        if not marker.affected_cohorts:
+            raise ValueError("critical gap affected cohorts are required")
+        if len(marker.affected_cohorts) > _MAX_GAP_COHORTS:
+            raise ValueError("critical gap affected cohort count exceeds bound")
+        bindings: list[str] = []
+        for cohort, binding in marker.affected_cohorts.items():
+            if (
+                not isinstance(cohort, str)
+                or not cohort.strip()
+                or len(cohort) > _MAX_GAP_TEXT
+                or not isinstance(binding, str)
+                or not binding.strip()
+                or len(binding) > _MAX_GAP_TEXT
+            ):
+                raise ValueError("critical gap affected cohort binding is invalid")
+            bindings.append(binding)
+        if len(set(bindings)) != len(bindings):
+            raise ValueError("critical gap affected cohort bindings must be unique")
         if not isinstance(marker.cohort_invalid_reasons, dict):
             raise ValueError("critical gap cohort reasons must be a mapping")
+        if not isinstance(marker.corporate_action_rejections, dict):
+            raise ValueError("critical gap corporate action intents must be a mapping")
+        if marker.detail_status == "minimal":
+            if marker.cohort_invalid_reasons or marker.corporate_action_rejections:
+                raise ValueError("minimal critical gap cannot contain recovery detail")
+            return
+        if marker.detail_status != "ready":
+            raise ValueError("critical gap recovery detail is not ready")
         if len(marker.cohort_invalid_reasons) > _MAX_GAP_COHORTS:
             raise ValueError("critical gap cohort count exceeds bound")
         ticker_count = 0
@@ -153,13 +186,15 @@ class MetricStore:
                     raise ValueError("critical gap ticker payload is invalid")
         if ticker_count > _MAX_GAP_TICKERS:
             raise ValueError("critical gap ticker count exceeds bound")
+        if not set(marker.cohort_invalid_reasons) <= set(marker.affected_cohorts):
+            raise ValueError("critical gap outcome cohort is not affected")
         audit_intents = marker.corporate_action_rejections
-        if not isinstance(audit_intents, dict):
-            raise ValueError("critical gap corporate action intents must be a mapping")
         if len(set(marker.cohort_invalid_reasons) | set(audit_intents)) > (
             _MAX_GAP_COHORTS
         ):
             raise ValueError("critical gap total cohort count exceeds bound")
+        if not set(audit_intents) <= set(marker.affected_cohorts):
+            raise ValueError("critical gap audit cohort is not affected")
         audit_items = 0
         for cohort, intent in audit_intents.items():
             if (
@@ -178,8 +213,6 @@ class MetricStore:
             if not errors:
                 raise ValueError("critical gap corporate action errors are required")
             audit_items += len(actions) + len(governed) + len(errors)
-            if governed != sorted(set(governed)) or errors != sorted(set(errors)):
-                raise ValueError("critical gap corporate action lists are not canonical")
             for ticker in governed:
                 if (
                     not isinstance(ticker, str)
@@ -194,6 +227,8 @@ class MetricStore:
                     or len(error) > _MAX_GAP_DETAIL_TEXT
                 ):
                     raise ValueError("critical gap corporate action error is invalid")
+            if governed != sorted(set(governed)) or errors != sorted(set(errors)):
+                raise ValueError("critical gap corporate action lists are not canonical")
             expected_action_keys = {
                 "action_id",
                 "ticker",
@@ -352,10 +387,12 @@ class MetricStore:
         return self.close_epoch(epoch_id, end_session, reason, invalid=True)
 
     def begin_critical_gap(self, marker: CriticalGapMarker) -> CriticalGapMarker:
-        """Persist one bounded recovery marker before any dependent mutation."""
+        """Persist the minimal blocker before any provider-owned recovery detail."""
         self._validate_critical_gap(marker)
         if marker.status != "pending":
             raise ValueError("new critical gap marker must be pending")
+        if marker.detail_status != "minimal":
+            raise ValueError("new critical gap marker must be minimal")
         payload = self._json(marker)
         with sqlite3.connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -386,6 +423,55 @@ class MetricStore:
                 )
             except sqlite3.IntegrityError as error:
                 raise ValueError("another critical gap recovery is pending") from error
+        return marker
+
+    def attach_critical_gap_details(
+        self, marker: CriticalGapMarker
+    ) -> CriticalGapMarker:
+        """Atomically attach bounded replay detail to an existing blocker."""
+        self._validate_critical_gap(marker)
+        if marker.status != "pending" or marker.detail_status != "ready":
+            raise ValueError("critical gap recovery detail must be ready and pending")
+        payload = self._json(marker)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
+                (marker.marker_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(marker.marker_id)
+            current = self._critical_gap(row[0])
+            core = (
+                marker.marker_id,
+                marker.epoch_id,
+                marker.gap_session,
+                marker.reason,
+                marker.affected_cohorts,
+                marker.status,
+            )
+            current_core = (
+                current.marker_id,
+                current.epoch_id,
+                current.gap_session,
+                current.reason,
+                current.affected_cohorts,
+                current.status,
+            )
+            if current_core != core:
+                raise ValueError("critical gap recovery detail has unequal blocker")
+            if current.detail_status == "ready":
+                if current == marker:
+                    return current
+                raise ValueError(
+                    f"critical gap marker {marker.marker_id!r} has unequal detail"
+                )
+            if current.detail_status != "minimal":
+                raise ValueError("critical gap blocker cannot accept recovery detail")
+            connection.execute(
+                "UPDATE critical_gap_markers SET payload_json = ? WHERE marker_id = ?",
+                (payload, marker.marker_id),
+            )
         return marker
 
     def load_critical_gap(self, marker_id: str) -> CriticalGapMarker:
@@ -424,6 +510,8 @@ class MetricStore:
             current = self._critical_gap(row[0])
             if current.status == "completed":
                 return current
+            if current.detail_status != "ready":
+                raise ValueError("critical gap recovery detail is not ready")
             completed = replace(current, status="completed")
             connection.execute(
                 """

@@ -377,6 +377,7 @@ class CohortOrchestrator:
         self._base_config = base_config
         self._price_source = price_source or YFinancePriceSource()
         self._epoch_id: str | None = None
+        self._after_gap_blocker = lambda marker: None
         self._after_gap_marker = lambda marker: None
         self._after_gap_p0_invalidation = lambda marker: None
         self._after_gap_metric_invalidation = lambda marker: None
@@ -404,24 +405,57 @@ class CohortOrchestrator:
         first_engine = self.cohorts[0]["engine"]
         return first_engine.screen_and_enrich(trading_date, data, horizon=horizon)
 
-    def _stop_for_critical_market_data_gap(
+    def _bound_critical_gap_cohorts(
+        self, marker: CriticalGapMarker
+    ) -> list[dict[str, Any]]:
+        """Resolve every original cohort to its exact opaque ledger binding."""
+        if marker.detail_status == "legacy_unbound" or not marker.affected_cohorts:
+            raise ValueError("critical gap cohort binding is missing")
+        current: dict[str, tuple[str, dict[str, Any]]] = {}
+        seen_bindings: set[str] = set()
+        for cohort in self.cohorts:
+            name = cohort["config"].name
+            binding = cohort["ledger"].recovery_binding_id()
+            if name in current or binding in seen_bindings:
+                raise ValueError("critical gap cohort binding is duplicated")
+            if cohort["ledger"].cohort_id != name:
+                raise ValueError("critical gap cohort binding is incompatible")
+            current[name] = (binding, cohort)
+            seen_bindings.add(binding)
+        resolved: list[dict[str, Any]] = []
+        for name, expected_binding in marker.affected_cohorts.items():
+            bound = current.get(name)
+            if bound is None:
+                raise ValueError(f"critical gap cohort binding is missing for {name}")
+            actual_binding, cohort = bound
+            if actual_binding != expected_binding:
+                raise ValueError(
+                    f"critical gap cohort binding is incompatible for {name}"
+                )
+            resolved.append(cohort)
+        return resolved
+
+    def _invalidate_gap_epoch_after_boundary_error(
+        self, marker: CriticalGapMarker, error: Exception
+    ) -> None:
+        """Close the exact epoch while retaining the boundary error as primary."""
+        try:
+            self.cohorts[0]["executor"].invalidate_metric_epoch(
+                marker.gap_session,
+                epoch_id=marker.epoch_id,
+            )
+        except Exception as invalidation_error:
+            raise error from invalidation_error
+
+    def _build_critical_gap_detail_marker(
         self,
+        minimal_marker: CriticalGapMarker,
         session: date,
         processed_at: datetime,
-        results: dict[str, Any],
         raw_bars: dict,
-        reason: str,
-        *,
-        corporate_action_errors: dict[str, Any] | None = None,
-        original_error: Exception | None = None,
-    ) -> dict[str, Any]:
-        """Start and complete one durable cross-database gap transition."""
-        from tradingagents.strategies.execution.ids import stable_id
-        from tradingagents.strategies.metrics.models import CriticalGapMarker
-
-        if self._epoch_id is None:
-            raise RuntimeError("metric epoch is not initialized")
-        store = self.cohorts[0]["executor"].metric_store
+        corporate_action_errors: dict[str, Any] | None,
+    ) -> CriticalGapMarker:
+        """Build provider-derived recovery detail after the blocker is durable."""
         cohort_invalid_reasons: dict[str, dict[str, str]] = {}
         for cohort in self.cohorts:
             executor = cohort["executor"]
@@ -484,18 +518,74 @@ class CohortOrchestrator:
                 ),
                 "errors": sorted(set(action_error.errors)),
             }
-        marker = CriticalGapMarker(
-            marker_id=stable_id("critical_gap_marker", self._epoch_id, session),
-            epoch_id=self._epoch_id,
-            gap_session=session,
-            reason="critical_market_data_gap",
+        return replace(
+            minimal_marker,
             cohort_invalid_reasons=dict(sorted(cohort_invalid_reasons.items())),
-            status="pending",
+            detail_status="ready",
             corporate_action_rejections=dict(
                 sorted(corporate_action_rejections.items())
             ),
         )
-        marker = store.begin_critical_gap(marker)
+
+    def _stop_for_critical_market_data_gap(
+        self,
+        session: date,
+        processed_at: datetime,
+        results: dict[str, Any],
+        raw_bars: dict,
+        reason: str,
+        *,
+        corporate_action_errors: dict[str, Any] | None = None,
+        original_error: Exception | None = None,
+    ) -> dict[str, Any]:
+        """Start and complete one durable cross-database gap transition."""
+        from tradingagents.strategies.execution.ids import stable_id
+        from tradingagents.strategies.metrics.models import CriticalGapMarker
+
+        if self._epoch_id is None:
+            raise RuntimeError("metric epoch is not initialized")
+        store = self.cohorts[0]["executor"].metric_store
+        affected_cohorts = {
+            cohort["config"].name: cohort["ledger"].recovery_binding_id()
+            for cohort in self.cohorts
+        }
+        minimal_marker = CriticalGapMarker(
+            marker_id=stable_id("critical_gap_marker", self._epoch_id, session),
+            epoch_id=self._epoch_id,
+            gap_session=session,
+            reason="critical_market_data_gap",
+            cohort_invalid_reasons={},
+            status="pending",
+            affected_cohorts=dict(sorted(affected_cohorts.items())),
+            detail_status="minimal",
+            corporate_action_rejections={},
+        )
+        try:
+            minimal_marker = store.begin_critical_gap(minimal_marker)
+        except Exception as marker_error:
+            self._invalidate_gap_epoch_after_boundary_error(
+                minimal_marker, marker_error
+            )
+            if original_error is not None:
+                raise original_error from marker_error
+            raise
+        try:
+            self._after_gap_blocker(minimal_marker)
+            marker = self._build_critical_gap_detail_marker(
+                minimal_marker,
+                session,
+                processed_at,
+                raw_bars,
+                corporate_action_errors,
+            )
+            marker = store.attach_critical_gap_details(marker)
+        except Exception as detail_error:
+            self._invalidate_gap_epoch_after_boundary_error(
+                minimal_marker, detail_error
+            )
+            if original_error is not None:
+                raise original_error from detail_error
+            raise
         self._after_gap_marker(marker)
         return self._complete_pending_critical_gap(
             marker,
@@ -520,9 +610,16 @@ class CohortOrchestrator:
 
         results = results if results is not None else {}
         self._epoch_id = marker.epoch_id
+        try:
+            affected_cohorts = self._bound_critical_gap_cohorts(marker)
+            if marker.detail_status != "ready":
+                raise ValueError("critical gap recovery detail is not ready")
+        except Exception as boundary_error:
+            self._invalidate_gap_epoch_after_boundary_error(marker, boundary_error)
+            raise
         committed = {
             cohort["config"].name
-            for cohort in self.cohorts
+            for cohort in affected_cohorts
             if cohort["ledger"].read_snapshots(
                 marker.gap_session,
                 marker.gap_session,
@@ -537,7 +634,7 @@ class CohortOrchestrator:
         recovery_error: Exception | None = None
         audit_error: Exception | None = None
         try:
-            for cohort in self.cohorts:
+            for cohort in affected_cohorts:
                 executor = cohort["executor"]
                 invalid_reasons = marker.cohort_invalid_reasons.get(
                     cohort["config"].name, {}
@@ -551,7 +648,7 @@ class CohortOrchestrator:
                     )
         except Exception as error:
             recovery_error = error
-        for cohort in self.cohorts:
+        for cohort in affected_cohorts:
             name = cohort["config"].name
             rejection = marker.corporate_action_rejections.get(name)
             if rejection is None or name in committed:
@@ -589,7 +686,7 @@ class CohortOrchestrator:
             except Exception as error:
                 if audit_error is None:
                     audit_error = error
-        for cohort in self.cohorts:
+        for cohort in affected_cohorts:
             name = cohort["config"].name
             if name in committed:
                 results.setdefault(
@@ -611,6 +708,14 @@ class CohortOrchestrator:
                 or result_reason
                 or marker.reason,
             }
+        affected_names = set(marker.affected_cohorts)
+        for cohort in self.cohorts:
+            name = cohort["config"].name
+            if name not in affected_names:
+                results.setdefault(
+                    name,
+                    {"error": True, "invalid_reason": marker.reason},
+                )
         self._after_gap_p0_invalidation(marker)
         self.cohorts[0]["executor"].invalidate_metric_epoch(
             marker.gap_session,

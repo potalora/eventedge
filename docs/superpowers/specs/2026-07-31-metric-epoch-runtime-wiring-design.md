@@ -71,20 +71,31 @@ P0 cohort ledgers and the shared metrics store are separate SQLite databases,
 so a critical gap cannot depend on process-local ordering alone. The shared
 `MetricStore` is the recovery coordinator. Before any dependent outcome, P0
 invalidation, corporate-action rejection, or metric-epoch mutation, the
-orchestrator durably inserts one `pending` `CriticalGapMarker`. A partial unique
-index permits only one pending marker per generation store, and marker
-completion is idempotent.
+orchestrator durably inserts one minimal `pending` `CriticalGapMarker`. A
+partial unique index permits only one pending marker per generation store, and
+marker completion is idempotent.
 
-The marker is deliberately bounded and schema-validated. It contains the
-stable marker/epoch IDs, one exact XNYS gap session, the stable
-`critical_market_data_gap` reason, bounded cohort/ticker invalid-outcome
-reasons, and—only when a corporate-action batch must be rejected—a bounded
-canonical rejection intent per cohort. That intent includes only the exact
-corporate-action fields already required by the P0 rejection audit, the
-governed ticker names, and deterministic validation errors. It excludes market
-bars, positions, credentials, filesystem paths, provider response bodies, and
-arbitrary exception details, and it never participates in the semantic epoch
-hash.
+Marker persistence is a two-phase boundary. Phase 1 contains only the stable
+marker/epoch IDs, one exact XNYS gap session, the stable
+`critical_market_data_gap` reason, and the exact affected cohort set. Each
+affected cohort maps to one opaque ledger binding derived from the cohort name,
+normalized ledger database path, and filesystem device/inode identity; only a
+stable hash is stored, never the raw path. Phase 2 atomically attaches bounded,
+schema-validated cohort/ticker invalid-outcome reasons and—only when a
+corporate-action batch must be rejected—a bounded canonical rejection intent
+per cohort. That intent includes only the exact corporate-action fields already
+required by the P0 rejection audit, governed ticker names, and deterministic
+validation errors. It excludes market bars, positions, credentials, filesystem
+paths, provider response bodies, and arbitrary exception details, and it never
+participates in the semantic epoch hash.
+
+If phase 1 cannot persist, the orchestrator directly invalidates the exact
+epoch before surfacing the boundary error. If the post-blocker hook, detail
+construction, validation, size cap, or phase-2 attachment fails, the exact
+epoch is likewise invalidated and the minimal blocker remains pending. A
+minimal blocker cannot be replayed automatically because it cannot prove
+whether an audit was unnecessary or interrupted; same- and later-session runs
+therefore fail closed until manual resolution supplies trustworthy detail.
 
 Recovery is an idempotent state machine:
 
@@ -112,6 +123,15 @@ fetches. A session earlier than the pending gap fails closed. Deterministic
 crash hooks cover process death after marker persistence, after P0 invalidation,
 and after metric invalidation.
 
+Recovery first requires every originally affected cohort name to resolve
+exactly once to its original opaque ledger binding. Removed, renamed,
+duplicated, replacement-path, or otherwise incompatible ledgers leave the
+marker pending and fail before any fetch or recovery write. A newly added,
+uniquely bound cohort is not part of the old recovery and receives no old-gap
+mutation; it may enter normal processing only after exact original recovery
+completes and a later session resolves the replacement epoch. Legacy pending
+markers without bindings are deliberately non-recoverable and fail closed.
+
 ## Canonical semantic inputs
 
 The behavior document contains only:
@@ -123,10 +143,12 @@ The behavior document contains only:
 
 The context builder itself, not only its caller, enforces the exact model-key
 allowlist: `llm_provider`, `deep_think_llm`, `quick_think_llm`, `cache_model`,
-`live_model`, `strategist_model`, `cro_model`, and `autoresearch_model`. It also
-enforces exact top-level and nested execution-policy schemas and canonical
-scalar/string-list leaves. Unexpected or hidden state/secret keys are rejected
-before hashing.
+`live_model`, `strategist_model`, `cro_model`, and `autoresearch_model`. All
+eight keys are required even when a configured model is explicitly `None`. The
+builder also enforces equality with the full top-level and nested
+execution-policy key sets, including nonempty nested documents, plus canonical
+scalar/string-list leaves. Missing, unexpected, or hidden state/secret keys are
+rejected before hashing.
 
 The configuration document contains a sorted entry per cohort:
 
@@ -182,9 +204,15 @@ Tests must prove:
 - a missing/stale due bar writes one invalid outcome, invalidates the shared
   epoch once, performs no further metric write, and an exact replay neither
   refetches data nor opens another epoch;
-- crashes after marker persistence, P0 invalidation, and metric invalidation
-  leave a pending boundary that a same-session replay completes without a
-  fetch; direct later-session recovery completes before replacement creation;
+- crashes after ready marker persistence, P0 invalidation, and metric
+  invalidation leave a pending boundary that a same-session replay completes
+  without a fetch; direct later-session recovery completes before replacement
+  creation; a minimal-only blocker closes the exact epoch and cannot be
+  bypassed on the same or a later session;
+- every affected cohort is bound exactly once on no-due and audit gaps;
+  removed, renamed, duplicate, replacement-path, missing-audit-cohort, and
+  legacy topologies fail closed, while a newly added cohort starts only after
+  exact original recovery;
 - a failed corporate-action rejection audit leaves the marker pending, and its
   zero-fetch replay writes exactly one idempotent rejection row before marker
   completion;

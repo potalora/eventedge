@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
 from datetime import date
@@ -105,6 +106,20 @@ def _critical_gap(status: str = "pending") -> CriticalGapMarker:
             "cohort-b": {"MSFT": "critical_market_data_gap"},
         },
         status=status,
+        affected_cohorts={
+            "cohort-a": "ledger_recovery_binding_a",
+            "cohort-b": "ledger_recovery_binding_b",
+        },
+        detail_status="ready",
+    )
+
+
+def _minimal_critical_gap() -> CriticalGapMarker:
+    return replace(
+        _critical_gap(),
+        cohort_invalid_reasons={},
+        detail_status="minimal",
+        corporate_action_rejections={},
     )
 
 
@@ -263,10 +278,14 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
 def test_pending_critical_gap_round_trips_and_completes_idempotently(tmp_path) -> None:
     path = tmp_path / "metrics_v2.sqlite3"
     store = MetricStore(path)
+    minimal = _minimal_critical_gap()
     marker = _critical_gap()
 
-    assert store.begin_critical_gap(marker) == marker
-    assert store.begin_critical_gap(marker) == marker
+    assert store.begin_critical_gap(minimal) == minimal
+    assert store.begin_critical_gap(minimal) == minimal
+    assert MetricStore(path).pending_critical_gap() == minimal
+    assert store.attach_critical_gap_details(marker) == marker
+    assert store.attach_critical_gap_details(marker) == marker
     assert MetricStore(path).pending_critical_gap() == marker
 
     completed = store.complete_critical_gap(marker.marker_id)
@@ -293,7 +312,8 @@ def test_critical_gap_schema_migrates_existing_store_and_indexes_pending(tmp_pat
         )
 
     store = MetricStore(path)
-    store.begin_critical_gap(_critical_gap())
+    store.begin_critical_gap(_minimal_critical_gap())
+    store.attach_critical_gap_details(_critical_gap())
 
     with sqlite3.connect(path) as connection:
         indexes = {
@@ -322,8 +342,58 @@ def test_critical_gap_marker_rejects_unbounded_or_unstable_payload(
     tmp_path, changes
 ) -> None:
     store = MetricStore(tmp_path / "metrics_v2.sqlite3")
+    store.begin_critical_gap(_minimal_critical_gap())
     with pytest.raises(ValueError):
-        store.begin_critical_gap(replace(_critical_gap(), **changes))
+        store.attach_critical_gap_details(replace(_critical_gap(), **changes))
+
+
+def test_minimal_critical_gap_requires_unique_opaque_ledger_bindings(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics_v2.sqlite3")
+    with pytest.raises(ValueError, match="affected cohorts are required"):
+        store.begin_critical_gap(replace(_minimal_critical_gap(), affected_cohorts={}))
+    with pytest.raises(ValueError, match="bindings must be unique"):
+        store.begin_critical_gap(
+            replace(
+                _minimal_critical_gap(),
+                affected_cohorts={"cohort-a": "same", "cohort-b": "same"},
+            )
+        )
+
+
+def test_legacy_pending_gap_without_bindings_is_loaded_but_cannot_complete(
+    tmp_path,
+) -> None:
+    path = tmp_path / "metrics_v2.sqlite3"
+    store = MetricStore(path)
+    legacy = _critical_gap().__dict__.copy()
+    legacy.pop("affected_cohorts")
+    legacy.pop("detail_status")
+    payload = store._json(_critical_gap())
+    parsed = json.loads(payload)
+    parsed.pop("affected_cohorts")
+    parsed.pop("detail_status")
+    legacy_payload = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO critical_gap_markers
+              (marker_id, status, gap_session, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                legacy["marker_id"],
+                legacy["status"],
+                legacy["gap_session"].isoformat(),
+                legacy_payload,
+            ),
+        )
+
+    pending = store.pending_critical_gap()
+    assert pending is not None
+    assert pending.detail_status == "legacy_unbound"
+    assert pending.affected_cohorts == {}
+    with pytest.raises(ValueError, match="recovery detail is not ready"):
+        store.complete_critical_gap(pending.marker_id)
 
 
 def test_immutable_epoch_outcome_and_health_writes_are_idempotent(tmp_path) -> None:

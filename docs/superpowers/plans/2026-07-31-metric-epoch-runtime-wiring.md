@@ -61,8 +61,8 @@ SQLite/WAL, exchange-calendars XNYS, pytest.
 - Produces `SessionExecutor.ensure_metric_epoch(context, session) -> MetricEpoch`.
 - Produces `SessionExecutor.invalidate_metric_epoch(session, reason) -> MetricEpoch`.
 - Produces a bounded `CriticalGapMarker` and idempotent
-  `MetricStore.begin_critical_gap`, `pending_critical_gap`, and
-  `complete_critical_gap` recovery operations.
+  `MetricStore.begin_critical_gap`, `attach_critical_gap_details`,
+  `pending_critical_gap`, and `complete_critical_gap` recovery operations.
 - `CohortOrchestrator(..., generation_id: str, generation_commit: str, ...)`
   requires exact generation identity and uses the returned metric epoch ID for
   every P0 and v2 record in the session.
@@ -227,8 +227,10 @@ with string keys, `list`, `str`, `int`, `bool`, or `None`. Reject floats,
 of stringifying them. The executor policy is already canonical and should pass.
 Do not accept a full application config in this module.
 
-Enforce the exact eight-key model allowlist in this public builder, not only at
-its caller. Enforce exact top-level and nested schemas for the executor policy;
+Enforce equality with the exact eight-key model set in this public builder, not
+only at its caller; all eight keys are required even when their configured
+value is explicitly `None`. Enforce equality with the exact top-level and
+nested schemas for the executor policy; empty or partial documents fail closed;
 allowed scalar or string-list leaves must not contain hidden mappings. Reject
 API keys/tokens, state paths, timestamps, live borrow rates, prices, positions,
 and every other unexpected key before hashing.
@@ -413,11 +415,16 @@ session opening a new epoch.
 - [x] **Step 9a: Amend critical-gap handling into a durable state machine**
 
 Add a migration-safe `critical_gap_markers` table to the shared generation
-`MetricStore`. A partial unique index allows one pending marker. Persist the
-marker before any outcome, cohort-ledger invalidation, corporate-action
-rejection, or metric-epoch invalidation. Bound and validate the marker's IDs,
-exact XNYS session, stable general reason, cohort/ticker counts and reasons, and
-total serialized size.
+`MetricStore`. A partial unique index allows one pending marker. Use a two-phase
+write: first persist a minimal blocker before provider-derived detail and before
+any outcome, cohort-ledger invalidation, corporate-action rejection, or
+metric-epoch invalidation; then atomically attach validated recovery detail.
+The minimal blocker contains the marker/epoch IDs, exact XNYS session, stable
+general reason, and every affected cohort mapped exactly once to an opaque
+ledger binding. Derive the binding from cohort identity plus normalized ledger
+path and filesystem identity, but persist only the stable hash. Bound and
+validate cohort/ticker counts, reasons, audit fields/items, and total serialized
+size.
 
 For a corporate-action batch rejection, persist a bounded canonical audit
 intent in the marker: exact action fields, governed ticker names, and
@@ -425,6 +432,14 @@ deterministic validation errors only. Do not persist market bars, positions,
 credentials, state paths, provider response bodies, or arbitrary exception
 payloads. Reconstruct the P0 rejection from this intent so a process restart
 can retry the audit/quarantine write without fetching.
+
+If minimal blocker persistence fails, directly invalidate the exact epoch
+before surfacing the error. Cover the post-blocker hook, detail construction,
+validation, and phase-2 attachment with the same exact-epoch invalidation
+boundary. Leave the minimal blocker pending when phase 2 fails. Do not
+auto-recover a minimal-only blocker: it does not contain enough evidence to
+distinguish an unnecessary audit from an interrupted one, so same/later runs
+must require manual resolution.
 
 Complete a pending marker in this order:
 
@@ -442,15 +457,24 @@ fetches. A direct later-session run completes the same recovery first, opens a
 replacement epoch, and fetches only the later session. Reject sessions earlier
 than the pending gap.
 
+Before every recovery write, require all originally affected cohort names to
+resolve exactly once to their original opaque ledger bindings. Removed,
+renamed, duplicated, changed-path, missing-audit-cohort, and legacy-unbound
+markers remain pending and fail before fetch. Permit extra cohorts only when all
+original bindings resolve: exclude extras from old-gap writes and let them
+enter normal execution only after recovery completes on a later session.
+
 Route completed, stage-only, stored partial-resume, bound-context validation,
 and post-execution outcome-repair corruption through this boundary. Preserve
 committed P0 and existing immutable outcomes, surface the original integrity
 error after safety closure, and leave the marker pending if a new recovery
 write fails.
 
-Add deterministic crash hooks after marker persistence, P0 invalidation, and
-metric invalidation. Tests must cover every crash boundary, direct
-later-session recovery, audit-write failure followed by zero-fetch replay with
+Add deterministic crash hooks after minimal blocker persistence, ready-marker
+attachment, P0 invalidation, and metric invalidation. Tests must cover every
+crash boundary, unrepresentable provider fields/errors plus item/byte overflow,
+exact affected-ledger topology and legacy failure, safe added-cohort behavior,
+direct later-session recovery, audit-write failure followed by zero-fetch replay with
 exactly one rejection row, malformed completed/stage/partial contexts,
 immutable conflicts, committed-P0 preservation, and marker migration/bounds.
 

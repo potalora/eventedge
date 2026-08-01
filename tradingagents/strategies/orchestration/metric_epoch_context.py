@@ -120,22 +120,33 @@ def _validate_execution_policy(value: object, path: str = "execution_policy") ->
 def _validate_execution_policy_schema(policy: object) -> None:
     if not isinstance(policy, dict):
         raise TypeError("execution_policy must be a dict")
-    unexpected = set(policy) - _EXECUTION_POLICY_KEYS
+    actual = set(policy)
+    unexpected = actual - _EXECUTION_POLICY_KEYS
     if unexpected:
         raise ValueError(
             f"unexpected execution_policy key {sorted(unexpected)[0]!r}"
         )
+    missing = _EXECUTION_POLICY_KEYS - actual
+    if missing:
+        raise ValueError(
+            f"execution_policy key set is missing {sorted(missing)[0]!r}"
+        )
     for container, allowed in _NESTED_POLICY_KEYS.items():
-        if container not in policy:
-            continue
         nested = policy[container]
         if not isinstance(nested, dict):
             raise TypeError(f"execution_policy.{container} must be a dict")
-        unexpected = set(nested) - allowed
+        actual = set(nested)
+        unexpected = actual - allowed
         if unexpected:
             raise ValueError(
                 f"unexpected execution_policy.{container} key "
                 f"{sorted(unexpected)[0]!r}"
+            )
+        missing = allowed - actual
+        if missing:
+            raise ValueError(
+                f"execution_policy.{container} key set is missing "
+                f"{sorted(missing)[0]!r}"
             )
         for key, value in nested.items():
             if container == "execution" and key == "price_rules":
@@ -176,10 +187,16 @@ def build_epoch_context(
     """Return a deterministic context from explicit, secret-free semantics."""
     generation_id = _required_text("generation_id", generation_id)
     generation_commit = _required_text("generation_commit", generation_commit)
-    unexpected_model_keys = set(models) - ALLOWED_MODEL_KEYS
+    actual_model_keys = set(models)
+    unexpected_model_keys = actual_model_keys - ALLOWED_MODEL_KEYS
     if unexpected_model_keys:
         raise ValueError(
             f"unexpected model key {sorted(unexpected_model_keys)[0]!r}"
+        )
+    missing_model_keys = ALLOWED_MODEL_KEYS - actual_model_keys
+    if missing_model_keys:
+        raise ValueError(
+            f"model key set is missing {sorted(missing_model_keys)[0]!r}"
         )
     model_document = {
         _required_text("model key", key): (

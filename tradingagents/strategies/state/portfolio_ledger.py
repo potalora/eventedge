@@ -418,6 +418,17 @@ class PortfolioLedger:
         """Expose the connection for bounded administrative inspection/tests."""
         return self._connection
 
+    def recovery_binding_id(self) -> str:
+        """Return a path-sensitive opaque identity for critical-gap recovery."""
+        stat = self.path.stat()
+        return stable_id(
+            "ledger_recovery_binding",
+            self.cohort_id,
+            os.path.abspath(self.path),
+            stat.st_dev,
+            stat.st_ino,
+        )
+
     @classmethod
     def open_existing(cls, path: Path) -> PortfolioLedger:
         """Open an initialized ledger without running any write initializer."""

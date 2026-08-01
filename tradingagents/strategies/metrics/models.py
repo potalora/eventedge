@@ -12,6 +12,7 @@ HealthStatus = Literal[
     "signals", "legitimate_no_event", "data_failure", "strategy_defect"
 ]
 CriticalGapStatus = Literal["pending", "completed"]
+CriticalGapDetailStatus = Literal["minimal", "ready", "legacy_unbound"]
 
 METRIC_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_LABEL = "1_legacy_calendar_signed"
@@ -45,6 +46,8 @@ class CriticalGapMarker:
     reason: str
     cohort_invalid_reasons: dict[str, dict[str, str]]
     status: CriticalGapStatus
+    affected_cohorts: dict[str, str] = field(default_factory=dict)
+    detail_status: CriticalGapDetailStatus = "legacy_unbound"
     corporate_action_rejections: dict[str, dict[str, object]] = field(
         default_factory=dict
     )
