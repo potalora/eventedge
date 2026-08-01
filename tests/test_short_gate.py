@@ -183,7 +183,9 @@ class TestLLMShortGate:
             signals=[_short("AAPL", "supply_chain", 0.7)], total_capital=50_000,
         )
         assert all(r.ticker != "AAPL" for r in recs), "low-confidence single short should be dropped"
-        assert any(r.ticker == "MSFT" for r in recs)
+        assert all(r.ticker != "MSFT" for r in recs), (
+            "a model recommendation without matching input provenance must be dropped"
+        )
 
     @patch.object(PortfolioCommittee, "_get_client")
     @patch.object(PortfolioCommittee, "_call_llm")

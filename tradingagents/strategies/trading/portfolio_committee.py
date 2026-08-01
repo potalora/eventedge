@@ -12,10 +12,15 @@ import json
 import logging
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from tradingagents.strategies.modules.base import OptionSpec
+from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicy,
+    PortfolioPolicyConfig,
+    PortfolioRiskContext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,18 @@ class PortfolioCommittee:
             self._max_position = pt_config.get("max_single_position_pct", 0.10)
 
         self._size_profile = size_profile
+        policy_settings = self.config.get("autoresearch", {}).get("portfolio_policy")
+        # Policy is an explicitly configured, profile-bound capability.  Legacy
+        # callers with small bespoke configs retain their current behavior until
+        # they opt into the versioned policy document.
+        self._policy_enabled = self._size_profile is not None and isinstance(
+            policy_settings, dict
+        )
+        self._policy_config = (
+            PortfolioPolicyConfig.from_size_profile(self._size_profile, policy_settings)
+            if self._policy_enabled
+            else None
+        )
         self._short_conviction_threshold = float(
             self.config.get("autoresearch", {})
             .get("risk_discipline", {})
@@ -122,6 +139,7 @@ class PortfolioCommittee:
         current_positions: list[dict] | None = None,
         total_capital: float = 5000.0,
         enrichment: dict | None = None,
+        risk_context: PortfolioRiskContext | None = None,
     ) -> list[TradeRecommendation]:
         """Synthesize all signals into ranked trade recommendations.
 
@@ -132,6 +150,7 @@ class PortfolioCommittee:
             strategy_confidence: Map of strategy name -> confidence [0,1].
             current_positions: List of current open position dicts.
             total_capital: Total portfolio capital for sizing.
+            risk_context: Immutable, profile-bound prospective-book context.
 
         Returns:
             List of TradeRecommendation sorted by confidence descending.
@@ -139,28 +158,137 @@ class PortfolioCommittee:
         if not signals:
             return []
 
+        if self._policy_enabled:
+            if risk_context is None:
+                raise ValueError("policy-enabled committee requires risk_context")
+            if risk_context.config != self._policy_config:
+                raise ValueError(
+                    "risk_context must use this committee's profile-bound policy config"
+                )
+
         regime_context = regime_context or {}
         strategy_confidence = strategy_confidence or {}
         current_positions = current_positions or []
 
         enrichment = enrichment or {}
 
-        # Try LLM synthesis if enabled and available
+        ranked: list[TradeRecommendation] | None = None
         if self._enabled:
             try:
-                llm_result = self._llm_synthesize(
+                ranked = self._llm_synthesize(
                     signals, regime_context, strategy_confidence,
                     current_positions, total_capital, enrichment,
                 )
-                if llm_result:
-                    return llm_result
             except Exception:
                 logger.warning("LLM synthesis failed, falling back to rule-based", exc_info=True)
 
-        return self._rule_based_synthesize(
-            signals, regime_context, strategy_confidence,
-            current_positions, total_capital, enrichment,
-        )
+        if not ranked:
+            ranked = self._rule_based_synthesize(
+                signals, regime_context, strategy_confidence,
+                current_positions, total_capital, enrichment,
+            )
+        if not ranked:
+            return []
+
+        attributed = self._derive_attribution(ranked, signals)
+        if not self._policy_enabled:
+            return attributed
+        return PortfolioPolicy().apply(attributed, risk_context)
+
+    @staticmethod
+    def _signal_tags(signal: dict, key: str) -> tuple[str, ...]:
+        """Read an attribution tuple without treating an arbitrary string as iterable."""
+        values = signal.get(key, ())
+        if isinstance(values, str):
+            return (values,) if values else ()
+        if not isinstance(values, (list, tuple, set, frozenset)):
+            return ()
+        return tuple(str(value) for value in values if str(value))
+
+    @classmethod
+    def _derive_attribution(
+        cls,
+        recommendations: list[TradeRecommendation],
+        signals: list[dict],
+    ) -> list[TradeRecommendation]:
+        """Replace model/fallback attribution with deterministic signal provenance.
+
+        A recommendation only receives provenance from input signals for its
+        exact ticker and direction.  This keeps LLM output advisory: it cannot
+        invent strategies, event identities, risk tags, or order eligibility.
+        """
+        attributed: list[TradeRecommendation] = []
+        for recommendation in recommendations:
+            contributors = [
+                signal
+                for signal in signals
+                if (
+                    str(signal.get("ticker", "")) == recommendation.ticker
+                    and str(signal.get("direction", "")) == recommendation.direction
+                )
+            ]
+            if not contributors:
+                logger.warning(
+                    "dropping recommendation without matching signal provenance: %s %s",
+                    recommendation.ticker,
+                    recommendation.direction,
+                )
+                continue
+
+            event_keys = sorted(
+                {
+                    str(signal["event_key"])
+                    for signal in contributors
+                    if signal.get("event_key")
+                }
+            )
+            strategy_tags = {
+                str(signal["strategy"])
+                for signal in contributors
+                if signal.get("strategy")
+            }
+            strategy_tags.update(
+                tag
+                for signal in contributors
+                for tag in cls._signal_tags(signal, "strategy_tags")
+            )
+            attributed.append(
+                replace(
+                    recommendation,
+                    event_key=event_keys[0] if event_keys else "",
+                    source_event_keys=tuple(
+                        sorted(
+                            {
+                                key
+                                for signal in contributors
+                                for key in cls._signal_tags(signal, "source_event_keys")
+                            }
+                        )
+                    ),
+                    strategy_tags=tuple(sorted(strategy_tags)),
+                    risk_tags=tuple(
+                        sorted(
+                            {
+                                tag
+                                for signal in contributors
+                                for tag in cls._signal_tags(signal, "risk_tags")
+                            }
+                        )
+                    ),
+                    journal_only=any(
+                        bool(signal.get("journal_only", False))
+                        for signal in contributors
+                    ),
+                    contributing_strategies=sorted(
+                        {
+                            str(signal["strategy"])
+                            for signal in contributors
+                            if signal.get("strategy")
+                        }
+                    ),
+                )
+            )
+        return attributed
 
     def _rule_based_synthesize(
         self,
