@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from tradingagents.dashboard.charts import make_equity_curves_facet
 from tradingagents.dashboard.data_loaders import (
     get_active_generations,
     load_generation_metrics,
@@ -61,6 +62,16 @@ def render() -> None:
                 )
             )
         )
+    history = {
+        cohort_id: list(series.get("net_equity_history", []))
+        for cohort_id, series in dict(report.get("cohort_series", {}) or {}).items()
+        if series.get("net_equity_history")
+    }
+    st.subheader("Persisted net-equity history")
+    if history:
+        st.plotly_chart(make_equity_curves_facet(history), use_container_width=True)
+    else:
+        st.info("No governed metric-v2 equity series is available.")
     st.dataframe(
         pd.DataFrame(_rows(dict(report.get("headline_books", {}) or {}))),
         hide_index=True,

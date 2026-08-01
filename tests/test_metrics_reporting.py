@@ -190,3 +190,11 @@ def test_overview_discloses_governed_headline_data_quality() -> None:
 
     assert "valid sessions" in source
     assert "missing/stale marks" in source
+
+
+def test_returns_page_renders_the_governed_equity_series() -> None:
+    source = Path("tradingagents/dashboard/pages/returns.py").read_text()
+
+    assert "make_equity_curves_facet" in source
+    assert "cohort_series" in source
+    assert "Persisted net-equity history" in source
