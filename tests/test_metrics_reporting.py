@@ -192,6 +192,19 @@ def test_overview_discloses_governed_headline_data_quality() -> None:
     assert "missing/stale marks" in source
 
 
+def test_reporting_discloses_policy_audit_as_governance_not_alpha() -> None:
+    overview = Path("tradingagents/dashboard/pages/overview.py").read_text()
+    readme = Path("README.md").read_text()
+    architecture = Path("AUTORESEARCH_ARCHITECTURE_MAP.md").read_text()
+
+    assert "governance evidence only, not alpha validation" in overview
+    assert "Accepted/trimmed/rejected are recommendation decisions" in overview
+    assert "journal-only/consumed/cutoff/committee-not-selected are signals" in overview
+    assert "not alpha validation" in readme
+    assert "30/60/90-session gates" in architecture
+    assert "premium, assignment, expiry, and contract-mark" in readme
+
+
 def test_returns_page_renders_the_governed_equity_series() -> None:
     source = Path("tradingagents/dashboard/pages/returns.py").read_text()
 

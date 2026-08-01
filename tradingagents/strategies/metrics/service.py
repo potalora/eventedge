@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
 from tradingagents.strategies.execution.models import SignalRecord
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 
 from .identity import deduplicate_signals
 from .models import MetricEpoch, PairedComparison, PortfolioMetrics, SignalMetricRecord
@@ -35,6 +40,8 @@ _STRESS_BOOKS = frozenset(
     for size in ("5k", "10k", "50k")
 )
 _SCENARIO_BOOKS = _HEADLINE_BOOKS | _STRESS_BOOKS
+_POLICY_AUDIT_MAX_RECORDS = 4096
+_POLICY_AUDIT_DECISIONS = frozenset({"accepted", "trimmed", "rejected"})
 
 
 class MetricsService:
@@ -208,6 +215,229 @@ class MetricsService:
         self._assert_epoch_unchanged(epoch, self.store.load_epoch(epoch_id))
         return report
 
+    @staticmethod
+    def _unavailable_policy_audit(
+        *, epoch_id: str, status: str
+    ) -> dict[str, object]:
+        """Keep audit failures explicit rather than projecting zero activity."""
+        return {
+            "available": False,
+            "status": status,
+            "metric_epoch_id": epoch_id,
+            "policy_version": None,
+            "signals_examined": None,
+            "policy_candidate_decisions_examined": None,
+            "max_records": _POLICY_AUDIT_MAX_RECORDS,
+            "counts": None,
+            "reason_code_counts": None,
+        }
+
+    def _policy_audit_for_cohort(
+        self, cohort_id: str, epoch_id: str
+    ) -> dict[str, object]:
+        """Build one bounded, tamper-evident policy-governance projection.
+
+        Recommendation decisions are counted once from immutable candidate
+        rows; signal companions supply ingress blocks and committee coverage.
+        It is deliberately not a financial-performance metric.
+        """
+        ledger = self._ledger(cohort_id)
+        connection = ledger.connection
+        owns_snapshot = not connection.in_transaction
+        if owns_snapshot:
+            connection.execute("BEGIN")
+        try:
+            rows = connection.execute(
+                """SELECT signal_id, reference_session, policy_id
+                   FROM signals WHERE epoch_id = ?
+                   ORDER BY reference_session, signal_id LIMIT ?""",
+                (epoch_id, _POLICY_AUDIT_MAX_RECORDS + 1),
+            ).fetchall()
+            if len(rows) > _POLICY_AUDIT_MAX_RECORDS:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="projection_limit_exceeded"
+                )
+            staging_rows = connection.execute(
+                """SELECT r.session, r.policy_id, r.epoch_id AS staging_epoch_id,
+                          b.epoch_id AS binding_epoch_id, b.policy_version,
+                          b.context_digest
+                   FROM staging_runs r
+                   JOIN policy_session_contexts b
+                     ON b.cohort_id = r.cohort_id AND b.session = r.session
+                    AND b.binding_kind = 'staging'
+                   WHERE r.cohort_id = ? AND r.epoch_id = ?
+                   ORDER BY r.session, r.policy_id LIMIT ?""",
+                (cohort_id, epoch_id, _POLICY_AUDIT_MAX_RECORDS + 1),
+            ).fetchall()
+            if len(staging_rows) > _POLICY_AUDIT_MAX_RECORDS:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="projection_limit_exceeded"
+                )
+            if any(row["binding_epoch_id"] != epoch_id for row in staging_rows):
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="provenance_read_failed"
+                )
+            policy_staging_keys = {
+                (date.fromisoformat(str(row["session"])), str(row["policy_id"]))
+                for row in staging_rows
+            }
+            if not rows and not policy_staging_keys:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="no_policy_provenance"
+                )
+            signal_staging_keys = {
+                (date.fromisoformat(str(row["reference_session"])), str(row["policy_id"]))
+                for row in rows
+            }
+            if any(
+                not ledger.staging_completed(session, epoch_id, policy_id)
+                for session, policy_id in signal_staging_keys
+            ):
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="incomplete_staging"
+                )
+            provenances: list[dict[str, object]] = []
+            for row in rows:
+                try:
+                    provenance = ledger.read_signal_policy_provenance(
+                        str(row["signal_id"])
+                    )
+                except (LedgerConflictError, ValueError, TypeError):
+                    return self._unavailable_policy_audit(
+                        epoch_id=epoch_id, status="provenance_read_failed"
+                    )
+                if provenance is None:
+                    return self._unavailable_policy_audit(
+                        epoch_id=epoch_id, status="missing_policy_provenance"
+                    )
+                provenances.append(provenance)
+
+            candidate_decisions = ledger.read_policy_candidate_decisions(
+                epoch_id=epoch_id,
+                limit=4096,
+            )
+            decisions = {str(provenance["decision"]) for provenance in provenances}
+            if not decisions <= _POLICY_AUDIT_DECISIONS:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="invalid_policy_decision"
+                )
+            manifests = ledger.read_policy_staging_audit_manifests(
+                epoch_id=epoch_id,
+                limit=_POLICY_AUDIT_MAX_RECORDS,
+            )
+            manifest_keys = {
+                (manifest["session"], str(manifest["policy_id"]))
+                for manifest in manifests
+            }
+            if manifest_keys != policy_staging_keys:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="missing_policy_audit_manifest"
+                )
+            policy_versions = {
+                *(str(provenance["policy_version"]) for provenance in provenances),
+                *(str(decision["policy_version"]) for decision in candidate_decisions),
+                *(str(manifest["policy_version"]) for manifest in manifests),
+                *(str(row["policy_version"]) for row in staging_rows),
+            }
+            if len(policy_versions) != 1:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="mixed_policy_versions"
+                )
+            manifest_decision_ids = {
+                str(decision_id)
+                for manifest in manifests
+                for decision_id in manifest["candidate_decision_ids"]
+            }
+            if manifest_decision_ids != {
+                str(decision["decision_id"]) for decision in candidate_decisions
+            }:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="policy_audit_partition_mismatch"
+                )
+
+            counts = {
+                "accepted": 0,
+                "trimmed": 0,
+                "rejected": 0,
+                "journal_only": 0,
+                "consumed_event_blocks": 0,
+                "cutoff_late": 0,
+                "committee_not_selected": 0,
+            }
+            reason_code_counts: dict[str, int] = {}
+            candidate_signal_ids: set[str] = set()
+            for candidate in candidate_decisions:
+                decision = str(candidate["decision"])
+                if decision not in _POLICY_AUDIT_DECISIONS:
+                    return self._unavailable_policy_audit(
+                        epoch_id=epoch_id, status="invalid_policy_decision"
+                    )
+                counts[decision] += 1
+                candidate_signal_ids.update(
+                    str(signal_id) for signal_id in candidate["signal_ids"]
+                )
+                for reason in candidate["reason_codes"]:
+                    code = str(reason)
+                    reason_code_counts[code] = reason_code_counts.get(code, 0) + 1
+
+            ingress_eligible_signal_ids: set[str] = set()
+            for provenance in provenances:
+                if bool(provenance["journal_only"]):
+                    counts["journal_only"] += 1
+                reasons = tuple(str(code) for code in provenance["reason_codes"])
+                if "consumed_event" in reasons:
+                    counts["consumed_event_blocks"] += 1
+                if "cutoff_late" in reasons:
+                    counts["cutoff_late"] += 1
+                if bool(provenance["order_eligible"]):
+                    ingress_eligible_signal_ids.add(str(provenance["signal_id"]))
+                else:
+                    for reason in reasons:
+                        reason_code_counts[reason] = (
+                            reason_code_counts.get(reason, 0) + 1
+                        )
+            if not candidate_signal_ids <= ingress_eligible_signal_ids:
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="candidate_signal_mismatch"
+                )
+            manifest_ingress = {
+                str(signal_id)
+                for manifest in manifests
+                for signal_id in manifest["ingress_signal_ids"]
+            }
+            manifest_nonselected = {
+                str(signal_id)
+                for manifest in manifests
+                for signal_id in manifest["committee_not_selected_ids"]
+            }
+            if (
+                manifest_ingress != ingress_eligible_signal_ids
+                or manifest_nonselected
+                != ingress_eligible_signal_ids - candidate_signal_ids
+            ):
+                return self._unavailable_policy_audit(
+                    epoch_id=epoch_id, status="policy_audit_partition_mismatch"
+                )
+            counts["committee_not_selected"] = len(manifest_nonselected)
+            return {
+                "available": True,
+                "status": "available",
+                "metric_epoch_id": epoch_id,
+                "policy_version": next(iter(policy_versions)),
+                "signals_examined": len(provenances),
+                "policy_candidate_decisions_examined": len(candidate_decisions),
+                "max_records": _POLICY_AUDIT_MAX_RECORDS,
+                "counts": counts,
+                "reason_code_counts": dict(sorted(reason_code_counts.items())),
+            }
+        except (sqlite3.Error, LedgerConflictError, ValueError, TypeError):
+            return self._unavailable_policy_audit(
+                epoch_id=epoch_id, status="provenance_read_failed"
+            )
+        finally:
+            if owns_snapshot:
+                connection.execute("ROLLBACK")
+
     def generation_report(self, epoch_id: str | None = None) -> dict[str, object]:
         unexpected = sorted(set(self.cohort_ids) - _SCENARIO_BOOKS)
         if unexpected:
@@ -227,6 +457,11 @@ class MetricsService:
                 "stress_tests": {},
                 "cohort_series": {},
                 "dependent_scenarios": True,
+                "policy_audit": {
+                    "aggregation_prohibited": True,
+                    "aggregate": None,
+                    "per_cohort": {},
+                },
             }
         self._require_available_epoch(epoch, epoch.epoch_id)
         outcomes = self.store.read_outcomes(epoch.epoch_id)
@@ -240,6 +475,10 @@ class MetricsService:
             key: self._book_payload(value[0]) for key, value in materialized.items()
         }
         series = {key: value[1] for key, value in materialized.items()}
+        policy_audit = {
+            cohort_id: self._policy_audit_for_cohort(cohort_id, epoch.epoch_id)
+            for cohort_id in self.cohort_ids
+        }
         final_epoch = self.store.load_epoch(epoch.epoch_id)
         self._assert_epoch_unchanged(epoch, final_epoch)
         if epoch_id is None:
@@ -293,6 +532,13 @@ class MetricsService:
             # reporting surfaces use the same valuation and benchmark evidence.
             "cohort_series": series,
             "dependent_scenarios": True,
+            # Policy audit evidence is per dependent scenario only.  Never
+            # aggregate it into a cross-cohort event count or alpha statistic.
+            "policy_audit": {
+                "aggregation_prohibited": True,
+                "aggregate": None,
+                "per_cohort": policy_audit,
+            },
         }
 
     def _materialize_cohort(

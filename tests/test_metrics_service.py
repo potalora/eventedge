@@ -37,7 +37,10 @@ from tradingagents.strategies.orchestration.generation_comparison import (
     ComparisonPair,
     GenerationComparison,
 )
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+from tradingagents.strategies.state.portfolio_ledger import (
+    LedgerConflictError,
+    PortfolioLedger,
+)
 
 
 SESSIONS = (date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5), date(2026, 8, 6))
@@ -89,6 +92,7 @@ def _signal(
     *,
     direction: str = "long",
     epoch_id: str = "epoch-1",
+    reference_session: date = SESSIONS[0],
 ) -> SignalRecord:
     return SignalRecord(
         signal_id=signal_id,
@@ -100,10 +104,195 @@ def _signal(
         direction=direction,
         event_at=None,
         observed_at=NOW,
-        reference_session=SESSIONS[0],
+        reference_session=reference_session,
         reference_close=Decimal("100"),
         decision_at=NOW,
         evidence_hash="evidence",
+    )
+
+
+def _record_policy_signal(
+    ledger: PortfolioLedger,
+    signal: SignalRecord,
+    *,
+    policy_version: str = "portfolio_policy_v1",
+    decision: str = "accepted",
+    journal_only: bool = False,
+    order_eligible: bool = True,
+    reason_codes: tuple[str, ...] = ("accepted",),
+) -> None:
+    ledger.record_signal(signal)
+    binding = ledger.bind_policy_session_context(
+        signal.reference_session,
+        binding_kind="staging",
+        epoch_id=signal.epoch_id,
+        policy_version=policy_version,
+        policy_config={"version": policy_version},
+        context={"cash": "100000", "positions": []},
+        bound_at=NOW,
+    )
+    ledger.record_signal_policy_provenance(
+        signal.signal_id,
+        policy_version=policy_version,
+        event_key=signal.event_key,
+        source_event_keys=(f"source:{signal.event_key}",),
+        strategy_tags=(signal.strategy,),
+        risk_tags=(f"event:{signal.event_key}",),
+        sector="Technology",
+        journal_only=journal_only,
+        order_eligible=order_eligible,
+        decision=decision,
+        reason_codes=reason_codes,
+        bound_context_digest=str(binding["context_digest"]),
+        captured_at=NOW,
+    )
+
+
+def _record_candidate_decision(
+    ledger: PortfolioLedger,
+    signal_ids: tuple[str, ...],
+    *,
+    decision: str,
+    reason_codes: tuple[str, ...],
+) -> None:
+    signals = ledger.signals_by_ids(signal_ids)
+    assert len(signals) == len(signal_ids)
+    signal = signals[0]
+    provenance = ledger.read_signal_policy_provenance(signal.signal_id)
+    assert provenance is not None
+    requested_weight = 0.02
+    approved_weight = {
+        "accepted": requested_weight,
+        "trimmed": 0.01,
+        "rejected": 0.0,
+    }[decision]
+    ledger.record_policy_candidate_decision(
+        signal.reference_session,
+        epoch_id=signal.epoch_id,
+        policy_version=str(provenance["policy_version"]),
+        ticker=signal.ticker,
+        direction=signal.direction,
+        event_key=signal.event_key,
+        signal_ids=signal_ids,
+        requested_weight=requested_weight,
+        approved_weight=approved_weight,
+        decision=decision,
+        reason_codes=reason_codes,
+        bound_context_digest=str(provenance["bound_context_digest"]),
+        captured_at=NOW,
+    )
+
+
+def _complete_policy_staging(ledger: PortfolioLedger) -> None:
+    keys = {
+        (signal.reference_session, signal.epoch_id, signal.policy_id)
+        for signal in ledger.read_signals()
+    }
+    for session, epoch_id, policy_id in sorted(keys):
+        if ledger.staging_completed(session, epoch_id, policy_id):
+            continue
+        def operation() -> None:
+            signals = ledger.read_signals(
+                session, session, epoch_id=epoch_id, policy_id=policy_id
+            )
+            ingress = tuple(
+                sorted(
+                    signal.signal_id
+                    for signal in signals
+                    if (
+                        (provenance := ledger.read_signal_policy_provenance(
+                            signal.signal_id
+                        ))
+                        is not None
+                        and provenance["order_eligible"]
+                    )
+                )
+            )
+            decisions = ledger.read_policy_candidate_decisions(
+                session, session, epoch_id=epoch_id
+            )
+            covered = {
+                str(signal_id)
+                for decision in decisions
+                for signal_id in decision["signal_ids"]
+            }
+            binding = ledger.read_policy_session_context(
+                session, binding_kind="staging"
+            )
+            assert binding is not None
+            ledger.record_policy_staging_audit_manifest(
+                session,
+                epoch_id=epoch_id,
+                policy_id=policy_id,
+                policy_version=str(binding["policy_version"]),
+                bound_context_digest=str(binding["context_digest"]),
+                ingress_signal_ids=ingress,
+                candidate_decision_ids=tuple(
+                    sorted(str(decision["decision_id"]) for decision in decisions)
+                ),
+                committee_not_selected_ids=tuple(
+                    sorted(set(ingress) - covered)
+                ),
+                recorded_at=NOW,
+            )
+
+        try:
+            ledger.complete_staging(
+                session,
+                epoch_id,
+                policy_id,
+                NOW,
+                operation,
+                ledger.execution_governed_state_digest(session),
+            )
+        except (LedgerConflictError, ValueError, TypeError):
+            ledger.complete_staging(
+                session,
+                epoch_id,
+                policy_id,
+                NOW,
+                lambda: None,
+                ledger.execution_governed_state_digest(session),
+            )
+
+
+def _complete_empty_policy_staging(
+    ledger: PortfolioLedger,
+    session: date,
+    *,
+    include_manifest: bool = True,
+) -> None:
+    binding = ledger.bind_policy_session_context(
+        session,
+        binding_kind="staging",
+        epoch_id="epoch-1",
+        policy_version="portfolio_policy_v1",
+        policy_config={"version": "portfolio_policy_v1"},
+        context={"cash": "100000", "positions": []},
+        bound_at=NOW,
+    )
+
+    def operation() -> None:
+        if include_manifest:
+            ledger.record_policy_staging_audit_manifest(
+                session,
+                epoch_id="epoch-1",
+                policy_id="policy-1",
+                policy_version="portfolio_policy_v1",
+                bound_context_digest=str(binding["context_digest"]),
+                ingress_signal_ids=(),
+                candidate_decision_ids=(),
+                committee_not_selected_ids=(),
+                recorded_at=NOW,
+            )
+
+    ledger.complete_staging(
+        session,
+        "epoch-1",
+        "policy-1",
+        NOW,
+        operation,
+        ledger.execution_governed_state_digest(session),
     )
 
 
@@ -364,6 +553,11 @@ def test_generation_report_empty_current_historical_and_panel_rules(
         "stress_tests": {},
         "cohort_series": {},
         "dependent_scenarios": True,
+        "policy_audit": {
+            "aggregation_prohibited": True,
+            "aggregate": None,
+            "per_cohort": {},
+        },
     }
 
     names = [
@@ -470,6 +664,442 @@ def test_generation_report_projects_persisted_series_without_network(
         pytest.approx(1 / 1001),
         pytest.approx(1 / 1002),
     ]
+
+
+def test_generation_report_projects_bounded_policy_audit_from_companions(
+    tmp_path, ledger_factory, monkeypatch
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    for signal_id in (
+        "accepted",
+        "trimmed-a",
+        "trimmed-b",
+        "rejected",
+        "committee-not-selected",
+    ):
+        _record_policy_signal(ledger, _signal(signal_id))
+    _record_candidate_decision(
+        ledger,
+        ("accepted",),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    _record_candidate_decision(
+        ledger,
+        ("trimmed-a", "trimmed-b"),
+        decision="trimmed",
+        reason_codes=("position_cap",),
+    )
+    _record_candidate_decision(
+        ledger,
+        ("rejected",),
+        decision="rejected",
+        reason_codes=("sector_cap",),
+    )
+    _record_policy_signal(
+        ledger,
+        _signal("journal"),
+        decision="rejected",
+        journal_only=True,
+        order_eligible=False,
+        reason_codes=("journal_only",),
+    )
+    _record_policy_signal(
+        ledger,
+        _signal("consumed"),
+        decision="rejected",
+        order_eligible=False,
+        reason_codes=("consumed_event",),
+    )
+    _record_policy_signal(
+        ledger,
+        _signal("cutoff-late"),
+        decision="rejected",
+        order_eligible=False,
+        reason_codes=("cutoff_late",),
+    )
+    candidate_projection_calls: list[dict[str, object]] = []
+    original_candidate_projection = ledger.read_policy_candidate_decisions
+
+    def bounded_candidate_projection(*args, **kwargs):
+        candidate_projection_calls.append(dict(kwargs))
+        return original_candidate_projection(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ledger, "read_policy_candidate_decisions", bounded_candidate_projection
+    )
+    _complete_policy_staging(ledger)
+    candidate_projection_calls.clear()
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    audit = service.generation_report()["policy_audit"]
+
+    assert audit["aggregation_prohibited"] is True
+    assert audit["aggregate"] is None
+    assert candidate_projection_calls == [{"epoch_id": "epoch-1", "limit": 4096}]
+    cohort = audit["per_cohort"][ledger.cohort_id]
+    assert cohort == {
+        "available": True,
+        "status": "available",
+        "metric_epoch_id": "epoch-1",
+        "policy_version": "portfolio_policy_v1",
+        "signals_examined": 8,
+        "policy_candidate_decisions_examined": 3,
+        "max_records": 4096,
+        "counts": {
+            "accepted": 1,
+            "trimmed": 1,
+            "rejected": 1,
+            "journal_only": 1,
+            "consumed_event_blocks": 1,
+            "cutoff_late": 1,
+            "committee_not_selected": 1,
+        },
+        "reason_code_counts": {
+            "accepted": 1,
+            "consumed_event": 1,
+            "cutoff_late": 1,
+            "journal_only": 1,
+            "position_cap": 1,
+            "sector_cap": 1,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("setup", "status"),
+    (
+        ("missing", "missing_policy_provenance"),
+        ("mixed_policy", "mixed_policy_versions"),
+        ("tampered", "provenance_read_failed"),
+    ),
+)
+def test_policy_audit_fails_closed_for_incomplete_or_untrusted_provenance(
+    tmp_path, ledger_factory, setup: str, status: str
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    first = _signal("first")
+    _record_policy_signal(ledger, first)
+    if setup == "missing":
+        ledger.record_signal(_signal("unbound"))
+    elif setup == "mixed_policy":
+        _record_policy_signal(
+            ledger,
+            _signal("other", reference_session=SESSIONS[1]),
+            policy_version="portfolio_policy_v2",
+        )
+    else:
+        ledger.connection.execute(
+            "UPDATE signal_policy_provenance SET payload_json = ? WHERE signal_id = ?",
+            ('{"tampered":true}', first.signal_id),
+        )
+    _complete_policy_staging(ledger)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort == {
+        "available": False,
+        "status": status,
+        "metric_epoch_id": "epoch-1",
+        "policy_version": None,
+        "signals_examined": None,
+        "policy_candidate_decisions_examined": None,
+        "max_records": 4096,
+        "counts": None,
+        "reason_code_counts": None,
+    }
+
+
+def test_policy_audit_refuses_an_unbounded_companion_projection(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    for index in range(4097):
+        _record_policy_signal(ledger, _signal(f"signal-{index:03d}"))
+    _complete_policy_staging(ledger)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort == {
+        "available": False,
+        "status": "projection_limit_exceeded",
+        "metric_epoch_id": "epoch-1",
+        "policy_version": None,
+        "signals_examined": None,
+        "policy_candidate_decisions_examined": None,
+        "max_records": 4096,
+        "counts": None,
+        "reason_code_counts": None,
+    }
+
+
+def test_policy_audit_fails_closed_when_signal_epoch_breaks_bound_provenance(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    signal = _signal("epoch-mismatch")
+    _record_policy_signal(ledger, signal)
+    ledger.connection.execute(
+        "UPDATE signals SET epoch_id = ? WHERE signal_id = ?",
+        ("epoch-2", signal.signal_id),
+    )
+    _complete_policy_staging(ledger)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch("epoch-2"))
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort["available"] is False
+    assert cohort["status"] == "provenance_read_failed"
+    assert cohort["metric_epoch_id"] == "epoch-2"
+
+
+def test_policy_audit_fails_closed_for_tampered_candidate_decision(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    signal = _signal("candidate-tamper")
+    _record_policy_signal(ledger, signal)
+    _record_candidate_decision(
+        ledger,
+        (signal.signal_id,),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    ledger.connection.execute(
+        "UPDATE policy_candidate_decisions SET payload_json = ?",
+        ('{"tampered":true}',),
+    )
+    _complete_policy_staging(ledger)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort["available"] is False
+    assert cohort["status"] == "provenance_read_failed"
+    assert cohort["counts"] is None
+
+
+def test_policy_audit_fails_closed_for_candidate_contributor_coverage_mismatch(
+    tmp_path, ledger_factory, monkeypatch
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    signal = _signal("eligible")
+    _record_policy_signal(ledger, signal)
+    _record_candidate_decision(
+        ledger,
+        (signal.signal_id,),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    _complete_policy_staging(ledger)
+    stored = ledger.read_policy_candidate_decisions()[0]
+    monkeypatch.setattr(
+        ledger,
+        "read_policy_candidate_decisions",
+        lambda *, epoch_id, limit: ({**stored, "signal_ids": ("foreign-signal",)},),
+    )
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort["available"] is False
+    assert cohort["status"] == "candidate_signal_mismatch"
+    assert cohort["counts"] is None
+
+
+def test_policy_audit_marks_partial_staging_unavailable(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _record_policy_signal(ledger, _signal("interrupted"))
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort["available"] is False
+    assert cohort["status"] == "incomplete_staging"
+    assert cohort["counts"] is None
+
+
+def test_policy_audit_marks_completed_staging_without_manifest_unavailable(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _record_policy_signal(ledger, _signal("manifest-missing"))
+    ledger.complete_staging(
+        SESSIONS[0],
+        "epoch-1",
+        "policy-1",
+        NOW,
+        lambda: None,
+        ledger.execution_governed_state_digest(SESSIONS[0]),
+    )
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort["available"] is False
+    assert cohort["status"] == "missing_policy_audit_manifest"
+    assert cohort["counts"] is None
+
+
+def test_policy_audit_requires_manifest_for_completed_empty_policy_staging(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    signal = _signal("selected")
+    _record_policy_signal(ledger, signal)
+    _record_candidate_decision(
+        ledger,
+        (signal.signal_id,),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    _complete_policy_staging(ledger)
+    _complete_empty_policy_staging(
+        ledger,
+        SESSIONS[1],
+        include_manifest=False,
+    )
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][ledger.cohort_id]
+
+    assert cohort["available"] is False
+    assert cohort["status"] == "missing_policy_audit_manifest"
+    assert cohort["counts"] is None
+
+
+def test_policy_audit_accepts_mixed_signal_and_empty_policy_staging(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    signal = _signal("selected")
+    _record_policy_signal(ledger, signal)
+    _record_candidate_decision(
+        ledger,
+        (signal.signal_id,),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    _complete_policy_staging(ledger)
+    _complete_empty_policy_staging(ledger, SESSIONS[1])
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][ledger.cohort_id]
+
+    assert cohort["available"] is True
+    assert cohort["policy_version"] == "portfolio_policy_v1"
+    assert cohort["signals_examined"] == 1
+    assert cohort["policy_candidate_decisions_examined"] == 1
+    assert cohort["counts"] == {
+        "accepted": 1,
+        "trimmed": 0,
+        "rejected": 0,
+        "journal_only": 0,
+        "consumed_event_blocks": 0,
+        "cutoff_late": 0,
+        "committee_not_selected": 0,
+    }
+
+
+def test_policy_audit_reports_completed_empty_policy_epoch_as_available(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _complete_empty_policy_staging(ledger, SESSIONS[0])
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][ledger.cohort_id]
+
+    assert cohort == {
+        "available": True,
+        "status": "available",
+        "metric_epoch_id": "epoch-1",
+        "policy_version": "portfolio_policy_v1",
+        "signals_examined": 0,
+        "policy_candidate_decisions_examined": 0,
+        "max_records": 4096,
+        "counts": {
+            "accepted": 0,
+            "trimmed": 0,
+            "rejected": 0,
+            "journal_only": 0,
+            "consumed_event_blocks": 0,
+            "cutoff_late": 0,
+            "committee_not_selected": 0,
+        },
+        "reason_code_counts": {},
+    }
+
+
+def test_policy_audit_scopes_candidate_validation_to_the_requested_epoch(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    current = _signal("current")
+    _record_policy_signal(ledger, current)
+    _record_candidate_decision(
+        ledger,
+        (current.signal_id,),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    old = _signal(
+        "old",
+        epoch_id="old-epoch",
+        reference_session=SESSIONS[1],
+    )
+    _record_policy_signal(ledger, old)
+    _record_candidate_decision(
+        ledger,
+        (old.signal_id,),
+        decision="accepted",
+        reason_codes=("accepted",),
+    )
+    _complete_policy_staging(ledger)
+    ledger.connection.execute(
+        """UPDATE policy_candidate_decisions SET payload_json = ?
+           WHERE epoch_id = ?""",
+        ('{"tampered":true}', "old-epoch"),
+    )
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    cohort = service.generation_report()["policy_audit"]["per_cohort"][
+        ledger.cohort_id
+    ]
+
+    assert cohort["available"] is True
+    assert cohort["policy_candidate_decisions_examined"] == 1
+    assert cohort["counts"]["accepted"] == 1
 
 
 def test_generation_report_keeps_first_valid_session_as_insufficient_history(
