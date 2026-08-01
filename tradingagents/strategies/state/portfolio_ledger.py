@@ -1905,8 +1905,10 @@ class PortfolioLedger:
         governed_tickers: tuple[str, ...],
         errors: tuple[str, ...],
         rejected_at: datetime,
+        *,
+        preserve_committed_session: bool = False,
     ) -> str:
-        """Reject one complete provider response without applying any member."""
+        """Reject one response, optionally preserving an interleaved commit."""
         self._require_timezone_aware(rejected_at, "rejected_at")
         if not errors:
             raise ValueError("corporate action batch rejection requires errors")
@@ -1959,10 +1961,13 @@ class PortfolioLedger:
                     self._encode(rejected_at),
                 ),
             )
-            if not self.session_invalid_reason(session):
-                self.invalidate_session_and_cancel_due(session, reason, rejected_at)
-            else:
-                self._invalidate_session(session, reason, rejected_at)
+            if not preserve_committed_session:
+                if not self.session_invalid_reason(session):
+                    self.invalidate_session_and_cancel_due(
+                        session, reason, rejected_at
+                    )
+                else:
+                    self._invalidate_session(session, reason, rejected_at)
             for ticker in affected:
                 self._quarantine_ticker(ticker, reason, rejected_at)
         return reason

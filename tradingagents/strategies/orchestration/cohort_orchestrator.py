@@ -303,6 +303,7 @@ class CohortOrchestrator:
             Path(base_config.get("autoresearch", {}).get("state_dir", "data/state"))
             / "metrics_v2.sqlite3"
         )
+        self._metric_store = metric_store
 
         for cfg in cohort_configs:
             cfg = replace(cfg, adaptive_confidence=False, learning_enabled=False)
@@ -436,14 +437,24 @@ class CohortOrchestrator:
         return resolved
 
     def _invalidate_gap_epoch_after_boundary_error(
-        self, marker: CriticalGapMarker, error: Exception
+        self,
+        epoch_id: str,
+        gap_session: date,
+        error: Exception,
     ) -> None:
         """Close the exact epoch while retaining the boundary error as primary."""
         try:
-            self.cohorts[0]["executor"].invalidate_metric_epoch(
-                marker.gap_session,
-                epoch_id=marker.epoch_id,
-            )
+            if self.cohorts:
+                self.cohorts[0]["executor"].invalidate_metric_epoch(
+                    gap_session,
+                    epoch_id=epoch_id,
+                )
+            else:
+                self._metric_store.invalidate_epoch(
+                    epoch_id,
+                    gap_session,
+                    "critical_market_data_gap",
+                )
         except Exception as invalidation_error:
             raise error from invalidation_error
 
@@ -544,27 +555,28 @@ class CohortOrchestrator:
 
         if self._epoch_id is None:
             raise RuntimeError("metric epoch is not initialized")
-        store = self.cohorts[0]["executor"].metric_store
-        affected_cohorts = {
-            cohort["config"].name: cohort["ledger"].recovery_binding_id()
-            for cohort in self.cohorts
-        }
-        minimal_marker = CriticalGapMarker(
-            marker_id=stable_id("critical_gap_marker", self._epoch_id, session),
-            epoch_id=self._epoch_id,
-            gap_session=session,
-            reason="critical_market_data_gap",
-            cohort_invalid_reasons={},
-            status="pending",
-            affected_cohorts=dict(sorted(affected_cohorts.items())),
-            detail_status="minimal",
-            corporate_action_rejections={},
-        )
+        epoch_id = self._epoch_id
+        store = self._metric_store
         try:
+            affected_cohorts = {
+                cohort["config"].name: cohort["ledger"].recovery_binding_id()
+                for cohort in self.cohorts
+            }
+            minimal_marker = CriticalGapMarker(
+                marker_id=stable_id("critical_gap_marker", epoch_id, session),
+                epoch_id=epoch_id,
+                gap_session=session,
+                reason="critical_market_data_gap",
+                cohort_invalid_reasons={},
+                status="pending",
+                affected_cohorts=dict(sorted(affected_cohorts.items())),
+                detail_status="minimal",
+                corporate_action_rejections={},
+            )
             minimal_marker = store.begin_critical_gap(minimal_marker)
         except Exception as marker_error:
             self._invalidate_gap_epoch_after_boundary_error(
-                minimal_marker, marker_error
+                epoch_id, session, marker_error
             )
             if original_error is not None:
                 raise original_error from marker_error
@@ -581,7 +593,7 @@ class CohortOrchestrator:
             marker = store.attach_critical_gap_details(marker)
         except Exception as detail_error:
             self._invalidate_gap_epoch_after_boundary_error(
-                minimal_marker, detail_error
+                epoch_id, session, detail_error
             )
             if original_error is not None:
                 raise original_error from detail_error
@@ -615,7 +627,9 @@ class CohortOrchestrator:
             if marker.detail_status != "ready":
                 raise ValueError("critical gap recovery detail is not ready")
         except Exception as boundary_error:
-            self._invalidate_gap_epoch_after_boundary_error(marker, boundary_error)
+            self._invalidate_gap_epoch_after_boundary_error(
+                marker.epoch_id, marker.gap_session, boundary_error
+            )
             raise
         committed = {
             cohort["config"].name
@@ -651,7 +665,7 @@ class CohortOrchestrator:
         for cohort in affected_cohorts:
             name = cohort["config"].name
             rejection = marker.corporate_action_rejections.get(name)
-            if rejection is None or name in committed:
+            if rejection is None:
                 continue
             try:
                 actions = tuple(
@@ -682,6 +696,7 @@ class CohortOrchestrator:
                     tuple(str(value) for value in rejection["governed_tickers"]),
                     tuple(str(value) for value in rejection["errors"]),
                     processed_at,
+                    preserve_committed_session=name in committed,
                 )
             except Exception as error:
                 if audit_error is None:
@@ -723,9 +738,7 @@ class CohortOrchestrator:
         )
         self._after_gap_metric_invalidation(marker)
         if recovery_error is None and audit_error is None:
-            self.cohorts[0]["executor"].metric_store.complete_critical_gap(
-                marker.marker_id
-            )
+            self._metric_store.complete_critical_gap(marker.marker_id)
         if original_error is not None:
             raise original_error
         if recovery_error is not None:
@@ -758,20 +771,30 @@ class CohortOrchestrator:
 
         logger.info("=== Cohort daily run: %s ===", trading_date)
         results: dict[str, Any] = {}
-        if not self.cohorts:
-            return results
-        pending_gap = self.cohorts[0]["executor"].metric_store.pending_critical_gap()
+        pending_gap = self._metric_store.pending_critical_gap()
         if pending_gap is not None:
             if session < pending_gap.gap_session:
                 raise ValueError(
                     f"{session} precedes pending critical gap "
                     f"{pending_gap.gap_session}"
                 )
+            if not self.cohorts:
+                boundary_error = ValueError(
+                    "critical gap cohort binding is missing for every affected cohort"
+                )
+                self._invalidate_gap_epoch_after_boundary_error(
+                    pending_gap.epoch_id,
+                    pending_gap.gap_session,
+                    boundary_error,
+                )
+                raise boundary_error
             recovered = self._complete_pending_critical_gap(
                 pending_gap, processed_at, results
             )
             if session == pending_gap.gap_session:
                 return recovered
+        if not self.cohorts:
+            return results
         metric_epoch = self.cohorts[0]["executor"].ensure_metric_epoch(
             self._metric_epoch_context, session
         )

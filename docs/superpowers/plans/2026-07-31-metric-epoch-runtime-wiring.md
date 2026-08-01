@@ -433,20 +433,24 @@ credentials, state paths, provider response bodies, or arbitrary exception
 payloads. Reconstruct the P0 rejection from this intent so a process restart
 can retry the audit/quarantine write without fetching.
 
-If minimal blocker persistence fails, directly invalidate the exact epoch
-before surfacing the error. Cover the post-blocker hook, detail construction,
-validation, and phase-2 attachment with the same exact-epoch invalidation
-boundary. Leave the minimal blocker pending when phase 2 fails. Do not
-auto-recover a minimal-only blocker: it does not contain enough evidence to
-distinguish an unnecessary audit from an interrupted one, so same/later runs
-must require manual resolution.
+Guard all phase-1 preparation and persistence, including affected-name
+collection, ledger-binding derivation, marker construction/validation, and the
+insert. On failure, directly invalidate the explicit epoch/session without
+requiring a marker or binding. Cover the
+post-blocker hook, detail construction, validation, and phase-2 attachment with
+the same exact-epoch invalidation boundary. Leave the minimal blocker pending
+when phase 2 fails. Do not auto-recover a minimal-only blocker: it does not
+contain enough evidence to distinguish an unnecessary audit from an interrupted
+one, so same/later runs must require manual resolution.
 
 Complete a pending marker in this order:
 
 1. Write missing due invalid outcomes from persisted entry evidence only.
 2. Replay required corporate-action rejection/audit writes.
 3. Preserve complete P0 phase chains/snapshots and invalidate only uncommitted
-   cohort sessions.
+   cohort sessions. If another runner committed after marker attachment, write
+   the required audit/quarantine idempotently without invalidating or replacing
+   that committed snapshot/phase chain.
 4. Invalidate the marker's exact original metric epoch.
 5. Complete the marker only when outcome and audit writes both succeeded.
 
@@ -463,6 +467,11 @@ renamed, duplicated, changed-path, missing-audit-cohort, and legacy-unbound
 markers remain pending and fail before fetch. Permit extra cohorts only when all
 original bindings resolve: exclude extras from old-gap writes and let them
 enter normal execution only after recovery completes on a later session.
+Retain the shared `MetricStore` directly on the orchestrator and inspect it
+before the empty-cohort return. With a pending ready or minimal marker and no
+cohorts, invalidate the marker's exact epoch directly if needed, leave it
+pending, and raise the missing-binding error without fetching. Preserve `{}`
+only for an empty topology with no pending marker.
 
 Route completed, stage-only, stored partial-resume, bound-context validation,
 and post-execution outcome-repair corruption through this boundary. Preserve
@@ -474,8 +483,10 @@ Add deterministic crash hooks after minimal blocker persistence, ready-marker
 attachment, P0 invalidation, and metric invalidation. Tests must cover every
 crash boundary, unrepresentable provider fields/errors plus item/byte overflow,
 exact affected-ledger topology and legacy failure, safe added-cohort behavior,
-direct later-session recovery, audit-write failure followed by zero-fetch replay with
-exactly one rejection row, malformed completed/stage/partial contexts,
+binding-derivation failure, all-removed ready/minimal recovery, interleaved
+committed audit replay, direct later-session recovery, and audit-write failure
+followed by zero-fetch replay with exactly one rejection row. Also cover malformed
+completed/stage/partial contexts,
 immutable conflicts, committed-P0 preservation, and marker migration/bounds.
 
 - [ ] **Step 10: Run focused, full, and static verification**

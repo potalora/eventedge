@@ -42,6 +42,7 @@ from tradingagents.strategies.orchestration.multi_strategy_engine import (
 )
 from tradingagents.strategies.orchestration.session_executor import (
     CorporateActionBatchError,
+    PHASES,
     SessionExecutor,
 )
 from tradingagents.strategies.orchestration.trading_calendar import (
@@ -1157,6 +1158,45 @@ class TestIdempotencyDoubleRun:
         assert not clean["cohort_0"]["error"]
         assert store.current_epoch().epoch_id != epoch_id
 
+    def test_binding_derivation_failure_directly_invalidates_exact_epoch(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        cohort = orchestrator.cohorts[0]
+        store = cohort["executor"].metric_store
+        epoch_id = orchestrator._epoch_id
+        original_binding = cohort["ledger"].recovery_binding_id
+        cohort["ledger"].recovery_binding_id = lambda: (_ for _ in ()).throw(
+            RuntimeError("binding derivation failed")
+        )
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("benchmark gap")
+        )
+
+        with pytest.raises(RuntimeError, match="binding derivation failed"):
+            orchestrator.run_daily(gap_session.isoformat())
+
+        assert store.pending_critical_gap() is None
+        invalid = store.load_epoch(epoch_id)
+        assert invalid.status == "invalid" and invalid.end_session == gap_session
+        cohort["ledger"].recovery_binding_id = original_binding
+        source.get_total_return_closes = (
+            AuthoritativePriceSource().get_total_return_closes
+        )
+        later_session = next_session(gap_session)
+        clean = orchestrator.run_daily(later_session.isoformat())
+        assert not clean["cohort_0"]["error"]
+        assert orchestrator._epoch_id != epoch_id
+
     def test_no_due_shared_gap_marker_names_every_affected_ledger(self, tmp_path):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
@@ -1351,6 +1391,179 @@ class TestIdempotencyDoubleRun:
             assert connection.execute(
                 "SELECT COUNT(*) FROM corporate_action_batch_rejections"
             ).fetchone()[0] == 0
+
+    def test_committed_interleaved_runner_still_persists_required_audit(
+        self, tmp_path
+    ):
+        marker_owner, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            marker_owner.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        epoch_id = marker_owner._epoch_id
+        interleaved, clean_source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        interleaved_executor = interleaved.cohorts[0]["executor"]
+        interleaved_epoch = interleaved_executor.ensure_metric_epoch(
+            interleaved._metric_epoch_context, gap_session
+        )
+        assert interleaved_epoch.epoch_id == epoch_id
+        required = interleaved_executor.required_tickers(gap_session, epoch_id)
+        clean_bundle = SessionExecutor.fetch_input_bundle(
+            gap_session, required, clean_source
+        )
+
+        invalid_action = CorporateAction(
+            "bad-scope-action",
+            "MSFT",
+            gap_session,
+            "split",
+            Decimal("2"),
+            None,
+            "fixture",
+            datetime.now(timezone.utc),
+            True,
+        )
+        source.get_corporate_actions = lambda tickers, session: (invalid_action,)
+        marker_owner._after_gap_marker = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("runner paused after ready marker")
+        )
+        with pytest.raises(RuntimeError, match="runner paused after ready marker"):
+            marker_owner.run_daily(gap_session.isoformat())
+
+        store = marker_owner.cohorts[0]["executor"].metric_store
+        pending = store.pending_critical_gap()
+        assert pending is not None and pending.detail_status == "ready"
+        processed_at = datetime.now(timezone.utc)
+        committed_result = interleaved_executor.execute_open_and_mark(
+            gap_session,
+            epoch_id,
+            clean_bundle,
+            {},
+            processed_at,
+        )
+        assert committed_result.valid and committed_result.snapshot is not None
+        committed_ledger = marker_owner.cohorts[0]["ledger"]
+        snapshot_before = committed_ledger.read_snapshots(
+            gap_session, gap_session, epoch_id=epoch_id, valid_only=True
+        )[0]
+        assert all(
+            committed_ledger.phase_completed(gap_session, phase) for phase in PHASES
+        )
+        original_reject = committed_ledger.reject_corporate_action_batch
+        committed_ledger.reject_corporate_action_batch = (
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("committed audit write failed")
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="committed audit write failed"):
+            marker_owner.run_daily(gap_session.isoformat())
+
+        assert store.pending_critical_gap() == pending
+        assert store.load_epoch(epoch_id).status == "invalid"
+        assert committed_ledger.connection.execute(
+            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+        ).fetchone()[0] == 0
+        committed_ledger.reject_corporate_action_batch = original_reject
+        marker_owner._after_gap_metric_invalidation = lambda marker: (_ for _ in ()).throw(
+            RuntimeError("crash after committed audit")
+        )
+
+        with pytest.raises(RuntimeError, match="crash after committed audit"):
+            marker_owner.run_daily(gap_session.isoformat())
+
+        assert store.pending_critical_gap() is not None
+        assert committed_ledger.connection.execute(
+            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+        ).fetchone()[0] == 1
+        marker_owner._after_gap_metric_invalidation = lambda marker: None
+        recovered = marker_owner.run_daily(gap_session.isoformat())
+
+        assert recovered["cohort_0"]["error"]
+        assert store.pending_critical_gap() is None
+        assert committed_ledger.connection.execute(
+            "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+        ).fetchone()[0] == 1
+        assert committed_ledger.read_snapshots(
+            gap_session, gap_session, epoch_id=epoch_id, valid_only=True
+        ) == [snapshot_before]
+        assert all(
+            committed_ledger.phase_completed(gap_session, phase) for phase in PHASES
+        )
+        assert committed_ledger.session_invalid_reason(gap_session) == ""
+        assert store.load_epoch(epoch_id).status == "invalid"
+        interleaved.cohorts[0]["ledger"].close()
+
+    @pytest.mark.parametrize("detail_status", ("ready", "minimal"))
+    def test_all_removed_cohorts_leave_pending_gap_and_fail_closed(
+        self, tmp_path, detail_status
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, strategy_modules=[FakeStrategy()]
+        )
+        first_session = date(2026, 3, 30)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+        gap_session = next_session(first_session)
+        epoch_id = orchestrator._epoch_id
+        store = orchestrator.cohorts[0]["executor"].metric_store
+        source.get_total_return_closes = lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("shared benchmark gap")
+        )
+        hook_name = (
+            "_after_gap_marker" if detail_status == "ready" else "_after_gap_blocker"
+        )
+        setattr(
+            orchestrator,
+            hook_name,
+            lambda marker: (_ for _ in ()).throw(
+                RuntimeError(f"crash with {detail_status} marker")
+            ),
+        )
+        with pytest.raises(RuntimeError, match=f"crash with {detail_status} marker"):
+            orchestrator.run_daily(gap_session.isoformat())
+        pending = store.pending_critical_gap()
+        assert pending is not None and pending.detail_status == detail_status
+        orchestrator.cohorts[0]["ledger"].close()
+
+        empty, empty_source = _authoritative_orchestrator(
+            tmp_path, cohorts=0, strategy_modules=[FakeStrategy()]
+        )
+        calls_before = (
+            len(empty_source.raw_calls),
+            len(empty_source.action_calls),
+            len(empty_source.benchmark_calls),
+        )
+        for replay_session in (gap_session, next_session(gap_session)):
+            with pytest.raises(ValueError, match="critical gap cohort binding"):
+                empty.run_daily(replay_session.isoformat())
+            assert store.pending_critical_gap() == pending
+            assert store.load_epoch(epoch_id).status == "invalid"
+            assert (
+                len(empty_source.raw_calls),
+                len(empty_source.action_calls),
+                len(empty_source.benchmark_calls),
+            ) == calls_before
+
+    def test_empty_orchestrator_without_pending_gap_returns_empty(self, tmp_path):
+        empty, source = _authoritative_orchestrator(
+            tmp_path, cohorts=0, strategy_modules=[FakeStrategy()]
+        )
+
+        assert empty.run_daily(date(2026, 3, 30).isoformat()) == {}
+        assert source.raw_calls == []
+        assert source.action_calls == []
+        assert source.benchmark_calls == []
 
     def test_added_cohort_can_start_only_after_exact_original_recovery(self, tmp_path):
         orchestrator, source = _authoritative_orchestrator(

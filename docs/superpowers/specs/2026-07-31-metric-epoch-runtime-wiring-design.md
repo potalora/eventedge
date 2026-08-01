@@ -89,8 +89,11 @@ validation errors. It excludes market bars, positions, credentials, filesystem
 paths, provider response bodies, and arbitrary exception details, and it never
 participates in the semantic epoch hash.
 
-If phase 1 cannot persist, the orchestrator directly invalidates the exact
-epoch before surfacing the boundary error. If the post-blocker hook, detail
+If any phase-1 preparation or persistence step fails—including affected-cohort
+collection, ledger binding derivation, marker construction/validation, or the
+insert—the orchestrator directly invalidates the already-known exact epoch and
+session before surfacing the boundary error. That fallback requires neither a
+marker nor a successfully derived binding. If the post-blocker hook, detail
 construction, validation, size cap, or phase-2 attachment fails, the exact
 epoch is likewise invalidated and the minimal blocker remains pending. A
 minimal blocker cannot be replayed automatically because it cannot prove
@@ -102,7 +105,9 @@ Recovery is an idempotent state machine:
 1. Write any missing due invalid outcomes from persisted entry evidence only,
    preserving every existing immutable outcome.
 2. Replay any pending corporate-action rejection/audit/quarantine write from
-   the marker's canonical intent.
+   the marker's canonical intent. An interleaved runner's already-committed P0
+   session still receives the idempotent audit/quarantine write, but its valid
+   snapshot, phase chain, and session validity are preserved.
 3. Preserve cohorts whose P0 snapshot and complete phase chain already
    committed; invalidate and cancel due work only for uncommitted cohorts.
 4. Invalidate the marker's exact original metric epoch with the stable reason.
@@ -131,6 +136,11 @@ uniquely bound cohort is not part of the old recovery and receives no old-gap
 mutation; it may enter normal processing only after exact original recovery
 completes and a later session resolves the replacement epoch. Legacy pending
 markers without bindings are deliberately non-recoverable and fail closed.
+The generation-level `MetricStore` is retained independently of executors, so
+removing every cohort cannot bypass this check: ready and minimal markers close
+their exact epoch if needed, remain pending, and raise a missing-binding error
+without fetching. An empty topology with no pending marker still returns an
+empty result.
 
 ## Canonical semantic inputs
 
@@ -213,9 +223,12 @@ Tests must prove:
   removed, renamed, duplicate, replacement-path, missing-audit-cohort, and
   legacy topologies fail closed, while a newly added cohort starts only after
   exact original recovery;
+- binding derivation failure closes the explicit epoch without a marker, and
+  removing every cohort leaves ready/minimal markers pending with zero fetch;
 - a failed corporate-action rejection audit leaves the marker pending, and its
   zero-fetch replay writes exactly one idempotent rejection row before marker
-  completion;
+  completion, including when an interleaved runner already committed the P0
+  session without changing that committed snapshot or phase validity;
 - completed, stage-only, partial-resume, and outcome-repair corruption preserve
   committed P0, invalidate the original epoch, and surface the original error;
 - P0 `SignalRecord.signal_id`, v2 `SignalMetricRecord.signal_id`, and outcomes
