@@ -15,6 +15,7 @@ from .models import MetricEpoch, PairedComparison, PortfolioMetrics, SignalMetri
 from .portfolio import (
     daily_net_returns,
     equal_weighted_scenario_return,
+    matched_benchmark_returns,
     paired_comparison,
     portfolio_metrics,
     validate_snapshot_window,
@@ -155,11 +156,16 @@ class MetricsService:
                 "scenario_panel_unavailable_reason": "no_current_epoch",
                 "missing_headline_books": sorted(_HEADLINE_BOOKS),
                 "stress_tests": {},
+                "cohort_series": {},
                 "dependent_scenarios": True,
             }
         self._require_available_epoch(epoch, epoch.epoch_id)
         reports = {
             cohort_id: self.cohort_report(cohort_id, epoch.epoch_id)
+            for cohort_id in self.cohort_ids
+        }
+        series = {
+            cohort_id: self._cohort_series(cohort_id, epoch.epoch_id)
             for cohort_id in self.cohort_ids
         }
         headline = {
@@ -195,7 +201,73 @@ class MetricsService:
                 for key, value in reports.items()
                 if not key.endswith("_size_100k")
             },
+            # These are projections of the immutable ledger, not dashboard-side
+            # calculations.  Keep the raw persisted observations available so all
+            # reporting surfaces use the same valuation and benchmark evidence.
+            "cohort_series": series,
             "dependent_scenarios": True,
+        }
+
+    def _cohort_series(self, cohort_id: str, epoch_id: str) -> dict[str, object]:
+        """Serialize the valid ledger window and its persisted benchmarks."""
+        try:
+            snapshots, benchmarks, _signals, _fills = self._inputs(cohort_id, epoch_id)
+        except ValueError as error:
+            # ``generation_report`` can be projected from mocked/previously
+            # materialized cohort reports during offline consumers.  A series is
+            # unavailable in that case; it must never be fabricated.
+            if str(error) != "at least two valid snapshots are required":
+                raise
+            return {
+                "net_equity_history": [],
+                "benchmarks": {"SPY": [], "BIL": []},
+                "matched_benchmark_returns": [],
+            }
+        benchmark_rows = tuple(
+            row for row in benchmarks if row.valid and row.symbol in {"SPY", "BIL"}
+        )
+        by_symbol = {
+            symbol: [
+                {
+                    "session": row.session.isoformat(),
+                    "close": float(row.close),
+                    "observed_at": row.observed_at.isoformat(),
+                    "return_basis": row.return_basis,
+                    "source": row.source,
+                }
+                for row in benchmark_rows
+                if row.symbol == symbol
+            ]
+            for symbol in ("SPY", "BIL")
+        }
+        matched = matched_benchmark_returns(snapshots, benchmark_rows)
+        first_equity = float(snapshots[0].net_equity)
+        return {
+            "net_equity_history": [
+                {
+                    "session": row.session.isoformat(),
+                    "valuation_at": row.valuation_at.isoformat(),
+                    "net_equity": float(row.net_equity),
+                    "gross_equity": float(row.gross_equity),
+                    "gross_exposure": float(row.gross_exposure),
+                    "net_exposure": float(row.net_exposure),
+                    "cash": float(row.cash),
+                    "cumulative_costs": {
+                        "slippage": float(row.slippage_cost),
+                        "commission": float(row.commission_cost),
+                        "other_fees": float(row.other_fees),
+                        "borrow": float(row.borrow_cost),
+                        "financing": float(row.financing_cost),
+                    },
+                    "total_return": float(row.net_equity) / first_equity - 1.0,
+                }
+                for row in snapshots
+            ],
+            "benchmarks": by_symbol,
+            "matched_benchmark_returns": [
+                {"session": row.session.isoformat(), "return": row.value}
+                for row in matched
+            ],
         }
 
     def compare(

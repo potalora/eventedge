@@ -349,6 +349,7 @@ def test_generation_report_empty_current_historical_and_panel_rules(
             "horizon_6m_size_100k",
         ],
         "stress_tests": {},
+        "cohort_series": {},
         "dependent_scenarios": True,
     }
 
@@ -416,6 +417,32 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     )
     assert partial_report["missing_headline_books"] == ["horizon_1y_size_100k"]
     assert set(partial_report["stress_tests"]) == {"horizon_30d_size_50k"}
+
+
+def test_generation_report_projects_persisted_series_without_network(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _record_window(ledger, "epoch-1", SESSIONS)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+
+    series = service.generation_report()["cohort_series"][ledger.cohort_id]
+
+    assert [row["net_equity"] for row in series["net_equity_history"]] == [
+        100000.0,
+        100000.0,
+        100000.0,
+        100000.0,
+    ]
+    assert [row["session"] for row in series["benchmarks"]["SPY"]] == [
+        session.isoformat() for session in SESSIONS
+    ]
+    assert [row["return"] for row in series["matched_benchmark_returns"]] == [
+        pytest.approx(0.001),
+        pytest.approx(1 / 1001),
+        pytest.approx(1 / 1002),
+    ]
 
 
 def test_compare_uses_exact_reports_and_contiguous_common_daily_returns(
