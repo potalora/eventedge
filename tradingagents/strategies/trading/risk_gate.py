@@ -10,9 +10,18 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tradingagents.strategies.execution import AccountState
+from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicy,
+    PortfolioRiskContext,
+)
+
+if TYPE_CHECKING:
+    from tradingagents.strategies.trading.portfolio_committee import (
+        TradeRecommendation,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +196,9 @@ class RiskGate:
         authoritative_account: AccountState | None = None,
         pending_entries: tuple[PendingRiskEntry, ...] = (),
         proposed_margin: float = 0.0,
+        policy_enabled: bool = False,
+        recommendation: TradeRecommendation | None = None,
+        portfolio_context: PortfolioRiskContext | None = None,
     ) -> tuple[bool, str]:
         """Run all gates. Returns (passed, rejection_reason).
 
@@ -200,6 +212,14 @@ class RiskGate:
             short_interest: Optional mapping of ticker -> short interest % of float.
         """
         open_trades = open_trades or []
+        if policy_enabled:
+            if recommendation is None or portfolio_context is None:
+                return False, "portfolio_policy:missing_context"
+            passed, reason = PortfolioPolicy().validate(
+                recommendation, portfolio_context
+            )
+            if not passed:
+                return False, f"portfolio_policy:{reason}"
         current_strategies = (strategy,) if isinstance(strategy, str) else strategy
         self._require_nonnegative_finite(position_value, "position_value")
         self._require_nonnegative_finite(proposed_margin, "proposed_margin")

@@ -51,7 +51,10 @@ FAMILIES = [
     ),
     (
         "congressional_trades",
-        {"trade_keys": ["house:member:2026-07-30:$15k-$50k"]},
+        {
+            "trade_keys": ["house:member:2026-07-30:$15k-$50k"],
+            "cluster_direction": "long",
+        },
         ("trade_keys", ["house:member:2026-07-31:$15k-$50k"]),
     ),
     (
@@ -275,7 +278,17 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                         "transaction_date": "2026-06-25",
                         "source_url": "https://example.test/disclosure/1",
                         "publication_date": "2026-06-30",
-                    }
+                    },
+                    {
+                        "ticker": "AAPL",
+                        "transaction_type": "purchase",
+                        "amount": "$15,001 - $50,000",
+                        "representative": "Member Two",
+                        "chamber": "house",
+                        "transaction_date": "2026-06-25",
+                        "source_url": "https://example.test/disclosure/2",
+                        "publication_date": "2026-06-30",
+                    },
                 ]
             }
         },

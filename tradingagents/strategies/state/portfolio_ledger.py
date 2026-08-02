@@ -8,6 +8,7 @@ order or fill never carries an independently asserted ticker.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -139,6 +140,16 @@ _DDL: tuple[str, ...] = (
         payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
         captured_at TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS signal_policy_provenance (
+        signal_id TEXT PRIMARY KEY REFERENCES signals(signal_id),
+        policy_version TEXT NOT NULL, event_key TEXT NOT NULL,
+        source_event_keys_json TEXT NOT NULL, strategy_tags_json TEXT NOT NULL,
+        risk_tags_json TEXT NOT NULL, sector TEXT NOT NULL,
+        journal_only INTEGER NOT NULL, order_eligible INTEGER NOT NULL,
+        decision TEXT NOT NULL, reason_codes_json TEXT NOT NULL,
+        bound_context_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+        payload_digest TEXT NOT NULL, captured_at TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS signal_journal_projection (
         cohort_id TEXT PRIMARY KEY, verified_offset INTEGER NOT NULL,
         initialized_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -155,6 +166,54 @@ _DDL: tuple[str, ...] = (
         signal_order INTEGER NOT NULL,
         PRIMARY KEY(intent_id, signal_id),
         UNIQUE(intent_id, signal_order)
+    )""",
+    """CREATE TABLE IF NOT EXISTS intent_policy_provenance (
+        intent_id TEXT PRIMARY KEY REFERENCES order_intents(intent_id),
+        signal_ids_json TEXT NOT NULL, policy_version TEXT NOT NULL,
+        event_key TEXT NOT NULL, source_event_keys_json TEXT NOT NULL,
+        strategy_tags_json TEXT NOT NULL, risk_tags_json TEXT NOT NULL,
+        sector TEXT NOT NULL, journal_only INTEGER NOT NULL,
+        order_eligible INTEGER NOT NULL, decision TEXT NOT NULL,
+        reason_codes_json TEXT NOT NULL, bound_context_digest TEXT NOT NULL,
+        payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS policy_candidate_decisions (
+        decision_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
+        session TEXT NOT NULL, epoch_id TEXT NOT NULL,
+        policy_version TEXT NOT NULL, ticker TEXT NOT NULL,
+        direction TEXT NOT NULL, event_key TEXT NOT NULL,
+        signal_ids_json TEXT NOT NULL, requested_weight TEXT NOT NULL,
+        approved_weight TEXT NOT NULL, decision TEXT NOT NULL,
+        reason_codes_json TEXT NOT NULL, bound_context_digest TEXT NOT NULL,
+        payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_candidate_identity
+       ON policy_candidate_decisions(
+           cohort_id, session, epoch_id, policy_version, ticker, direction,
+           event_key, signal_ids_json
+       )""",
+    """CREATE TABLE IF NOT EXISTS policy_staging_audit_manifests (
+        manifest_id TEXT PRIMARY KEY, cohort_id TEXT NOT NULL,
+        session TEXT NOT NULL, epoch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
+        policy_version TEXT NOT NULL, bound_context_digest TEXT NOT NULL,
+        ingress_signal_ids_json TEXT NOT NULL,
+        candidate_decision_ids_json TEXT NOT NULL,
+        committee_not_selected_ids_json TEXT NOT NULL,
+        payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        UNIQUE(cohort_id, session, epoch_id, policy_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS policy_session_contexts (
+        cohort_id TEXT NOT NULL, session TEXT NOT NULL,
+        binding_kind TEXT NOT NULL CHECK(binding_kind IN ('staging', 'execution')),
+        epoch_id TEXT NOT NULL,
+        policy_version TEXT NOT NULL, policy_config_json TEXT NOT NULL,
+        policy_config_digest TEXT NOT NULL, context_json TEXT NOT NULL,
+        context_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+        payload_digest TEXT NOT NULL, bound_at TEXT NOT NULL,
+        PRIMARY KEY(cohort_id, session, binding_kind)
     )""",
     """CREATE TABLE IF NOT EXISTS exit_intent_lots (
         intent_id TEXT NOT NULL REFERENCES order_intents(intent_id),
@@ -309,6 +368,9 @@ _DDL: tuple[str, ...] = (
         WHERE open_qty > 0""",
     """CREATE INDEX IF NOT EXISTS ix_cash_events_cohort_event
         ON cash_events(cohort_id, event_type, session)""",
+    """CREATE INDEX IF NOT EXISTS ix_policy_pending_entries
+        ON order_intents(cohort_id, status, side, eligible_session, created_at,
+                         intent_id)""",
 )
 
 _IDENTITY_COLUMNS = {
@@ -378,6 +440,48 @@ def _date(value: str | date) -> date:
 
 def _datetime(value: str | datetime) -> datetime:
     return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+
+
+def _canonical_json_value(value: object) -> object:
+    """Return the small deterministic JSON domain accepted by policy bindings."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_json_value(value[key])
+            for key in sorted(value, key=lambda item: str(item))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_json_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_canonical_json_value(item) for item in value]
+        return sorted(
+            normalized,
+            key=lambda item: json.dumps(
+                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ),
+        )
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("policy payload decimals must be finite")
+        return format(value, "f")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("policy payload floats must be finite")
+        return value
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise TypeError(f"unsupported policy payload value: {type(value).__name__}")
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        _canonical_json_value(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
 
 
 class PortfolioLedger:
@@ -674,6 +778,9 @@ class PortfolioLedger:
     def execution_starting_state(self, session: date) -> dict[str, object]:
         """Canonical bounded state governed by the execution phase machine."""
         account = self.account_state()
+        execution_policy_binding = self.read_policy_session_context(
+            session, binding_kind="execution"
+        )
         due_intents = []
         intent_rows = self._due_intent_rows(session)
         for row in intent_rows:
@@ -700,6 +807,25 @@ class PortfolioLedger:
 
         return {
             "account": account.__dict__,
+            "execution_policy_binding": (
+                None
+                if execution_policy_binding is None
+                else {
+                    "epoch_id": execution_policy_binding["epoch_id"],
+                    "policy_version": execution_policy_binding["policy_version"],
+                    "policy_config_json": execution_policy_binding[
+                        "policy_config_json"
+                    ],
+                    "policy_config_digest": execution_policy_binding[
+                        "policy_config_digest"
+                    ],
+                    "context_json": execution_policy_binding["context_json"],
+                    "context_digest": execution_policy_binding["context_digest"],
+                    "payload_json": execution_policy_binding["payload_json"],
+                    "payload_digest": execution_policy_binding["payload_digest"],
+                    "bound_at": execution_policy_binding["bound_at"],
+                }
+            ),
             "due_intents": due_intents,
             "open_lots": self.open_exit_positions(),
             "exit_allocations": [dict(row) for row in allocations],
@@ -1274,6 +1400,1681 @@ class PortfolioLedger:
             json.loads(row["candidate_json"]),
             json.loads(row["journal_json"]),
         )
+
+    @staticmethod
+    def _normalized_string_tuple(
+        values: tuple[str, ...], label: str, *, allow_empty: bool = True
+    ) -> tuple[str, ...]:
+        if isinstance(values, (str, bytes)):
+            raise TypeError(f"{label} must be a tuple of strings")
+        normalized = tuple(
+            sorted({str(value).strip() for value in values if str(value).strip()})
+        )
+        if not allow_empty and not normalized:
+            raise ValueError(f"{label} must not be empty")
+        if len(normalized) > 256:
+            raise ValueError(f"{label} must contain at most 256 values")
+        return normalized
+
+    @classmethod
+    def _normalized_policy_payload(
+        cls,
+        *,
+        policy_version: str,
+        event_key: str,
+        source_event_keys: tuple[str, ...],
+        strategy_tags: tuple[str, ...],
+        risk_tags: tuple[str, ...],
+        sector: str,
+        journal_only: bool,
+        order_eligible: bool,
+        decision: str,
+        reason_codes: tuple[str, ...],
+        bound_context_digest: str,
+        signal_ids: tuple[str, ...] | None = None,
+    ) -> dict[str, object]:
+        normalized = {
+            "policy_version": str(policy_version).strip(),
+            "event_key": str(event_key).strip(),
+            "source_event_keys": cls._normalized_string_tuple(
+                source_event_keys, "source_event_keys"
+            ),
+            "strategy_tags": cls._normalized_string_tuple(
+                strategy_tags, "strategy_tags", allow_empty=False
+            ),
+            "risk_tags": cls._normalized_string_tuple(risk_tags, "risk_tags"),
+            "sector": str(sector).strip() or "Unknown",
+            "journal_only": bool(journal_only),
+            "order_eligible": bool(order_eligible),
+            "decision": str(decision).strip(),
+            "reason_codes": cls._normalized_string_tuple(
+                reason_codes, "reason_codes", allow_empty=False
+            ),
+            "bound_context_digest": str(bound_context_digest).strip(),
+        }
+        if signal_ids is not None:
+            if isinstance(signal_ids, (str, bytes)):
+                raise TypeError("signal_ids must be a tuple of strings")
+            exact_signal_ids = tuple(str(value).strip() for value in signal_ids)
+            if (
+                not exact_signal_ids
+                or any(not value for value in exact_signal_ids)
+                or len(set(exact_signal_ids)) != len(exact_signal_ids)
+                or len(exact_signal_ids) > 256
+            ):
+                raise ValueError("signal_ids must be nonempty and unique")
+            normalized["signal_ids"] = exact_signal_ids
+        for required in (
+            "policy_version",
+            "event_key",
+            "decision",
+            "bound_context_digest",
+        ):
+            if not normalized[required]:
+                raise ValueError(f"{required} must not be empty")
+        if normalized["journal_only"] and normalized["order_eligible"]:
+            raise ValueError("journal-only provenance cannot be order eligible")
+        if normalized["decision"] not in {"accepted", "trimmed", "rejected"}:
+            raise ValueError("decision must be accepted, trimmed, or rejected")
+        return normalized
+
+    @staticmethod
+    def _policy_payload_digest(
+        kind: str, identity: str, payload_json: str
+    ) -> str:
+        return stable_id("policy_payload", kind, identity, payload_json)
+
+    @staticmethod
+    def _policy_payload_result(
+        identity_name: str,
+        identity: str,
+        payload: dict[str, object],
+        payload_json: str,
+        payload_digest: str,
+        captured_at: datetime,
+    ) -> dict[str, object]:
+        result = {
+            identity_name: identity,
+            **payload,
+            "payload_json": payload_json,
+            "payload_digest": payload_digest,
+            "captured_at": captured_at,
+        }
+        for key in (
+            "source_event_keys",
+            "strategy_tags",
+            "risk_tags",
+            "reason_codes",
+            "signal_ids",
+        ):
+            if key in result:
+                result[key] = tuple(result[key])  # type: ignore[arg-type]
+        return result
+
+    @staticmethod
+    def _require_exact_date(value: object, label: str) -> date:
+        if type(value) is not date:
+            raise TypeError(f"{label} must be an exact date")
+        return value
+
+    def record_signal_policy_provenance(
+        self,
+        signal_id: str,
+        *,
+        policy_version: str,
+        event_key: str,
+        source_event_keys: tuple[str, ...],
+        strategy_tags: tuple[str, ...],
+        risk_tags: tuple[str, ...],
+        sector: str,
+        journal_only: bool,
+        order_eligible: bool,
+        decision: str,
+        reason_codes: tuple[str, ...],
+        bound_context_digest: str,
+        captured_at: datetime,
+    ) -> dict[str, object]:
+        """Persist immutable normalized policy metadata beside a P0 signal."""
+        self._require_timezone_aware(captured_at, "captured_at")
+        signal = self.signals_by_ids((signal_id,))
+        if len(signal) != 1:
+            raise ValueError(f"unknown signal {signal_id}")
+        payload = self._normalized_policy_payload(
+            policy_version=policy_version,
+            event_key=event_key,
+            source_event_keys=source_event_keys,
+            strategy_tags=strategy_tags,
+            risk_tags=risk_tags,
+            sector=sector,
+            journal_only=journal_only,
+            order_eligible=order_eligible,
+            decision=decision,
+            reason_codes=reason_codes,
+            bound_context_digest=bound_context_digest,
+        )
+        if payload["decision"] not in {"accepted", "rejected"} or bool(
+            payload["order_eligible"]
+        ) != (payload["decision"] == "accepted"):
+            raise ValueError(
+                "signal decision must be accepted iff ingress order eligible"
+            )
+        if payload["event_key"] != signal[0].event_key:
+            raise LedgerConflictError(
+                f"signal policy event key mismatch for {signal_id}"
+            )
+        if signal[0].strategy not in payload["strategy_tags"]:
+            raise LedgerConflictError(
+                f"signal policy strategy mismatch for {signal_id}"
+            )
+        self._require_signal_policy_binding(signal[0], payload)
+        payload_json = _canonical_json(payload)
+        payload_digest = self._policy_payload_digest(
+            "signal", signal_id, payload_json
+        )
+        with self.transaction():
+            existing = self._connection.execute(
+                "SELECT * FROM signal_policy_provenance WHERE signal_id = ?",
+                (signal_id,),
+            ).fetchone()
+            if existing is not None:
+                stored = self._signal_policy_from_row(existing)
+                if stored["payload_json"] != payload_json:
+                    raise LedgerConflictError(
+                        f"conflicting signal policy provenance {signal_id}"
+                    )
+                return stored
+            self._connection.execute(
+                """INSERT INTO signal_policy_provenance VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    signal_id,
+                    payload["policy_version"],
+                    payload["event_key"],
+                    _canonical_json(payload["source_event_keys"]),
+                    _canonical_json(payload["strategy_tags"]),
+                    _canonical_json(payload["risk_tags"]),
+                    payload["sector"],
+                    self._encode(payload["journal_only"]),
+                    self._encode(payload["order_eligible"]),
+                    payload["decision"],
+                    _canonical_json(payload["reason_codes"]),
+                    payload["bound_context_digest"],
+                    payload_json,
+                    payload_digest,
+                    self._encode(captured_at),
+                ),
+            )
+        return self.read_signal_policy_provenance(signal_id)  # type: ignore[return-value]
+
+    def read_signal_policy_provenance(
+        self, signal_id: str
+    ) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT * FROM signal_policy_provenance WHERE signal_id = ?",
+            (signal_id,),
+        ).fetchone()
+        return None if row is None else self._signal_policy_from_row(row)
+
+    def _signal_policy_from_row(self, row: sqlite3.Row) -> dict[str, object]:
+        payload = self._verified_policy_payload(row, "signal", row["signal_id"])
+        identity = str(row["signal_id"])
+        expected = {
+            "policy_version": row["policy_version"],
+            "event_key": row["event_key"],
+            "source_event_keys": self._stored_policy_tuple(
+                row, "source_event_keys_json", "signal", identity
+            ),
+            "strategy_tags": self._stored_policy_tuple(
+                row, "strategy_tags_json", "signal", identity
+            ),
+            "risk_tags": self._stored_policy_tuple(
+                row, "risk_tags_json", "signal", identity
+            ),
+            "sector": row["sector"],
+            "journal_only": self._stored_policy_bool(
+                row, "journal_only", "signal", identity
+            ),
+            "order_eligible": self._stored_policy_bool(
+                row, "order_eligible", "signal", identity
+            ),
+            "decision": row["decision"],
+            "reason_codes": self._stored_policy_tuple(
+                row, "reason_codes_json", "signal", identity
+            ),
+            "bound_context_digest": row["bound_context_digest"],
+        }
+        if payload != expected:
+            raise LedgerConflictError(
+                f"tampered signal policy provenance {row['signal_id']}"
+            )
+        self._require_normalized_policy_payload(payload, "signal", identity)
+        if payload["decision"] not in {"accepted", "rejected"} or bool(
+            payload["order_eligible"]
+        ) != (payload["decision"] == "accepted"):
+            raise LedgerConflictError(
+                f"invalid signal policy decision {row['signal_id']}"
+            )
+        signal = self.signals_by_ids((str(row["signal_id"]),))
+        if (
+            len(signal) != 1
+            or signal[0].event_key != payload["event_key"]
+            or signal[0].strategy not in payload["strategy_tags"]
+        ):
+            raise LedgerConflictError(
+                f"mismatched signal policy provenance {row['signal_id']}"
+            )
+        self._require_signal_policy_binding(signal[0], payload)
+        captured_at = self._policy_timestamp(
+            row["captured_at"], "signal", identity
+        )
+        return self._policy_payload_result(
+            "signal_id",
+            str(row["signal_id"]),
+            payload,
+            str(row["payload_json"]),
+            str(row["payload_digest"]),
+            captured_at,
+        )
+
+    def _require_signal_policy_binding(
+        self, signal: SignalRecord, payload: Mapping[str, object]
+    ) -> None:
+        binding = self.read_policy_session_context(
+            signal.reference_session, binding_kind="staging"
+        )
+        if binding is None:
+            raise LedgerConflictError(
+                f"missing bound policy context for signal {signal.signal_id}/"
+                f"{signal.reference_session}"
+            )
+        if (
+            binding["epoch_id"] != signal.epoch_id
+            or binding["policy_version"] != payload["policy_version"]
+            or binding["context_digest"] != payload["bound_context_digest"]
+        ):
+            raise LedgerConflictError(
+                f"signal policy binding mismatch for {signal.signal_id}/"
+                f"{signal.reference_session}"
+            )
+
+    def record_intent_policy_provenance(
+        self,
+        intent_id: str,
+        *,
+        signal_ids: tuple[str, ...],
+        policy_version: str,
+        event_key: str,
+        source_event_keys: tuple[str, ...],
+        strategy_tags: tuple[str, ...],
+        risk_tags: tuple[str, ...],
+        sector: str,
+        journal_only: bool,
+        order_eligible: bool,
+        decision: str,
+        reason_codes: tuple[str, ...],
+        bound_context_digest: str,
+        captured_at: datetime,
+    ) -> dict[str, object]:
+        """Persist the exact recommendation attribution bound to a P0 intent."""
+        self._require_timezone_aware(captured_at, "captured_at")
+        intent_row = self._connection.execute(
+            "SELECT * FROM order_intents WHERE intent_id = ? AND cohort_id = ?",
+            (intent_id, self.cohort_id),
+        ).fetchone()
+        if intent_row is None:
+            raise ValueError(f"unknown order intent {intent_id}")
+        stored_intent = self._intent_from_row(intent_row)
+        payload = self._normalized_policy_payload(
+            policy_version=policy_version,
+            event_key=event_key,
+            source_event_keys=source_event_keys,
+            strategy_tags=strategy_tags,
+            risk_tags=risk_tags,
+            sector=sector,
+            journal_only=journal_only,
+            order_eligible=order_eligible,
+            decision=decision,
+            reason_codes=reason_codes,
+            bound_context_digest=bound_context_digest,
+            signal_ids=signal_ids,
+        )
+        if tuple(payload["signal_ids"]) != stored_intent.signal_ids:
+            raise LedgerConflictError(
+                f"intent policy signal provenance mismatch for {intent_id}"
+            )
+        if stored_intent.side in {"buy", "short"} and (
+            payload["journal_only"] or not payload["order_eligible"]
+        ):
+            raise LedgerConflictError(
+                f"entry intent has ineligible policy provenance {intent_id}"
+            )
+        if payload["decision"] not in {"accepted", "trimmed"} or not payload[
+            "order_eligible"
+        ] or payload["journal_only"]:
+            raise LedgerConflictError(
+                f"invalid entry intent policy decision {intent_id}"
+            )
+        self._validate_intent_contributor_policy(intent_id, payload)
+        payload_json = _canonical_json(payload)
+        payload_digest = self._policy_payload_digest(
+            "intent", intent_id, payload_json
+        )
+        with self.transaction():
+            existing = self._connection.execute(
+                "SELECT * FROM intent_policy_provenance WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            if existing is not None:
+                stored = self._intent_policy_from_row(existing)
+                if stored["payload_json"] != payload_json:
+                    raise LedgerConflictError(
+                        f"conflicting intent policy provenance {intent_id}"
+                    )
+                return stored
+            self._connection.execute(
+                """INSERT INTO intent_policy_provenance VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    intent_id,
+                    _canonical_json(payload["signal_ids"]),
+                    payload["policy_version"],
+                    payload["event_key"],
+                    _canonical_json(payload["source_event_keys"]),
+                    _canonical_json(payload["strategy_tags"]),
+                    _canonical_json(payload["risk_tags"]),
+                    payload["sector"],
+                    self._encode(payload["journal_only"]),
+                    self._encode(payload["order_eligible"]),
+                    payload["decision"],
+                    _canonical_json(payload["reason_codes"]),
+                    payload["bound_context_digest"],
+                    payload_json,
+                    payload_digest,
+                    self._encode(captured_at),
+                ),
+            )
+        return self.read_intent_policy_provenance(intent_id)  # type: ignore[return-value]
+
+    def read_intent_policy_provenance(
+        self, intent_id: str
+    ) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT * FROM intent_policy_provenance WHERE intent_id = ?",
+            (intent_id,),
+        ).fetchone()
+        return None if row is None else self._intent_policy_from_row(row)
+
+    def _intent_policy_from_row(self, row: sqlite3.Row) -> dict[str, object]:
+        payload = self._verified_policy_payload(row, "intent", row["intent_id"])
+        identity = str(row["intent_id"])
+        expected = {
+            "policy_version": row["policy_version"],
+            "event_key": row["event_key"],
+            "source_event_keys": self._stored_policy_tuple(
+                row, "source_event_keys_json", "intent", identity
+            ),
+            "strategy_tags": self._stored_policy_tuple(
+                row, "strategy_tags_json", "intent", identity
+            ),
+            "risk_tags": self._stored_policy_tuple(
+                row, "risk_tags_json", "intent", identity
+            ),
+            "sector": row["sector"],
+            "journal_only": self._stored_policy_bool(
+                row, "journal_only", "intent", identity
+            ),
+            "order_eligible": self._stored_policy_bool(
+                row, "order_eligible", "intent", identity
+            ),
+            "decision": row["decision"],
+            "reason_codes": self._stored_policy_tuple(
+                row, "reason_codes_json", "intent", identity
+            ),
+            "bound_context_digest": row["bound_context_digest"],
+            "signal_ids": self._stored_policy_tuple(
+                row, "signal_ids_json", "intent", identity, normalized=False
+            ),
+        }
+        if payload != expected:
+            raise LedgerConflictError(
+                f"tampered intent policy provenance {row['intent_id']}"
+            )
+        self._require_normalized_policy_payload(payload, "intent", identity)
+        if payload["decision"] not in {"accepted", "trimmed"} or not payload[
+            "order_eligible"
+        ] or payload["journal_only"]:
+            raise LedgerConflictError(
+                f"invalid intent policy decision {row['intent_id']}"
+            )
+        intent_row = self._connection.execute(
+            "SELECT * FROM order_intents WHERE intent_id = ? AND cohort_id = ?",
+            (row["intent_id"], self.cohort_id),
+        ).fetchone()
+        if intent_row is None or self._intent_from_row(intent_row).signal_ids != tuple(
+            payload["signal_ids"]
+        ):
+            raise LedgerConflictError(
+                f"mismatched intent policy provenance {row['intent_id']}"
+            )
+        self._validate_intent_contributor_policy(str(row["intent_id"]), payload)
+        captured_at = self._policy_timestamp(
+            row["captured_at"], "intent", identity
+        )
+        return self._policy_payload_result(
+            "intent_id",
+            str(row["intent_id"]),
+            payload,
+            str(row["payload_json"]),
+            str(row["payload_digest"]),
+            captured_at,
+        )
+
+    @classmethod
+    def _require_normalized_policy_payload(
+        cls, payload: Mapping[str, object], kind: str, identity: str
+    ) -> None:
+        """Re-run the write-time policy contract for durable companion reads."""
+        try:
+            normalized = cls._normalized_policy_payload(
+                policy_version=str(payload["policy_version"]),
+                event_key=str(payload["event_key"]),
+                source_event_keys=tuple(payload["source_event_keys"]),  # type: ignore[arg-type]
+                strategy_tags=tuple(payload["strategy_tags"]),  # type: ignore[arg-type]
+                risk_tags=tuple(payload["risk_tags"]),  # type: ignore[arg-type]
+                sector=str(payload["sector"]),
+                journal_only=bool(payload["journal_only"]),
+                order_eligible=bool(payload["order_eligible"]),
+                decision=str(payload["decision"]),
+                reason_codes=tuple(payload["reason_codes"]),  # type: ignore[arg-type]
+                bound_context_digest=str(payload["bound_context_digest"]),
+                signal_ids=(
+                    tuple(payload["signal_ids"])  # type: ignore[arg-type]
+                    if "signal_ids" in payload
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LedgerConflictError(
+                f"invalid {kind} policy provenance {identity}"
+            ) from exc
+        if normalized != payload:
+            raise LedgerConflictError(
+                f"invalid {kind} policy provenance {identity}"
+            )
+
+    @staticmethod
+    def _policy_timestamp(value: object, kind: str, identity: str) -> datetime:
+        try:
+            parsed = _datetime(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise LedgerConflictError(
+                f"invalid {kind} policy timestamp {identity}"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise LedgerConflictError(
+                f"invalid {kind} policy timestamp {identity}"
+            )
+        return parsed
+
+    def _verified_policy_payload(
+        self, row: sqlite3.Row, kind: str, identity: str
+    ) -> dict[str, object]:
+        payload_json = str(row["payload_json"])
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LedgerConflictError(
+                f"tampered {kind} policy provenance {identity}"
+            ) from exc
+        if (
+            _canonical_json(payload) != payload_json
+            or row["payload_digest"]
+            != self._policy_payload_digest(kind, str(identity), payload_json)
+        ):
+            raise LedgerConflictError(
+                f"tampered {kind} policy provenance {identity}"
+            )
+        for key in (
+            "source_event_keys",
+            "strategy_tags",
+            "risk_tags",
+            "reason_codes",
+            "signal_ids",
+        ):
+            if key in payload:
+                payload[key] = tuple(payload[key])
+        return payload
+
+    @staticmethod
+    def _stored_policy_tuple(
+        row: sqlite3.Row,
+        column: str,
+        kind: str,
+        identity: str,
+        *,
+        normalized: bool = True,
+    ) -> tuple[str, ...]:
+        try:
+            decoded = json.loads(row[column])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LedgerConflictError(
+                f"tampered {kind} policy provenance {identity}"
+            ) from exc
+        if (
+            not isinstance(decoded, list)
+            or any(not isinstance(value, str) for value in decoded)
+            or _canonical_json(decoded) != row[column]
+            or (normalized and decoded != sorted(set(decoded)))
+        ):
+            raise LedgerConflictError(
+                f"tampered {kind} policy provenance {identity}"
+            )
+        return tuple(decoded)
+
+    @staticmethod
+    def _stored_policy_bool(
+        row: sqlite3.Row, column: str, kind: str, identity: str
+    ) -> bool:
+        if row[column] not in {0, 1}:
+            raise LedgerConflictError(
+                f"tampered {kind} policy provenance {identity}"
+            )
+        return bool(row[column])
+
+    def _validate_intent_contributor_policy(
+        self, intent_id: str, payload: Mapping[str, object]
+    ) -> None:
+        intent_row = self._connection.execute(
+            "SELECT side FROM order_intents WHERE intent_id = ? AND cohort_id = ?",
+            (intent_id, self.cohort_id),
+        ).fetchone()
+        if intent_row is None:
+            raise LedgerConflictError(
+                f"missing order intent for policy provenance {intent_id}"
+            )
+        entry_intent = intent_row["side"] in {"buy", "short"}
+        contributors: list[dict[str, object]] = []
+        for signal_id in payload["signal_ids"]:  # type: ignore[union-attr]
+            companion = self.read_signal_policy_provenance(str(signal_id))
+            if companion is None:
+                raise LedgerConflictError(
+                    f"missing signal policy provenance {signal_id} for {intent_id}"
+                )
+            if entry_intent and (
+                companion["journal_only"] or not companion["order_eligible"]
+            ):
+                raise LedgerConflictError(
+                    f"ineligible signal policy provenance {signal_id} "
+                    f"for {intent_id}"
+                )
+            contributors.append(companion)
+        expected_event_key = sorted(
+            {str(item["event_key"]) for item in contributors}
+        )[0]
+        expected_sources = tuple(
+            sorted(
+                {
+                    str(value)
+                    for item in contributors
+                    for value in item["source_event_keys"]  # type: ignore[union-attr]
+                }
+            )
+        )
+        expected_strategies = tuple(
+            sorted(
+                {
+                    str(value)
+                    for item in contributors
+                    for value in item["strategy_tags"]  # type: ignore[union-attr]
+                }
+            )
+        )
+        expected_risks = tuple(
+            sorted(
+                {
+                    str(value)
+                    for item in contributors
+                    for value in item["risk_tags"]  # type: ignore[union-attr]
+                }
+            )
+        )
+        expected_sectors = {str(item["sector"]) for item in contributors}
+        expected_versions = {str(item["policy_version"]) for item in contributors}
+        expected_contexts = {
+            str(item["bound_context_digest"]) for item in contributors
+        }
+        if (
+            payload["event_key"] != expected_event_key
+            or tuple(payload["source_event_keys"]) != expected_sources
+            or tuple(payload["strategy_tags"]) != expected_strategies
+            or tuple(payload["risk_tags"]) != expected_risks
+            or expected_sectors != {payload["sector"]}
+            or expected_versions != {payload["policy_version"]}
+            or expected_contexts != {payload["bound_context_digest"]}
+        ):
+            raise LedgerConflictError(
+                f"mismatched intent policy provenance {intent_id}"
+            )
+
+    def record_policy_candidate_decision(
+        self,
+        session: date,
+        *,
+        epoch_id: str,
+        policy_version: str,
+        ticker: str,
+        direction: str,
+        event_key: str,
+        signal_ids: tuple[str, ...],
+        requested_weight: float,
+        approved_weight: float,
+        decision: str,
+        reason_codes: tuple[str, ...],
+        bound_context_digest: str,
+        captured_at: datetime,
+    ) -> dict[str, object]:
+        """Persist one attributed recommendation as the policy audit unit."""
+        session = self._require_exact_date(session, "session")
+        self._require_timezone_aware(captured_at, "captured_at")
+        if direction not in {"long", "short"}:
+            raise ValueError("candidate policy direction must be long or short")
+        if decision not in {"accepted", "trimmed", "rejected"}:
+            raise ValueError("candidate policy decision is invalid")
+        if (
+            not math.isfinite(requested_weight)
+            or not math.isfinite(approved_weight)
+            or requested_weight <= 0
+            or approved_weight < 0
+            or approved_weight > requested_weight
+        ):
+            raise ValueError("candidate policy weights are invalid")
+        if decision == "accepted" and approved_weight != requested_weight:
+            raise ValueError("accepted candidate must preserve requested weight")
+        if decision == "trimmed" and not (0 < approved_weight < requested_weight):
+            raise ValueError("trimmed candidate must reduce to positive weight")
+        if decision == "rejected" and approved_weight != 0:
+            raise ValueError("rejected candidate must approve zero weight")
+        exact_signal_ids = tuple(str(value).strip() for value in signal_ids)
+        if (
+            not exact_signal_ids
+            or len(set(exact_signal_ids)) != len(exact_signal_ids)
+            or any(not value for value in exact_signal_ids)
+            or len(exact_signal_ids) > 256
+            or exact_signal_ids != tuple(sorted(exact_signal_ids))
+        ):
+            raise ValueError(
+                "candidate policy signal_ids must be sorted, nonempty, and unique"
+            )
+        signals = self.signals_by_ids(exact_signal_ids)
+        if len(signals) != len(exact_signal_ids) or any(
+            signal.epoch_id != epoch_id
+            or signal.reference_session != session
+            or signal.ticker != ticker
+            or signal.direction != direction
+            for signal in signals
+        ):
+            raise LedgerConflictError("candidate policy signal provenance mismatch")
+        companions = [
+            self.read_signal_policy_provenance(signal_id)
+            for signal_id in exact_signal_ids
+        ]
+        if any(item is None for item in companions) or any(
+            item["policy_version"] != policy_version
+            or item["bound_context_digest"] != bound_context_digest
+            or not item["order_eligible"]
+            for item in companions
+            if item is not None
+        ):
+            raise LedgerConflictError("candidate policy companion mismatch")
+        expected_event_key = sorted(
+            str(item["event_key"]) for item in companions if item is not None
+        )[0]
+        if event_key != expected_event_key:
+            raise LedgerConflictError("candidate policy event identity mismatch")
+        normalized_reasons = self._normalized_string_tuple(
+            reason_codes, "reason_codes", allow_empty=False
+        )
+        payload = {
+            "cohort_id": self.cohort_id,
+            "session": self._encode(session),
+            "epoch_id": str(epoch_id),
+            "policy_version": str(policy_version),
+            "ticker": str(ticker),
+            "direction": direction,
+            "event_key": str(event_key),
+            "signal_ids": list(exact_signal_ids),
+            "requested_weight": format(Decimal(str(requested_weight)), "f"),
+            "approved_weight": format(Decimal(str(approved_weight)), "f"),
+            "decision": decision,
+            "reason_codes": list(normalized_reasons),
+            "bound_context_digest": str(bound_context_digest),
+        }
+        payload_json = _canonical_json(payload)
+        decision_id = stable_id("policy_candidate_decision", payload_json)
+        payload_digest = stable_id("policy_candidate_payload", decision_id, payload_json)
+        with self.transaction():
+            existing = self._connection.execute(
+                """SELECT * FROM policy_candidate_decisions
+                   WHERE cohort_id = ? AND session = ? AND epoch_id = ?
+                     AND policy_version = ? AND ticker = ? AND direction = ?
+                     AND event_key = ? AND signal_ids_json = ?""",
+                (
+                    self.cohort_id,
+                    self._encode(session),
+                    epoch_id,
+                    policy_version,
+                    ticker,
+                    direction,
+                    event_key,
+                    _canonical_json(list(exact_signal_ids)),
+                ),
+            ).fetchone()
+            if existing is not None:
+                stored = self._policy_candidate_decision_from_row(existing)
+                if stored["payload_json"] != payload_json:
+                    raise LedgerConflictError(
+                        f"conflicting policy candidate decision {decision_id}"
+                    )
+                return stored
+            self._connection.execute(
+                """INSERT INTO policy_candidate_decisions VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    decision_id,
+                    self.cohort_id,
+                    self._encode(session),
+                    epoch_id,
+                    policy_version,
+                    ticker,
+                    direction,
+                    event_key,
+                    _canonical_json(list(exact_signal_ids)),
+                    payload["requested_weight"],
+                    payload["approved_weight"],
+                    decision,
+                    _canonical_json(list(normalized_reasons)),
+                    bound_context_digest,
+                    payload_json,
+                    payload_digest,
+                    self._encode(captured_at),
+                ),
+            )
+        row = self._connection.execute(
+            "SELECT * FROM policy_candidate_decisions WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        assert row is not None
+        return self._policy_candidate_decision_from_row(row)
+
+    def read_policy_candidate_decisions(
+        self,
+        start: date | None = None,
+        end: date | None = None,
+        *,
+        epoch_id: str | None = None,
+        limit: int = 4096,
+    ) -> tuple[dict[str, object], ...]:
+        """Read a bounded deterministic policy-decision audit projection."""
+        limit = self._policy_projection_limit(limit, maximum=4096)
+        clauses = ["cohort_id = ?"]
+        values: list[object] = [self.cohort_id]
+        if start is not None:
+            clauses.append("session >= ?")
+            values.append(self._encode(self._require_exact_date(start, "start")))
+        if end is not None:
+            clauses.append("session <= ?")
+            values.append(self._encode(self._require_exact_date(end, "end")))
+        if epoch_id is not None:
+            exact_epoch_id = str(epoch_id).strip()
+            if not exact_epoch_id:
+                raise ValueError("epoch_id must not be empty")
+            clauses.append("epoch_id = ?")
+            values.append(exact_epoch_id)
+        rows = self._connection.execute(
+            "SELECT * FROM policy_candidate_decisions WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY session, decision_id LIMIT ?",
+            (*values, limit + 1),
+        ).fetchall()
+        rows = self._require_projection_bound(rows, limit, "candidate policy")
+        return tuple(self._policy_candidate_decision_from_row(row) for row in rows)
+
+    def _policy_candidate_decision_from_row(
+        self, row: sqlite3.Row
+    ) -> dict[str, object]:
+        try:
+            payload = json.loads(row["payload_json"])
+            signal_ids = tuple(json.loads(row["signal_ids_json"]))
+            reasons = tuple(json.loads(row["reason_codes_json"]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LedgerConflictError("tampered policy candidate decision") from exc
+        expected = {
+            "cohort_id": row["cohort_id"],
+            "session": row["session"],
+            "epoch_id": row["epoch_id"],
+            "policy_version": row["policy_version"],
+            "ticker": row["ticker"],
+            "direction": row["direction"],
+            "event_key": row["event_key"],
+            "signal_ids": list(signal_ids),
+            "requested_weight": row["requested_weight"],
+            "approved_weight": row["approved_weight"],
+            "decision": row["decision"],
+            "reason_codes": list(reasons),
+            "bound_context_digest": row["bound_context_digest"],
+        }
+        try:
+            requested_weight = float(row["requested_weight"])
+            approved_weight = float(row["approved_weight"])
+            captured_at = _datetime(row["captured_at"])
+        except (TypeError, ValueError) as exc:
+            raise LedgerConflictError("tampered policy candidate decision") from exc
+        canonical_decision_id = stable_id(
+            "policy_candidate_decision", row["payload_json"]
+        )
+        if (
+            payload != expected
+            or _canonical_json(payload) != row["payload_json"]
+            or row["payload_digest"]
+            != stable_id(
+                "policy_candidate_payload", row["decision_id"], row["payload_json"]
+            )
+            or row["decision_id"] != canonical_decision_id
+            or signal_ids != tuple(sorted(set(signal_ids)))
+            or not reasons
+            or reasons != tuple(sorted(set(reasons)))
+            or any(not isinstance(reason, str) or not reason for reason in reasons)
+            or row["decision"] not in {"accepted", "trimmed", "rejected"}
+            or not math.isfinite(requested_weight)
+            or not math.isfinite(approved_weight)
+            or requested_weight <= 0
+            or approved_weight < 0
+            or approved_weight > requested_weight
+            or (
+                row["decision"] == "accepted"
+                and approved_weight != requested_weight
+            )
+            or (
+                row["decision"] == "trimmed"
+                and not (0 < approved_weight < requested_weight)
+            )
+            or (row["decision"] == "rejected" and approved_weight != 0)
+            or captured_at.tzinfo is None
+            or captured_at.utcoffset() is None
+        ):
+            raise LedgerConflictError("tampered policy candidate decision")
+        signals = self.signals_by_ids(signal_ids)
+        companions = [
+            self.read_signal_policy_provenance(signal_id)
+            for signal_id in signal_ids
+        ]
+        if (
+            len(signals) != len(signal_ids)
+            or any(
+                signal.epoch_id != row["epoch_id"]
+                or signal.reference_session != _date(row["session"])
+                or signal.ticker != row["ticker"]
+                or signal.direction != row["direction"]
+                for signal in signals
+            )
+            or any(item is None for item in companions)
+            or any(
+                item["policy_version"] != row["policy_version"]
+                or item["bound_context_digest"] != row["bound_context_digest"]
+                or not item["order_eligible"]
+                for item in companions
+                if item is not None
+            )
+            or row["event_key"]
+            != sorted(
+                str(item["event_key"])
+                for item in companions
+                if item is not None
+            )[0]
+        ):
+            raise LedgerConflictError("candidate policy provenance mismatch")
+        return {
+            "decision_id": str(row["decision_id"]),
+            **payload,
+            "session": _date(row["session"]),
+            "signal_ids": signal_ids,
+            "reason_codes": reasons,
+            "requested_weight": requested_weight,
+            "approved_weight": approved_weight,
+            "payload_json": str(row["payload_json"]),
+            "payload_digest": str(row["payload_digest"]),
+            "captured_at": captured_at,
+        }
+
+    def record_policy_staging_audit_manifest(
+        self,
+        session: date,
+        *,
+        epoch_id: str,
+        policy_id: str,
+        policy_version: str,
+        bound_context_digest: str,
+        ingress_signal_ids: tuple[str, ...],
+        candidate_decision_ids: tuple[str, ...],
+        committee_not_selected_ids: tuple[str, ...],
+        recorded_at: datetime,
+    ) -> dict[str, object]:
+        """Commit the exact, complete policy-decision partition for staging."""
+        session = self._require_exact_date(session, "session")
+        self._require_timezone_aware(recorded_at, "recorded_at")
+        epoch_id = str(epoch_id).strip()
+        policy_id = str(policy_id).strip()
+        policy_version = str(policy_version).strip()
+        bound_context_digest = str(bound_context_digest).strip()
+        if not all((epoch_id, policy_id, policy_version, bound_context_digest)):
+            raise ValueError("policy staging manifest identity must not be empty")
+
+        def exact_ids(values: tuple[str, ...], label: str) -> tuple[str, ...]:
+            if isinstance(values, (str, bytes)):
+                raise TypeError(f"{label} must be a tuple of strings")
+            normalized = tuple(sorted(str(value).strip() for value in values))
+            if any(not value for value in normalized) or len(set(normalized)) != len(
+                normalized
+            ):
+                raise ValueError(f"{label} must contain unique nonempty IDs")
+            if len(normalized) > 4096:
+                raise ValueError(f"{label} exceeds the staging audit bound")
+            return normalized
+
+        ingress = exact_ids(ingress_signal_ids, "ingress_signal_ids")
+        decision_ids = exact_ids(candidate_decision_ids, "candidate_decision_ids")
+        nonselected = exact_ids(
+            committee_not_selected_ids, "committee_not_selected_ids"
+        )
+        binding = self.read_policy_session_context(
+            session, binding_kind="staging"
+        )
+        if (
+            binding is None
+            or binding["epoch_id"] != epoch_id
+            or binding["policy_version"] != policy_version
+            or binding["context_digest"] != bound_context_digest
+        ):
+            raise LedgerConflictError("policy staging manifest binding mismatch")
+        signal_rows = self._connection.execute(
+            """SELECT signal_id FROM signals
+               WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
+               ORDER BY signal_id""",
+            (self._encode(session), epoch_id, policy_id),
+        ).fetchall()
+        actual_ingress: list[str] = []
+        for row in signal_rows:
+            companion = self.read_signal_policy_provenance(str(row["signal_id"]))
+            if companion is None:
+                raise LedgerConflictError("missing staging signal policy provenance")
+            if companion["order_eligible"]:
+                actual_ingress.append(str(row["signal_id"]))
+        if ingress != tuple(sorted(actual_ingress)):
+            raise LedgerConflictError("policy staging ingress partition mismatch")
+        decisions: list[dict[str, object]] = []
+        for decision_id in decision_ids:
+            row = self._connection.execute(
+                "SELECT * FROM policy_candidate_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerConflictError(
+                    f"missing policy candidate decision {decision_id}"
+                )
+            decisions.append(self._policy_candidate_decision_from_row(row))
+        if any(
+            decision["session"] != session
+            or decision["epoch_id"] != epoch_id
+            or decision["policy_version"] != policy_version
+            or decision["bound_context_digest"] != bound_context_digest
+            for decision in decisions
+        ):
+            raise LedgerConflictError("policy staging candidate scope mismatch")
+        covered: set[str] = set()
+        for decision in decisions:
+            contributors = set(str(value) for value in decision["signal_ids"])
+            if covered & contributors:
+                raise LedgerConflictError(
+                    "policy staging candidate contributors overlap"
+                )
+            covered.update(contributors)
+        if set(nonselected) & covered or covered | set(nonselected) != set(ingress):
+            raise LedgerConflictError("policy staging decision partition mismatch")
+        payload = {
+            "cohort_id": self.cohort_id,
+            "session": self._encode(session),
+            "epoch_id": epoch_id,
+            "policy_id": policy_id,
+            "policy_version": policy_version,
+            "bound_context_digest": bound_context_digest,
+            "ingress_signal_ids": list(ingress),
+            "candidate_decision_ids": list(decision_ids),
+            "committee_not_selected_ids": list(nonselected),
+        }
+        payload_json = _canonical_json(payload)
+        manifest_id = stable_id("policy_staging_audit_manifest", payload_json)
+        payload_digest = stable_id(
+            "policy_staging_audit_payload", manifest_id, payload_json
+        )
+        with self.transaction():
+            existing = self._connection.execute(
+                """SELECT * FROM policy_staging_audit_manifests
+                   WHERE cohort_id = ? AND session = ? AND epoch_id = ?
+                     AND policy_id = ?""",
+                (self.cohort_id, self._encode(session), epoch_id, policy_id),
+            ).fetchone()
+            if existing is not None:
+                stored = self._policy_staging_audit_manifest_from_row(
+                    existing, require_complete=False
+                )
+                if stored["payload_json"] != payload_json:
+                    raise LedgerConflictError(
+                        f"conflicting policy staging audit manifest {manifest_id}"
+                    )
+                return stored
+            self._connection.execute(
+                """INSERT INTO policy_staging_audit_manifests VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    manifest_id,
+                    self.cohort_id,
+                    self._encode(session),
+                    epoch_id,
+                    policy_id,
+                    policy_version,
+                    bound_context_digest,
+                    _canonical_json(list(ingress)),
+                    _canonical_json(list(decision_ids)),
+                    _canonical_json(list(nonselected)),
+                    payload_json,
+                    payload_digest,
+                    self._encode(recorded_at),
+                ),
+            )
+        row = self._connection.execute(
+            "SELECT * FROM policy_staging_audit_manifests WHERE manifest_id = ?",
+            (manifest_id,),
+        ).fetchone()
+        assert row is not None
+        return self._policy_staging_audit_manifest_from_row(
+            row, require_complete=False
+        )
+
+    def read_policy_staging_audit_manifests(
+        self,
+        *,
+        epoch_id: str | None = None,
+        limit: int = 256,
+    ) -> tuple[dict[str, object], ...]:
+        """Read and revalidate bounded completed staging audit partitions."""
+        limit = self._policy_projection_limit(limit, maximum=4096)
+        clauses = ["cohort_id = ?"]
+        values: list[object] = [self.cohort_id]
+        if epoch_id is not None:
+            exact_epoch = str(epoch_id).strip()
+            if not exact_epoch:
+                raise ValueError("epoch_id must not be empty")
+            clauses.append("epoch_id = ?")
+            values.append(exact_epoch)
+        rows = self._connection.execute(
+            "SELECT * FROM policy_staging_audit_manifests WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY session, policy_id LIMIT ?",
+            (*values, limit + 1),
+        ).fetchall()
+        rows = self._require_projection_bound(rows, limit, "staging audit manifest")
+        return tuple(self._policy_staging_audit_manifest_from_row(row) for row in rows)
+
+    def _policy_staging_audit_manifest_from_row(
+        self, row: sqlite3.Row, *, require_complete: bool = True
+    ) -> dict[str, object]:
+        try:
+            payload = json.loads(row["payload_json"])
+            ingress = tuple(json.loads(row["ingress_signal_ids_json"]))
+            decisions = tuple(json.loads(row["candidate_decision_ids_json"]))
+            nonselected = tuple(
+                json.loads(row["committee_not_selected_ids_json"])
+            )
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LedgerConflictError("tampered policy staging audit manifest") from exc
+        expected = {
+            "cohort_id": row["cohort_id"],
+            "session": row["session"],
+            "epoch_id": row["epoch_id"],
+            "policy_id": row["policy_id"],
+            "policy_version": row["policy_version"],
+            "bound_context_digest": row["bound_context_digest"],
+            "ingress_signal_ids": list(ingress),
+            "candidate_decision_ids": list(decisions),
+            "committee_not_selected_ids": list(nonselected),
+        }
+        try:
+            recorded_at = self._policy_timestamp(
+                row["recorded_at"], "staging manifest", str(row["manifest_id"])
+            )
+        except LedgerConflictError as exc:
+            raise LedgerConflictError(
+                "invalid policy staging audit manifest timestamp"
+            ) from exc
+
+        def canonical_ids(values: tuple[object, ...]) -> bool:
+            return (
+                all(
+                    isinstance(value, str)
+                    and bool(value)
+                    and value == value.strip()
+                    for value in values
+                )
+                and tuple(sorted(set(values))) == values
+            )
+
+        if (
+            payload != expected
+            or _canonical_json(payload) != row["payload_json"]
+            or _canonical_json(list(ingress)) != row["ingress_signal_ids_json"]
+            or _canonical_json(list(decisions)) != row["candidate_decision_ids_json"]
+            or _canonical_json(list(nonselected))
+            != row["committee_not_selected_ids_json"]
+            or not canonical_ids(ingress)
+            or not canonical_ids(decisions)
+            or not canonical_ids(nonselected)
+            or row["cohort_id"] != self.cohort_id
+            or any(
+                not isinstance(row[key], str) or not str(row[key]).strip()
+                for key in (
+                    "epoch_id",
+                    "policy_id",
+                    "policy_version",
+                    "bound_context_digest",
+                )
+            )
+            or row["payload_digest"]
+            != stable_id(
+                "policy_staging_audit_payload",
+                row["manifest_id"],
+                row["payload_json"],
+            )
+            or row["manifest_id"]
+            != stable_id("policy_staging_audit_manifest", row["payload_json"])
+        ):
+            raise LedgerConflictError("tampered policy staging audit manifest")
+        # Re-run the complete partition validator against live companion rows.
+        binding = self.read_policy_session_context(
+            _date(row["session"]), binding_kind="staging"
+        )
+        if (
+            binding is None
+            or binding["epoch_id"] != row["epoch_id"]
+            or binding["policy_version"] != row["policy_version"]
+            or binding["context_digest"] != row["bound_context_digest"]
+        ):
+            raise LedgerConflictError("policy staging audit binding mismatch")
+        signal_rows = self._connection.execute(
+            """SELECT signal_id FROM signals
+               WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
+               ORDER BY signal_id""",
+            (row["session"], row["epoch_id"], row["policy_id"]),
+        ).fetchall()
+        actual_ingress = tuple(
+            sorted(
+                str(item["signal_id"])
+                for item in signal_rows
+                if (
+                    (companion := self.read_signal_policy_provenance(
+                        str(item["signal_id"])
+                    ))
+                    is not None
+                    and companion["order_eligible"]
+                )
+            )
+        )
+        if actual_ingress != ingress:
+            raise LedgerConflictError("policy staging audit ingress mismatch")
+        scoped_candidate_rows = self._connection.execute(
+            """SELECT * FROM policy_candidate_decisions
+               WHERE cohort_id = ? AND session = ? AND epoch_id = ?
+                 AND policy_version = ? AND bound_context_digest = ?""",
+            (
+                self.cohort_id,
+                row["session"],
+                row["epoch_id"],
+                row["policy_version"],
+                row["bound_context_digest"],
+            ),
+        ).fetchall()
+        scoped_decisions: dict[str, dict[str, object]] = {}
+        for candidate_row in scoped_candidate_rows:
+            candidate = self._policy_candidate_decision_from_row(candidate_row)
+            contributor_signals = self.signals_by_ids(
+                tuple(str(value) for value in candidate["signal_ids"])
+            )
+            if contributor_signals and {
+                signal.policy_id for signal in contributor_signals
+            } == {str(row["policy_id"])}:
+                scoped_decisions[str(candidate["decision_id"])] = candidate
+        missing_decisions = set(decisions) - set(scoped_decisions)
+        if missing_decisions:
+            raise LedgerConflictError(
+                f"missing policy candidate decision {sorted(missing_decisions)[0]}"
+            )
+        if set(scoped_decisions) - set(decisions):
+            raise LedgerConflictError(
+                "policy staging audit candidate set is incomplete"
+            )
+        covered: set[str] = set()
+        for decision_id in decisions:
+            decision = scoped_decisions.get(str(decision_id))
+            if decision is None:
+                raise LedgerConflictError(
+                    f"missing policy candidate decision {decision_id}"
+                )
+            if (
+                decision["session"] != _date(row["session"])
+                or decision["epoch_id"] != row["epoch_id"]
+                or decision["policy_version"] != row["policy_version"]
+                or decision["bound_context_digest"] != row["bound_context_digest"]
+            ):
+                raise LedgerConflictError("policy staging audit candidate mismatch")
+            contributors = set(str(value) for value in decision["signal_ids"])
+            if covered & contributors:
+                raise LedgerConflictError(
+                    "policy staging audit candidate contributors overlap"
+                )
+            covered.update(contributors)
+        if covered & set(nonselected) or covered | set(nonselected) != set(ingress):
+            raise LedgerConflictError("policy staging audit partition mismatch")
+        if require_complete and not self.staging_completed(
+            _date(row["session"]), str(row["epoch_id"]), str(row["policy_id"])
+        ):
+            raise LedgerConflictError("policy staging audit is incomplete")
+        return {
+            "manifest_id": str(row["manifest_id"]),
+            **payload,
+            "session": _date(row["session"]),
+            "ingress_signal_ids": ingress,
+            "candidate_decision_ids": decisions,
+            "committee_not_selected_ids": nonselected,
+            "payload_json": str(row["payload_json"]),
+            "payload_digest": str(row["payload_digest"]),
+            "recorded_at": recorded_at,
+        }
+
+    def bind_policy_session_context(
+        self,
+        session: date,
+        *,
+        binding_kind: str = "staging",
+        epoch_id: str,
+        policy_version: str,
+        policy_config: Mapping[str, object],
+        context: Mapping[str, object],
+        bound_at: datetime,
+    ) -> dict[str, object]:
+        """Bind one canonical policy/config snapshot for a cohort session.
+
+        A restart with identical semantic input returns the first binding and
+        its original timestamp.  Any changed semantic input conflicts.
+        """
+        session = self._require_exact_date(session, "session")
+        self._require_timezone_aware(bound_at, "bound_at")
+        if binding_kind not in {"staging", "execution"}:
+            raise ValueError("binding_kind must be staging or execution")
+        epoch_id = str(epoch_id).strip()
+        policy_version = str(policy_version).strip()
+        if not epoch_id or not policy_version:
+            raise ValueError("epoch_id and policy_version must not be empty")
+        configured_version = policy_config.get("version")
+        if configured_version is not None and str(configured_version) != policy_version:
+            raise ValueError("policy_config version does not match policy_version")
+        config_json = _canonical_json(policy_config)
+        context_json = _canonical_json(context)
+        config_digest = stable_id("policy_config", config_json)
+        context_digest = stable_id("policy_context", context_json)
+        payload = {
+            "cohort_id": self.cohort_id,
+            "session": self._encode(session),
+            "binding_kind": binding_kind,
+            "epoch_id": epoch_id,
+            "policy_version": policy_version,
+            "policy_config_digest": config_digest,
+            "context_digest": context_digest,
+        }
+        payload_json = _canonical_json(payload)
+        payload_digest = stable_id("policy_binding", payload_json)
+        with self.transaction():
+            existing = self._connection.execute(
+                """SELECT * FROM policy_session_contexts
+                   WHERE cohort_id = ? AND session = ? AND binding_kind = ?""",
+                (self.cohort_id, self._encode(session), binding_kind),
+            ).fetchone()
+            if existing is not None:
+                stored = self._policy_session_context_from_row(existing)
+                if (
+                    stored["payload_json"] != payload_json
+                    or stored["policy_config_json"] != config_json
+                    or stored["context_json"] != context_json
+                ):
+                    raise LedgerConflictError(
+                        f"conflicting policy session context "
+                        f"{self.cohort_id}/{session}/{binding_kind}"
+                    )
+                return stored
+            self._connection.execute(
+                """INSERT INTO policy_session_contexts VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    self.cohort_id,
+                    self._encode(session),
+                    binding_kind,
+                    epoch_id,
+                    policy_version,
+                    config_json,
+                    config_digest,
+                    context_json,
+                    context_digest,
+                    payload_json,
+                    payload_digest,
+                    self._encode(bound_at),
+                ),
+            )
+        return self.read_policy_session_context(
+            session, binding_kind=binding_kind
+        )  # type: ignore[return-value]
+
+    def read_policy_session_context(
+        self, session: date, *, binding_kind: str = "staging"
+    ) -> dict[str, object] | None:
+        session = self._require_exact_date(session, "session")
+        if binding_kind not in {"staging", "execution"}:
+            raise ValueError("binding_kind must be staging or execution")
+        row = self._connection.execute(
+            """SELECT * FROM policy_session_contexts
+               WHERE cohort_id = ? AND session = ? AND binding_kind = ?""",
+            (self.cohort_id, self._encode(session), binding_kind),
+        ).fetchone()
+        return None if row is None else self._policy_session_context_from_row(row)
+
+    def _policy_session_context_from_row(
+        self, row: sqlite3.Row
+    ) -> dict[str, object]:
+        label = f"{row['cohort_id']}/{row['session']}/{row['binding_kind']}"
+        try:
+            config = json.loads(row["policy_config_json"])
+            context = json.loads(row["context_json"])
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LedgerConflictError(
+                f"tampered policy session context {label}"
+            ) from exc
+        config_json = _canonical_json(config)
+        context_json = _canonical_json(context)
+        payload_json = _canonical_json(payload)
+        expected_payload = {
+            "cohort_id": row["cohort_id"],
+            "session": row["session"],
+            "binding_kind": row["binding_kind"],
+            "epoch_id": row["epoch_id"],
+            "policy_version": row["policy_version"],
+            "policy_config_digest": row["policy_config_digest"],
+            "context_digest": row["context_digest"],
+        }
+        if (
+            config_json != row["policy_config_json"]
+            or context_json != row["context_json"]
+            or payload_json != row["payload_json"]
+            or row["policy_config_digest"]
+            != stable_id("policy_config", config_json)
+            or row["context_digest"] != stable_id("policy_context", context_json)
+            or payload != expected_payload
+            or row["payload_digest"] != stable_id("policy_binding", payload_json)
+        ):
+            raise LedgerConflictError(f"tampered policy session context {label}")
+        return {
+            "cohort_id": str(row["cohort_id"]),
+            "session": _date(row["session"]),
+            "binding_kind": str(row["binding_kind"]),
+            "epoch_id": str(row["epoch_id"]),
+            "policy_version": str(row["policy_version"]),
+            "policy_config": config,
+            "policy_config_json": config_json,
+            "policy_config_digest": str(row["policy_config_digest"]),
+            "context": context,
+            "context_json": context_json,
+            "context_digest": str(row["context_digest"]),
+            "payload_json": payload_json,
+            "payload_digest": str(row["payload_digest"]),
+            "bound_at": _datetime(row["bound_at"]),
+        }
+
+    @staticmethod
+    def _policy_projection_limit(limit: int, *, maximum: int = 256) -> int:
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise TypeError("policy projection limit must be an integer")
+        if limit < 1 or limit > maximum:
+            raise ValueError(
+                f"policy projection limit must be between 1 and {maximum}"
+            )
+        return limit
+
+    @staticmethod
+    def _require_projection_bound(
+        rows: list[sqlite3.Row], limit: int, label: str
+    ) -> list[sqlite3.Row]:
+        if len(rows) > limit:
+            raise LedgerConflictError(
+                f"{label} projection limit {limit} exceeded; refusing truncation"
+            )
+        return rows
+
+    def policy_pending_entry_projection(
+        self,
+        exclude_intent_id: str | None = None,
+        *,
+        limit: int = 256,
+    ) -> tuple[dict[str, object], ...]:
+        """Return every outstanding entry, including future-eligible intents."""
+        limit = self._policy_projection_limit(limit)
+        clauses = [
+            "i.cohort_id = ?",
+            "i.status = 'pending'",
+            "i.side IN ('buy', 'short')",
+        ]
+        values: list[object] = [self.cohort_id]
+        if exclude_intent_id is not None:
+            clauses.append("i.intent_id != ?")
+            values.append(str(exclude_intent_id))
+        rows = self._connection.execute(
+            "SELECT i.* FROM order_intents i WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY i.eligible_session, i.created_at, i.intent_id LIMIT ?",
+            (*values, limit + 1),
+        ).fetchall()
+        rows = self._require_projection_bound(rows, limit, "pending policy")
+        projection: list[dict[str, object]] = []
+        for row in rows:
+            intent = self._intent_from_row(row)
+            provenance = self.read_intent_policy_provenance(intent.intent_id)
+            if provenance is None:
+                raise LedgerConflictError(
+                    f"missing intent policy provenance {intent.intent_id}"
+                )
+            if provenance["journal_only"] or not provenance["order_eligible"]:
+                raise LedgerConflictError(
+                    f"ineligible pending entry provenance {intent.intent_id}"
+                )
+            signals = self.signals_by_ids(intent.signal_ids)
+            if len(signals) != len(intent.signal_ids):
+                raise LedgerConflictError(
+                    f"missing signal provenance for pending intent {intent.intent_id}"
+                )
+            tickers = {signal.ticker for signal in signals}
+            reference_closes = {signal.reference_close for signal in signals}
+            if len(tickers) != 1:
+                raise LedgerConflictError(
+                    f"pending intent {intent.intent_id} has ambiguous ticker"
+                )
+            if len(reference_closes) != 1:
+                raise LedgerConflictError(
+                    f"pending intent {intent.intent_id} requires unambiguous "
+                    "reference_close"
+                )
+            ticker = next(iter(tickers))
+            reference_close = next(iter(reference_closes))
+            if not reference_close.is_finite() or reference_close <= 0:
+                raise LedgerConflictError(
+                    f"pending intent {intent.intent_id} has invalid reference_close"
+                )
+            projection.append(
+                {
+                    "intent_id": intent.intent_id,
+                    "ticker": ticker,
+                    "direction": "long" if intent.side == "buy" else "short",
+                    "quantity": intent.requested_qty,
+                    "reference_close": reference_close,
+                    "marked_value": Decimal(intent.requested_qty) * reference_close,
+                    "eligible_session": intent.eligible_session,
+                    "event_key": provenance["event_key"],
+                    "source_event_keys": provenance["source_event_keys"],
+                    "strategy_tags": provenance["strategy_tags"],
+                    "risk_tags": provenance["risk_tags"],
+                    "sector": provenance["sector"],
+                    "policy_version": provenance["policy_version"],
+                    "bound_context_digest": provenance["bound_context_digest"],
+                }
+            )
+        return tuple(projection)
+
+    def policy_open_lot_projection(
+        self,
+        session: date,
+        *,
+        limit: int = 256,
+    ) -> tuple[dict[str, object], ...]:
+        """Return marked open lots using only persisted raw ledger evidence."""
+        session = self._require_exact_date(session, "session")
+        limit = self._policy_projection_limit(limit)
+        rows = self._connection.execute(
+            """SELECT l.*, f.intent_id,
+                      f.reference_price AS opening_reference_price,
+                      m.close AS mark_close, m.session AS mark_session,
+                      m.source AS mark_source
+               FROM lots l
+               JOIN fills f ON f.fill_id = l.fill_id
+               LEFT JOIN marks m ON m.mark_id = (
+                   SELECT candidate.mark_id FROM marks candidate
+                   WHERE candidate.cohort_id = l.cohort_id
+                     AND candidate.ticker = l.ticker
+                     AND candidate.adjusted = 0
+                     AND candidate.session >= l.opened_session
+                     AND candidate.session <= ?
+                   ORDER BY candidate.session DESC, candidate.mark_id DESC
+                   LIMIT 1
+               )
+               WHERE l.cohort_id = ? AND l.open_qty > 0
+               ORDER BY l.ticker, l.direction, l.opened_session, l.lot_id
+               LIMIT ?""",
+            (self._encode(session), self.cohort_id, limit + 1),
+        ).fetchall()
+        rows = self._require_projection_bound(rows, limit, "open-lot policy")
+        projection: list[dict[str, object]] = []
+        for row in rows:
+            opened_session = _date(row["opened_session"])
+            if opened_session > session:
+                raise LedgerConflictError(
+                    f"open lot {row['lot_id']} is from future session"
+                )
+            provenance = self.read_intent_policy_provenance(str(row["intent_id"]))
+            if provenance is None:
+                raise LedgerConflictError(
+                    f"missing intent policy provenance {row['intent_id']}"
+                )
+            if row["mark_close"] is None:
+                if opened_session != session:
+                    raise MissingMarkError(
+                        f"missing persisted raw mark for {row['ticker']}/{session}"
+                    )
+                mark = _decimal(row["opening_reference_price"])
+                mark_session = session
+                mark_source = "opening_reference"
+            else:
+                mark = _decimal(row["mark_close"])
+                mark_session = _date(row["mark_session"])
+                mark_source = str(row["mark_source"])
+            quantity = int(row["open_qty"])
+            if not mark.is_finite() or mark <= 0:
+                raise MissingMarkError(
+                    f"invalid persisted raw mark for {row['ticker']}/{session}"
+                )
+            if quantity <= 0:
+                raise LedgerConflictError(
+                    f"invalid open quantity for lot {row['lot_id']}"
+                )
+            projection.append(
+                {
+                    "lot_id": str(row["lot_id"]),
+                    "intent_id": str(row["intent_id"]),
+                    "ticker": str(row["ticker"]),
+                    "direction": str(row["direction"]),
+                    "quantity": quantity,
+                    "marked_value": Decimal(quantity) * mark,
+                    "mark": mark,
+                    "mark_session": mark_session,
+                    "mark_source": mark_source,
+                    "event_key": provenance["event_key"],
+                    "source_event_keys": provenance["source_event_keys"],
+                    "strategy_tags": provenance["strategy_tags"],
+                    "risk_tags": provenance["risk_tags"],
+                    "sector": provenance["sector"],
+                    "policy_version": provenance["policy_version"],
+                    "bound_context_digest": provenance["bound_context_digest"],
+                }
+            )
+        return tuple(projection)
+
+    def consumed_event_keys(self, *, limit: int = 4096) -> frozenset[str]:
+        """Return event identities consumed by authoritative filled entries only."""
+        limit = self._policy_projection_limit(limit, maximum=4096)
+        rows = self._connection.execute(
+            """SELECT i.intent_id FROM order_intents i
+               WHERE i.cohort_id = ? AND i.status = 'filled'
+                 AND i.side IN ('buy', 'short')
+               ORDER BY i.eligible_session, i.created_at, i.intent_id LIMIT ?""",
+            (self.cohort_id, limit + 1),
+        ).fetchall()
+        rows = self._require_projection_bound(rows, limit, "consumed-event")
+        consumed: set[str] = set()
+        for row in rows:
+            intent_id = str(row["intent_id"])
+            provenance = self.read_intent_policy_provenance(intent_id)
+            if provenance is None:
+                raise LedgerConflictError(
+                    f"missing intent policy provenance {intent_id}"
+                )
+            if provenance["journal_only"] or not provenance["order_eligible"]:
+                raise LedgerConflictError(
+                    f"ineligible filled entry provenance {intent_id}"
+                )
+            for signal_id in provenance["signal_ids"]:  # type: ignore[union-attr]
+                signal_provenance = self.read_signal_policy_provenance(
+                    str(signal_id)
+                )
+                if signal_provenance is None:
+                    raise LedgerConflictError(
+                        f"missing signal policy provenance {signal_id} "
+                        f"for {intent_id}"
+                    )
+                consumed.add(str(signal_provenance["event_key"]))
+                if len(consumed) > limit:
+                    raise LedgerConflictError(
+                        f"consumed-event projection limit {limit} exceeded; "
+                        "refusing truncation"
+                    )
+        return frozenset(consumed)
 
     def pending_signal_journal_outbox(
         self, limit: int = 256

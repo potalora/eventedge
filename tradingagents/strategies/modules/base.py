@@ -26,6 +26,11 @@ class Candidate:
     metadata: dict = field(default_factory=dict)  # Strategy-specific data
     vehicle: str = "equity"  # "equity" or "option"
     option_spec: OptionSpec | None = None  # Populated when vehicle == "option"
+    event_key: str = ""
+    source_event_keys: tuple[str, ...] = ()
+    strategy_tags: tuple[str, ...] = ()
+    risk_tags: tuple[str, ...] = ()
+    journal_only: bool = False
 
 
 @dataclass

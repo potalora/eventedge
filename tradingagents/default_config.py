@@ -181,6 +181,18 @@ DEFAULT_CONFIG = {
             "max_sector_concentration_pct": 0.30,
             "max_single_position_pct": 0.10,
         },
+        "portfolio_policy": {
+            "version": "portfolio_policy_v1",
+            "volatility_lookback_sessions": 60,
+            "annualized_volatility_floor": 0.15,
+            "congressional_exposure_by_size": {
+                "5k": 0.25,
+                "10k": 0.20,
+                "50k": 0.15,
+                "100k": 0.12,
+            },
+            "options_overlays_enabled": False,
+        },
         # Short selling settings
         "short_selling": {
             "borrow_cost_tiers": {5: 0.005, 15: 0.02, 30: 0.05},

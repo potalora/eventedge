@@ -200,11 +200,18 @@ def canonical_event_key(
             }
         payload = locator
     elif strategy == "congressional_trades":
-        family = "disclosure_cluster"
         trade_keys = _required(metadata, "trade_keys", strategy)
         if not isinstance(trade_keys, list):
             raise ValueError("congressional_trades candidate lacks source identity")
-        payload = sorted(str(item) for item in trade_keys)
+        from tradingagents.strategies.modules.congressional_trades import (
+            congressional_cluster_event_key,
+        )
+
+        return congressional_cluster_event_key(
+            ticker,
+            str(_required(metadata, "cluster_direction", strategy)),
+            [str(item) for item in trade_keys],
+        )
     elif strategy == "govt_contracts":
         source = _required(metadata, "source", strategy)
         if source == "usaspending":

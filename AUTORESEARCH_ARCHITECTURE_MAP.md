@@ -38,9 +38,14 @@ EventEdge runs 16 dependent scenario portfolios. Headline performance shows
 four separate $100k horizon books plus an equal-weighted scenario panel; the
 panel is not investable fund AUM. Smaller books are concentration stress tests.
 Metrics use XNYS sessions, next-session-open signal outcomes, persisted SPY/BIL
-benchmarks, explicit costs, and immutable schema-v2 epochs. Production learning
-is disabled. Promotion output is advisory and requires Pedro's manual review.
-Covered-call execution remains inactive scaffolding. The scenarios share source
+benchmarks, explicit costs, and immutable schema-v2 epochs. A bounded policy
+audit counts each attributed recommendation once and separately reports signal
+ingress blocks and committee non-selection; it is not alpha validation.
+Production learning is disabled. Promotion output is advisory and requires
+Pedro's manual review against precommitted 30/60/90-session gates and complete
+benchmark, cost, and provenance evidence. Covered-call execution remains
+inactive until authoritative premium, assignment, expiry, and contract-mark
+accounting exists. The scenarios share source
 fetches and horizon screens, then apply different sizing and eligibility rules;
 they are not independent statistical experiments. Equity shorts are active only
 where the size/horizon policy allows them.

@@ -114,6 +114,7 @@ def _render_gen_card(gen: dict) -> None:
         "Four $100k horizon books are dependent scenario portfolios; shared "
         "signals and market data mean they are not independent observations."
     )
+    _render_policy_audit(metrics)
     quality = [
         (
             f"{cohort_id}: {book.get('valid_sessions', 'unavailable')} valid sessions; "
@@ -125,3 +126,35 @@ def _render_gen_card(gen: dict) -> None:
         for cohort_id, book in sorted(headline.items())
     ]
     st.caption("Data quality — " + (" | ".join(quality) if quality else "unavailable"))
+
+
+def _render_policy_audit(metrics: dict) -> None:
+    """Show per-cohort policy governance evidence without aggregating scenarios."""
+    audit = metrics.get("policy_audit") or {}
+    cohorts = audit.get("per_cohort") or {}
+    if not cohorts:
+        st.caption("Policy audit — unavailable; governance evidence is per cohort.")
+        return
+    st.caption(
+        "Policy audit — governance evidence only, not alpha validation. "
+        "Accepted/trimmed/rejected are recommendation decisions; "
+        "journal-only/consumed/cutoff/committee-not-selected are signals."
+    )
+    rows = []
+    for cohort_id, payload in sorted(cohorts.items()):
+        if not payload.get("available"):
+            rows.append(
+                f"{cohort_id}: unavailable ({payload.get('status', 'unknown')})"
+            )
+            continue
+        counts = payload.get("counts") or {}
+        rows.append(
+            f"{cohort_id}: policy {payload.get('policy_version', 'unknown')}; "
+            f"accepted {counts.get('accepted', 0)}, trimmed {counts.get('trimmed', 0)}, "
+            f"rejected {counts.get('rejected', 0)}, journal-only "
+            f"{counts.get('journal_only', 0)}, consumed-event blocks "
+            f"{counts.get('consumed_event_blocks', 0)}, cutoff-late "
+            f"{counts.get('cutoff_late', 0)}, committee not selected "
+            f"{counts.get('committee_not_selected', 0)}"
+        )
+    st.caption(" | ".join(rows))

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from importlib.metadata import version as package_version
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -49,6 +49,14 @@ from tradingagents.strategies.state.portfolio_ledger import (
 )
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
 from tradingagents.strategies.trading.risk_gate import RiskGateConfig
+from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicyConfig,
+    PortfolioRiskContext,
+    build_portfolio_risk_context,
+    portfolio_policy_config_document,
+    portfolio_risk_context_document,
+)
+from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
 
 
 PHASES = (
@@ -64,6 +72,7 @@ PHASES = (
 )
 
 _SIDE_PRIORITY = {"sell": 0, "cover": 0, "buy": 1, "short": 1}
+_POLICY_VOLATILITY_EVIDENCE_KEY = "portfolio_policy_volatility_evidence"
 
 
 def _canonical_json_value(value: object) -> object:
@@ -152,15 +161,26 @@ class SessionExecutor:
         ledger: PortfolioLedger,
         config: dict,
         *,
+        size_profile: object | None = None,
         metric_store: MetricStore | None = None,
         after_phase_mutation: Callable[[str], None] | None = None,
         after_phase_commit: Callable[[str], None] | None = None,
     ) -> None:
         self.ledger = ledger
         self.config = config
+        self.size_profile = size_profile
         if config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("EventEdge cohort execution must remain paper-only")
         self.ar_config = config.get("autoresearch", {})
+        policy_settings = self.ar_config.get("portfolio_policy")
+        self.policy_enabled = size_profile is not None and isinstance(
+            policy_settings, dict
+        )
+        self.portfolio_policy_config = (
+            PortfolioPolicyConfig.from_size_profile(size_profile, policy_settings)
+            if self.policy_enabled
+            else None
+        )
         self.ledger_config = self.ar_config.get("paper_ledger", {})
         self.benchmark_symbols = tuple(
             self.ledger_config.get("benchmark_symbols", ("SPY", "BIL"))
@@ -187,6 +207,236 @@ class SessionExecutor:
         """Return canonical, secret-free, session-invariant execution semantics."""
         config_inputs, _ = self._static_context_documents((), {})
         return config_inputs
+
+    def portfolio_policy_document(self) -> dict[str, object] | None:
+        """Return the normalized profile-bound policy or ``None`` for legacy callers."""
+        if self.portfolio_policy_config is None:
+            return None
+        return {
+            field.name: getattr(self.portfolio_policy_config, field.name)
+            for field in fields(self.portfolio_policy_config)
+        }
+
+    @staticmethod
+    def _positive_volatility(value: object, label: str) -> Decimal:
+        if isinstance(value, bool):
+            raise LedgerConflictError(f"invalid volatility evidence for {label}")
+        try:
+            normalized = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise LedgerConflictError(
+                f"invalid volatility evidence for {label}"
+            ) from error
+        if not normalized.is_finite() or normalized <= 0:
+            raise LedgerConflictError(f"invalid volatility evidence for {label}")
+        return normalized
+
+    def _validated_staging_volatility(
+        self,
+        context: Mapping[str, object],
+        *,
+        required_tickers: set[str],
+    ) -> dict[str, Decimal]:
+        raw = context.get("annualized_volatility")
+        if not isinstance(raw, Mapping):
+            raise LedgerConflictError("missing annualized volatility evidence")
+        values: dict[str, Decimal] = {}
+        for raw_ticker, raw_value in raw.items():
+            ticker = str(raw_ticker).strip().upper()
+            if not ticker or ticker in values:
+                raise LedgerConflictError("conflicting annualized volatility evidence")
+            values[ticker] = self._positive_volatility(raw_value, ticker)
+        missing = sorted(required_tickers - set(values))
+        if missing:
+            raise LedgerConflictError(
+                f"missing annualized volatility evidence for {missing}"
+            )
+        for collection_name in ("positions", "pending_positions"):
+            collection = context.get(collection_name)
+            if not isinstance(collection, list):
+                raise LedgerConflictError(
+                    f"missing serialized position volatility evidence: {collection_name}"
+                )
+            for item in collection:
+                if not isinstance(item, Mapping):
+                    raise LedgerConflictError(
+                        f"invalid serialized position volatility evidence: {collection_name}"
+                    )
+                ticker = str(item.get("ticker", "")).strip().upper()
+                serialized = self._positive_volatility(
+                    item.get("annualized_volatility"), ticker or collection_name
+                )
+                if ticker not in values or values[ticker] != serialized:
+                    raise LedgerConflictError(
+                        f"conflicting serialized volatility evidence for {ticker}"
+                    )
+        return values
+
+    @staticmethod
+    def _volatility_evidence_document(
+        values: Mapping[str, Decimal],
+        sources: Mapping[tuple[date, str], set[str]],
+    ) -> dict[str, object]:
+        return {
+            "annualized_volatility": {
+                ticker: format(value, "f") for ticker, value in sorted(values.items())
+            },
+            "source_bindings": [
+                {
+                    "reference_session": reference_session.isoformat(),
+                    "context_digest": context_digest,
+                    "candidate_tickers": sorted(sources[(reference_session, context_digest)]),
+                }
+                for reference_session, context_digest in sorted(sources)
+            ],
+        }
+
+    def _resolve_staged_volatility_evidence(
+        self, session: date, epoch_id: str
+    ) -> tuple[dict[str, object], dict[str, float]]:
+        if self.portfolio_policy_config is None:
+            return {}, {}
+        due = tuple(
+            intent
+            for intent in self.ledger.pending_intents(session)
+            if intent.side in {"buy", "short"}
+        )
+        combined: dict[str, Decimal] = {}
+        sources: dict[tuple[date, str], set[str]] = {}
+        for intent in due:
+            provenance = self.ledger.read_intent_policy_provenance(intent.intent_id)
+            if provenance is None:
+                raise LedgerConflictError(
+                    f"missing intent policy provenance {intent.intent_id}"
+                )
+            signals = self.ledger.signals_for_intent(intent.intent_id)
+            tickers = {signal.ticker.strip().upper() for signal in signals}
+            sessions = {signal.reference_session for signal in signals}
+            if not signals or len(tickers) != 1 or len(sessions) != 1:
+                raise LedgerConflictError(
+                    f"ambiguous volatility provenance for {intent.intent_id}"
+                )
+            ticker = next(iter(tickers))
+            reference_session = next(iter(sessions))
+            binding = self.ledger.read_policy_session_context(
+                reference_session, binding_kind="staging"
+            )
+            if (
+                binding is None
+                or binding["epoch_id"] != epoch_id
+                or binding["policy_version"] != self.portfolio_policy_config.version
+                or binding["context_digest"] != provenance["bound_context_digest"]
+            ):
+                raise LedgerConflictError(
+                    f"staging volatility binding mismatch for {intent.intent_id}"
+                )
+            values = self._validated_staging_volatility(
+                binding["context"], required_tickers={ticker}
+            )
+            for name, value in values.items():
+                if name in combined and combined[name] != value:
+                    raise LedgerConflictError(
+                        f"conflicting annualized volatility evidence for {name}"
+                    )
+                combined[name] = value
+            source_key = (reference_session, str(binding["context_digest"]))
+            sources.setdefault(source_key, set()).add(ticker)
+        document = self._volatility_evidence_document(combined, sources)
+        return document, {ticker: float(value) for ticker, value in combined.items()}
+
+    def _rehydrate_bound_volatility_evidence(
+        self, bound_context: Mapping[str, object], epoch_id: str
+    ) -> tuple[dict[str, object], dict[str, float]]:
+        if self.portfolio_policy_config is None:
+            return {}, {}
+        try:
+            economic = json.loads(str(bound_context["economic_inputs_json"]))
+            document = economic[_POLICY_VOLATILITY_EVIDENCE_KEY]
+            raw_sources = document["source_bindings"]
+            raw_values = document["annualized_volatility"]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise LedgerConflictError(
+                "missing bound portfolio policy volatility evidence"
+            ) from error
+        if not isinstance(document, Mapping) or not isinstance(raw_sources, list):
+            raise LedgerConflictError("invalid bound portfolio policy volatility evidence")
+        stored = self._validated_staging_volatility(
+            {
+                "annualized_volatility": raw_values,
+                "positions": [],
+                "pending_positions": [],
+            },
+            required_tickers=set(),
+        )
+        resolved: dict[str, Decimal] = {}
+        sources: dict[tuple[date, str], set[str]] = {}
+        for item in raw_sources:
+            if not isinstance(item, Mapping):
+                raise LedgerConflictError("invalid volatility source binding")
+            try:
+                reference_session = date.fromisoformat(str(item["reference_session"]))
+                context_digest = str(item["context_digest"])
+                candidates = {
+                    str(ticker).strip().upper()
+                    for ticker in item["candidate_tickers"]
+                }
+            except (KeyError, TypeError, ValueError) as error:
+                raise LedgerConflictError("invalid volatility source binding") from error
+            binding = self.ledger.read_policy_session_context(
+                reference_session, binding_kind="staging"
+            )
+            if (
+                binding is None
+                or binding["epoch_id"] != epoch_id
+                or binding["policy_version"] != self.portfolio_policy_config.version
+                or binding["context_digest"] != context_digest
+            ):
+                raise LedgerConflictError("staging volatility source binding mismatch")
+            values = self._validated_staging_volatility(
+                binding["context"], required_tickers=candidates
+            )
+            for ticker, value in values.items():
+                if ticker in resolved and resolved[ticker] != value:
+                    raise LedgerConflictError(
+                        f"conflicting annualized volatility evidence for {ticker}"
+                    )
+                resolved[ticker] = value
+            sources[(reference_session, context_digest)] = candidates
+        if stored != resolved:
+            raise LedgerConflictError("bound annualized volatility evidence conflict")
+        canonical = self._volatility_evidence_document(resolved, sources)
+        if canonical != document:
+            raise LedgerConflictError("noncanonical bound volatility evidence")
+        return canonical, {ticker: float(value) for ticker, value in resolved.items()}
+
+    def _verify_committed_execution_policy_binding(
+        self, session: date, epoch_id: str
+    ) -> None:
+        """Require the exact policy artifact committed by the entry phase."""
+        if not self.ledger.phase_completed(session, "execute_entries"):
+            return
+        binding = self.ledger.read_policy_session_context(
+            session, binding_kind="execution"
+        )
+        if self.portfolio_policy_config is None:
+            if binding is not None:
+                raise LedgerConflictError(
+                    "execution policy binding exists while portfolio policy is disabled"
+                )
+            return
+        if binding is None:
+            raise LedgerConflictError(
+                f"missing committed execution policy binding for {session}"
+            )
+        if (
+            binding["epoch_id"] != epoch_id
+            or binding["policy_version"] != self.portfolio_policy_config.version
+            or binding["policy_config"]
+            != portfolio_policy_config_document(self.portfolio_policy_config)
+        ):
+            raise LedgerConflictError(
+                f"committed execution policy binding mismatch for {session}"
+            )
 
     def ensure_metric_epoch(
         self, context: EpochContext, session: date
@@ -564,6 +814,8 @@ class SessionExecutor:
                 "execution context conflict: effective config or borrow inputs changed"
             )
         self.ledger.verify_session_phase_chain(session, PHASES)
+        if self.portfolio_policy_config is not None:
+            self._rehydrate_bound_volatility_evidence(context, epoch_id)
         return borrow_rates
 
     def execute_open_and_mark(
@@ -625,11 +877,22 @@ class SessionExecutor:
                     session, reason, processed_at
                 )
             return SessionExecutionResult(session, False, None, reason, ())
+        volatility_document: dict[str, object] = {}
+        annualized_volatility_evidence: dict[str, float] = {}
         if bound_context is not None:
             try:
                 self._expected_state_digest = self.ledger.verify_session_phase_chain(
                     session, PHASES
                 )
+                self._verify_committed_execution_policy_binding(session, epoch_id)
+                if self.portfolio_policy_config is not None:
+                    (
+                        volatility_document,
+                        annualized_volatility_evidence,
+                    ) = self._rehydrate_bound_volatility_evidence(
+                        bound_context,
+                        epoch_id,
+                    )
             except LedgerConflictError as error:
                 reason = f"execution context conflict: {error}"
                 if not existing:
@@ -647,6 +910,10 @@ class SessionExecutor:
                     session, reason, processed_at
                 )
                 return SessionExecutionResult(session, False, None, reason, ())
+        if self.portfolio_policy_config is not None and bound_context is None:
+            volatility_document, annualized_volatility_evidence = (
+                self._resolve_staged_volatility_evidence(session, epoch_id)
+            )
         try:
             bundle = (
                 price_source
@@ -680,6 +947,10 @@ class SessionExecutor:
                     "market": market_inputs,
                     "starting_state": _canonical_json_value(starting_state),
                 }
+                if self.portfolio_policy_config is not None:
+                    economic_inputs[_POLICY_VOLATILITY_EVIDENCE_KEY] = (
+                        volatility_document
+                    )
                 economic_json = json.dumps(
                     economic_inputs, sort_keys=True, separators=(",", ":")
                 )
@@ -787,15 +1058,16 @@ class SessionExecutor:
             session,
             "execute_entries",
             processed_at,
-            lambda: self._execute_intents(
+            lambda: self._execute_entry_intents(
                 session,
-                {"buy", "short"},
+                epoch_id,
                 bridge,
                 bars,
                 opening_prices,
                 borrow_rates,
                 processed_at,
                 market_validated_at,
+                annualized_volatility_evidence,
             ),
             completed,
         )
@@ -950,8 +1222,7 @@ class SessionExecutor:
             name: format(getattr(self.cost_model, name), "f")
             for name in PaperCostModel.DEFAULTS
         }
-        config_inputs = _canonical_json_value(
-            {
+        semantic_inputs: dict[str, object] = {
                 "policy_document_version": POLICY_DOCUMENT_VERSION,
                 "execution": {
                     "mode": self.config.get("execution", {}).get("mode", "paper"),
@@ -974,9 +1245,164 @@ class SessionExecutor:
                     "borrow_cost_reject_above": format(self.borrow_reject_above, "f"),
                 },
             }
-        )
+        policy_document = self.portfolio_policy_document()
+        if policy_document is not None:
+            semantic_inputs["portfolio_policy"] = policy_document
+        config_inputs = _canonical_json_value(semantic_inputs)
         assert isinstance(config_inputs, dict)
         return config_inputs, borrow_inputs
+
+    def _execute_entry_intents(
+        self,
+        session: date,
+        epoch_id: str,
+        bridge: ExecutionBridge,
+        bars: dict[str, MarketBar],
+        opening_prices: dict[str, Decimal],
+        borrow_rates: dict[str, Decimal | None],
+        processed_at: datetime,
+        market_validated_at: datetime,
+        annualized_volatility_evidence: Mapping[str, float],
+    ) -> None:
+        """Bind one post-exit baseline, then validate every entry against it."""
+        portfolio_context = None
+        if self.portfolio_policy_config is not None:
+            account = self.ledger.account_state()
+            current = self.ledger.policy_open_lot_projection(session)
+            pending = self._policy_pending_with_execution_prices(
+                session, self.ledger.policy_pending_entry_projection(), opening_prices
+            )
+            sectors = {
+                str(row["ticker"]): str(row.get("sector", "Unknown"))
+                for row in current + pending
+            }
+            borrow_available = {
+                str(row["ticker"]): borrow_rates.get(str(row["ticker"])) is not None
+                for row in pending
+                if str(row.get("direction")) == "short"
+            }
+            active_tickers = {
+                str(row["ticker"]).strip().upper() for row in current + pending
+            }
+            active_volatility_evidence = {
+                ticker: value
+                for ticker, value in annualized_volatility_evidence.items()
+                if ticker in active_tickers
+            }
+            portfolio_context = build_portfolio_risk_context(
+                portfolio_value=float(account.net_equity),
+                cash=float(account.cash),
+                current_positions=current,
+                pending_positions=pending,
+                price_cache=None,
+                annualized_volatility_evidence=(
+                    active_volatility_evidence or None
+                ),
+                earnings_dates={},
+                short_interest={},
+                borrow_available=borrow_available,
+                margin_used=float(account.margin_used),
+                consumed_event_keys=self.ledger.consumed_event_keys(),
+                config=self.portfolio_policy_config,
+                sectors=sectors,
+            )
+            self.ledger.bind_policy_session_context(
+                session,
+                binding_kind="execution",
+                epoch_id=epoch_id,
+                policy_version=self.portfolio_policy_config.version,
+                policy_config=portfolio_policy_config_document(
+                    self.portfolio_policy_config
+                ),
+                context=portfolio_risk_context_document(portfolio_context),
+                bound_at=processed_at,
+            )
+        self._execute_intents(
+            session,
+            {"buy", "short"},
+            bridge,
+            bars,
+            opening_prices,
+            borrow_rates,
+            processed_at,
+            market_validated_at,
+            portfolio_context=portfolio_context,
+        )
+
+    @staticmethod
+    def _policy_pending_with_execution_prices(
+        session: date,
+        pending: tuple[dict[str, object], ...],
+        opening_prices: Mapping[str, Decimal],
+    ) -> tuple[dict[str, object], ...]:
+        """Use bound raw opens for due reservations; future entries retain D-close."""
+        priced: list[dict[str, object]] = []
+        for row in pending:
+            item = dict(row)
+            if item["eligible_session"] == session:
+                ticker = str(item["ticker"])
+                opening_price = opening_prices.get(ticker)
+                if (
+                    not isinstance(opening_price, Decimal)
+                    or not opening_price.is_finite()
+                    or opening_price <= 0
+                ):
+                    raise LedgerConflictError(
+                        f"missing bound opening price for due policy entry {ticker}"
+                    )
+                item["marked_value"] = Decimal(int(item["quantity"])) * opening_price
+            priced.append(item)
+        return tuple(priced)
+
+    def _current_intent_policy_context(
+        self,
+        session: date,
+        intent_id: str,
+        opening_prices: Mapping[str, Decimal],
+        borrow_rates: Mapping[str, Decimal | None],
+        baseline: PortfolioRiskContext,
+    ) -> PortfolioRiskContext:
+        """Rebuild the prospective view after each prior fill/rejection."""
+        if self.portfolio_policy_config is None:
+            raise LedgerConflictError("portfolio policy config is unavailable")
+        current = self.ledger.policy_open_lot_projection(session)
+        pending = self._policy_pending_with_execution_prices(
+            session,
+            self.ledger.policy_pending_entry_projection(
+                exclude_intent_id=intent_id
+            ),
+            opening_prices,
+        )
+        account = self.ledger.account_state()
+        sectors = dict(baseline.sectors)
+        sectors.update(
+            {
+                str(row["ticker"]): str(row.get("sector", "Unknown"))
+                for row in current + pending
+            }
+        )
+        borrow_available = {
+            str(row["ticker"]): borrow_rates.get(str(row["ticker"])) is not None
+            for row in pending
+            if str(row.get("direction")) == "short"
+        }
+        return build_portfolio_risk_context(
+            portfolio_value=float(account.net_equity),
+            cash=float(account.cash),
+            current_positions=current,
+            pending_positions=pending,
+            price_cache=None,
+            annualized_volatility_evidence=(
+                baseline.annualized_volatility or None
+            ),
+            earnings_dates=baseline.earnings_dates,
+            short_interest=baseline.short_interest,
+            borrow_available=borrow_available,
+            margin_used=float(account.margin_used),
+            consumed_event_keys=self.ledger.consumed_event_keys(),
+            config=self.portfolio_policy_config,
+            sectors=sectors,
+        )
 
     def _phase(
         self,
@@ -1014,6 +1440,8 @@ class SessionExecutor:
         borrow_rates: dict[str, Decimal | None],
         processed_at: datetime,
         market_validated_at: datetime,
+        *,
+        portfolio_context: PortfolioRiskContext | None = None,
     ) -> None:
         intents = sorted(
             (
@@ -1033,6 +1461,59 @@ class SessionExecutor:
             if len(tickers) != 1:
                 raise ValueError(f"ambiguous ticker for intent {intent.intent_id}")
             ticker = next(iter(tickers))
+            recommendation = None
+            intent_context = portfolio_context
+            if self.policy_enabled and intent.side in {"buy", "short"}:
+                if portfolio_context is None:
+                    raise LedgerConflictError(
+                        f"missing execution policy context for {intent.intent_id}"
+                    )
+                provenance = self.ledger.read_intent_policy_provenance(
+                    intent.intent_id
+                )
+                if provenance is None:
+                    raise LedgerConflictError(
+                        f"missing intent policy provenance {intent.intent_id}"
+                    )
+                if (
+                    self.portfolio_policy_config is None
+                    or provenance["policy_version"]
+                    != self.portfolio_policy_config.version
+                ):
+                    raise LedgerConflictError(
+                        f"intent policy version mismatch for {intent.intent_id}"
+                    )
+                direction = "short" if intent.side == "short" else "long"
+                intent_context = self._current_intent_policy_context(
+                    session,
+                    intent.intent_id,
+                    opening_prices,
+                    borrow_rates,
+                    portfolio_context,
+                )
+                intent_context = replace(
+                    intent_context,
+                    borrow_available={
+                        **dict(intent_context.borrow_available),
+                        ticker: borrow_rates.get(ticker) is not None,
+                    },
+                )
+                proposed_value = float(Decimal(intent.requested_qty) * bars[ticker].open)
+                recommendation = TradeRecommendation(
+                    ticker=ticker,
+                    direction=direction,
+                    position_size_pct=(
+                        proposed_value / intent_context.portfolio_value
+                    ),
+                    confidence=0.0,
+                    rationale="rehydrated immutable intent provenance",
+                    contributing_strategies=list(provenance["strategy_tags"]),
+                    event_key=str(provenance["event_key"]),
+                    source_event_keys=tuple(provenance["source_event_keys"]),
+                    strategy_tags=tuple(provenance["strategy_tags"]),
+                    risk_tags=tuple(provenance["risk_tags"]),
+                    journal_only=bool(provenance["journal_only"]),
+                )
             bridge.execute_due_intent(
                 intent,
                 bars[ticker],
@@ -1056,6 +1537,9 @@ class SessionExecutor:
                     ],
                     "earnings_dates": {},
                     "short_interest": {},
+                    "policy_enabled": self.policy_enabled,
+                    "recommendation": recommendation,
+                    "portfolio_context": intent_context,
                 },
                 self.cost_model,
             )

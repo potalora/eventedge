@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,34 @@ def _value_to_bucket(value: int | float) -> str:
     return "$25,000,001 - $50,000,000"
 
 
+def _canonical_disclosure_url(value: object) -> str:
+    """Retain a portable disclosure locator without tracking noise."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    tracking = {"fbclid", "gclid", "dclid", "msclkid"}
+    query = urlencode(
+        sorted(
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.casefold() not in tracking
+            and not key.casefold().startswith(("utm_", "mc_"))
+        )
+    )
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path.rstrip("/"),
+            query,
+            "",
+        )
+    )
+
+
 def _normalize_trade(raw: dict[str, Any]) -> dict[str, Any]:
     """Convert a CapitolTrades trade object to our standard format."""
     issuer = raw.get("issuer", {}) or {}
@@ -93,7 +122,17 @@ def _normalize_trade(raw: dict[str, Any]) -> dict[str, Any]:
 
     raw_value = raw.get("value", 0)
 
+    native_disclosure_id = (
+        raw.get("disclosureId")
+        or raw.get("disclosure_id")
+        or raw.get("transactionId")
+        or raw.get("transaction_id")
+        or ""
+    )
+    source_url = raw.get("url") or raw.get("link") or ""
+
     return {
+        "source": "capitoltrades",
         "ticker": ticker,
         "issuer_name": issuer.get("issuerName", ""),
         "sector": issuer.get("sector") or "",
@@ -109,6 +148,9 @@ def _normalize_trade(raw: dict[str, Any]) -> dict[str, Any]:
         "publication_date": raw.get("pubDate", ""),
         "owner": raw.get("owner", ""),
         "comment": raw.get("comment", ""),
+        "native_disclosure_id": native_disclosure_id,
+        "source_url": source_url,
+        "canonical_disclosure_url": _canonical_disclosure_url(source_url),
     }
 
 
@@ -120,7 +162,16 @@ def _normalize_fmp_trade(raw: dict[str, Any], chamber: str) -> dict[str, Any]:
     if not representative:
         representative = f"{first} {last}".strip()
 
+    native_disclosure_id = (
+        raw.get("disclosureId")
+        or raw.get("disclosure_id")
+        or raw.get("transactionId")
+        or raw.get("transaction_id")
+        or ""
+    )
+    source_url = raw.get("link") or raw.get("url") or ""
     return {
+        "source": "fmp",
         "ticker": str(raw.get("symbol") or "").upper().strip(),
         "issuer_name": raw.get("assetDescription", ""),
         "sector": "",
@@ -136,7 +187,9 @@ def _normalize_fmp_trade(raw: dict[str, Any], chamber: str) -> dict[str, Any]:
         "publication_date": raw.get("disclosureDate", ""),
         "owner": raw.get("owner", ""),
         "comment": raw.get("comment", ""),
-        "source_url": raw.get("link", ""),
+        "native_disclosure_id": native_disclosure_id,
+        "source_url": source_url,
+        "canonical_disclosure_url": _canonical_disclosure_url(source_url),
     }
 
 
