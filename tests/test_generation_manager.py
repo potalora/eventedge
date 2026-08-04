@@ -342,6 +342,39 @@ class TestGenerationDailyRun:
         assert result["success"] is False
         assert "horizon_30d_size_5k" in result["error"]
 
+    def test_candidate_provider_failure_without_quarantine_preserves_p0_validity_in_history(
+        self, git_repo, manager
+    ):
+        """P0-valid candidate failures remain alertable without a quarantine record."""
+        info = manager.start_generation("candidate provider failure")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        process = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "horizon_30d_size_5k": {
+                        "error": True,
+                        "invalid_reason": "candidate provider failed",
+                        "degraded": False,
+                        "execution_valid": True,
+                        "staging_valid": False,
+                        "candidate_bar_quarantines": [],
+                    },
+                },
+                indent=2,
+            ),
+            stderr="",
+        )
+        with patch.object(gm_mod.subprocess, "run", return_value=process):
+            results = manager.run_daily("2026-03-31")
+
+        result = results[info.gen_id]
+        assert result["success"] is False
+        assert result["execution_valid"] is True
+        entry = manager.get_generation(info.gen_id).run_history[0]
+        assert entry["execution_valid"] is True
+
     def test_run_daily_cli_prints_all_results_then_exits_nonzero(
         self, monkeypatch, capsys
     ):

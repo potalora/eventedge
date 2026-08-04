@@ -409,12 +409,12 @@ class GenerationManager:
                         "success": False,
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
+                        "execution_valid": execution_valid,
                     }
                     if n_degraded:
                         failure.update(
                             {
                                 "degraded": True,
-                                "execution_valid": execution_valid,
                                 "candidate_bar_quarantines": quarantined_tickers,
                             }
                         )

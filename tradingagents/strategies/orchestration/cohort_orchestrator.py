@@ -1729,7 +1729,7 @@ class CohortOrchestrator:
                 results[cohort["config"].name] = {
                     "error": True,
                     "invalid_reason": reason,
-                    "degraded": bool(failed_quarantines),
+                    "degraded": True,
                     "execution_valid": True,
                     "staging_valid": False,
                     "candidate_bar_quarantines": failed_quarantines,

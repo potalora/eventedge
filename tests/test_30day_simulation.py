@@ -984,7 +984,7 @@ class TestIdempotencyDoubleRun:
                 "candidate reference-bar validation failed: "
                 "deterministic candidate reference gap"
             ),
-            "degraded": False,
+            "degraded": True,
             "execution_valid": True,
             "staging_valid": False,
             "candidate_bar_quarantines": [],
