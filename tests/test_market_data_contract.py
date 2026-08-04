@@ -223,6 +223,60 @@ def _candidate_frame(aapl_close: object, msft_close: object) -> pd.DataFrame:
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_candidate_bars_validate_initial_fetch_against_post_fetch_clock(mock_download):
+    columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
+    mock_download.return_value = pd.DataFrame(
+        [[100, 103, 99, 102]],
+        index=pd.DatetimeIndex([_SESSION.isoformat()]),
+        columns=columns,
+    )
+    processed_at = _AS_OF
+    clock = [
+        processed_at + timedelta(seconds=1),
+        processed_at + timedelta(seconds=2),
+        processed_at + timedelta(seconds=3),
+    ]
+    source = YFinancePriceSource(now=lambda: clock.pop(0))
+
+    resolution = source.resolve_candidate_daily_bars(
+        ["AAPL"], _SESSION, processed_at, timedelta(hours=24)
+    )
+
+    assert mock_download.call_count == 1
+    assert set(resolution.bars) == {("AAPL", _SESSION)}
+    assert resolution.attempts[0].validation_error is None
+    assert resolution.recovered_tickers == frozenset()
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_candidate_bars_validate_recovery_fetch_against_post_fetch_clock(mock_download):
+    columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
+    mock_download.return_value = pd.DataFrame(
+        [[100, 103, 99, 102]],
+        index=pd.DatetimeIndex([_SESSION.isoformat()]),
+        columns=columns,
+    )
+    processed_at = _AS_OF
+    clock = [
+        datetime(2026, 7, 31, 19, tzinfo=timezone.utc),
+        processed_at + timedelta(seconds=1),
+        processed_at + timedelta(seconds=2),
+        processed_at + timedelta(seconds=3),
+    ]
+    source = YFinancePriceSource(now=lambda: clock.pop(0))
+
+    resolution = source.resolve_candidate_daily_bars(
+        ["AAPL"], _SESSION, processed_at, timedelta(hours=24)
+    )
+
+    assert mock_download.call_count == 2
+    assert set(resolution.bars) == {("AAPL", _SESSION)}
+    assert resolution.attempts[0].validation_error == "pre-close AAPL/2026-07-31"
+    assert resolution.attempts[1].validation_error is None
+    assert resolution.recovered_tickers == frozenset({"AAPL"})
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_candidate_bars_refreshes_only_invalid_ticker_and_recovers_it(mock_download):
     mock_download.side_effect = [
         _candidate_frame(102, 204),
@@ -342,7 +396,12 @@ def test_candidate_bars_retry_pre_close_observation_and_recover(mock_download):
         index=pd.DatetimeIndex([_SESSION.isoformat()]),
         columns=columns,
     )
-    clock = [datetime(2026, 7, 31, 19, tzinfo=timezone.utc), _AS_OF]
+    clock = [
+        datetime(2026, 7, 31, 19, tzinfo=timezone.utc),
+        _AS_OF,
+        _AS_OF,
+        _AS_OF,
+    ]
     source = YFinancePriceSource(now=lambda: clock.pop(0))
 
     resolution = source.resolve_candidate_daily_bars(

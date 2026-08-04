@@ -240,12 +240,13 @@ class YFinancePriceSource:
         """Return valid candidate bars, retrying only initially invalid tickers once."""
         self._validate_range(tickers, session, session)
         frame, fetched_at = self._raw_frame(tickers, session, session, adjusted=False)
+        validation_at = max(processed_at, self._fetched_at())
         attempts: list[CandidateBarAttempt] = []
         bars: dict[tuple[str, date], MarketBar] = {}
         invalid_tickers: list[str] = []
         for ticker in tickers:
             bar, attempt = self._candidate_bar_attempt(
-                frame, ticker, tickers, session, fetched_at, 1, processed_at, max_age
+                frame, ticker, tickers, session, fetched_at, 1, validation_at, max_age
             )
             attempts.append(attempt)
             if attempt.validation_error is not None:
@@ -259,13 +260,14 @@ class YFinancePriceSource:
         if invalid_tickers:
             for ticker in invalid_tickers:
                 refreshed = self.refresh_daily_bars([ticker], session, session)
+                validation_at = max(processed_at, self._fetched_at())
                 bar = refreshed.bars.get((ticker, session))
                 raw_attempt = refreshed.attempts[0]
                 attempt = (
                     raw_attempt
                     if raw_attempt.validation_error is not None
                     else self._candidate_attempt_from_bar(
-                        ticker, session, 2, bar, processed_at, max_age
+                        ticker, session, 2, bar, validation_at, max_age
                     )
                 )
                 attempts.append(attempt)
