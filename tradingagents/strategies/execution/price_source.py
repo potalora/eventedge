@@ -341,6 +341,10 @@ class YFinancePriceSource:
             try:
                 raw = _frame_value(frame, field, normalized, ticker, pd.Timestamp(session))
                 values.append(_decimal_bar_value(raw, ticker, session, field.lower()))
+            except KeyError:
+                values.append(None)
+                error = f"missing {ticker}/{session}"
+                break
             except BarValidationError as exc:
                 values.append(None)
                 error = str(exc)

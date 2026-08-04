@@ -246,6 +246,30 @@ def test_candidate_bars_refreshes_only_invalid_ticker_and_recovers_it(mock_downl
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_candidate_bars_retry_missing_initial_session_row_and_recovers(mock_download):
+    columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
+    mock_download.side_effect = [
+        pd.DataFrame(index=pd.DatetimeIndex([]), columns=columns),
+        pd.DataFrame(
+            [[100, 103, 99, 102]],
+            index=pd.DatetimeIndex([_SESSION.isoformat()]),
+            columns=columns,
+        ),
+    ]
+    source = YFinancePriceSource(now=lambda: _AS_OF)
+
+    resolution = source.resolve_candidate_daily_bars(
+        ["AAPL"], _SESSION, _AS_OF, timedelta(hours=24)
+    )
+
+    assert mock_download.call_count == 2
+    assert resolution.bars[("AAPL", _SESSION)].close == Decimal("102")
+    assert resolution.recovered_tickers == frozenset({"AAPL"})
+    assert resolution.attempts[0].validation_error == "missing AAPL/2026-07-31"
+    assert resolution.attempts[1].validation_error is None
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_candidate_bars_quarantines_only_persistently_invalid_ticker(mock_download):
     mock_download.side_effect = [
         _candidate_frame(102, 204),
