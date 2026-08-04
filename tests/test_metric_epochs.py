@@ -181,14 +181,15 @@ def test_hash_change_closes_old_epoch_on_previous_session_and_opens_new(
     manager = EpochManager(store)
     first = manager.ensure_epoch(_context(), date(2026, 8, 3))
 
-    second = manager.ensure_epoch(
-        _context(config_hash="config-b"), date(2026, 8, 5)
-    )
+    second = manager.ensure_epoch(_context(config_hash="config-b"), date(2026, 8, 5))
 
     assert first.epoch_id != second.epoch_id
-    assert second.epoch_id == manager.ensure_epoch(
-        _context(config_hash="config-b"), date(2026, 8, 6)
-    ).epoch_id
+    assert (
+        second.epoch_id
+        == manager.ensure_epoch(
+            _context(config_hash="config-b"), date(2026, 8, 6)
+        ).epoch_id
+    )
     assert store.load_epoch(first.epoch_id) == replace(
         first,
         end_session=date(2026, 8, 4),
@@ -221,9 +222,7 @@ def test_critical_gap_invalidation_is_durable_and_idempotent(tmp_path) -> None:
     epoch = manager.ensure_epoch(_context(), date(2026, 8, 3))
 
     invalid = manager.invalidate_current(date(2026, 8, 4), "missing_mark")
-    repeated = store.invalidate_epoch(
-        epoch.epoch_id, date(2026, 8, 4), "missing_mark"
-    )
+    repeated = store.invalidate_epoch(epoch.epoch_id, date(2026, 8, 4), "missing_mark")
 
     assert repeated == invalid
     assert MetricStore(store.path).load_epoch(epoch.epoch_id) == invalid
@@ -266,12 +265,13 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
             )
         }
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-    assert tables == {
-        "critical_gap_markers",
-        "metric_epochs",
-        "outcomes",
-        "strategy_health",
-    }
+        assert tables == {
+            "candidate_bar_recoveries",
+            "critical_gap_markers",
+            "metric_epochs",
+            "outcomes",
+            "strategy_health",
+        }
     assert journal_mode == "wal"
 
 
@@ -295,7 +295,9 @@ def test_pending_critical_gap_round_trips_and_completes_idempotently(tmp_path) -
     assert MetricStore(path).load_critical_gap(marker.marker_id) == completed
 
 
-def test_critical_gap_schema_migrates_existing_store_and_indexes_pending(tmp_path) -> None:
+def test_critical_gap_schema_migrates_existing_store_and_indexes_pending(
+    tmp_path,
+) -> None:
     path = tmp_path / "metrics_v2.sqlite3"
     with sqlite3.connect(path) as connection:
         connection.executescript(
@@ -420,9 +422,7 @@ def test_immutable_epoch_outcome_and_health_writes_are_idempotent(tmp_path) -> N
     with pytest.raises(ValueError, match="immutable outcome_id"):
         store.upsert_outcome(replace(outcome, ticker="MSFT"))
     with pytest.raises(ValueError, match="immutable health_id"):
-        store.save_strategy_health(
-            replace(health, evidence={"provider": "other"})
-        )
+        store.save_strategy_health(replace(health, evidence={"provider": "other"}))
 
 
 def test_round_trip_optional_decimals_evidence_status_and_ordering(tmp_path) -> None:
@@ -457,12 +457,11 @@ def test_closure_allows_only_exact_open_transition(tmp_path) -> None:
     store = MetricStore(tmp_path / "metrics_v2.sqlite3")
     store.save_epoch(_epoch())
 
-    closed = store.close_epoch(
-        "epoch-1", date(2026, 8, 4), "manual_boundary", False
+    closed = store.close_epoch("epoch-1", date(2026, 8, 4), "manual_boundary", False)
+    assert (
+        store.close_epoch("epoch-1", date(2026, 8, 4), "manual_boundary", False)
+        == closed
     )
-    assert store.close_epoch(
-        "epoch-1", date(2026, 8, 4), "manual_boundary", False
-    ) == closed
     with pytest.raises(ValueError, match="conflicting epoch closure"):
         store.invalidate_epoch("epoch-1", date(2026, 8, 4), "critical_gap")
 
