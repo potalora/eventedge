@@ -41,6 +41,7 @@ _STRESS_BOOKS = frozenset(
 )
 _SCENARIO_BOOKS = _HEADLINE_BOOKS | _STRESS_BOOKS
 _POLICY_AUDIT_MAX_RECORDS = 4096
+_CANDIDATE_RECOVERY_REPORT_LIMIT = 1_000
 _POLICY_AUDIT_DECISIONS = frozenset({"accepted", "trimmed", "rejected"})
 
 
@@ -457,6 +458,12 @@ class MetricsService:
                 "stress_tests": {},
                 "cohort_series": {},
                 "candidate_bar_recoveries": [],
+                "candidate_bar_recovery_scope": {
+                    "total_records": 0,
+                    "returned_records": 0,
+                    "truncated": False,
+                    "order": "newest_first",
+                },
                 "dependent_scenarios": True,
                 "policy_audit": {
                     "aggregation_prohibited": True,
@@ -480,10 +487,18 @@ class MetricsService:
             cohort_id: self._policy_audit_for_cohort(cohort_id, epoch.epoch_id)
             for cohort_id in self.cohort_ids
         }
-        candidate_bar_recoveries = [
-            asdict(record)
-            for record in self.store.read_candidate_bar_recoveries(epoch.epoch_id)
-        ]
+        candidate_records, candidate_total = (
+            self.store.read_candidate_bar_recovery_window(
+                epoch.epoch_id, limit=_CANDIDATE_RECOVERY_REPORT_LIMIT
+            )
+        )
+        candidate_bar_recoveries = [asdict(record) for record in candidate_records]
+        candidate_bar_recovery_scope = {
+            "total_records": candidate_total,
+            "returned_records": len(candidate_records),
+            "truncated": candidate_total > len(candidate_records),
+            "order": "newest_first",
+        }
         final_epoch = self.store.load_epoch(epoch.epoch_id)
         self._assert_epoch_unchanged(epoch, final_epoch)
         if epoch_id is None:
@@ -539,6 +554,7 @@ class MetricsService:
             # Persisted candidate staging evidence only.  This reports recovery
             # and quarantine without synthesizing portfolio performance.
             "candidate_bar_recoveries": candidate_bar_recoveries,
+            "candidate_bar_recovery_scope": candidate_bar_recovery_scope,
             "dependent_scenarios": True,
             # Policy audit evidence is per dependent scenario only.  Never
             # aggregate it into a cross-cohort event count or alpha statistic.

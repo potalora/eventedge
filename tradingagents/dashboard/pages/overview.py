@@ -134,6 +134,7 @@ def _render_gen_card(gen: dict) -> None:
 def _render_candidate_recovery(metrics: dict) -> None:
     """Show persisted candidate staging evidence without performance inference."""
     records = metrics.get("candidate_bar_recoveries") or []
+    scope = metrics.get("candidate_bar_recovery_scope") or {}
     if not records:
         st.caption("Candidate market-data recovery — no persisted records.")
         return
@@ -150,8 +151,17 @@ def _render_candidate_recovery(metrics: dict) -> None:
             f"{len(identities) if isinstance(identities, (list, tuple)) else 'unknown'} "
             "signal identities)"
         )
+    prefix = "Candidate market-data recovery — persisted staging evidence; "
+    if scope.get("truncated") is True:
+        prefix += (
+            "Showing newest "
+            f"{int(scope.get('returned_records', len(records))):,} of "
+            f"{int(scope.get('total_records', len(records))):,} persisted recovery "
+            "records; older evidence remains durable. "
+        )
     st.caption(
-        "Candidate market-data recovery — persisted staging evidence; quarantined "
+        prefix
+        + "quarantined "
         "records are execution-valid degraded outcomes and do not revise portfolio "
         "performance. "
         + " | ".join(rows)

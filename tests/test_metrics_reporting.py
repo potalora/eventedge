@@ -234,6 +234,39 @@ def test_overview_discloses_candidate_recovery_and_quarantine(monkeypatch):
     assert "execution-valid degraded" in candidate_captions
 
 
+def test_report_and_dashboard_disclose_candidate_recovery_truncation(monkeypatch):
+    recovery = {
+        "session": "2026-08-31",
+        "ticker": "ALX",
+        "outcome": "quarantined",
+        "attempts": [{"attempt": 1}, {"attempt": 2}],
+        "signal_identities": [
+            {"event_key": "event-alx", "strategy": "litigation"}
+        ],
+    }
+    metrics = {
+        "epoch": {"epoch_id": "epoch-1"},
+        "headline_books": {},
+        "stress_tests": {},
+        "candidate_bar_recoveries": [recovery],
+        "candidate_bar_recovery_scope": {
+            "total_records": 1_001,
+            "returned_records": 1_000,
+            "truncated": True,
+            "order": "newest_first",
+        },
+    }
+
+    rendered_report = render_generation_report(
+        "2026-08-31", {"gen_id": "gen_004"}, metrics
+    )
+    rendered_dashboard = _render_overview_card(monkeypatch, metrics)
+
+    disclosure = "Showing newest 1,000 of 1,001 persisted recovery records"
+    assert disclosure in rendered_report
+    assert disclosure in " ".join(rendered_dashboard.captions)
+
+
 def test_dashboard_surfaces_have_no_legacy_accuracy_or_local_aggregation() -> None:
     dashboard = Path("tradingagents/dashboard")
     sources = "\n".join(path.read_text() for path in dashboard.rglob("*.py"))

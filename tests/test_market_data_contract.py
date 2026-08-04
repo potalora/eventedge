@@ -389,6 +389,60 @@ def test_candidate_bars_refreshes_each_invalid_ticker_individually(mock_download
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_candidate_flat_multi_ticker_batch_retries_each_ticker_then_quarantines(
+    mock_download,
+):
+    mock_download.side_effect = [
+        pd.DataFrame(
+            [[100, 103, 99, 102]],
+            index=pd.DatetimeIndex([_SESSION.isoformat()]),
+            columns=["Open", "High", "Low", "Close"],
+        ),
+        pd.DataFrame(
+            [[100, 103, 99, 102]],
+            index=pd.DatetimeIndex([_SESSION.isoformat()]),
+            columns=["Open", "High", "Low", "Close"],
+        ),
+        pd.DataFrame(
+            [[200, 203, 199, 204]],
+            index=pd.DatetimeIndex([_SESSION.isoformat()]),
+            columns=["Open", "High", "Low", "Close"],
+        ),
+    ]
+    source = YFinancePriceSource(now=lambda: _AS_OF)
+
+    resolution = source.resolve_candidate_daily_bars(
+        ["AAPL", "MSFT"], _SESSION, _AS_OF, timedelta(hours=24)
+    )
+
+    assert [call.args[0] for call in mock_download.call_args_list] == [
+        ["AAPL", "MSFT"],
+        ["AAPL"],
+        ["MSFT"],
+    ]
+    assert resolution.recovered_tickers == frozenset({"AAPL"})
+    assert resolution.quarantined_tickers == frozenset({"MSFT"})
+    assert set(resolution.bars) == {("AAPL", _SESSION)}
+    assert [
+        (attempt.ticker, attempt.attempt, attempt.validation_error)
+        for attempt in resolution.attempts
+    ] == [
+        (
+            "AAPL",
+            1,
+            "ambiguous flat columns for multiple requested tickers",
+        ),
+        (
+            "MSFT",
+            1,
+            "ambiguous flat columns for multiple requested tickers",
+        ),
+        ("AAPL", 2, None),
+        ("MSFT", 2, "incoherent MSFT/2026-07-31"),
+    ]
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_candidate_bars_retry_pre_close_observation_and_recover(mock_download):
     columns = pd.MultiIndex.from_product([["Open", "High", "Low", "Close"], ["AAPL"]])
     mock_download.return_value = pd.DataFrame(

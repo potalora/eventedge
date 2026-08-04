@@ -267,6 +267,7 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         assert tables == {
             "candidate_bar_recoveries",
+            "candidate_signal_identity_bindings",
             "critical_gap_markers",
             "metric_epochs",
             "outcomes",

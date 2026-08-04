@@ -44,16 +44,31 @@ def _book_table(books: dict[str, object]) -> list[str]:
     )
 
 
-def _candidate_recovery_table(records: object) -> list[str]:
+def _candidate_recovery_table(records: object, scope: object = None) -> list[str]:
     rows = records if isinstance(records, list) else []
+    recovery_scope = scope if isinstance(scope, dict) else {}
     lines = [
         "## Candidate market-data recovery",
         "",
         "Persisted staging evidence only. A quarantined candidate is an execution-valid degraded outcome; it does not create or revise portfolio performance.",
-        "",
-        "| Session | Ticker | Outcome | Attempts | Signal identities |",
-        "|---|---|---|---:|---:|",
     ]
+    if recovery_scope.get("truncated") is True:
+        lines.extend(
+            [
+                "",
+                "Showing newest "
+                f"{int(recovery_scope.get('returned_records', len(rows))):,} of "
+                f"{int(recovery_scope.get('total_records', len(rows))):,} "
+                "persisted recovery records; older evidence remains durable.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "| Session | Ticker | Outcome | Attempts | Signal identities |",
+            "|---|---|---|---:|---:|",
+        ]
+    )
     for value in rows:
         record = value if isinstance(value, dict) else {}
         attempts = record.get("attempts")
@@ -122,7 +137,13 @@ def render_generation_report(
         lines.append(
             "| No governed metric books available. | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |"
         )
-    lines += ["", *_candidate_recovery_table(report.get("candidate_bar_recoveries"))]
+    lines += [
+        "",
+        *_candidate_recovery_table(
+            report.get("candidate_bar_recoveries"),
+            report.get("candidate_bar_recovery_scope"),
+        ),
+    ]
     return "\n".join(lines) + "\n"
 
 

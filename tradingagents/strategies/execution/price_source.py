@@ -245,9 +245,31 @@ class YFinancePriceSource:
         bars: dict[tuple[str, date], MarketBar] = {}
         invalid_tickers: list[str] = []
         for ticker in tickers:
-            bar, attempt = self._candidate_bar_attempt(
-                frame, ticker, tickers, session, fetched_at, 1, validation_at, max_age
-            )
+            try:
+                bar, attempt = self._candidate_bar_attempt(
+                    frame,
+                    ticker,
+                    tickers,
+                    session,
+                    fetched_at,
+                    1,
+                    validation_at,
+                    max_age,
+                )
+            except BarValidationError as error:
+                bar = None
+                attempt = CandidateBarAttempt(
+                    ticker=ticker,
+                    session=session,
+                    attempt=1,
+                    source="yfinance",
+                    fetched_at=fetched_at,
+                    open=None,
+                    high=None,
+                    low=None,
+                    close=None,
+                    validation_error=str(error),
+                )
             attempts.append(attempt)
             if attempt.validation_error is not None:
                 invalid_tickers.append(ticker)

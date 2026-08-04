@@ -7,7 +7,10 @@ import sqlite3
 
 import pytest
 
-from tradingagents.strategies.metrics.models import CandidateBarRecoveryRecord
+from tradingagents.strategies.metrics.models import (
+    CandidateBarRecoveryRecord,
+    CandidateSignalIdentityBinding,
+)
 from tradingagents.strategies.metrics.store import MetricStore
 
 
@@ -88,6 +91,43 @@ def test_one_attempt_accepted_candidate_round_trips(tmp_path) -> None:
     assert store.read_candidate_bar_recoveries("epoch-1") == (record,)
 
 
+def test_candidate_signal_identity_binding_round_trips_immutably(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    binding = CandidateSignalIdentityBinding(
+        binding_id="candidate-signal-binding-epoch-1-2026-08-03",
+        epoch_id="epoch-1",
+        session=date(2026, 8, 3),
+        identities=(
+            {
+                "horizon": "30d",
+                "ticker": "AAPL",
+                "event_key": "event-aapl-30d",
+                "strategy": "litigation",
+            },
+            {
+                "horizon": "3m",
+                "ticker": "AAPL",
+                "event_key": "event-aapl-3m",
+                "strategy": "litigation",
+            },
+        ),
+    )
+
+    store.save_candidate_signal_identity_binding(binding)
+    store.save_candidate_signal_identity_binding(binding)
+
+    assert (
+        MetricStore(store.path).read_candidate_signal_identity_binding(
+            "epoch-1", date(2026, 8, 3)
+        )
+        == binding
+    )
+    with pytest.raises(ValueError, match="unequal payload"):
+        store.save_candidate_signal_identity_binding(
+            replace(binding, identities=binding.identities[:1])
+        )
+
+
 def test_candidate_bar_recovery_rejects_unequal_duplicate_payload(tmp_path) -> None:
     store = MetricStore(tmp_path / "metrics.sqlite3")
     record = _record()
@@ -137,6 +177,12 @@ def test_legacy_read_only_store_has_no_candidate_bar_recoveries(tmp_path) -> Non
 
     assert store.read_only
     assert store.read_candidate_bar_recoveries("legacy-epoch") == ()
+    assert (
+        store.read_candidate_signal_identity_binding(
+            "legacy-epoch", date(2026, 8, 3)
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("price", [Decimal("NaN"), Decimal("Infinity")])

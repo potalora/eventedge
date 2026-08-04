@@ -129,6 +129,16 @@ class CandidateBarRecoveryRecord:
 
 
 @dataclass(frozen=True)
+class CandidateSignalIdentityBinding:
+    """Immutable per-horizon signal identity universe for one staging session."""
+
+    binding_id: str
+    epoch_id: str
+    session: date
+    identities: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
 class PortfolioMetrics:
     cohort_id: str
     epoch_id: str
