@@ -198,6 +198,11 @@ def _run_staging_matrix(
             cohort["executor"], "validate_bound_context", lambda *_args: {}
         )
         monkeypatch.setattr(
+            cohort["executor"],
+            "validated_execution_reference_bars",
+            lambda *_args: {},
+        )
+        monkeypatch.setattr(
             ledger,
             "verify_session_phase_chain",
             lambda session, _phases, _ledger=ledger: (
