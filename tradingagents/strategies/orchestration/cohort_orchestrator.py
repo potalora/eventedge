@@ -25,6 +25,63 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _candidate_signal_identity_pairs(
+    signals: list[dict], ticker: str, session: date
+) -> tuple[tuple[str, str], ...]:
+    """Return the canonical, deterministic identities bound to candidate evidence."""
+    from tradingagents.strategies.orchestration.event_identity import (
+        ACTIVE_STRATEGY_NAMES,
+        canonical_event_key,
+    )
+
+    pairs = sorted(
+        {
+            (
+                (
+                    str(signal.get("metadata", {}).get("event_key"))
+                    if isinstance(signal.get("metadata"), dict)
+                    and signal["metadata"].get("event_key")
+                    and str(signal.get("strategy", "")).strip()
+                    not in ACTIVE_STRATEGY_NAMES
+                    else canonical_event_key(
+                        str(signal.get("strategy", "")).strip(),
+                        ticker,
+                        (
+                            signal["metadata"]
+                            if isinstance(signal.get("metadata"), dict)
+                            else {}
+                        ),
+                        session,
+                    )
+                ),
+                str(signal.get("strategy", "")).strip(),
+            )
+            for signal in signals
+            if str(signal.get("ticker", "")).strip().upper() == ticker
+        }
+    )
+    if not pairs or any(
+        not event_key or not strategy for event_key, strategy in pairs
+    ):
+        raise ValueError(f"candidate recovery identity is incomplete for {ticker}")
+    return tuple(pairs)
+
+
+def _candidate_replay_conflict_reason(tickers: list[str]) -> str:
+    """Build a clear bounded report reason for deterministic replay conflicts."""
+    displayed = [ticker[:32] for ticker in sorted(tickers)[:10]]
+    suffix = (
+        f" (+{len(tickers) - len(displayed)} more)"
+        if len(tickers) > 10
+        else ""
+    )
+    return (
+        "deterministic candidate replay identity conflict: "
+        + ", ".join(displayed)
+        + suffix
+    )
+
+
 def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
     """Count cohorts that errored in a ``run_daily`` results dict.
 
@@ -1351,6 +1408,43 @@ class CohortOrchestrator:
             )
             if record.ticker in candidate_only_tickers
         }
+        replay_identity_conflicts: list[str] = []
+        for ticker, record in existing_recoveries.items():
+            try:
+                current_pairs = _candidate_signal_identity_pairs(
+                    all_signals, ticker, session
+                )
+            except (TypeError, ValueError):
+                replay_identity_conflicts.append(ticker)
+                continue
+            stored_pairs = tuple(
+                sorted(
+                    (
+                        str(identity.get("event_key", "")),
+                        str(identity.get("strategy", "")),
+                    )
+                    for identity in record.signal_identities
+                )
+            )
+            if current_pairs != stored_pairs:
+                replay_identity_conflicts.append(ticker)
+        if replay_identity_conflicts:
+            reason = _candidate_replay_conflict_reason(replay_identity_conflicts)
+            existing_quarantines = sorted(
+                record.ticker
+                for record in existing_recoveries.values()
+                if record.outcome == "quarantined"
+            )
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": True,
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": existing_quarantines,
+                }
+            return results
         try:
             from tradingagents.strategies.execution.models import MarketBar
             from tradingagents.strategies.execution.price_source import (
@@ -1455,47 +1549,9 @@ class CohortOrchestrator:
                 quarantined_tickers.update(resolution.quarantined_tickers)
 
                 for ticker in sorted(resolution_tickers):
-                    from tradingagents.strategies.orchestration.event_identity import (
-                        ACTIVE_STRATEGY_NAMES,
-                        canonical_event_key,
+                    identities = _candidate_signal_identity_pairs(
+                        all_signals, ticker, session
                     )
-
-                    identities = sorted(
-                        {
-                            (
-                                (
-                                    str(signal.get("metadata", {}).get("event_key"))
-                                    if isinstance(signal.get("metadata"), dict)
-                                    and signal["metadata"].get("event_key")
-                                    and str(signal.get("strategy", "")).strip()
-                                    not in ACTIVE_STRATEGY_NAMES
-                                    else canonical_event_key(
-                                        str(signal.get("strategy", "")).strip(),
-                                        ticker,
-                                        (
-                                            signal["metadata"]
-                                            if isinstance(
-                                                signal.get("metadata"), dict
-                                            )
-                                            else {}
-                                        ),
-                                        session,
-                                    )
-                                ),
-                                str(signal.get("strategy", "")).strip(),
-                            )
-                            for signal in all_signals
-                            if str(signal.get("ticker", "")).strip().upper()
-                            == ticker
-                        }
-                    )
-                    if not identities or any(
-                        not event_key or not strategy
-                        for event_key, strategy in identities
-                    ):
-                        raise ValueError(
-                            f"candidate recovery identity is incomplete for {ticker}"
-                        )
                     attempts = tuple(
                         asdict(attempt)
                         for attempt in resolution.attempts
