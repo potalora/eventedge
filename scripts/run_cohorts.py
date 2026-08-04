@@ -34,6 +34,53 @@ logging.basicConfig(
 logger = logging.getLogger("run_cohorts")
 
 
+def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
+    """Return the alerting exit outcome for cohort execution results.
+
+    Candidate-data quarantine is a distinct degraded outcome: its cohort
+    execution is valid, but its performance must not be reported as a clean run.
+    Execution failures retain exit status 1; degraded runs use 2.
+    """
+    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        count_degraded_cohorts,
+        count_failed_cohorts,
+    )
+
+    n_failed, n_total, failed = count_failed_cohorts(result)
+    n_degraded, _, degraded = count_degraded_cohorts(result)
+    quarantined_tickers = sorted(
+        {
+            str(ticker)
+            for name in degraded
+            for ticker in result[name].get("candidate_bar_quarantines", [])
+        }
+    )
+    if n_failed:
+        message = f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
+        if n_degraded:
+            message += (
+                "; DEGRADED: "
+                f"{n_degraded}/{n_total} cohorts degraded (execution valid): "
+                f"{', '.join(degraded)}"
+            )
+            if quarantined_tickers:
+                message += "; quarantined tickers: " + ", ".join(
+                    quarantined_tickers
+                )
+        return 1, message
+
+    if n_degraded:
+        message = (
+            "DEGRADED: "
+            f"{n_degraded}/{n_total} cohorts degraded (execution valid): "
+            f"{', '.join(degraded)}"
+        )
+        if quarantined_tickers:
+            message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
+        return 2, message
+    return 0, ""
+
+
 def _raise_fd_limit() -> None:
     """Raise the soft file-descriptor limit (launchd default is 256, too low
     for the 13-source fetch fan-out). Prefer the shared helper; fall back to a
@@ -217,26 +264,24 @@ def main():
     print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
     print(json.dumps(result, indent=2, default=str))
 
-    # Surface cohort failures via exit code so a run where cohorts errored is
-    # never recorded as a clean success (2026-06-01: all 16 cohorts errored on
-    # FD exhaustion, but the run exited 0 and was logged successful).
+    # Surface both execution failures and candidate-data quarantine via distinct
+    # nonzero outcomes.  Quarantine keeps P0 execution valid but must never be
+    # recorded as a clean performance run.
     try:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import (
-            count_failed_cohorts,
-        )
-
-        n_failed, n_total, failed = count_failed_cohorts(result)
+        exit_code, message = _cohort_run_exit_status(result)
     except Exception:
         failed = [
             k for k, v in result.items() if isinstance(v, dict) and v.get("error")
         ]
-        n_failed, n_total = len(failed), len(result)
-    if n_failed:
-        print(
-            f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}",
-            file=sys.stderr,
+        exit_code = 1 if failed else 0
+        message = (
+            f"ERROR: {len(failed)}/{len(result)} cohorts failed: {', '.join(failed)}"
+            if failed
+            else ""
         )
-        sys.exit(1)
+    if exit_code:
+        print(message, file=sys.stderr)
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

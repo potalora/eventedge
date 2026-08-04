@@ -14,6 +14,7 @@ import yfinance as yf
 from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
 from tradingagents.strategies.execution.ids import stable_id
 from tradingagents.strategies.execution.models import CorporateAction, MarketBar
+from tradingagents.strategies.orchestration.trading_calendar import session_close
 
 
 class BarValidationError(ValueError):
@@ -39,6 +40,32 @@ class AdjustedClose:
             raise TypeError("close must be Decimal")
 
 
+@dataclass(frozen=True)
+class CandidateBarAttempt:
+    """One candidate-bar retrieval, including any validation failure."""
+
+    ticker: str
+    session: date
+    attempt: int
+    source: str
+    fetched_at: datetime
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    validation_error: str | None
+
+
+@dataclass(frozen=True)
+class CandidateBarResolution:
+    """Validated candidate bars plus the evidence for one recovery retry."""
+
+    bars: dict[tuple[str, date], MarketBar]
+    attempts: tuple[CandidateBarAttempt, ...]
+    recovered_tickers: frozenset[str]
+    quarantined_tickers: frozenset[str]
+
+
 class PriceSource(Protocol):
     """Inclusive daily market-data boundary for the authoritative ledger."""
 
@@ -60,6 +87,14 @@ class PriceSource(Protocol):
         start_session: date,
         end_session_inclusive: date,
     ) -> dict[tuple[str, date], AdjustedClose]: ...
+
+    def resolve_candidate_daily_bars(
+        self,
+        tickers: list[str],
+        session: date,
+        processed_at: datetime,
+        max_age: timedelta,
+    ) -> CandidateBarResolution: ...
 
 
 def validate_required_bars(
@@ -194,6 +229,213 @@ class YFinancePriceSource:
             bars, set(tickers), end_session_inclusive, self._fetched_at()
         )
         return bars
+
+    def resolve_candidate_daily_bars(
+        self,
+        tickers: list[str],
+        session: date,
+        processed_at: datetime,
+        max_age: timedelta,
+    ) -> CandidateBarResolution:
+        """Return valid candidate bars, retrying only initially invalid tickers once."""
+        self._validate_range(tickers, session, session)
+        frame, fetched_at = self._raw_frame(tickers, session, session, adjusted=False)
+        validation_at = max(processed_at, self._fetched_at())
+        attempts: list[CandidateBarAttempt] = []
+        bars: dict[tuple[str, date], MarketBar] = {}
+        invalid_tickers: list[str] = []
+        for ticker in tickers:
+            try:
+                bar, attempt = self._candidate_bar_attempt(
+                    frame,
+                    ticker,
+                    tickers,
+                    session,
+                    fetched_at,
+                    1,
+                    validation_at,
+                    max_age,
+                )
+            except BarValidationError as error:
+                bar = None
+                attempt = CandidateBarAttempt(
+                    ticker=ticker,
+                    session=session,
+                    attempt=1,
+                    source="yfinance",
+                    fetched_at=fetched_at,
+                    open=None,
+                    high=None,
+                    low=None,
+                    close=None,
+                    validation_error=str(error),
+                )
+            attempts.append(attempt)
+            if attempt.validation_error is not None:
+                invalid_tickers.append(ticker)
+            else:
+                assert bar is not None
+                bars[(ticker, session)] = bar
+
+        recovered_tickers: set[str] = set()
+        quarantined_tickers: set[str] = set()
+        if invalid_tickers:
+            for ticker in invalid_tickers:
+                refreshed = self.refresh_daily_bars([ticker], session, session)
+                validation_at = max(processed_at, self._fetched_at())
+                bar = refreshed.bars.get((ticker, session))
+                raw_attempt = refreshed.attempts[0]
+                attempt = (
+                    raw_attempt
+                    if raw_attempt.validation_error is not None
+                    else self._candidate_attempt_from_bar(
+                        ticker, session, 2, bar, validation_at, max_age
+                    )
+                )
+                attempts.append(attempt)
+                if attempt.validation_error is None and bar is not None:
+                    bars[(ticker, session)] = bar
+                    recovered_tickers.add(ticker)
+                else:
+                    quarantined_tickers.add(ticker)
+        return CandidateBarResolution(
+            bars=bars,
+            attempts=tuple(attempts),
+            recovered_tickers=frozenset(recovered_tickers),
+            quarantined_tickers=frozenset(quarantined_tickers),
+        )
+
+    def refresh_daily_bars(
+        self,
+        tickers: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+    ) -> CandidateBarResolution:
+        """Fetch raw daily bars without consulting or updating the raw-frame cache."""
+        self._validate_range(tickers, start_session, end_session_inclusive)
+        frame = yf.download(
+            normalize_tickers(tickers),
+            start=start_session.isoformat(),
+            end=(end_session_inclusive + timedelta(days=1)).isoformat(),
+            auto_adjust=False,
+            actions=True,
+            progress=False,
+            timeout=30,
+        )
+        fetched_at = self._fetched_at()
+        bars: dict[tuple[str, date], MarketBar] = {}
+        attempts: list[CandidateBarAttempt] = []
+        for ticker in tickers:
+            bar, attempt = self._candidate_bar_attempt(
+                frame,
+                ticker,
+                tickers,
+                end_session_inclusive,
+                fetched_at,
+                2,
+                fetched_at,
+                timedelta.max,
+            )
+            attempts.append(attempt)
+            if bar is not None:
+                bars[(ticker, end_session_inclusive)] = bar
+        return CandidateBarResolution(
+            bars=bars,
+            attempts=tuple(attempts),
+            recovered_tickers=frozenset(),
+            quarantined_tickers=frozenset(),
+        )
+
+    def _candidate_bar_attempt(
+        self,
+        frame: pd.DataFrame,
+        ticker: str,
+        requested_tickers: list[str],
+        session: date,
+        fetched_at: datetime,
+        attempt: int,
+        processed_at: datetime,
+        max_age: timedelta,
+    ) -> tuple[MarketBar | None, CandidateBarAttempt]:
+        _require_flat_frame_provenance(frame, normalize_tickers(requested_tickers))
+        normalized = normalize_tickers([ticker])[0]
+        values: list[Decimal | None] = []
+        error: str | None = None
+        for field in ("Open", "High", "Low", "Close"):
+            try:
+                raw = _frame_value(frame, field, normalized, ticker, pd.Timestamp(session))
+                values.append(_decimal_bar_value(raw, ticker, session, field.lower()))
+            except KeyError:
+                values.append(None)
+                error = f"missing {ticker}/{session}"
+                break
+            except BarValidationError as exc:
+                values.append(None)
+                error = str(exc)
+                break
+        values.extend([None] * (4 - len(values)))
+        if error is not None:
+            return None, CandidateBarAttempt(
+                ticker=ticker,
+                session=session,
+                attempt=attempt,
+                source="yfinance",
+                fetched_at=fetched_at,
+                open=values[0],
+                high=values[1],
+                low=values[2],
+                close=values[3],
+                validation_error=error,
+            )
+        bar = MarketBar(
+            ticker=ticker,
+            session=session,
+            open=values[0],  # type: ignore[arg-type]
+            high=values[1],  # type: ignore[arg-type]
+            low=values[2],  # type: ignore[arg-type]
+            close=values[3],  # type: ignore[arg-type]
+            source="yfinance",
+            fetched_at=fetched_at,
+            adjusted=False,
+        )
+        return bar, self._candidate_attempt_from_bar(
+            ticker, session, attempt, bar, processed_at, max_age, error
+        )
+
+    @staticmethod
+    def _candidate_attempt_from_bar(
+        ticker: str,
+        session: date,
+        attempt: int,
+        bar: MarketBar | None,
+        processed_at: datetime,
+        max_age: timedelta,
+        conversion_error: str | None = None,
+    ) -> CandidateBarAttempt:
+        error = conversion_error
+        if bar is None and error is None:
+            error = f"missing {ticker}/{session}"
+        if bar is not None and error is None:
+            try:
+                validate_required_bars(
+                    {(ticker, session): bar}, {ticker}, session, processed_at, max_age
+                )
+            except BarValidationError as exc:
+                error = str(exc)
+        if bar is not None and error is None and bar.fetched_at < session_close(session):
+            error = f"pre-close {ticker}/{session}"
+        return CandidateBarAttempt(
+            ticker=ticker,
+            session=session,
+            attempt=attempt,
+            source=bar.source if bar is not None else "yfinance",
+            fetched_at=bar.fetched_at if bar is not None else processed_at,
+            open=bar.open if bar is not None else None,
+            high=bar.high if bar is not None else None,
+            low=bar.low if bar is not None else None,
+            close=bar.close if bar is not None else None,
+            validation_error=error,
+        )
 
     def get_corporate_actions(
         self, tickers: list[str], session: date

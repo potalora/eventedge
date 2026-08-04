@@ -344,6 +344,7 @@ class AuthoritativePriceSource:
         self.raw_calls: list[tuple[tuple[str, ...], date]] = []
         self.action_calls: list[tuple[tuple[str, ...], date]] = []
         self.benchmark_calls: list[date] = []
+        self._raw_fetched_at: dict[date, datetime] = {}
 
     def get_daily_bars(
         self, tickers, start_session, end_session_inclusive, adjusted=False
@@ -352,7 +353,9 @@ class AuthoritativePriceSource:
         assert adjusted is False
         session = start_session
         self.raw_calls.append((tuple(sorted(tickers)), session))
-        fetched_at = datetime.now(timezone.utc)
+        fetched_at = self._raw_fetched_at.setdefault(
+            session, datetime.now(timezone.utc)
+        )
         return {
             (ticker, session): MarketBar(
                 ticker,
@@ -955,9 +958,7 @@ class TestIdempotencyDoubleRun:
         assert epoch is not None and epoch.status == "invalid"
         assert executor.metric_store.read_outcomes(epoch.epoch_id) == ()
 
-    def test_candidate_reference_gap_closes_epoch_without_refetch_or_staging(
-        self, tmp_path
-    ):
+    def test_candidate_reference_gap_preserves_valid_p0_without_staging(self, tmp_path):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
         )
@@ -969,25 +970,33 @@ class TestIdempotencyDoubleRun:
             _ for _ in ()
         ).throw(AssertionError("staging must stop after candidate reference gap"))
 
-        with (
-            patch(
-                "tradingagents.strategies.orchestration.session_executor.ensure_reference_bars",
-                side_effect=RuntimeError("deterministic candidate reference gap"),
-            ),
-            pytest.raises(RuntimeError, match="deterministic candidate reference gap"),
+        with patch(
+            "tradingagents.strategies.orchestration.session_executor.ensure_reference_bars",
+            side_effect=RuntimeError("deterministic candidate reference gap"),
         ):
-            orchestrator.run_daily(session.isoformat())
+            result = orchestrator.run_daily(session.isoformat())
 
         epoch_id = orchestrator._epoch_id
         epoch = store.load_epoch(epoch_id)
-        assert epoch.status == "invalid" and epoch.end_session == session
+        assert result["cohort_0"] == {
+            "error": True,
+            "invalid_reason": (
+                "candidate reference-bar validation failed: "
+                "deterministic candidate reference gap"
+            ),
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": [],
+        }
+        assert epoch.status == "open" and epoch.end_session is None
         assert store.pending_critical_gap() is None
         with sqlite3.connect(store.path) as connection:
             assert (
                 connection.execute(
-                    "SELECT COUNT(*) FROM critical_gap_markers WHERE status = 'completed'"
+                    "SELECT COUNT(*) FROM critical_gap_markers"
                 ).fetchone()[0]
-                == 1
+                == 0
             )
         snapshot = cohort["ledger"].read_snapshots(
             session, session, epoch_id=epoch_id, valid_only=True
@@ -998,7 +1007,7 @@ class TestIdempotencyDoubleRun:
             len(source.raw_calls),
             len(source.action_calls),
             len(source.benchmark_calls),
-        ) == (0, 0, 1)
+        ) == (1, 1, 1)
 
         cohort["engine"].screen_and_stage = original_stage
         later_session = next_session(session)
@@ -1008,7 +1017,7 @@ class TestIdempotencyDoubleRun:
         ):
             clean = orchestrator.run_daily(later_session.isoformat())
         assert not clean["cohort_0"]["error"]
-        assert orchestrator._epoch_id != epoch_id
+        assert orchestrator._epoch_id == epoch_id
 
     def test_execution_only_missing_required_bar_invalidates_shared_epoch(
         self, tmp_path
@@ -1863,8 +1872,11 @@ class TestIdempotencyDoubleRun:
         outcomes = cohort["executor"].metric_store.read_outcomes(orchestrator._epoch_id)
         assert not first["cohort_0"]["error"]
         assert not first["cohort_1"]["error"]
-        assert source.raw_calls[-1] == (("AAPL", "MSFT"), sessions[-1])
-        assert raw_after_exit == raw_before_exit + 2
+        assert source.raw_calls[-1] == (
+            ("AAPL", "BIL", "MSFT", "SPY"),
+            sessions[-1],
+        )
+        assert raw_after_exit == raw_before_exit + 1
         assert {(row.ticker, row.status) for row in outcomes} == {
             ("AAPL", "valid"),
             ("MSFT", "valid"),
@@ -1951,7 +1963,7 @@ class TestIdempotencyDoubleRun:
         assert fresh_required == ("AAPL", "MSFT", "ZZZZ")
         assert not replay["cohort_1"]["error"]
         assert source.raw_calls[before_replay] == (
-            ("AAPL", "MSFT", "ZZZZ"),
+            ("AAPL", "BIL", "MSFT", "SPY", "ZZZZ"),
             sessions[-1],
         )
 
@@ -2303,7 +2315,7 @@ class TestIdempotencyDoubleRun:
         assert first["cohort_1"]["error"]
         assert replay["cohort_0"]["replayed"]
         assert not replay["cohort_1"]["error"]
-        assert len(source.raw_calls) == before[0] + 1
+        assert len(source.raw_calls) == before[0]
         assert len(source.action_calls) == before[1]
         assert len(source.benchmark_calls) == before[2]
 
@@ -2587,7 +2599,7 @@ class TestThirtyDayCohortDivergence:
         assert not result["cohort_0"]["error"]
         assert not result["cohort_1"]["error"]
         assert len(source.benchmark_calls) == 1
-        assert len(source.raw_calls) == 1
+        assert len(source.raw_calls) == 2
         assert all(
             cohort["engine"]._adaptive_confidence is False
             and cohort["config"].learning_policy.mode == "disabled"

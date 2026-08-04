@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +23,124 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _candidate_signal_identity_pairs(
+    signals: list[dict], ticker: str, session: date
+) -> tuple[tuple[str, str], ...]:
+    """Return the canonical, deterministic identities bound to candidate evidence."""
+    from tradingagents.strategies.orchestration.event_identity import (
+        ACTIVE_STRATEGY_NAMES,
+        canonical_event_key,
+    )
+
+    pairs = sorted(
+        {
+            (
+                (
+                    str(signal.get("metadata", {}).get("event_key"))
+                    if isinstance(signal.get("metadata"), dict)
+                    and signal["metadata"].get("event_key")
+                    and str(signal.get("strategy", "")).strip()
+                    not in ACTIVE_STRATEGY_NAMES
+                    else canonical_event_key(
+                        str(signal.get("strategy", "")).strip(),
+                        ticker,
+                        (
+                            signal["metadata"]
+                            if isinstance(signal.get("metadata"), dict)
+                            else {}
+                        ),
+                        session,
+                    )
+                ),
+                str(signal.get("strategy", "")).strip(),
+            )
+            for signal in signals
+            if str(signal.get("ticker", "")).strip().upper() == ticker
+        }
+    )
+    if not pairs or any(
+        not event_key or not strategy for event_key, strategy in pairs
+    ):
+        raise ValueError(f"candidate recovery identity is incomplete for {ticker}")
+    return tuple(pairs)
+
+
+def _candidate_replay_conflict_reason(tickers: list[str]) -> str:
+    """Build a clear bounded report reason for deterministic replay conflicts."""
+    displayed = [ticker[:32] for ticker in sorted(tickers)[:10]]
+    suffix = (
+        f" (+{len(tickers) - len(displayed)} more)"
+        if len(tickers) > 10
+        else ""
+    )
+    return (
+        "deterministic candidate replay identity conflict: "
+        + ", ".join(displayed)
+        + suffix
+    )
+
+
+def _candidate_signal_identity_scope(
+    horizon_signals: dict[str, tuple[list[dict], dict, list[Any]]], session: date
+) -> tuple[dict[str, str], ...]:
+    """Return the canonical per-horizon identity universe for staging replay."""
+    identities: list[dict[str, str]] = []
+    for horizon, (signals, _regime, _health) in sorted(horizon_signals.items()):
+        tickers = sorted(
+            {
+                str(signal.get("ticker", "")).strip().upper()
+                for signal in signals
+                if str(signal.get("ticker", "")).strip()
+            }
+        )
+        for ticker in tickers:
+            identities.extend(
+                {
+                    "horizon": horizon,
+                    "ticker": ticker,
+                    "event_key": event_key,
+                    "strategy": strategy,
+                }
+                for event_key, strategy in _candidate_signal_identity_pairs(
+                    signals, ticker, session
+                )
+            )
+    return tuple(
+        sorted(
+            identities,
+            key=lambda identity: (
+                identity["horizon"],
+                identity["ticker"],
+                identity["event_key"],
+                identity["strategy"],
+            ),
+        )
+    )
+
+
+def _candidate_identity_conflict_tickers(
+    current: tuple[dict[str, str], ...], stored: tuple[dict[str, str], ...]
+) -> list[str]:
+    """Return tickers participating in an immutable identity-scope difference."""
+
+    def canonical(
+        identities: tuple[dict[str, str], ...],
+    ) -> set[tuple[str, str, str, str]]:
+        return {
+            (
+                identity["horizon"],
+                identity["ticker"],
+                identity["event_key"],
+                identity["strategy"],
+            )
+            for identity in identities
+        }
+
+    current_only = canonical(current) - canonical(stored)
+    differences = current_only or (canonical(stored) - canonical(current))
+    return sorted({identity[1] for identity in differences})
 
 
 def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
@@ -46,6 +164,27 @@ def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
         )
     )
     return len(failed), len(results), failed
+
+
+def count_degraded_cohorts(results: dict) -> tuple[int, int, list[str]]:
+    """Count candidate-quarantined cohorts without recasting them as failures.
+
+    A degraded cohort completed its execution lifecycle (``execution_valid``) but
+    quarantined candidate market data during staging.  It is reportable as a
+    data/availability failure. A result may also be an execution/staging failure;
+    callers preserve both classifications so candidate quarantine evidence is
+    not hidden by the failure exit status.
+
+    Returns ``(n_degraded, n_total, sorted_degraded_names)``.
+    """
+    degraded = sorted(
+        name
+        for name, result in results.items()
+        if isinstance(result, dict)
+        and result.get("degraded")
+        and result.get("execution_valid") is True
+    )
+    return len(degraded), len(results), degraded
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +927,10 @@ class CohortOrchestrator:
                     {
                         "error": True,
                         "invalid_reason": result_reason or marker.reason,
+                        "degraded": False,
+                        "execution_valid": False,
+                        "staging_valid": False,
+                        "candidate_bar_quarantines": [],
                     },
                 )
                 continue
@@ -801,6 +944,10 @@ class CohortOrchestrator:
                 "invalid_reason": ledger.session_invalid_reason(marker.gap_session)
                 or result_reason
                 or marker.reason,
+                "degraded": False,
+                "execution_valid": False,
+                "staging_valid": False,
+                "candidate_bar_quarantines": [],
             }
         affected_names = set(marker.affected_cohorts)
         for cohort in self.cohorts:
@@ -808,7 +955,14 @@ class CohortOrchestrator:
             if name not in affected_names:
                 results.setdefault(
                     name,
-                    {"error": True, "invalid_reason": marker.reason},
+                    {
+                        "error": True,
+                        "invalid_reason": marker.reason,
+                        "degraded": False,
+                        "execution_valid": False,
+                        "staging_valid": False,
+                        "candidate_bar_quarantines": [],
+                    },
                 )
         self._after_gap_p0_invalidation(marker)
         self.cohorts[0]["executor"].invalidate_metric_epoch(
@@ -818,6 +972,13 @@ class CohortOrchestrator:
         self._after_gap_metric_invalidation(marker)
         if recovery_error is None and audit_error is None:
             self._metric_store.complete_critical_gap(marker.marker_id)
+        for result in results.values():
+            if not isinstance(result, dict):
+                continue
+            result.setdefault("degraded", False)
+            result.setdefault("execution_valid", False)
+            result.setdefault("staging_valid", False)
+            result.setdefault("candidate_bar_quarantines", [])
         if original_error is not None:
             raise original_error
         if recovery_error is not None:
@@ -878,6 +1039,13 @@ class CohortOrchestrator:
             self._metric_epoch_context, session
         )
         self._epoch_id = metric_epoch.epoch_id
+        session_candidate_quarantines = sorted(
+            record.ticker
+            for record in self._metric_store.read_candidate_bar_recoveries(
+                self._epoch_id, session
+            )
+            if record.outcome == "quarantined"
+        )
         if metric_epoch.status == "invalid":
             for cohort in self.cohorts:
                 reason = cohort["ledger"].session_invalid_reason(session)
@@ -957,6 +1125,10 @@ class CohortOrchestrator:
                     ],
                     "replayed": True,
                     "error": False,
+                    "degraded": bool(session_candidate_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": not session_candidate_quarantines,
+                    "candidate_bar_quarantines": session_candidate_quarantines,
                 }
             elif len(snapshots) == 1 and phases_complete:
                 cohort["marked_account"] = snapshots[0]
@@ -1043,10 +1215,13 @@ class CohortOrchestrator:
                 )
             )
             benchmark_symbols = fresh_execution[0]["executor"].benchmark_symbols
+            governed_tickers = tuple(
+                sorted(set(required_tickers) | set(benchmark_symbols))
+            )
             try:
                 bundle = SessionExecutor.fetch_input_bundle(
                     session,
-                    required_tickers,
+                    governed_tickers,
                     self._price_source,
                     benchmark_symbols,
                 )
@@ -1125,11 +1300,14 @@ class CohortOrchestrator:
                     name = cohort["config"].name
                     executor = cohort["executor"]
                     required = executor.required_tickers(session, self._epoch_id)
+                    governed = tuple(
+                        sorted(set(required) | set(executor.benchmark_symbols))
+                    )
                     try:
                         executor.validate_execution_input_bundle(
                             session,
                             self._epoch_id,
-                            bundle.for_tickers(required),
+                            bundle.for_tickers(governed),
                             processed_at,
                         )
                     except CorporateActionBatchError as error:
@@ -1165,10 +1343,16 @@ class CohortOrchestrator:
                         required = cohort["executor"].required_tickers(
                             session, self._epoch_id
                         )
+                        governed = tuple(
+                            sorted(
+                                set(required)
+                                | set(cohort["executor"].benchmark_symbols)
+                            )
+                        )
                         lifecycle = cohort["executor"].execute_open_and_mark(
                             session,
                             self._epoch_id,
-                            bundle.for_tickers(required),
+                            bundle.for_tickers(governed),
                             {},
                             processed_at,
                         )
@@ -1258,6 +1442,333 @@ class CohortOrchestrator:
         all_signals = [
             signal for signals, _, _ in horizon_signals.values() for signal in signals
         ]
+        governed_reference_bars: dict[str, Any] = {}
+        session_governed_cohorts = [*completed_cohorts, *valid_cohorts]
+        try:
+            for cohort in valid_cohorts:
+                bars = cohort["executor"].validated_execution_reference_bars(
+                    session, self._epoch_id
+                )
+                for ticker, bar in bars.items():
+                    existing = governed_reference_bars.get(ticker)
+                    if existing is not None and existing != bar:
+                        raise ValueError(
+                            f"conflicting governed execution bar for {ticker}/{session}"
+                        )
+                    governed_reference_bars[ticker] = bar
+            for cohort in completed_cohorts:
+                bars = cohort["executor"].validated_execution_reference_bars(
+                    session, self._epoch_id
+                )
+                for ticker, bar in bars.items():
+                    existing = governed_reference_bars.get(ticker)
+                    if existing is not None and existing != bar:
+                        raise ValueError(
+                            f"conflicting governed execution bar for {ticker}/{session}"
+                        )
+                    governed_reference_bars[ticker] = bar
+        except Exception as error:
+            reason = f"governed execution reference-bar validation failed: {error}"
+            for cohort in session_governed_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": False,
+                    "execution_valid": False,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": [],
+                }
+            return self._stop_for_critical_market_data_gap(
+                session,
+                processed_at,
+                results,
+                bundle.bars if bundle is not None else {},
+                "critical_market_data_gap",
+                original_error=error,
+            )
+
+        signal_tickers = {
+            str(signal.get("ticker", "")).strip().upper()
+            for signal in all_signals
+            if str(signal.get("ticker", "")).strip()
+        }
+        candidate_only_tickers = signal_tickers - set(governed_reference_bars)
+        candidate_reference_bars: dict[str, Any] = {}
+        quarantined_tickers: set[str] = set()
+        stored_recoveries = {
+            record.ticker: record
+            for record in self._metric_store.read_candidate_bar_recoveries(
+                self._epoch_id, session
+            )
+        }
+        partial_replay = bool(completed_cohorts)
+        existing_quarantines = sorted(
+            record.ticker
+            for record in stored_recoveries.values()
+            if record.outcome == "quarantined"
+        )
+        replay_identity_conflicts: set[str] = set()
+        try:
+            from tradingagents.strategies.execution.ids import stable_id
+            from tradingagents.strategies.metrics.models import (
+                CandidateSignalIdentityBinding,
+            )
+
+            current_identity_scope = _candidate_signal_identity_scope(
+                horizon_signals, session
+            )
+            stored_identity_binding = (
+                self._metric_store.read_candidate_signal_identity_binding(
+                    self._epoch_id, session
+                )
+            )
+            if stored_identity_binding is None:
+                if partial_replay or stored_recoveries:
+                    replay_identity_conflicts.update(signal_tickers)
+                    replay_identity_conflicts.update(stored_recoveries)
+                    if not replay_identity_conflicts:
+                        replay_identity_conflicts.add("identity-scope")
+                else:
+                    self._metric_store.save_candidate_signal_identity_binding(
+                        CandidateSignalIdentityBinding(
+                            binding_id=stable_id(
+                                "candidate_signal_identity_binding",
+                                self._epoch_id,
+                                session,
+                            ),
+                            epoch_id=self._epoch_id,
+                            session=session,
+                            identities=current_identity_scope,
+                        )
+                    )
+            else:
+                unfinished_horizons = set(horizon_signals)
+                stored_unfinished_scope = tuple(
+                    identity
+                    for identity in stored_identity_binding.identities
+                    if identity.get("horizon") in unfinished_horizons
+                )
+                replay_identity_conflicts.update(
+                    _candidate_identity_conflict_tickers(
+                        current_identity_scope, stored_unfinished_scope
+                    )
+                )
+        except Exception as error:
+            reason = f"candidate identity validation failed: {error}"
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": bool(existing_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": existing_quarantines,
+                }
+            return results
+        if replay_identity_conflicts:
+            reason = _candidate_replay_conflict_reason(
+                sorted(replay_identity_conflicts)
+            )
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": bool(existing_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": existing_quarantines,
+                }
+            return results
+        existing_recoveries = stored_recoveries
+        try:
+            from tradingagents.strategies.execution.models import MarketBar
+            from tradingagents.strategies.execution.price_source import (
+                CandidateBarAttempt,
+                CandidateBarResolution,
+            )
+            from tradingagents.strategies.execution.ids import stable_id
+            from tradingagents.strategies.metrics.models import (
+                CandidateBarRecoveryRecord,
+            )
+
+            for ticker, record in existing_recoveries.items():
+                if record.outcome == "quarantined":
+                    quarantined_tickers.add(ticker)
+                    continue
+                evidence = record.attempts[-1]
+                if evidence["validation_error"] is not None or any(
+                    evidence[field] is None
+                    for field in ("open", "high", "low", "close")
+                ):
+                    raise ValueError(
+                        f"resolved candidate evidence is incomplete for {ticker}"
+                    )
+                candidate_reference_bars[ticker] = MarketBar(
+                    ticker,
+                    session,
+                    evidence["open"],
+                    evidence["high"],
+                    evidence["low"],
+                    evidence["close"],
+                    str(evidence["source"]),
+                    evidence["fetched_at"],
+                    False,
+                )
+
+            resolutions: list[tuple[set[str], CandidateBarResolution]] = []
+            unresolved_candidates = candidate_only_tickers - set(existing_recoveries)
+            if unresolved_candidates:
+                resolver = getattr(
+                    self._price_source, "resolve_candidate_daily_bars", None
+                )
+                if callable(resolver):
+                    resolution = resolver(
+                        sorted(unresolved_candidates),
+                        session,
+                        processed_at,
+                        timedelta(
+                            hours=float(
+                                self._base_config.get("autoresearch", {})
+                                .get("paper_ledger", {})
+                                .get("bar_max_age_hours", 24)
+                            )
+                        ),
+                    )
+                else:
+                    strict_bars = ensure_reference_bars(
+                        self._price_source,
+                        unresolved_candidates,
+                        session,
+                        processed_at,
+                        timedelta(
+                            hours=float(
+                                self._base_config.get("autoresearch", {})
+                                .get("paper_ledger", {})
+                                .get("bar_max_age_hours", 24)
+                            )
+                        ),
+                    )
+                    resolution = CandidateBarResolution(
+                        bars={
+                            (ticker, session): bar
+                            for ticker, bar in strict_bars.items()
+                        },
+                        attempts=tuple(
+                            CandidateBarAttempt(
+                                ticker=ticker,
+                                session=session,
+                                attempt=1,
+                                source=bar.source,
+                                fetched_at=bar.fetched_at,
+                                open=bar.open,
+                                high=bar.high,
+                                low=bar.low,
+                                close=bar.close,
+                                validation_error=None,
+                            )
+                            for ticker, bar in sorted(strict_bars.items())
+                        ),
+                        recovered_tickers=frozenset(),
+                        quarantined_tickers=frozenset(),
+                    )
+                resolutions.append((unresolved_candidates, resolution))
+
+            for resolution_tickers, resolution in resolutions:
+                candidate_reference_bars.update(
+                    {
+                        ticker: bar
+                        for (ticker, bar_session), bar in resolution.bars.items()
+                        if bar_session == session
+                    }
+                )
+                quarantined_tickers.update(resolution.quarantined_tickers)
+
+                for ticker in sorted(resolution_tickers):
+                    identities = _candidate_signal_identity_pairs(
+                        all_signals, ticker, session
+                    )
+                    attempts = tuple(
+                        asdict(attempt)
+                        for attempt in resolution.attempts
+                        if attempt.ticker == ticker
+                    )
+                    self._metric_store.save_candidate_bar_recovery(
+                        CandidateBarRecoveryRecord(
+                            recovery_id=stable_id(
+                                "candidate_bar_recovery",
+                                self._epoch_id,
+                                session,
+                                ticker,
+                            ),
+                            epoch_id=self._epoch_id,
+                            session=session,
+                            ticker=ticker,
+                            outcome=(
+                                "quarantined"
+                                if ticker in resolution.quarantined_tickers
+                                else (
+                                    "recovered"
+                                    if ticker in resolution.recovered_tickers
+                                    else "accepted"
+                                )
+                            ),
+                            attempts=attempts,
+                            signal_identities=tuple(
+                                {
+                                    "event_key": event_key,
+                                    "strategy": strategy,
+                                }
+                                for event_key, strategy in identities
+                            ),
+                        )
+                    )
+        except Exception as error:
+            reason = f"candidate reference-bar validation failed: {error}"
+            failed_quarantines = sorted(quarantined_tickers)
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": True,
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": failed_quarantines,
+                }
+            return results
+
+        if quarantined_tickers:
+            horizon_signals = {
+                horizon: (
+                    [
+                        signal
+                        for signal in signals
+                        if str(signal.get("ticker", "")).strip().upper()
+                        not in quarantined_tickers
+                    ],
+                    regime,
+                    health,
+                )
+                for horizon, (signals, regime, health) in horizon_signals.items()
+            }
+            all_signals = [
+                signal
+                for signals, _, _ in horizon_signals.values()
+                for signal in signals
+            ]
+
+        candidate_bar_quarantines = sorted(quarantined_tickers)
+        staging_valid = not candidate_bar_quarantines
+        for horizon, (_signals, regime, _health) in horizon_signals.items():
+            first_engine.state.save_regime_snapshot(
+                regime,
+                session=session,
+                epoch_id=self._epoch_id,
+                horizon=horizon,
+                execution_valid=True,
+                staging_valid=staging_valid,
+                candidate_bar_quarantines=tuple(candidate_bar_quarantines),
+            )
+
         shared_volatility_evidence = None
         policy_settings = self._base_config.get("autoresearch", {}).get(
             "portfolio_policy"
@@ -1337,49 +1848,18 @@ class CohortOrchestrator:
                     results[cohort["config"].name] = {
                         "error": True,
                         "invalid_reason": reason,
+                        "degraded": bool(candidate_bar_quarantines),
+                        "execution_valid": True,
+                        "staging_valid": False,
+                        "candidate_bar_quarantines": candidate_bar_quarantines,
                     }
                 return results
 
         enrichment = self._fetch_openbb_enrichment(all_signals)
-        reference_tickers = {
-            str(signal.get("ticker", "")).strip().upper()
-            for signal in all_signals
-            if signal.get("ticker")
+        shared_data["_execution_reference_bars"] = {
+            **governed_reference_bars,
+            **candidate_reference_bars,
         }
-        reference_tickers.update(
-            str(position["ticker"])
-            for cohort in valid_cohorts
-            for position in cohort["ledger"].open_positions()
-        )
-        try:
-            shared_data["_execution_reference_bars"] = ensure_reference_bars(
-                self._price_source,
-                reference_tickers,
-                session,
-                processed_at,
-                timedelta(
-                    hours=float(
-                        self._base_config.get("autoresearch", {})
-                        .get("paper_ledger", {})
-                        .get("bar_max_age_hours", 24)
-                    )
-                ),
-            )
-        except Exception as error:
-            reason = f"candidate reference-bar validation failed: {error}"
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                }
-            return self._stop_for_critical_market_data_gap(
-                session,
-                processed_at,
-                results,
-                bundle.bars if bundle is not None else {},
-                "critical_market_data_gap",
-                original_error=error,
-            )
 
         for cohort in valid_cohorts:
             cfg = cohort["config"]
@@ -1404,10 +1884,21 @@ class CohortOrchestrator:
                     fill.fill_id for fill in fills if fill.side in {"sell", "cover"}
                 ]
                 staged["error"] = False
+                staged["degraded"] = bool(candidate_bar_quarantines)
+                staged["execution_valid"] = True
+                staged["staging_valid"] = staging_valid
+                staged["candidate_bar_quarantines"] = candidate_bar_quarantines
                 results[name] = staged
             except Exception as error:
                 logger.error("Cohort %s staging failed", name, exc_info=True)
-                results[name] = {"error": True, "invalid_reason": str(error)}
+                results[name] = {
+                    "error": True,
+                    "invalid_reason": str(error),
+                    "degraded": bool(candidate_bar_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": candidate_bar_quarantines,
+                }
 
         return results
 

@@ -44,6 +44,46 @@ def _book_table(books: dict[str, object]) -> list[str]:
     )
 
 
+def _candidate_recovery_table(records: object, scope: object = None) -> list[str]:
+    rows = records if isinstance(records, list) else []
+    recovery_scope = scope if isinstance(scope, dict) else {}
+    lines = [
+        "## Candidate market-data recovery",
+        "",
+        "Persisted staging evidence only. A quarantined candidate is an execution-valid degraded outcome; it does not create or revise portfolio performance.",
+    ]
+    if recovery_scope.get("truncated") is True:
+        lines.extend(
+            [
+                "",
+                "Showing newest "
+                f"{int(recovery_scope.get('returned_records', len(rows))):,} of "
+                f"{int(recovery_scope.get('total_records', len(rows))):,} "
+                "persisted recovery records; older evidence remains durable.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "| Session | Ticker | Outcome | Attempts | Signal identities |",
+            "|---|---|---|---:|---:|",
+        ]
+    )
+    for value in rows:
+        record = value if isinstance(value, dict) else {}
+        attempts = record.get("attempts")
+        identities = record.get("signal_identities")
+        lines.append(
+            f"| {record.get('session', 'N/A')} | {record.get('ticker', 'N/A')} | "
+            f"{record.get('outcome', 'N/A')} | "
+            f"{len(attempts) if isinstance(attempts, (list, tuple)) else 'N/A'} | "
+            f"{len(identities) if isinstance(identities, (list, tuple)) else 'N/A'} |"
+        )
+    if not rows:
+        lines.append("| No persisted candidate recovery records. | — | — | — | — |")
+    return lines
+
+
 def render_generation_report(
     date: str, gen: dict[str, object], report: dict[str, object]
 ) -> str:
@@ -97,6 +137,13 @@ def render_generation_report(
         lines.append(
             "| No governed metric books available. | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A |"
         )
+    lines += [
+        "",
+        *_candidate_recovery_table(
+            report.get("candidate_bar_recoveries"),
+            report.get("candidate_bar_recovery_scope"),
+        ),
+    ]
     return "\n".join(lines) + "\n"
 
 

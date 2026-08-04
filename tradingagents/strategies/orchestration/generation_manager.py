@@ -31,10 +31,10 @@ def _extract_cohort_results(stdout: str) -> dict | None:
     """Extract the trailing top-level JSON results object that run_cohorts.py
     prints (``json.dumps(result, indent=2)``) from its mixed stdout.
 
-    Lets the parent detect cohort failures even when a (frozen) worktree's
-    run_cohorts.py exits 0 on a run where cohorts errored. Returns None when no
-    top-level object is parseable, in which case callers fall back to the exit
-    code alone.
+    Lets the parent detect both cohort execution failures and candidate-data
+    quarantine, including from a frozen worktree whose runner exits 0. Returns
+    None when no top-level object is parseable, in which case callers fall back
+    to the exit code alone.
     """
     if not stdout:
         return None
@@ -213,6 +213,21 @@ class GenerationManager:
                 "action": "daily",
                 "success": result["success"],
                 "elapsed_s": result["elapsed_s"],
+                **({"degraded": True} if result.get("degraded") else {}),
+                **(
+                    {"execution_valid": result["execution_valid"]}
+                    if "execution_valid" in result
+                    else {}
+                ),
+                **(
+                    {
+                        "candidate_bar_quarantines": result[
+                            "candidate_bar_quarantines"
+                        ]
+                    }
+                    if "candidate_bar_quarantines" in result
+                    else {}
+                ),
                 **({"error": result["error"]} if "error" in result else {}),
             })
             # Cap history
@@ -348,6 +363,82 @@ class GenerationManager:
             # strategies" rule. Kept on success too, not just on failure.
             self._write_run_log(gen_data, proc.stdout, proc.stderr)
 
+            # The printed cohort results are authoritative for the distinction
+            # between execution failure and candidate-data quarantine.  Parse
+            # them before interpreting the worker's nonzero alert exit code so
+            # old frozen runners (which may exit zero) retain the same status.
+            cohort_results = _extract_cohort_results(proc.stdout)
+            if cohort_results is not None:
+                from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                    count_degraded_cohorts,
+                    count_failed_cohorts,
+                )
+
+                n_failed, n_total, failed = count_failed_cohorts(cohort_results)
+                n_degraded, _, degraded = count_degraded_cohorts(cohort_results)
+                execution_valid = bool(cohort_results) and all(
+                    isinstance(result, dict)
+                    and result.get("execution_valid") is True
+                    for result in cohort_results.values()
+                )
+                quarantined_tickers = sorted(
+                    {
+                        str(ticker)
+                        for name in degraded
+                        for ticker in cohort_results[name].get(
+                            "candidate_bar_quarantines", []
+                        )
+                    }
+                )
+                if n_failed:
+                    msg = (
+                        f"{n_failed}/{n_total} cohorts failed: "
+                        f"{', '.join(failed)}"
+                    )
+                    if n_degraded:
+                        msg += (
+                            f"; {n_degraded}/{n_total} cohorts degraded "
+                            f"(candidate data quarantined): {', '.join(degraded)}"
+                        )
+                        if quarantined_tickers:
+                            msg += "; quarantined tickers: " + ", ".join(
+                                quarantined_tickers
+                            )
+                    logger.error("Generation %s: %s", gen_data["gen_id"], msg)
+                    failure = {
+                        "success": False,
+                        "elapsed_s": round(elapsed, 2),
+                        "error": msg,
+                        "execution_valid": execution_valid,
+                    }
+                    if n_degraded:
+                        failure.update(
+                            {
+                                "degraded": True,
+                                "candidate_bar_quarantines": quarantined_tickers,
+                            }
+                        )
+                    return failure
+
+                if n_degraded:
+                    msg = (
+                        f"{n_degraded}/{n_total} cohorts degraded "
+                        f"(candidate data quarantined): {', '.join(degraded)}"
+                    )
+                    if quarantined_tickers:
+                        msg += "; quarantined tickers: " + ", ".join(
+                            quarantined_tickers
+                        )
+                    logger.warning("Generation %s: %s", gen_data["gen_id"], msg)
+                    return {
+                        "success": False,
+                        "degraded": True,
+                        "execution_valid": execution_valid,
+                        "candidate_bar_quarantines": quarantined_tickers,
+                        "elapsed_s": round(elapsed, 2),
+                        "error": msg,
+                    }
+
             if proc.returncode != 0:
                 error_msg = (proc.stderr or proc.stdout or "").strip()
                 # Truncate long error output
@@ -362,29 +453,6 @@ class GenerationManager:
                     "elapsed_s": round(elapsed, 2),
                     "error": error_msg,
                 }
-
-            # rc==0 does not imply the cohorts succeeded: run_cohorts.py catches
-            # per-cohort errors and prints {"error": true} for each, then exits
-            # 0. Inspect the printed results so a run where cohorts failed is
-            # never recorded as a masked success (2026-06-01 incident).
-            cohort_results = _extract_cohort_results(proc.stdout)
-            if cohort_results is not None:
-                from tradingagents.strategies.orchestration.cohort_orchestrator import (
-                    count_failed_cohorts,
-                )
-
-                n_failed, n_total, failed = count_failed_cohorts(cohort_results)
-                if n_failed:
-                    msg = (
-                        f"{n_failed}/{n_total} cohorts failed: "
-                        f"{', '.join(failed)}"
-                    )
-                    logger.error("Generation %s: %s", gen_data["gen_id"], msg)
-                    return {
-                        "success": False,
-                        "elapsed_s": round(elapsed, 2),
-                        "error": msg,
-                    }
 
             logger.info(
                 "Generation %s completed in %.1fs",

@@ -10,6 +10,8 @@ from urllib.parse import quote
 
 from .calendar import XNYSCalendar
 from .models import (
+    CandidateBarRecoveryRecord,
+    CandidateSignalIdentityBinding,
     CriticalGapMarker,
     MetricEpoch,
     OutcomeRecord,
@@ -39,6 +41,22 @@ CREATE TABLE IF NOT EXISTS critical_gap_markers (
   gap_session TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS candidate_bar_recoveries (
+  recovery_id TEXT PRIMARY KEY,
+  epoch_id TEXT NOT NULL,
+  session TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS candidate_signal_identity_bindings (
+  binding_id TEXT PRIMARY KEY,
+  epoch_id TEXT NOT NULL,
+  session TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_bar_recoveries_epoch_session
+  ON candidate_bar_recoveries(epoch_id, session);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_signal_identity_scope
+  ON candidate_signal_identity_bindings(epoch_id, session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_gap_pending
   ON critical_gap_markers(status) WHERE status = 'pending';
 """
@@ -58,6 +76,29 @@ _MAX_GAP_TEXT = 256
 _MAX_GAP_DETAIL_TEXT = 4_096
 _MAX_GAP_AUDIT_ITEMS = 2_048
 _MAX_GAP_PAYLOAD_BYTES = 2_000_000
+_MAX_CANDIDATE_RECOVERY_TEXT = 256
+_MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT = 128
+_MAX_CANDIDATE_RECOVERY_ATTEMPTS = 2
+_MAX_CANDIDATE_RECOVERY_SIGNALS = 64
+_MAX_CANDIDATE_SIGNAL_IDENTITIES = 4_096
+_CANDIDATE_ATTEMPT_KEYS = frozenset(
+    {
+        "ticker",
+        "session",
+        "attempt",
+        "source",
+        "fetched_at",
+        "open",
+        "high",
+        "low",
+        "close",
+        "validation_error",
+    }
+)
+_CANDIDATE_SIGNAL_IDENTITY_KEYS = frozenset({"event_key", "strategy"})
+_CANDIDATE_SIGNAL_BINDING_KEYS = frozenset(
+    {"horizon", "ticker", "event_key", "strategy"}
+)
 
 
 class MetricStore:
@@ -67,6 +108,8 @@ class MetricStore:
         self.path = Path(path)
         self._calendar = XNYSCalendar()
         self._read_only = False
+        self._has_candidate_bar_recoveries = True
+        self._has_candidate_signal_identity_bindings = True
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
@@ -96,6 +139,10 @@ class MetricStore:
         }
         if not required <= tables:
             raise ValueError("existing metric store schema is incomplete")
+        store._has_candidate_bar_recoveries = "candidate_bar_recoveries" in tables
+        store._has_candidate_signal_identity_bindings = (
+            "candidate_signal_identity_bindings" in tables
+        )
         return store
 
     @property
@@ -154,6 +201,156 @@ class MetricStore:
             data["affected_cohorts"] = {}
             data["detail_status"] = "legacy_unbound"
         return CriticalGapMarker(**data)
+
+    @staticmethod
+    def _candidate_bar_recovery(payload: str) -> CandidateBarRecoveryRecord:
+        data = json.loads(payload)
+        data["session"] = date.fromisoformat(data["session"])
+        attempts: list[dict[str, object]] = []
+        for raw_attempt in data["attempts"]:
+            attempt = dict(raw_attempt)
+            attempt["session"] = date.fromisoformat(attempt["session"])
+            attempt["fetched_at"] = datetime.fromisoformat(attempt["fetched_at"])
+            for field in ("open", "high", "low", "close"):
+                if attempt[field] is not None:
+                    attempt[field] = Decimal(attempt[field])
+            attempts.append(attempt)
+        data["attempts"] = tuple(attempts)
+        data["signal_identities"] = tuple(
+            dict(identity) for identity in data["signal_identities"]
+        )
+        return CandidateBarRecoveryRecord(**data)
+
+    @staticmethod
+    def _candidate_signal_identity_binding(
+        payload: str,
+    ) -> CandidateSignalIdentityBinding:
+        data = json.loads(payload)
+        data["session"] = date.fromisoformat(data["session"])
+        data["identities"] = tuple(dict(identity) for identity in data["identities"])
+        return CandidateSignalIdentityBinding(**data)
+
+    @staticmethod
+    def _bounded_candidate_recovery_text(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and bool(value.strip())
+            and len(value) <= _MAX_CANDIDATE_RECOVERY_TEXT
+        )
+
+    def _validate_candidate_bar_recovery(
+        self, record: CandidateBarRecoveryRecord
+    ) -> None:
+        for value in (record.recovery_id, record.epoch_id):
+            if not self._bounded_candidate_recovery_text(value):
+                raise ValueError("candidate bar recovery identifier is invalid")
+        if not self._calendar.is_session(record.session):
+            raise ValueError(f"{record.session} is not an XNYS session")
+        if (
+            not self._bounded_candidate_recovery_text(record.ticker)
+            or record.ticker != record.ticker.upper()
+        ):
+            raise ValueError("candidate bar recovery ticker is invalid")
+        if record.outcome not in {"accepted", "recovered", "quarantined"}:
+            raise ValueError("candidate bar recovery outcome is invalid")
+        if not 1 <= len(record.attempts) <= _MAX_CANDIDATE_RECOVERY_ATTEMPTS:
+            raise ValueError("candidate bar recovery attempt evidence count is invalid")
+        for index, evidence in enumerate(record.attempts, start=1):
+            if (
+                not isinstance(evidence, dict)
+                or set(evidence) != _CANDIDATE_ATTEMPT_KEYS
+            ):
+                raise ValueError(
+                    "candidate bar recovery attempt evidence keys are invalid"
+                )
+            if (
+                evidence["ticker"] != record.ticker
+                or evidence["session"] != record.session
+            ):
+                raise ValueError(
+                    "candidate bar recovery attempt evidence scope is invalid"
+                )
+            if type(evidence["attempt"]) is not int or evidence["attempt"] != index:
+                raise ValueError(
+                    "candidate bar recovery attempt evidence order is invalid"
+                )
+            if not self._bounded_candidate_recovery_text(evidence["source"]):
+                raise ValueError(
+                    "candidate bar recovery attempt evidence source is invalid"
+                )
+            fetched_at = evidence["fetched_at"]
+            if (
+                not isinstance(fetched_at, datetime)
+                or fetched_at.tzinfo is None
+                or fetched_at.utcoffset() is None
+            ):
+                raise ValueError(
+                    "candidate bar recovery attempt evidence time is invalid"
+                )
+            for field in ("open", "high", "low", "close"):
+                value = evidence[field]
+                if value is not None and (
+                    not isinstance(value, Decimal)
+                    or not value.is_finite()
+                    or len(str(value)) > _MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT
+                ):
+                    raise ValueError(
+                        "candidate bar recovery attempt evidence price is invalid"
+                    )
+            error = evidence["validation_error"]
+            if error is not None and not self._bounded_candidate_recovery_text(error):
+                raise ValueError(
+                    "candidate bar recovery attempt evidence error is invalid"
+                )
+        if len(record.signal_identities) > _MAX_CANDIDATE_RECOVERY_SIGNALS:
+            raise ValueError(
+                "candidate bar recovery signal identity count exceeds bound"
+            )
+        for identity in record.signal_identities:
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != _CANDIDATE_SIGNAL_IDENTITY_KEYS
+                or not all(
+                    self._bounded_candidate_recovery_text(value)
+                    for value in identity.values()
+                )
+            ):
+                raise ValueError("candidate bar recovery signal identity is invalid")
+
+    def _validate_candidate_signal_identity_binding(
+        self, record: CandidateSignalIdentityBinding
+    ) -> None:
+        for value in (record.binding_id, record.epoch_id):
+            if not self._bounded_candidate_recovery_text(value):
+                raise ValueError(
+                    "candidate signal identity binding identifier is invalid"
+                )
+        if not self._calendar.is_session(record.session):
+            raise ValueError(f"{record.session} is not an XNYS session")
+        if len(record.identities) > _MAX_CANDIDATE_SIGNAL_IDENTITIES:
+            raise ValueError("candidate signal identity binding exceeds bound")
+        canonical: list[tuple[str, str, str, str]] = []
+        for identity in record.identities:
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != _CANDIDATE_SIGNAL_BINDING_KEYS
+                or not all(
+                    self._bounded_candidate_recovery_text(value)
+                    for value in identity.values()
+                )
+                or identity["ticker"] != identity["ticker"].upper()
+            ):
+                raise ValueError("candidate signal identity binding is invalid")
+            canonical.append(
+                (
+                    identity["horizon"],
+                    identity["ticker"],
+                    identity["event_key"],
+                    identity["strategy"],
+                )
+            )
+        if canonical != sorted(set(canonical)):
+            raise ValueError("candidate signal identity binding is not canonical")
 
     def _validate_critical_gap(self, marker: CriticalGapMarker) -> None:
         for label, value in (
@@ -570,6 +767,130 @@ class MetricStore:
                 (self._json(completed), marker_id),
             )
         return completed
+
+    def save_candidate_bar_recovery(self, record: CandidateBarRecoveryRecord) -> None:
+        self._validate_candidate_bar_recovery(record)
+        payload = self._json(record)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_immutable(
+                connection,
+                table="candidate_bar_recoveries",
+                id_column="recovery_id",
+                record_id=record.recovery_id,
+                payload=payload,
+                values=(
+                    record.recovery_id,
+                    record.epoch_id,
+                    record.session.isoformat(),
+                    payload,
+                ),
+                insert_sql=(
+                    "INSERT INTO candidate_bar_recoveries "
+                    "(recovery_id, epoch_id, session, payload_json) "
+                    "VALUES (?, ?, ?, ?)"
+                ),
+            )
+
+    def read_candidate_bar_recoveries(
+        self,
+        epoch_id: str,
+        session: date | None = None,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[CandidateBarRecoveryRecord, ...]:
+        self._validate_limit(limit)
+        if not self._has_candidate_bar_recoveries:
+            return ()
+        clauses = ["epoch_id = ?"]
+        values: list[object] = [epoch_id]
+        if session is not None:
+            clauses.append("session = ?")
+            values.append(session.isoformat())
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT payload_json
+                FROM candidate_bar_recoveries
+                WHERE {" AND ".join(clauses)}
+                ORDER BY session, json_extract(payload_json, '$.ticker'), recovery_id
+                LIMIT ?
+                """,
+                (*values, limit),
+            ).fetchall()
+        return tuple(self._candidate_bar_recovery(row[0]) for row in rows)
+
+    def read_candidate_bar_recovery_window(
+        self,
+        epoch_id: str,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[tuple[CandidateBarRecoveryRecord, ...], int]:
+        """Return the newest bounded evidence and its complete durable count."""
+        self._validate_limit(limit)
+        if not self._has_candidate_bar_recoveries:
+            return (), 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json, COUNT(*) OVER () AS total_records
+                FROM candidate_bar_recoveries
+                WHERE epoch_id = ?
+                ORDER BY session DESC,
+                         json_extract(payload_json, '$.ticker') DESC,
+                         recovery_id DESC
+                LIMIT ?
+                """,
+                (epoch_id, limit),
+            ).fetchall()
+        if not rows:
+            return (), 0
+        return (
+            tuple(self._candidate_bar_recovery(row[0]) for row in rows),
+            int(rows[0][1]),
+        )
+
+    def save_candidate_signal_identity_binding(
+        self, record: CandidateSignalIdentityBinding
+    ) -> None:
+        self._validate_candidate_signal_identity_binding(record)
+        payload = self._json(record)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_immutable(
+                connection,
+                table="candidate_signal_identity_bindings",
+                id_column="binding_id",
+                record_id=record.binding_id,
+                payload=payload,
+                values=(
+                    record.binding_id,
+                    record.epoch_id,
+                    record.session.isoformat(),
+                    payload,
+                ),
+                insert_sql=(
+                    "INSERT INTO candidate_signal_identity_bindings "
+                    "(binding_id, epoch_id, session, payload_json) "
+                    "VALUES (?, ?, ?, ?)"
+                ),
+            )
+
+    def read_candidate_signal_identity_binding(
+        self, epoch_id: str, session: date
+    ) -> CandidateSignalIdentityBinding | None:
+        if not self._has_candidate_signal_identity_bindings:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM candidate_signal_identity_bindings
+                WHERE epoch_id = ? AND session = ?
+                """,
+                (epoch_id, session.isoformat()),
+            ).fetchone()
+        return self._candidate_signal_identity_binding(row[0]) if row else None
 
     def upsert_outcome(self, outcome: OutcomeRecord) -> None:
         payload = self._json(outcome)

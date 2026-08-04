@@ -13,6 +13,7 @@ HealthStatus = Literal[
 ]
 CriticalGapStatus = Literal["pending", "completed"]
 CriticalGapDetailStatus = Literal["minimal", "ready", "legacy_unbound"]
+CandidateBarRecoveryOutcome = Literal["accepted", "recovered", "quarantined"]
 
 METRIC_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_LABEL = "1_legacy_calendar_signed"
@@ -112,6 +113,29 @@ class StrategyHealthRecord:
     status: HealthStatus
     signal_count: int
     evidence: dict[str, object]
+
+
+@dataclass(frozen=True)
+class CandidateBarRecoveryRecord:
+    """Immutable bounded audit evidence for one candidate-bar recovery outcome."""
+
+    recovery_id: str
+    epoch_id: str
+    session: date
+    ticker: str
+    outcome: CandidateBarRecoveryOutcome
+    attempts: tuple[dict[str, object], ...]
+    signal_identities: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class CandidateSignalIdentityBinding:
+    """Immutable per-horizon signal identity universe for one staging session."""
+
+    binding_id: str
+    epoch_id: str
+    session: date
+    identities: tuple[dict[str, str], ...]
 
 
 @dataclass(frozen=True)
