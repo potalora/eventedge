@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -264,12 +264,71 @@ class StateManager:
     def _regime_snapshots_path(self) -> Path:
         return self.state_dir / "regime_snapshots.json"
 
-    def save_regime_snapshot(self, regime: dict) -> None:
-        """Save a regime snapshot with timestamp. Appends to list."""
+    def save_regime_snapshot(
+        self,
+        regime: dict,
+        *,
+        session: date | None = None,
+        epoch_id: str | None = None,
+        horizon: str | None = None,
+        execution_valid: bool | None = None,
+        staging_valid: bool | None = None,
+        candidate_bar_quarantines: tuple[str, ...] = (),
+    ) -> None:
+        """Save one idempotent post-resolution regime observation."""
+        snapshot = dict(regime)
+        if session is not None or epoch_id is not None or horizon is not None:
+            if (
+                not isinstance(session, date)
+                or not isinstance(epoch_id, str)
+                or not epoch_id.strip()
+                or not isinstance(horizon, str)
+                or not horizon.strip()
+                or not isinstance(execution_valid, bool)
+                or not isinstance(staging_valid, bool)
+            ):
+                raise ValueError("regime snapshot governance metadata is incomplete")
+            quarantines = sorted(set(candidate_bar_quarantines))
+            if any(not ticker or ticker != ticker.upper() for ticker in quarantines):
+                raise ValueError("regime snapshot candidate quarantine is invalid")
+            snapshot.update(
+                {
+                    "session": session.isoformat(),
+                    "epoch_id": epoch_id,
+                    "horizon": horizon,
+                    "screening_status": "valid" if staging_valid else "degraded",
+                    "execution_valid": execution_valid,
+                    "staging_valid": staging_valid,
+                    "candidate_bar_quarantines": quarantines,
+                }
+            )
         snapshots = _load_json(self._regime_snapshots_path, [])
-        if "timestamp" not in regime:
-            regime["timestamp"] = datetime.now().isoformat()
-        snapshots.append(regime)
+        identity = (
+            snapshot.get("session"),
+            snapshot.get("epoch_id"),
+            snapshot.get("horizon"),
+        )
+        if all(identity):
+            for existing in snapshots:
+                if (
+                    existing.get("session"),
+                    existing.get("epoch_id"),
+                    existing.get("horizon"),
+                ) != identity:
+                    continue
+                comparable = dict(existing)
+                comparable.pop("timestamp", None)
+                candidate = dict(snapshot)
+                candidate.pop("timestamp", None)
+                if comparable == candidate:
+                    return
+                if existing.get("staging_valid") is False and staging_valid is True:
+                    raise ValueError(
+                        "degraded regime snapshot cannot be promoted to clean evidence"
+                    )
+                raise ValueError("regime snapshot replay has unequal payload")
+        snapshot.setdefault("timestamp", datetime.now().isoformat())
+        snapshots.append(snapshot)
         _atomic_write(self._regime_snapshots_path, snapshots)
         logger.info("Saved regime snapshot")
 

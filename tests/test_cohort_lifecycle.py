@@ -14,8 +14,9 @@ Uses fully mocked data (no API calls, no LLM).
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+import sqlite3
 from unittest.mock import patch
 
 import pandas as pd
@@ -27,6 +28,10 @@ from tradingagents.strategies.orchestration.multi_strategy_engine import (
 from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.learning.signal_journal import SignalJournal
 from tradingagents.strategies.execution.models import MarketBar
+from tradingagents.strategies.execution.price_source import (
+    CandidateBarAttempt,
+    CandidateBarResolution,
+)
 from tradingagents.strategies.metrics.models import OutcomeRecord, SignalMetricRecord
 from tradingagents.strategies.metrics.outcomes import OutcomeCalculator, directional_accuracy
 from tradingagents.strategies.state.state import StateManager
@@ -411,6 +416,341 @@ class TestMultiDaySimulation:
             and cohort["config"].learning_policy.mode == "disabled"
             for cohort in orchestrator.cohorts
         )
+
+
+class _CandidateLifecycleStrategy(FakeStrategy):
+    """Stage AAPL first, then expose candidate-only ALX and MSFT."""
+
+    name = "candidate_lifecycle"
+
+    def __init__(self, first_session: date, *, overlap_only: bool = False):
+        super().__init__()
+        self._first_session = first_session
+        self._overlap_only = overlap_only
+
+    def screen(self, data, trading_date, params):
+        session = date.fromisoformat(trading_date)
+        tickers = (
+            ("AAPL",)
+            if session == self._first_session or self._overlap_only
+            else ("ALX", "MSFT")
+        )
+        return [
+            Candidate(
+                ticker=ticker,
+                date=trading_date,
+                direction="long",
+                score=5.0,
+                metadata={
+                    "source": "candidate-lifecycle-fixture",
+                    "event_key": f"candidate-lifecycle:{ticker}:{trading_date}",
+                    "observed_at": f"{trading_date}T19:00:00+00:00",
+                },
+            )
+            for ticker in tickers
+        ]
+
+
+class _CandidateRecoveryPriceSource:
+    """P0 remains strict while candidate-only outcomes are configurable."""
+
+    def __init__(self, outcome: str = "quarantined") -> None:
+        from test_30day_simulation import AuthoritativePriceSource
+
+        self._governed = AuthoritativePriceSource()
+        self.outcome = outcome
+        self.governed_invalid = False
+        self.candidate_calls: list[tuple[tuple[str, ...], date]] = []
+
+    @property
+    def raw_calls(self):
+        return self._governed.raw_calls
+
+    @property
+    def benchmark_calls(self):
+        return self._governed.benchmark_calls
+
+    def get_daily_bars(
+        self, tickers, start_session, end_session_inclusive, adjusted=False
+    ):
+        bars = self._governed.get_daily_bars(
+            tickers, start_session, end_session_inclusive, adjusted
+        )
+        session = start_session
+        if self.governed_invalid and set(tickers) == {"AAPL"}:
+            bar = bars[("AAPL", session)]
+            bars[("AAPL", session)] = MarketBar(
+                bar.ticker,
+                bar.session,
+                bar.open,
+                Decimal("102"),
+                bar.low,
+                Decimal("103"),
+                bar.source,
+                bar.fetched_at,
+                bar.adjusted,
+            )
+        elif "ALX" in tickers and self.outcome in {"quarantined", "recovered"}:
+            bar = bars[("ALX", session)]
+            bars[("ALX", session)] = MarketBar(
+                bar.ticker,
+                bar.session,
+                bar.open,
+                Decimal("102"),
+                bar.low,
+                Decimal("103"),
+                bar.source,
+                bar.fetched_at,
+                bar.adjusted,
+            )
+        return bars
+
+    def get_corporate_actions(self, tickers, session):
+        return self._governed.get_corporate_actions(tickers, session)
+
+    def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
+        return self._governed.get_total_return_closes(
+            symbols, start_session, end_session_inclusive
+        )
+
+    def resolve_candidate_daily_bars(
+        self, tickers, session, processed_at, max_age=timedelta(hours=24)
+    ):
+        requested = tuple(sorted(tickers))
+        self.candidate_calls.append((requested, session))
+        bars = self._governed.get_daily_bars(
+            list(requested), session, session, adjusted=False
+        )
+        attempts: list[CandidateBarAttempt] = []
+        recovered: set[str] = set()
+        quarantined: set[str] = set()
+        for ticker in requested:
+            bar = bars[(ticker, session)]
+            if ticker != "ALX" or self.outcome == "valid":
+                continue
+            attempts.append(
+                CandidateBarAttempt(
+                    ticker,
+                    session,
+                    1,
+                    "fixture-candidate",
+                    processed_at,
+                    bar.open,
+                    Decimal("102"),
+                    bar.low,
+                    Decimal("103"),
+                    "incoherent ALX candidate bar",
+                )
+            )
+            retry_error = (
+                None
+                if self.outcome == "recovered"
+                else "incoherent ALX candidate bar"
+            )
+            attempts.append(
+                CandidateBarAttempt(
+                    ticker,
+                    session,
+                    2,
+                    "fixture-candidate",
+                    processed_at,
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close if retry_error is None else Decimal("103"),
+                    retry_error,
+                )
+            )
+            if retry_error is None:
+                recovered.add(ticker)
+            else:
+                quarantined.add(ticker)
+                bars.pop((ticker, session))
+        return CandidateBarResolution(
+            bars=bars,
+            attempts=tuple(attempts),
+            recovered_tickers=frozenset(recovered),
+            quarantined_tickers=frozenset(quarantined),
+        )
+
+
+def _candidate_lifecycle_orchestrator(tmp_path, source, *, overlap_only=False):
+    from test_30day_simulation import (
+        _authoritative_orchestrator,
+        _cohort_config,
+    )
+
+    first_session = date(2026, 3, 30)
+    configs = [
+        _cohort_config(tmp_path, "horizon_30d"),
+        type(_cohort_config(tmp_path, "horizon_3m"))(
+            name="horizon_3m",
+            state_dir=str(tmp_path / "horizon_3m"),
+            horizon="3m",
+            size_profile="5k",
+            use_llm=False,
+        ),
+    ]
+    orchestrator, _ = _authoritative_orchestrator(
+        tmp_path,
+        strategy_modules=[
+            _CandidateLifecycleStrategy(first_session, overlap_only=overlap_only)
+        ],
+        cohort_configs=configs,
+        source=source,
+    )
+    return orchestrator, first_session
+
+
+class TestCandidateBarLifecycle:
+    def test_candidate_quarantine_preserves_completed_p0_and_filters_every_horizon(
+        self, tmp_path
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        staged_tickers: dict[str, list[str]] = {}
+        for cohort in orchestrator.cohorts:
+            original = cohort["engine"].screen_and_stage
+            name = cohort["config"].name
+
+            def capture(*args, _original=original, _name=name, **kwargs):
+                staged_tickers[_name] = [
+                    signal["ticker"] for signal in kwargs["shared_signals"]
+                ]
+                return _original(*args, **kwargs)
+
+            cohort["engine"].screen_and_stage = capture
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            result = orchestrator.run_daily(next_session(first_session).isoformat())
+
+        assert staged_tickers == {
+            "horizon_30d": ["MSFT"],
+            "horizon_3m": ["MSFT"],
+        }
+        assert all(
+            cohort_result["error"] is False
+            and cohort_result["degraded"] is True
+            and cohort_result["execution_valid"] is True
+            and cohort_result["staging_valid"] is False
+            and cohort_result["candidate_bar_quarantines"] == ["ALX"]
+            for cohort_result in result.values()
+        )
+        records = orchestrator._metric_store.read_candidate_bar_recoveries(
+            orchestrator._epoch_id, next_session(first_session)
+        )
+        assert len(records) == 1
+        assert records[0].ticker == "ALX"
+        assert records[0].outcome == "quarantined"
+        epoch = orchestrator._metric_store.load_epoch(orchestrator._epoch_id)
+        assert epoch.status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+        health = orchestrator._metric_store.read_strategy_health(
+            orchestrator._epoch_id, session=next_session(first_session)
+        )
+        assert {
+            record.status
+            for record in health
+            if record.strategy == "candidate_lifecycle"
+        } == {"data_failure"}
+        regime = orchestrator.cohorts[0]["state"].load_latest_regime()
+        assert regime["execution_valid"] is True
+        assert regime["staging_valid"] is False
+        assert regime["candidate_bar_quarantines"] == ["ALX"]
+
+    def test_recovered_candidate_reaches_staging(self, tmp_path):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("recovered")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        staged: list[str] = []
+        original = orchestrator.cohorts[0]["engine"].screen_and_stage
+
+        def capture(*args, **kwargs):
+            staged.extend(signal["ticker"] for signal in kwargs["shared_signals"])
+            return original(*args, **kwargs)
+
+        orchestrator.cohorts[0]["engine"].screen_and_stage = capture
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            staged.clear()
+            result = orchestrator.run_daily(next_session(first_session).isoformat())
+
+        assert staged == ["ALX", "MSFT"]
+        assert all(item["staging_valid"] is True for item in result.values())
+        records = orchestrator._metric_store.read_candidate_bar_recoveries(
+            orchestrator._epoch_id, next_session(first_session)
+        )
+        assert [(record.ticker, record.outcome) for record in records] == [
+            ("ALX", "recovered")
+        ]
+
+    def test_governed_bar_failure_retains_critical_gap_path(self, tmp_path):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            source.governed_invalid = True
+            result = orchestrator.run_daily(next_session(first_session).isoformat())
+
+        assert all(
+            item["error"] is True
+            and item["degraded"] is False
+            and item["execution_valid"] is False
+            and item["staging_valid"] is False
+            and item["candidate_bar_quarantines"] == []
+            for item in result.values()
+        )
+        epoch = orchestrator._metric_store.load_epoch(orchestrator._epoch_id)
+        assert epoch.status == "invalid"
+        with sqlite3.connect(orchestrator._metric_store.path) as connection:
+            marker_count = connection.execute(
+                "SELECT COUNT(*) FROM critical_gap_markers"
+            ).fetchone()[0]
+        assert marker_count == 1
+        assert epoch.boundary_reason == "critical_market_data_gap"
+
+    def test_governed_overlap_reuses_p0_bar_without_candidate_fetch(self, tmp_path):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source, overlap_only=True
+        )
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            before = len(source.candidate_calls)
+            result = orchestrator.run_daily(next_session(first_session).isoformat())
+
+        assert len(source.candidate_calls) == before
+        assert all(item["staging_valid"] is True for item in result.values())
 
 
 class TestCohortComparison:

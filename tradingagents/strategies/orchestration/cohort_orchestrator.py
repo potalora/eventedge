@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -788,6 +788,10 @@ class CohortOrchestrator:
                     {
                         "error": True,
                         "invalid_reason": result_reason or marker.reason,
+                        "degraded": False,
+                        "execution_valid": False,
+                        "staging_valid": False,
+                        "candidate_bar_quarantines": [],
                     },
                 )
                 continue
@@ -801,6 +805,10 @@ class CohortOrchestrator:
                 "invalid_reason": ledger.session_invalid_reason(marker.gap_session)
                 or result_reason
                 or marker.reason,
+                "degraded": False,
+                "execution_valid": False,
+                "staging_valid": False,
+                "candidate_bar_quarantines": [],
             }
         affected_names = set(marker.affected_cohorts)
         for cohort in self.cohorts:
@@ -808,7 +816,14 @@ class CohortOrchestrator:
             if name not in affected_names:
                 results.setdefault(
                     name,
-                    {"error": True, "invalid_reason": marker.reason},
+                    {
+                        "error": True,
+                        "invalid_reason": marker.reason,
+                        "degraded": False,
+                        "execution_valid": False,
+                        "staging_valid": False,
+                        "candidate_bar_quarantines": [],
+                    },
                 )
         self._after_gap_p0_invalidation(marker)
         self.cohorts[0]["executor"].invalidate_metric_epoch(
@@ -818,6 +833,13 @@ class CohortOrchestrator:
         self._after_gap_metric_invalidation(marker)
         if recovery_error is None and audit_error is None:
             self._metric_store.complete_critical_gap(marker.marker_id)
+        for result in results.values():
+            if not isinstance(result, dict):
+                continue
+            result.setdefault("degraded", False)
+            result.setdefault("execution_valid", False)
+            result.setdefault("staging_valid", False)
+            result.setdefault("candidate_bar_quarantines", [])
         if original_error is not None:
             raise original_error
         if recovery_error is not None:
@@ -878,6 +900,13 @@ class CohortOrchestrator:
             self._metric_epoch_context, session
         )
         self._epoch_id = metric_epoch.epoch_id
+        session_candidate_quarantines = sorted(
+            record.ticker
+            for record in self._metric_store.read_candidate_bar_recoveries(
+                self._epoch_id, session
+            )
+            if record.outcome == "quarantined"
+        )
         if metric_epoch.status == "invalid":
             for cohort in self.cohorts:
                 reason = cohort["ledger"].session_invalid_reason(session)
@@ -957,6 +986,10 @@ class CohortOrchestrator:
                     ],
                     "replayed": True,
                     "error": False,
+                    "degraded": bool(session_candidate_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": not session_candidate_quarantines,
+                    "candidate_bar_quarantines": session_candidate_quarantines,
                 }
             elif len(snapshots) == 1 and phases_complete:
                 cohort["marked_account"] = snapshots[0]
@@ -1258,6 +1291,267 @@ class CohortOrchestrator:
         all_signals = [
             signal for signals, _, _ in horizon_signals.values() for signal in signals
         ]
+        governed_reference_bars: dict[str, Any] = {}
+        try:
+            for cohort in valid_cohorts:
+                bars = cohort["executor"].validated_execution_reference_bars(
+                    session, self._epoch_id
+                )
+                for ticker, bar in bars.items():
+                    existing = governed_reference_bars.get(ticker)
+                    if existing is not None and existing != bar:
+                        raise ValueError(
+                            f"conflicting governed execution bar for {ticker}/{session}"
+                        )
+                    governed_reference_bars[ticker] = bar
+        except Exception as error:
+            reason = f"governed execution reference-bar validation failed: {error}"
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": False,
+                    "execution_valid": False,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": [],
+                }
+            return self._stop_for_critical_market_data_gap(
+                session,
+                processed_at,
+                results,
+                bundle.bars if bundle is not None else {},
+                "critical_market_data_gap",
+                original_error=error,
+            )
+
+        signal_tickers = {
+            str(signal.get("ticker", "")).strip().upper()
+            for signal in all_signals
+            if str(signal.get("ticker", "")).strip()
+        }
+        candidate_only_tickers = signal_tickers - set(governed_reference_bars)
+        candidate_reference_bars: dict[str, Any] = {}
+        quarantined_tickers: set[str] = set()
+        existing_recoveries = {
+            record.ticker: record
+            for record in self._metric_store.read_candidate_bar_recoveries(
+                self._epoch_id, session
+            )
+            if record.ticker in candidate_only_tickers
+        }
+        try:
+            from tradingagents.strategies.execution.models import MarketBar
+            from tradingagents.strategies.execution.price_source import (
+                CandidateBarResolution,
+            )
+            from tradingagents.strategies.execution.ids import stable_id
+            from tradingagents.strategies.metrics.models import (
+                CandidateBarRecoveryRecord,
+            )
+
+            for ticker, record in existing_recoveries.items():
+                if record.outcome == "quarantined":
+                    quarantined_tickers.add(ticker)
+                    continue
+                evidence = record.attempts[-1]
+                if evidence["validation_error"] is not None or any(
+                    evidence[field] is None
+                    for field in ("open", "high", "low", "close")
+                ):
+                    raise ValueError(
+                        f"recovered candidate evidence is incomplete for {ticker}"
+                    )
+                candidate_reference_bars[ticker] = MarketBar(
+                    ticker,
+                    session,
+                    evidence["open"],
+                    evidence["high"],
+                    evidence["low"],
+                    evidence["close"],
+                    str(evidence["source"]),
+                    evidence["fetched_at"],
+                    False,
+                )
+
+            unresolved_tickers = candidate_only_tickers - set(existing_recoveries)
+            if unresolved_tickers:
+                resolver = getattr(
+                    self._price_source, "resolve_candidate_daily_bars", None
+                )
+                if callable(resolver):
+                    resolution = resolver(
+                        sorted(unresolved_tickers),
+                        session,
+                        processed_at,
+                        timedelta(
+                            hours=float(
+                                self._base_config.get("autoresearch", {})
+                                .get("paper_ledger", {})
+                                .get("bar_max_age_hours", 24)
+                            )
+                        ),
+                    )
+                else:
+                    strict_bars = ensure_reference_bars(
+                        self._price_source,
+                        unresolved_tickers,
+                        session,
+                        processed_at,
+                        timedelta(
+                            hours=float(
+                                self._base_config.get("autoresearch", {})
+                                .get("paper_ledger", {})
+                                .get("bar_max_age_hours", 24)
+                            )
+                        ),
+                    )
+                    resolution = CandidateBarResolution(
+                        bars={
+                            (ticker, session): bar
+                            for ticker, bar in strict_bars.items()
+                        },
+                        attempts=(),
+                        recovered_tickers=frozenset(),
+                        quarantined_tickers=frozenset(),
+                    )
+                candidate_reference_bars.update(
+                    {
+                        ticker: bar
+                        for (ticker, bar_session), bar in resolution.bars.items()
+                        if bar_session == session
+                    }
+                )
+                quarantined_tickers.update(resolution.quarantined_tickers)
+
+                for ticker in sorted(
+                    set(resolution.recovered_tickers)
+                    | set(resolution.quarantined_tickers)
+                ):
+                    from tradingagents.strategies.orchestration.event_identity import (
+                        ACTIVE_STRATEGY_NAMES,
+                        canonical_event_key,
+                    )
+
+                    identities = sorted(
+                        {
+                            (
+                                (
+                                    str(signal.get("metadata", {}).get("event_key"))
+                                    if isinstance(signal.get("metadata"), dict)
+                                    and signal["metadata"].get("event_key")
+                                    and str(signal.get("strategy", "")).strip()
+                                    not in ACTIVE_STRATEGY_NAMES
+                                    else canonical_event_key(
+                                        str(signal.get("strategy", "")).strip(),
+                                        ticker,
+                                        (
+                                            signal["metadata"]
+                                            if isinstance(
+                                                signal.get("metadata"), dict
+                                            )
+                                            else {}
+                                        ),
+                                        session,
+                                    )
+                                ),
+                                str(signal.get("strategy", "")).strip(),
+                            )
+                            for signal in all_signals
+                            if str(signal.get("ticker", "")).strip().upper()
+                            == ticker
+                        }
+                    )
+                    if not identities or any(
+                        not event_key or not strategy
+                        for event_key, strategy in identities
+                    ):
+                        raise ValueError(
+                            f"candidate recovery identity is incomplete for {ticker}"
+                        )
+                    attempts = tuple(
+                        asdict(attempt)
+                        for attempt in resolution.attempts
+                        if attempt.ticker == ticker
+                    )
+                    self._metric_store.save_candidate_bar_recovery(
+                        CandidateBarRecoveryRecord(
+                            recovery_id=stable_id(
+                                "candidate_bar_recovery",
+                                self._epoch_id,
+                                session,
+                                ticker,
+                            ),
+                            epoch_id=self._epoch_id,
+                            session=session,
+                            ticker=ticker,
+                            outcome=(
+                                "quarantined"
+                                if ticker in resolution.quarantined_tickers
+                                else "recovered"
+                            ),
+                            attempts=attempts,
+                            signal_identities=tuple(
+                                {
+                                    "event_key": event_key,
+                                    "strategy": strategy,
+                                }
+                                for event_key, strategy in identities
+                            ),
+                        )
+                    )
+        except Exception as error:
+            reason = f"candidate reference-bar validation failed: {error}"
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": False,
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": [],
+                }
+            return self._stop_for_critical_market_data_gap(
+                session,
+                processed_at,
+                results,
+                bundle.bars if bundle is not None else {},
+                "critical_market_data_gap",
+                original_error=error,
+            )
+
+        if quarantined_tickers:
+            horizon_signals = {
+                horizon: (
+                    [
+                        signal
+                        for signal in signals
+                        if str(signal.get("ticker", "")).strip().upper()
+                        not in quarantined_tickers
+                    ],
+                    regime,
+                    health,
+                )
+                for horizon, (signals, regime, health) in horizon_signals.items()
+            }
+            all_signals = [
+                signal
+                for signals, _, _ in horizon_signals.values()
+                for signal in signals
+            ]
+
+        candidate_bar_quarantines = sorted(quarantined_tickers)
+        staging_valid = not candidate_bar_quarantines
+        for horizon, (_signals, regime, _health) in horizon_signals.items():
+            first_engine.state.save_regime_snapshot(
+                regime,
+                session=session,
+                epoch_id=self._epoch_id,
+                horizon=horizon,
+                execution_valid=True,
+                staging_valid=staging_valid,
+                candidate_bar_quarantines=tuple(candidate_bar_quarantines),
+            )
+
         shared_volatility_evidence = None
         policy_settings = self._base_config.get("autoresearch", {}).get(
             "portfolio_policy"
@@ -1341,45 +1635,10 @@ class CohortOrchestrator:
                 return results
 
         enrichment = self._fetch_openbb_enrichment(all_signals)
-        reference_tickers = {
-            str(signal.get("ticker", "")).strip().upper()
-            for signal in all_signals
-            if signal.get("ticker")
+        shared_data["_execution_reference_bars"] = {
+            **governed_reference_bars,
+            **candidate_reference_bars,
         }
-        reference_tickers.update(
-            str(position["ticker"])
-            for cohort in valid_cohorts
-            for position in cohort["ledger"].open_positions()
-        )
-        try:
-            shared_data["_execution_reference_bars"] = ensure_reference_bars(
-                self._price_source,
-                reference_tickers,
-                session,
-                processed_at,
-                timedelta(
-                    hours=float(
-                        self._base_config.get("autoresearch", {})
-                        .get("paper_ledger", {})
-                        .get("bar_max_age_hours", 24)
-                    )
-                ),
-            )
-        except Exception as error:
-            reason = f"candidate reference-bar validation failed: {error}"
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                }
-            return self._stop_for_critical_market_data_gap(
-                session,
-                processed_at,
-                results,
-                bundle.bars if bundle is not None else {},
-                "critical_market_data_gap",
-                original_error=error,
-            )
 
         for cohort in valid_cohorts:
             cfg = cohort["config"]
@@ -1404,10 +1663,21 @@ class CohortOrchestrator:
                     fill.fill_id for fill in fills if fill.side in {"sell", "cover"}
                 ]
                 staged["error"] = False
+                staged["degraded"] = bool(candidate_bar_quarantines)
+                staged["execution_valid"] = True
+                staged["staging_valid"] = staging_valid
+                staged["candidate_bar_quarantines"] = candidate_bar_quarantines
                 results[name] = staged
             except Exception as error:
                 logger.error("Cohort %s staging failed", name, exc_info=True)
-                results[name] = {"error": True, "invalid_reason": str(error)}
+                results[name] = {
+                    "error": True,
+                    "invalid_reason": str(error),
+                    "degraded": True,
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": candidate_bar_quarantines,
+                }
 
         return results
 

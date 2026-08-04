@@ -781,6 +781,24 @@ class SessionExecutor:
             validated_at=context["bound_at"],
         )
 
+    def validated_execution_reference_bars(
+        self, session: date, epoch_id: str
+    ) -> dict[str, MarketBar]:
+        """Expose only exact-session bars already committed by completed P0."""
+        snapshots = self.ledger.read_snapshots(
+            session, session, epoch_id=epoch_id, valid_only=True
+        )
+        if len(snapshots) != 1 or not all(
+            self.ledger.phase_completed(session, phase) for phase in PHASES
+        ):
+            raise ValueError("execution reference bars require completed valid P0")
+        self.validate_bound_context(session, epoch_id)
+        bundle = self.persisted_input_bundle(session)
+        return {
+            ticker: bundle.bars[(ticker, session)]
+            for ticker in bundle.tickers
+        }
+
     def persisted_borrow_rates(self, session: date) -> dict[str, Decimal | None]:
         """Rehydrate the exact canonical borrow document bound to a session."""
         context = self.ledger.session_execution_context(session)

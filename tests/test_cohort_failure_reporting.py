@@ -54,6 +54,24 @@ def test_count_failed_cohorts_ignores_non_dicts_and_falsey_error():
     assert count_failed_cohorts(results) == (0, 3, [])
 
 
+def test_candidate_quarantine_is_reportable_degradation_not_execution_failure():
+    results = {
+        f"c{i}": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": ["ALX"],
+            "signals": [{"ticker": "MSFT", "strategy": "earnings_call"}],
+        }
+        for i in range(16)
+    }
+
+    assert count_failed_cohorts(results) == (0, 16, [])
+    assert all(result["degraded"] for result in results.values())
+    assert all(result["candidate_bar_quarantines"] == ["ALX"] for result in results.values())
+
+
 # --- _extract_cohort_results (parse run_cohorts.py stdout) ---
 
 def test_extract_cohort_results_from_mixed_stdout():

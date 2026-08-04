@@ -345,7 +345,6 @@ class MultiStrategyEngine:
         shared across cohorts so LLM non-determinism doesn't confound results.
         """
         regime_model = self._build_regime_model(data)
-        self.state.save_regime_snapshot(regime_model)
 
         all_signals: list[dict] = []
         health: list[StrategyHealthRecord] = []
