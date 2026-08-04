@@ -456,6 +456,7 @@ class MetricsService:
                 "missing_headline_books": sorted(_HEADLINE_BOOKS),
                 "stress_tests": {},
                 "cohort_series": {},
+                "candidate_bar_recoveries": [],
                 "dependent_scenarios": True,
                 "policy_audit": {
                     "aggregation_prohibited": True,
@@ -479,6 +480,10 @@ class MetricsService:
             cohort_id: self._policy_audit_for_cohort(cohort_id, epoch.epoch_id)
             for cohort_id in self.cohort_ids
         }
+        candidate_bar_recoveries = [
+            asdict(record)
+            for record in self.store.read_candidate_bar_recoveries(epoch.epoch_id)
+        ]
         final_epoch = self.store.load_epoch(epoch.epoch_id)
         self._assert_epoch_unchanged(epoch, final_epoch)
         if epoch_id is None:
@@ -531,6 +536,9 @@ class MetricsService:
             # calculations.  Keep the raw persisted observations available so all
             # reporting surfaces use the same valuation and benchmark evidence.
             "cohort_series": series,
+            # Persisted candidate staging evidence only.  This reports recovery
+            # and quarantine without synthesizing portfolio performance.
+            "candidate_bar_recoveries": candidate_bar_recoveries,
             "dependent_scenarios": True,
             # Policy audit evidence is per dependent scenario only.  Never
             # aggregate it into a cross-cohort event count or alpha statistic.

@@ -284,6 +284,30 @@ class TestGenerationDailyRun:
         assert entry["degraded"] is True
         assert entry["execution_valid"] is True
 
+    def test_run_daily_records_mixed_failure_and_degradation_history(
+        self, git_repo, manager
+    ):
+        manager.start_generation("mixed failure and degradation history test")
+
+        with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
+            mock_rcs.return_value = {
+                "success": False,
+                "degraded": True,
+                "execution_valid": False,
+                "candidate_bar_quarantines": ["ALX"],
+                "elapsed_s": 2.1,
+                "error": "1/2 cohorts failed; 1/2 cohorts degraded",
+            }
+            manager.run_daily("2026-03-31")
+
+        gen = manager.get_generation("gen_001")
+        assert gen is not None
+        entry = gen.run_history[0]
+        assert entry["success"] is False
+        assert entry["degraded"] is True
+        assert entry["execution_valid"] is False
+        assert entry["candidate_bar_quarantines"] == ["ALX"]
+
     def test_subprocess_result_fails_when_any_cohort_is_invalid(
         self, git_repo, manager
     ):

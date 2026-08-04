@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from tradingagents.dashboard import data_loaders
+from tradingagents.dashboard.pages import overview
 from tradingagents.dashboard.charts import make_cohort_heatmap, make_equity_curves_facet
 from tradingagents.strategies.metrics.service import MetricsService
 from scripts.generate_daily_report import render_generation_report
@@ -120,6 +121,117 @@ def test_report_discloses_epoch_quality_counts_and_costs() -> None:
         "Costs",
     )
     assert all(label in rendered for label in required)
+
+
+def test_report_discloses_candidate_recovery_and_quarantine_evidence() -> None:
+    rendered = render_generation_report(
+        "2026-08-31",
+        {"gen_id": "gen_004"},
+        {
+            "epoch": {"epoch_id": "epoch-1"},
+            "headline_books": {},
+            "stress_tests": {},
+            "candidate_bar_recoveries": [
+                {
+                    "session": "2026-08-31",
+                    "ticker": "ALX",
+                    "outcome": "quarantined",
+                    "attempts": [{"attempt": 1}, {"attempt": 2}],
+                    "signal_identities": [
+                        {"event_key": "event-alx", "strategy": "litigation"}
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert "Candidate market-data recovery" in rendered
+    assert "execution-valid degraded" in rendered
+    assert "| 2026-08-31 | ALX | quarantined | 2 | 1 |" in rendered
+
+
+class _OverviewColumn:
+    def __init__(self, metrics):
+        self._metrics = metrics
+
+    def metric(self, label, value):
+        self._metrics.append((label, value))
+
+
+class _OverviewStreamlit:
+    def __init__(self):
+        self.metrics = []
+        self.captions = []
+
+    def markdown(self, *_args, **_kwargs):
+        pass
+
+    def caption(self, value):
+        self.captions.append(value)
+
+    def columns(self, count):
+        return [_OverviewColumn(self.metrics) for _ in range(count)]
+
+
+def _render_overview_card(monkeypatch, metrics):
+    fake_st = _OverviewStreamlit()
+    monkeypatch.setattr(overview, "st", fake_st)
+    monkeypatch.setattr(overview, "load_generation_metrics", lambda *_args: metrics)
+    overview._render_gen_card(
+        {
+            "gen_id": "gen_004",
+            "state_dir": "/tmp/gen_004",
+            "created_at": "2026-08-01",
+            "git_commit": "abcdef123",
+            "description": "candidate recovery",
+            "run_history": [
+                {
+                    "date": "2026-08-31",
+                    "success": False,
+                    "degraded": True,
+                    "execution_valid": True,
+                    "candidate_bar_quarantines": ["ALX"],
+                }
+            ],
+        }
+    )
+    return fake_st
+
+
+def test_overview_counts_execution_valid_degraded_run_as_trading_day(monkeypatch):
+    rendered = _render_overview_card(
+        monkeypatch,
+        {"metric_schema_version": 2, "headline_books": {}},
+    )
+
+    assert ("Trading Days", 1) in rendered.metrics
+
+
+def test_overview_discloses_candidate_recovery_and_quarantine(monkeypatch):
+    rendered = _render_overview_card(
+        monkeypatch,
+        {
+            "metric_schema_version": 2,
+            "headline_books": {},
+            "candidate_bar_recoveries": [
+                {
+                    "session": "2026-08-31",
+                    "ticker": "ALX",
+                    "outcome": "quarantined",
+                    "attempts": [{"attempt": 1}, {"attempt": 2}],
+                    "signal_identities": [
+                        {"event_key": "event-alx", "strategy": "litigation"}
+                    ],
+                }
+            ],
+        },
+    )
+
+    candidate_captions = " ".join(rendered.captions)
+    assert "Candidate market-data recovery" in candidate_captions
+    assert "ALX" in candidate_captions
+    assert "quarantined" in candidate_captions
+    assert "execution-valid degraded" in candidate_captions
 
 
 def test_dashboard_surfaces_have_no_legacy_accuracy_or_local_aggregation() -> None:

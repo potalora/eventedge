@@ -130,12 +130,11 @@ def count_degraded_cohorts(results: dict) -> tuple[int, int, list[str]]:
 
     A degraded cohort completed its execution lifecycle (``execution_valid``) but
     quarantined candidate market data during staging.  It is reportable as a
-    data/availability failure, yet deliberately excluded from
-    :func:`count_failed_cohorts` so P0 execution remains distinguishable from a
-    cohort execution failure.
+    data/availability failure. A result may also be an execution/staging failure;
+    callers preserve both classifications so candidate quarantine evidence is
+    not hidden by the failure exit status.
 
-    Returns ``(n_degraded, n_total, sorted_degraded_names)``.  Results that also
-    carry an execution error remain execution failures and are not counted here.
+    Returns ``(n_degraded, n_total, sorted_degraded_names)``.
     """
     degraded = sorted(
         name
@@ -143,7 +142,6 @@ def count_degraded_cohorts(results: dict) -> tuple[int, int, list[str]]:
         if isinstance(result, dict)
         and result.get("degraded")
         and result.get("execution_valid") is True
-        and not result.get("error")
     )
     return len(degraded), len(results), degraded
 
@@ -1404,6 +1402,7 @@ class CohortOrchestrator:
             signal for signals, _, _ in horizon_signals.values() for signal in signals
         ]
         governed_reference_bars: dict[str, Any] = {}
+        session_governed_cohorts = [*completed_cohorts, *valid_cohorts]
         try:
             for cohort in valid_cohorts:
                 bars = cohort["executor"].validated_execution_reference_bars(
@@ -1416,9 +1415,15 @@ class CohortOrchestrator:
                             f"conflicting governed execution bar for {ticker}/{session}"
                         )
                     governed_reference_bars[ticker] = bar
+            for cohort in completed_cohorts:
+                bars = cohort["executor"].validated_execution_reference_bars(
+                    session, self._epoch_id
+                )
+                for ticker, bar in bars.items():
+                    governed_reference_bars.setdefault(ticker, bar)
         except Exception as error:
             reason = f"governed execution reference-bar validation failed: {error}"
-            for cohort in valid_cohorts:
+            for cohort in session_governed_cohorts:
                 results[cohort["config"].name] = {
                     "error": True,
                     "invalid_reason": reason,
@@ -1452,7 +1457,8 @@ class CohortOrchestrator:
         }
         current_candidate_identities: dict[str, tuple[tuple[str, str], ...]] = {}
         replay_identity_conflicts: set[str] = set()
-        if stored_recoveries:
+        partial_replay = bool(completed_cohorts)
+        if stored_recoveries or partial_replay:
             for ticker in sorted(candidate_only_tickers):
                 try:
                     current_candidate_identities[ticker] = _candidate_signal_identity_pairs(
@@ -1460,9 +1466,14 @@ class CohortOrchestrator:
                     )
                 except (TypeError, ValueError):
                     replay_identity_conflicts.add(ticker)
-            replay_identity_conflicts.update(
-                set(stored_recoveries) ^ set(current_candidate_identities)
-            )
+            if partial_replay:
+                replay_identity_conflicts.update(
+                    set(current_candidate_identities) - set(stored_recoveries)
+                )
+            else:
+                replay_identity_conflicts.update(
+                    set(stored_recoveries) ^ set(current_candidate_identities)
+                )
             for ticker in sorted(
                 set(stored_recoveries) & set(current_candidate_identities)
             ):

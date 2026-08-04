@@ -20,6 +20,7 @@ from tradingagents.strategies.execution.models import (
 )
 from tradingagents.strategies.metrics.health import classify_strategy_run
 from tradingagents.strategies.metrics.models import (
+    CandidateBarRecoveryRecord,
     METRIC_SCHEMA_VERSION,
     MetricEpoch,
     OutcomeRecord,
@@ -552,6 +553,7 @@ def test_generation_report_empty_current_historical_and_panel_rules(
         ],
         "stress_tests": {},
         "cohort_series": {},
+        "candidate_bar_recoveries": [],
         "dependent_scenarios": True,
         "policy_audit": {
             "aggregation_prohibited": True,
@@ -664,6 +666,50 @@ def test_generation_report_projects_persisted_series_without_network(
         pytest.approx(1 / 1001),
         pytest.approx(1 / 1002),
     ]
+
+
+def test_generation_report_projects_persisted_candidate_recovery_evidence(
+    tmp_path, ledger_factory
+) -> None:
+    ledger = ledger_factory("horizon_30d_size_100k")
+    _record_window(ledger, "epoch-1", SESSIONS)
+    service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
+    service.store.save_epoch(_epoch())
+    record = CandidateBarRecoveryRecord(
+        recovery_id="candidate-recovery-epoch-1-2026-08-03-ALX",
+        epoch_id="epoch-1",
+        session=SESSIONS[0],
+        ticker="ALX",
+        outcome="quarantined",
+        attempts=(
+            {
+                "ticker": "ALX",
+                "session": SESSIONS[0],
+                "attempt": 1,
+                "source": "yfinance",
+                "fetched_at": NOW,
+                "open": Decimal("101"),
+                "high": Decimal("102"),
+                "low": Decimal("100"),
+                "close": Decimal("103"),
+                "validation_error": "close exceeds high",
+            },
+        ),
+        signal_identities=(
+            {"event_key": "event-alx", "strategy": "litigation"},
+        ),
+    )
+    service.store.save_candidate_bar_recovery(record)
+
+    evidence = service.generation_report()["candidate_bar_recoveries"]
+
+    assert len(evidence) == 1
+    assert evidence[0]["recovery_id"] == record.recovery_id
+    assert evidence[0]["session"] == SESSIONS[0]
+    assert evidence[0]["ticker"] == "ALX"
+    assert evidence[0]["outcome"] == "quarantined"
+    assert evidence[0]["attempts"] == record.attempts
+    assert evidence[0]["signal_identities"] == record.signal_identities
 
 
 def test_generation_report_projects_bounded_policy_audit_from_companions(

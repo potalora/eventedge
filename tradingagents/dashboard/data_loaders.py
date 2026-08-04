@@ -136,6 +136,7 @@ def load_generation_metrics(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
             ],
             "stress_tests": {},
             "cohort_series": {},
+            "candidate_bar_recoveries": [],
             "dependent_scenarios": True,
         }
     try:

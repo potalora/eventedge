@@ -219,6 +219,15 @@ class GenerationManager:
                     if "execution_valid" in result
                     else {}
                 ),
+                **(
+                    {
+                        "candidate_bar_quarantines": result[
+                            "candidate_bar_quarantines"
+                        ]
+                    }
+                    if "candidate_bar_quarantines" in result
+                    else {}
+                ),
                 **({"error": result["error"]} if "error" in result else {}),
             })
             # Cap history
@@ -366,35 +375,66 @@ class GenerationManager:
                 )
 
                 n_failed, n_total, failed = count_failed_cohorts(cohort_results)
+                n_degraded, _, degraded = count_degraded_cohorts(cohort_results)
+                execution_valid = bool(cohort_results) and all(
+                    isinstance(result, dict)
+                    and result.get("execution_valid") is True
+                    for result in cohort_results.values()
+                )
+                quarantined_tickers = sorted(
+                    {
+                        str(ticker)
+                        for name in degraded
+                        for ticker in cohort_results[name].get(
+                            "candidate_bar_quarantines", []
+                        )
+                    }
+                )
                 if n_failed:
                     msg = (
                         f"{n_failed}/{n_total} cohorts failed: "
                         f"{', '.join(failed)}"
                     )
+                    if n_degraded:
+                        msg += (
+                            f"; {n_degraded}/{n_total} cohorts degraded "
+                            f"(candidate data quarantined): {', '.join(degraded)}"
+                        )
+                        if quarantined_tickers:
+                            msg += "; quarantined tickers: " + ", ".join(
+                                quarantined_tickers
+                            )
                     logger.error("Generation %s: %s", gen_data["gen_id"], msg)
-                    return {
+                    failure = {
                         "success": False,
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
                     }
+                    if n_degraded:
+                        failure.update(
+                            {
+                                "degraded": True,
+                                "execution_valid": execution_valid,
+                                "candidate_bar_quarantines": quarantined_tickers,
+                            }
+                        )
+                    return failure
 
-                n_degraded, n_total, degraded = count_degraded_cohorts(
-                    cohort_results
-                )
                 if n_degraded:
-                    execution_valid = all(
-                        cohort_results[name].get("execution_valid") is True
-                        for name in degraded
-                    )
                     msg = (
                         f"{n_degraded}/{n_total} cohorts degraded "
                         f"(candidate data quarantined): {', '.join(degraded)}"
                     )
+                    if quarantined_tickers:
+                        msg += "; quarantined tickers: " + ", ".join(
+                            quarantined_tickers
+                        )
                     logger.warning("Generation %s: %s", gen_data["gen_id"], msg)
                     return {
                         "success": False,
                         "degraded": True,
                         "execution_valid": execution_valid,
+                        "candidate_bar_quarantines": quarantined_tickers,
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
                     }

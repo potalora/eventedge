@@ -47,17 +47,37 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
     )
 
     n_failed, n_total, failed = count_failed_cohorts(result)
+    n_degraded, _, degraded = count_degraded_cohorts(result)
+    quarantined_tickers = sorted(
+        {
+            str(ticker)
+            for name in degraded
+            for ticker in result[name].get("candidate_bar_quarantines", [])
+        }
+    )
     if n_failed:
-        return 1, f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
+        message = f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
+        if n_degraded:
+            message += (
+                "; DEGRADED: "
+                f"{n_degraded}/{n_total} cohorts degraded (execution valid): "
+                f"{', '.join(degraded)}"
+            )
+            if quarantined_tickers:
+                message += "; quarantined tickers: " + ", ".join(
+                    quarantined_tickers
+                )
+        return 1, message
 
-    n_degraded, n_total, degraded = count_degraded_cohorts(result)
     if n_degraded:
-        return (
-            2,
+        message = (
             "DEGRADED: "
             f"{n_degraded}/{n_total} cohorts degraded (execution valid): "
-            f"{', '.join(degraded)}",
+            f"{', '.join(degraded)}"
         )
+        if quarantined_tickers:
+            message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
+        return 2, message
     return 0, ""
 
 

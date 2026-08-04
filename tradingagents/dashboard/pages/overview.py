@@ -82,10 +82,12 @@ def _render_gen_card(gen: dict) -> None:
     commit = gen.get("git_commit", "")[:7]
     desc = gen.get("description", "")
 
-    # Count successful run dates
+    # Count dates whose execution completed, including candidate-only degradation.
     run_dates = set()
     for r in gen.get("run_history", []):
-        if r.get("success"):
+        if r.get("success") or (
+            r.get("degraded") and r.get("execution_valid") is True
+        ):
             run_dates.add(r["date"])
 
     metrics = load_generation_metrics(gen_id, state_dir)
@@ -115,6 +117,7 @@ def _render_gen_card(gen: dict) -> None:
         "signals and market data mean they are not independent observations."
     )
     _render_policy_audit(metrics)
+    _render_candidate_recovery(metrics)
     quality = [
         (
             f"{cohort_id}: {book.get('valid_sessions', 'unavailable')} valid sessions; "
@@ -126,6 +129,33 @@ def _render_gen_card(gen: dict) -> None:
         for cohort_id, book in sorted(headline.items())
     ]
     st.caption("Data quality — " + (" | ".join(quality) if quality else "unavailable"))
+
+
+def _render_candidate_recovery(metrics: dict) -> None:
+    """Show persisted candidate staging evidence without performance inference."""
+    records = metrics.get("candidate_bar_recoveries") or []
+    if not records:
+        st.caption("Candidate market-data recovery — no persisted records.")
+        return
+    rows = []
+    for value in records:
+        record = value if isinstance(value, dict) else {}
+        attempts = record.get("attempts")
+        identities = record.get("signal_identities")
+        rows.append(
+            f"{record.get('session', 'unknown')} {record.get('ticker', 'unknown')}: "
+            f"{record.get('outcome', 'unknown')} "
+            f"({len(attempts) if isinstance(attempts, (list, tuple)) else 'unknown'} "
+            "attempts; "
+            f"{len(identities) if isinstance(identities, (list, tuple)) else 'unknown'} "
+            "signal identities)"
+        )
+    st.caption(
+        "Candidate market-data recovery — persisted staging evidence; quarantined "
+        "records are execution-valid degraded outcomes and do not revise portfolio "
+        "performance. "
+        + " | ".join(rows)
+    )
 
 
 def _render_policy_audit(metrics: dict) -> None:

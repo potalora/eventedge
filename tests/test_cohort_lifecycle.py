@@ -926,6 +926,109 @@ class TestCandidateBarLifecycle:
         assert regime["staging_valid"] is False
         assert regime["candidate_bar_quarantines"] == ["ALX"]
 
+    def test_partial_replay_uses_completed_cohort_p0_bars_as_session_governance(
+        self, tmp_path
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source, overlap_only=True
+        )
+        session = next_session(first_session)
+        second = orchestrator.cohorts[1]
+        original_second_stage = second["engine"].screen_and_stage
+        replay_reference_bars: list[set[str]] = []
+        fail_once = True
+
+        def stage_without_initial_position_then_fail_once(*args, **kwargs):
+            nonlocal fail_once
+            if kwargs["trading_date"] == first_session.isoformat():
+                return original_second_stage(
+                    *args, **{**kwargs, "shared_signals": []}
+                )
+            replay_reference_bars.append(
+                set(kwargs["data"]["_execution_reference_bars"])
+            )
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("post-resolution staging failure")
+            return original_second_stage(*args, **kwargs)
+
+        second["engine"].screen_and_stage = (
+            stage_without_initial_position_then_fail_once
+        )
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            first = orchestrator.run_daily(session.isoformat())
+            candidate_calls_before_replay = len(source.candidate_calls)
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert first["horizon_30d"]["error"] is False
+        assert first["horizon_3m"]["error"] is True
+        assert replay["horizon_30d"]["replayed"] is True
+        assert replay["horizon_3m"]["error"] is False
+        assert len(source.candidate_calls) == candidate_calls_before_replay
+        assert replay_reference_bars == [
+            {"AAPL", "BIL", "SPY"},
+            {"AAPL", "BIL", "SPY"},
+        ]
+
+    def test_partial_replay_ignores_stored_candidates_from_completed_horizons(
+        self, tmp_path
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        session = next_session(first_session)
+        original_screen = orchestrator._screen_for_horizon
+
+        def horizon_specific_screen(data, trading_date, horizon):
+            signals, regime, health = original_screen(data, trading_date, horizon)
+            if trading_date == session.isoformat():
+                ticker = "ALX" if horizon == "30d" else "MSFT"
+                signals = [signal for signal in signals if signal["ticker"] == ticker]
+            return signals, regime, health
+
+        orchestrator._screen_for_horizon = horizon_specific_screen
+        second = orchestrator.cohorts[1]
+        original_second_stage = second["engine"].screen_and_stage
+        staged_tickers: list[tuple[str, ...]] = []
+        fail_once = True
+
+        def stage_with_one_failure(*args, **kwargs):
+            nonlocal fail_once
+            staged_tickers.append(
+                tuple(signal["ticker"] for signal in kwargs["shared_signals"])
+            )
+            if kwargs["trading_date"] == session.isoformat() and fail_once:
+                fail_once = False
+                raise RuntimeError("post-resolution staging failure")
+            return original_second_stage(*args, **kwargs)
+
+        second["engine"].screen_and_stage = stage_with_one_failure
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            first = orchestrator.run_daily(session.isoformat())
+            candidate_calls_before_replay = len(source.candidate_calls)
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert first["horizon_30d"]["error"] is False
+        assert first["horizon_3m"]["error"] is True
+        assert replay["horizon_30d"]["replayed"] is True
+        assert replay["horizon_3m"]["error"] is False
+        assert len(source.candidate_calls) == candidate_calls_before_replay
+        assert staged_tickers[-2:] == [("MSFT",), ("MSFT",)]
+
     def test_partial_replay_rejects_changed_candidate_identity_without_io_or_staging(
         self, tmp_path
     ):
@@ -1062,7 +1165,7 @@ class TestCandidateBarLifecycle:
             "invalid_reason"
         ]
         assert "GOOG" in conflict["invalid_reason"]
-        assert "MSFT" in conflict["invalid_reason"]
+        assert "MSFT" not in conflict["invalid_reason"]
         assert count_failed_cohorts(replay) == (1, 2, ["horizon_3m"])
 
 

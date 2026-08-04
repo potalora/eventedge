@@ -104,6 +104,56 @@ def test_worker_status_is_degraded_for_candidate_quarantine():
     assert "DEGRADED: 1/1 cohorts" in message
 
 
+def test_worker_failure_status_retains_simultaneous_candidate_quarantine():
+    result = {
+        "execution_failed": {
+            "error": True,
+            "execution_valid": False,
+            "invalid_reason": "missing governed mark",
+        },
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": ["ALX"],
+        },
+    }
+
+    exit_code, message = run_cohorts._cohort_run_exit_status(result)
+
+    assert exit_code == 1
+    assert "ERROR: 1/2 cohorts failed: execution_failed" in message
+    assert "DEGRADED: 1/2 cohorts degraded (execution valid)" in message
+    assert "candidate_quarantined" in message
+    assert "quarantined tickers: ALX" in message
+
+
+def test_worker_failure_status_retains_degradation_on_same_cohort():
+    result = {
+        "candidate_replay_conflict": {
+            "error": True,
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": ["ALX"],
+            "invalid_reason": "deterministic candidate replay identity conflict",
+        }
+    }
+
+    assert count_failed_cohorts(result) == (1, 1, ["candidate_replay_conflict"])
+    assert count_degraded_cohorts(result) == (
+        1,
+        1,
+        ["candidate_replay_conflict"],
+    )
+    exit_code, message = run_cohorts._cohort_run_exit_status(result)
+    assert exit_code == 1
+    assert "ERROR: 1/1 cohorts failed" in message
+    assert "DEGRADED: 1/1 cohorts degraded (execution valid)" in message
+    assert "quarantined tickers: ALX" in message
+
+
 def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys):
     result = {
         "candidate_quarantined": {
@@ -265,6 +315,54 @@ def test_degraded_worker_result_preserves_execution_validity(tmp_path):
     assert result["success"] is False
     assert result["degraded"] is True
     assert result["execution_valid"] is True
+    assert "1/1 cohorts degraded" in result["error"]
+
+
+def test_failed_worker_result_preserves_simultaneous_degradation(tmp_path):
+    results = {
+        "execution_failed": {
+            "error": True,
+            "execution_valid": False,
+            "invalid_reason": "missing governed mark",
+        },
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+        },
+    }
+    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(1, stdout, "ERROR and DEGRADED"))
+
+    assert result["success"] is False
+    assert result["degraded"] is True
+    assert result["execution_valid"] is False
+    assert result["candidate_bar_quarantines"] == ["ALX"]
+    assert "1/2 cohorts failed" in result["error"]
+    assert "1/2 cohorts degraded" in result["error"]
+
+
+def test_failed_worker_result_preserves_same_cohort_degradation(tmp_path):
+    results = {
+        "candidate_replay_conflict": {
+            "error": True,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+            "invalid_reason": "deterministic candidate replay identity conflict",
+        }
+    }
+    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(1, stdout, "ERROR and DEGRADED"))
+
+    assert result["success"] is False
+    assert result["degraded"] is True
+    assert result["execution_valid"] is True
+    assert result["candidate_bar_quarantines"] == ["ALX"]
+    assert "1/1 cohorts failed" in result["error"]
     assert "1/1 cohorts degraded" in result["error"]
 
 
