@@ -263,6 +263,27 @@ class TestGenerationDailyRun:
         assert entry["success"] is True
         assert "elapsed_s" in entry
 
+    def test_run_daily_records_degraded_history(self, git_repo, manager):
+        """Candidate quarantine is alertable without becoming an execution failure."""
+        manager.start_generation("degraded history test")
+
+        with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
+            mock_rcs.return_value = {
+                "success": False,
+                "degraded": True,
+                "execution_valid": True,
+                "elapsed_s": 2.1,
+                "error": "1/1 cohorts degraded: candidate_quarantined",
+            }
+            manager.run_daily("2026-03-31")
+
+        gen = manager.get_generation("gen_001")
+        assert gen is not None
+        entry = gen.run_history[0]
+        assert entry["success"] is False
+        assert entry["degraded"] is True
+        assert entry["execution_valid"] is True
+
     def test_subprocess_result_fails_when_any_cohort_is_invalid(
         self, git_repo, manager
     ):
@@ -322,6 +343,36 @@ class TestGenerationDailyRun:
         assert raised.value.code == 1
         assert "gen_001: FAILED" in output
         assert "gen_002: OK" in output
+
+    def test_run_daily_cli_prints_degraded_then_exits_nonzero(
+        self, monkeypatch, capsys
+    ):
+        """Monitoring must distinguish candidate quarantine from execution failure."""
+        from scripts import run_generations
+
+        results = {
+            "gen_001": {
+                "success": False,
+                "degraded": True,
+                "execution_valid": True,
+                "elapsed_s": 1.0,
+                "error": "1/1 cohorts degraded: candidate_quarantined",
+            },
+        }
+        monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(GenerationManager, "run_daily", lambda self, date: results)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_generations.py", "run-daily", "--date", "2026-07-31"],
+        )
+
+        with pytest.raises(SystemExit) as raised:
+            run_generations.main()
+
+        output = capsys.readouterr().out
+        assert raised.value.code == 1
+        assert "gen_001: DEGRADED" in output
 
 
 # ------------------------------------------------------------------

@@ -31,10 +31,10 @@ def _extract_cohort_results(stdout: str) -> dict | None:
     """Extract the trailing top-level JSON results object that run_cohorts.py
     prints (``json.dumps(result, indent=2)``) from its mixed stdout.
 
-    Lets the parent detect cohort failures even when a (frozen) worktree's
-    run_cohorts.py exits 0 on a run where cohorts errored. Returns None when no
-    top-level object is parseable, in which case callers fall back to the exit
-    code alone.
+    Lets the parent detect both cohort execution failures and candidate-data
+    quarantine, including from a frozen worktree whose runner exits 0. Returns
+    None when no top-level object is parseable, in which case callers fall back
+    to the exit code alone.
     """
     if not stdout:
         return None
@@ -213,6 +213,12 @@ class GenerationManager:
                 "action": "daily",
                 "success": result["success"],
                 "elapsed_s": result["elapsed_s"],
+                **({"degraded": True} if result.get("degraded") else {}),
+                **(
+                    {"execution_valid": result["execution_valid"]}
+                    if "execution_valid" in result
+                    else {}
+                ),
                 **({"error": result["error"]} if "error" in result else {}),
             })
             # Cap history
@@ -348,28 +354,14 @@ class GenerationManager:
             # strategies" rule. Kept on success too, not just on failure.
             self._write_run_log(gen_data, proc.stdout, proc.stderr)
 
-            if proc.returncode != 0:
-                error_msg = (proc.stderr or proc.stdout or "").strip()
-                # Truncate long error output
-                if len(error_msg) > 2000:
-                    error_msg = error_msg[:2000] + "...(truncated)"
-                logger.error(
-                    "Generation %s failed (rc=%d): %s",
-                    gen_data["gen_id"], proc.returncode, error_msg[:200],
-                )
-                return {
-                    "success": False,
-                    "elapsed_s": round(elapsed, 2),
-                    "error": error_msg,
-                }
-
-            # rc==0 does not imply the cohorts succeeded: run_cohorts.py catches
-            # per-cohort errors and prints {"error": true} for each, then exits
-            # 0. Inspect the printed results so a run where cohorts failed is
-            # never recorded as a masked success (2026-06-01 incident).
+            # The printed cohort results are authoritative for the distinction
+            # between execution failure and candidate-data quarantine.  Parse
+            # them before interpreting the worker's nonzero alert exit code so
+            # old frozen runners (which may exit zero) retain the same status.
             cohort_results = _extract_cohort_results(proc.stdout)
             if cohort_results is not None:
                 from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                    count_degraded_cohorts,
                     count_failed_cohorts,
                 )
 
@@ -385,6 +377,42 @@ class GenerationManager:
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
                     }
+
+                n_degraded, n_total, degraded = count_degraded_cohorts(
+                    cohort_results
+                )
+                if n_degraded:
+                    execution_valid = all(
+                        cohort_results[name].get("execution_valid") is True
+                        for name in degraded
+                    )
+                    msg = (
+                        f"{n_degraded}/{n_total} cohorts degraded "
+                        f"(candidate data quarantined): {', '.join(degraded)}"
+                    )
+                    logger.warning("Generation %s: %s", gen_data["gen_id"], msg)
+                    return {
+                        "success": False,
+                        "degraded": True,
+                        "execution_valid": execution_valid,
+                        "elapsed_s": round(elapsed, 2),
+                        "error": msg,
+                    }
+
+            if proc.returncode != 0:
+                error_msg = (proc.stderr or proc.stdout or "").strip()
+                # Truncate long error output
+                if len(error_msg) > 2000:
+                    error_msg = error_msg[:2000] + "...(truncated)"
+                logger.error(
+                    "Generation %s failed (rc=%d): %s",
+                    gen_data["gen_id"], proc.returncode, error_msg[:200],
+                )
+                return {
+                    "success": False,
+                    "elapsed_s": round(elapsed, 2),
+                    "error": error_msg,
+                }
 
             logger.info(
                 "Generation %s completed in %.1fs",

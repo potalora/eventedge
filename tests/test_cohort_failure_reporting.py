@@ -17,6 +17,7 @@ import pytest
 from scripts import run_cohorts
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
+    count_degraded_cohorts,
     count_failed_cohorts,
 )
 from tradingagents.strategies.orchestration.generation_manager import (
@@ -70,6 +71,74 @@ def test_candidate_quarantine_is_reportable_degradation_not_execution_failure():
     assert count_failed_cohorts(results) == (0, 16, [])
     assert all(result["degraded"] for result in results.values())
     assert all(result["candidate_bar_quarantines"] == ["ALX"] for result in results.values())
+
+
+def test_count_degraded_cohorts_is_distinct_from_execution_failures():
+    results = {
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+        },
+        "clean": {"error": False, "degraded": False, "execution_valid": True},
+    }
+
+    assert count_failed_cohorts(results) == (0, 2, [])
+    assert count_degraded_cohorts(results) == (1, 2, ["candidate_quarantined"])
+
+
+def test_worker_status_is_degraded_for_candidate_quarantine():
+    result = {
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+        }
+    }
+
+    exit_code, message = run_cohorts._cohort_run_exit_status(result)
+
+    assert exit_code == 2
+    assert "DEGRADED: 1/1 cohorts" in message
+
+
+def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys):
+    result = {
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+        }
+    }
+
+    class FakeOrchestrator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_daily(self, trading_date):
+            return result
+
+    monkeypatch.setattr(sys, "argv", ["run_cohorts.py", "--date", "2026-07-31"])
+    monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
+    monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "synthetic-commit")
+    monkeypatch.setattr(
+        "tradingagents.strategies.orchestration.cohort_orchestrator.build_default_cohorts",
+        lambda config: [],
+    )
+    monkeypatch.setattr(
+        "tradingagents.strategies.orchestration.cohort_orchestrator.CohortOrchestrator",
+        FakeOrchestrator,
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_cohorts.main()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 2
+    assert "DEGRADED: 1/1 cohorts" in captured.err
 
 
 # --- _extract_cohort_results (parse run_cohorts.py stdout) ---
@@ -178,6 +247,25 @@ def test_rc0_all_success_stays_success(tmp_path):
     stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
     result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
     assert result["success"] is True
+
+
+def test_degraded_worker_result_preserves_execution_validity(tmp_path):
+    results = {
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+        }
+    }
+    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "DEGRADED: candidate data"))
+
+    assert result["success"] is False
+    assert result["degraded"] is True
+    assert result["execution_valid"] is True
+    assert "1/1 cohorts degraded" in result["error"]
 
 
 def test_nonzero_rc_still_failed(tmp_path):

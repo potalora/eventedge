@@ -82,6 +82,26 @@ def _candidate_replay_conflict_reason(tickers: list[str]) -> str:
     )
 
 
+def _stored_candidate_identity_pairs(record: Any) -> tuple[tuple[str, str], ...]:
+    """Normalize the immutable candidate identity representation for replay."""
+    pairs = tuple(
+        sorted(
+            (
+                str(identity.get("event_key", "")),
+                str(identity.get("strategy", "")),
+            )
+            for identity in record.signal_identities
+        )
+    )
+    if not pairs or any(
+        not event_key or not strategy for event_key, strategy in pairs
+    ):
+        raise ValueError(
+            f"candidate recovery identity is incomplete for {record.ticker}"
+        )
+    return pairs
+
+
 def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
     """Count cohorts that errored in a ``run_daily`` results dict.
 
@@ -103,6 +123,29 @@ def count_failed_cohorts(results: dict) -> tuple[int, int, list[str]]:
         )
     )
     return len(failed), len(results), failed
+
+
+def count_degraded_cohorts(results: dict) -> tuple[int, int, list[str]]:
+    """Count candidate-quarantined cohorts without recasting them as failures.
+
+    A degraded cohort completed its execution lifecycle (``execution_valid``) but
+    quarantined candidate market data during staging.  It is reportable as a
+    data/availability failure, yet deliberately excluded from
+    :func:`count_failed_cohorts` so P0 execution remains distinguishable from a
+    cohort execution failure.
+
+    Returns ``(n_degraded, n_total, sorted_degraded_names)``.  Results that also
+    carry an execution error remain execution failures and are not counted here.
+    """
+    degraded = sorted(
+        name
+        for name, result in results.items()
+        if isinstance(result, dict)
+        and result.get("degraded")
+        and result.get("execution_valid") is True
+        and not result.get("error")
+    )
+    return len(degraded), len(results), degraded
 
 
 # ---------------------------------------------------------------------------
@@ -1401,38 +1444,44 @@ class CohortOrchestrator:
         candidate_only_tickers = signal_tickers - set(governed_reference_bars)
         candidate_reference_bars: dict[str, Any] = {}
         quarantined_tickers: set[str] = set()
-        existing_recoveries = {
+        stored_recoveries = {
             record.ticker: record
             for record in self._metric_store.read_candidate_bar_recoveries(
                 self._epoch_id, session
             )
-            if record.ticker in candidate_only_tickers
         }
-        replay_identity_conflicts: list[str] = []
-        for ticker, record in existing_recoveries.items():
-            try:
-                current_pairs = _candidate_signal_identity_pairs(
-                    all_signals, ticker, session
-                )
-            except (TypeError, ValueError):
-                replay_identity_conflicts.append(ticker)
-                continue
-            stored_pairs = tuple(
-                sorted(
-                    (
-                        str(identity.get("event_key", "")),
-                        str(identity.get("strategy", "")),
+        current_candidate_identities: dict[str, tuple[tuple[str, str], ...]] = {}
+        replay_identity_conflicts: set[str] = set()
+        if stored_recoveries:
+            for ticker in sorted(candidate_only_tickers):
+                try:
+                    current_candidate_identities[ticker] = _candidate_signal_identity_pairs(
+                        all_signals, ticker, session
                     )
-                    for identity in record.signal_identities
-                )
+                except (TypeError, ValueError):
+                    replay_identity_conflicts.add(ticker)
+            replay_identity_conflicts.update(
+                set(stored_recoveries) ^ set(current_candidate_identities)
             )
-            if current_pairs != stored_pairs:
-                replay_identity_conflicts.append(ticker)
+            for ticker in sorted(
+                set(stored_recoveries) & set(current_candidate_identities)
+            ):
+                try:
+                    stored_pairs = _stored_candidate_identity_pairs(
+                        stored_recoveries[ticker]
+                    )
+                except (TypeError, ValueError):
+                    replay_identity_conflicts.add(ticker)
+                    continue
+                if current_candidate_identities[ticker] != stored_pairs:
+                    replay_identity_conflicts.add(ticker)
         if replay_identity_conflicts:
-            reason = _candidate_replay_conflict_reason(replay_identity_conflicts)
+            reason = _candidate_replay_conflict_reason(
+                sorted(replay_identity_conflicts)
+            )
             existing_quarantines = sorted(
                 record.ticker
-                for record in existing_recoveries.values()
+                for record in stored_recoveries.values()
                 if record.outcome == "quarantined"
             )
             for cohort in valid_cohorts:
@@ -1445,6 +1494,7 @@ class CohortOrchestrator:
                     "candidate_bar_quarantines": existing_quarantines,
                 }
             return results
+        existing_recoveries = stored_recoveries
         try:
             from tradingagents.strategies.execution.models import MarketBar
             from tradingagents.strategies.execution.price_source import (

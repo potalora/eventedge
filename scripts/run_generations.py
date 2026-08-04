@@ -474,7 +474,13 @@ def main():
             logger.info("Using XNYS session: %s", trading_date)
         results = manager.run_daily(trading_date)
         for gen_id, result in results.items():
-            status = "OK" if result["success"] else "FAILED"
+            status = (
+                "OK"
+                if result["success"]
+                else "DEGRADED"
+                if result.get("degraded")
+                else "FAILED"
+            )
             elapsed = result.get("elapsed_s", 0)
             print(f"  {gen_id}: {status} ({elapsed:.1f}s)")
             if not result["success"] and result.get("error"):
