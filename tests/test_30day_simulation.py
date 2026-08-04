@@ -998,7 +998,7 @@ class TestIdempotencyDoubleRun:
             len(source.raw_calls),
             len(source.action_calls),
             len(source.benchmark_calls),
-        ) == (0, 0, 1)
+        ) == (1, 1, 1)
 
         cohort["engine"].screen_and_stage = original_stage
         later_session = next_session(session)
@@ -1863,8 +1863,11 @@ class TestIdempotencyDoubleRun:
         outcomes = cohort["executor"].metric_store.read_outcomes(orchestrator._epoch_id)
         assert not first["cohort_0"]["error"]
         assert not first["cohort_1"]["error"]
-        assert source.raw_calls[-1] == (("AAPL", "MSFT"), sessions[-1])
-        assert raw_after_exit == raw_before_exit + 2
+        assert source.raw_calls[-1] == (
+            ("AAPL", "BIL", "MSFT", "SPY"),
+            sessions[-1],
+        )
+        assert raw_after_exit == raw_before_exit + 1
         assert {(row.ticker, row.status) for row in outcomes} == {
             ("AAPL", "valid"),
             ("MSFT", "valid"),
@@ -1951,7 +1954,7 @@ class TestIdempotencyDoubleRun:
         assert fresh_required == ("AAPL", "MSFT", "ZZZZ")
         assert not replay["cohort_1"]["error"]
         assert source.raw_calls[before_replay] == (
-            ("AAPL", "MSFT", "ZZZZ"),
+            ("AAPL", "BIL", "MSFT", "SPY", "ZZZZ"),
             sessions[-1],
         )
 
@@ -2303,7 +2306,7 @@ class TestIdempotencyDoubleRun:
         assert first["cohort_1"]["error"]
         assert replay["cohort_0"]["replayed"]
         assert not replay["cohort_1"]["error"]
-        assert len(source.raw_calls) == before[0] + 1
+        assert len(source.raw_calls) == before[0]
         assert len(source.action_calls) == before[1]
         assert len(source.benchmark_calls) == before[2]
 
@@ -2587,7 +2590,7 @@ class TestThirtyDayCohortDivergence:
         assert not result["cohort_0"]["error"]
         assert not result["cohort_1"]["error"]
         assert len(source.benchmark_calls) == 1
-        assert len(source.raw_calls) == 1
+        assert len(source.raw_calls) == 2
         assert all(
             cohort["engine"]._adaptive_confidence is False
             and cohort["config"].learning_policy.mode == "disabled"

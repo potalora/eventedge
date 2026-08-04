@@ -723,7 +723,6 @@ class SessionExecutor:
         economic = json.loads(str(context["economic_inputs_json"]))
         market = economic.get("market", {})
         provenance = json.loads(str(context["provenance_json"]))
-        required = tuple(context["required_tickers"])
         bars = {
             (str(item["ticker"]), session): MarketBar(
                 str(item["ticker"]),
@@ -774,7 +773,13 @@ class SessionExecutor:
         }
         return _PersistedSessionInputBundle(
             session,
-            required,
+            tuple(
+                sorted(
+                    ticker
+                    for ticker, stored_session in bars
+                    if stored_session == session
+                )
+            ),
             bars,
             actions,
             benchmarks,
@@ -1176,7 +1181,7 @@ class SessionExecutor:
                     "source": bars[ticker].source,
                     "adjusted": bars[ticker].adjusted,
                 }
-                for ticker in required
+                for ticker in sorted(bars)
             ],
             "corporate_actions": [
                 {
@@ -1210,7 +1215,8 @@ class SessionExecutor:
         )
         provenance: dict[str, object] = {
             "raw_bars": {
-                ticker: bars[ticker].fetched_at.isoformat() for ticker in required
+                ticker: bars[ticker].fetched_at.isoformat()
+                for ticker in sorted(bars)
             },
             "corporate_actions": {
                 action.action_id: action.fetched_at.isoformat() for action in actions
@@ -1627,7 +1633,7 @@ class SessionExecutor:
             max_age,
         )
         validate_required_bars(
-            bundle.bars, set(required), session, validation_at, max_age
+            bundle.bars, set(bundle.tickers), session, validation_at, max_age
         )
         validate_adjusted_closes(
             bundle.benchmarks,
@@ -1637,13 +1643,13 @@ class SessionExecutor:
             max_age,
         )
         cutoff = session_close(session)
-        for ticker in required:
+        for ticker in bundle.tickers:
             if bundle.bars[(ticker, session)].fetched_at < cutoff:
                 raise BarValidationError(f"pre-close {ticker}/{session}")
         for symbol in self.benchmark_symbols:
             if bundle.benchmarks[(symbol, session)].fetched_at < cutoff:
                 raise BarValidationError(f"pre-close {symbol}/{session}")
-        bars = {ticker: bundle.bars[(ticker, session)] for ticker in required}
+        bars = {ticker: bundle.bars[(ticker, session)] for ticker in bundle.tickers}
         benchmarks = {
             symbol: bundle.benchmarks[(symbol, session)]
             for symbol in self.benchmark_symbols

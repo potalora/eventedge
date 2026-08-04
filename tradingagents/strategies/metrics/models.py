@@ -13,7 +13,7 @@ HealthStatus = Literal[
 ]
 CriticalGapStatus = Literal["pending", "completed"]
 CriticalGapDetailStatus = Literal["minimal", "ready", "legacy_unbound"]
-CandidateBarRecoveryOutcome = Literal["recovered", "quarantined"]
+CandidateBarRecoveryOutcome = Literal["accepted", "recovered", "quarantined"]
 
 METRIC_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_LABEL = "1_legacy_calendar_signed"

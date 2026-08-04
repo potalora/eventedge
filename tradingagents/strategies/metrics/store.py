@@ -225,7 +225,7 @@ class MetricStore:
             or record.ticker != record.ticker.upper()
         ):
             raise ValueError("candidate bar recovery ticker is invalid")
-        if record.outcome not in {"recovered", "quarantined"}:
+        if record.outcome not in {"accepted", "recovered", "quarantined"}:
             raise ValueError("candidate bar recovery outcome is invalid")
         if not 1 <= len(record.attempts) <= _MAX_CANDIDATE_RECOVERY_ATTEMPTS:
             raise ValueError("candidate bar recovery attempt evidence count is invalid")

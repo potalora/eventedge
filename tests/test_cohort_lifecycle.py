@@ -402,15 +402,19 @@ class TestMultiDaySimulation:
         )
 
         orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
+        session = date(2026, 3, 30)
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
             side_effect=_authoritative_committee,
         ):
-            result = orchestrator.run_daily(date(2026, 3, 30).isoformat())
+            result = orchestrator.run_daily(session.isoformat())
 
         assert set(result) == {"cohort_0", "cohort_1"}
         assert len(source.benchmark_calls) == 1
-        assert len(source.raw_calls) == 1
+        assert source.raw_calls == [
+            (("BIL", "SPY"), session),
+            (("AAPL", "MSFT"), session),
+        ]
         assert all(
             cohort["engine"]._adaptive_confidence is False
             and cohort["config"].learning_policy.mode == "disabled"
@@ -477,9 +481,12 @@ class _CandidateRecoveryPriceSource:
             tickers, start_session, end_session_inclusive, adjusted
         )
         session = start_session
-        if self.governed_invalid and set(tickers) == {"AAPL"}:
-            bar = bars[("AAPL", session)]
-            bars[("AAPL", session)] = MarketBar(
+        invalid_ticker = (
+            "AAPL" if self.governed_invalid is True else self.governed_invalid
+        )
+        if invalid_ticker and invalid_ticker in tickers:
+            bar = bars[(invalid_ticker, session)]
+            bars[(invalid_ticker, session)] = MarketBar(
                 bar.ticker,
                 bar.session,
                 bar.open,
@@ -527,13 +534,27 @@ class _CandidateRecoveryPriceSource:
         for ticker in requested:
             bar = bars[(ticker, session)]
             if ticker != "ALX" or self.outcome == "valid":
+                attempts.append(
+                    CandidateBarAttempt(
+                        ticker,
+                        session,
+                        1,
+                        bar.source,
+                        bar.fetched_at,
+                        bar.open,
+                        bar.high,
+                        bar.low,
+                        bar.close,
+                        None,
+                    )
+                )
                 continue
             attempts.append(
                 CandidateBarAttempt(
                     ticker,
                     session,
                     1,
-                    "fixture-candidate",
+                    bar.source,
                     processed_at,
                     bar.open,
                     Decimal("102"),
@@ -552,7 +573,7 @@ class _CandidateRecoveryPriceSource:
                     ticker,
                     session,
                     2,
-                    "fixture-candidate",
+                    bar.source,
                     processed_at,
                     bar.open,
                     bar.high,
@@ -648,9 +669,10 @@ class TestCandidateBarLifecycle:
         records = orchestrator._metric_store.read_candidate_bar_recoveries(
             orchestrator._epoch_id, next_session(first_session)
         )
-        assert len(records) == 1
-        assert records[0].ticker == "ALX"
-        assert records[0].outcome == "quarantined"
+        assert [(record.ticker, record.outcome) for record in records] == [
+            ("ALX", "quarantined"),
+            ("MSFT", "accepted"),
+        ]
         epoch = orchestrator._metric_store.load_epoch(orchestrator._epoch_id)
         assert epoch.status == "open"
         assert orchestrator._metric_store.pending_critical_gap() is None
@@ -697,7 +719,8 @@ class TestCandidateBarLifecycle:
             orchestrator._epoch_id, next_session(first_session)
         )
         assert [(record.ticker, record.outcome) for record in records] == [
-            ("ALX", "recovered")
+            ("ALX", "recovered"),
+            ("MSFT", "accepted"),
         ]
 
     def test_governed_bar_failure_retains_critical_gap_path(self, tmp_path):
@@ -751,6 +774,152 @@ class TestCandidateBarLifecycle:
 
         assert len(source.candidate_calls) == before
         assert all(item["staging_valid"] is True for item in result.values())
+
+    def test_benchmark_candidate_uses_strict_raw_governed_bar_not_candidate_resolver(
+        self, tmp_path
+    ):
+        from test_30day_simulation import (
+            _authoritative_committee,
+            _authoritative_orchestrator,
+        )
+
+        class BenchmarkStrategy(_CandidateLifecycleStrategy):
+            def screen(self, data, trading_date, params):
+                return [
+                    Candidate(
+                        ticker="SPY",
+                        date=trading_date,
+                        direction="long",
+                        score=5.0,
+                        metadata={
+                            "source": "benchmark-candidate-fixture",
+                            "event_key": f"benchmark:SPY:{trading_date}",
+                            "observed_at": f"{trading_date}T19:00:00+00:00",
+                        },
+                    )
+                ]
+
+        source = _CandidateRecoveryPriceSource("valid")
+        session = date(2026, 3, 30)
+        orchestrator, _ = _authoritative_orchestrator(
+            tmp_path,
+            strategy_modules=[BenchmarkStrategy(session)],
+            source=source,
+        )
+        raw_reference_bars: list[dict[str, MarketBar]] = []
+        engine = orchestrator.cohorts[0]["engine"]
+        original_stage = engine.screen_and_stage
+
+        def capture_reference_bars(*args, **kwargs):
+            raw_reference_bars.append(
+                dict(kwargs["data"]["_execution_reference_bars"])
+            )
+            return original_stage(*args, **kwargs)
+
+        engine.screen_and_stage = capture_reference_bars
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            result = orchestrator.run_daily(session.isoformat())
+
+        assert source.candidate_calls == []
+        assert source.raw_calls == [(("BIL", "SPY"), session)]
+        assert result["cohort_0"]["error"] is False
+        assert result["cohort_0"]["staging_valid"] is True
+        assert [signal["ticker"] for signal in result["cohort_0"]["signals"]] == [
+            "SPY"
+        ]
+        assert raw_reference_bars[0]["SPY"].adjusted is False
+
+    def test_invalid_raw_benchmark_bar_fails_closed_in_p0(self, tmp_path):
+        from test_30day_simulation import _authoritative_orchestrator
+
+        source = _CandidateRecoveryPriceSource("valid")
+        source.governed_invalid = "SPY"
+        session = date(2026, 3, 30)
+        orchestrator, _ = _authoritative_orchestrator(
+            tmp_path,
+            strategy_modules=[_CandidateLifecycleStrategy(session)],
+            source=source,
+        )
+
+        result = orchestrator.run_daily(session.isoformat())
+
+        assert source.candidate_calls == []
+        assert source.raw_calls == [(("BIL", "SPY"), session)]
+        assert all(
+            item["error"] is True
+            and item["degraded"] is False
+            and item["execution_valid"] is False
+            and item["staging_valid"] is False
+            for item in result.values()
+        )
+        epoch = orchestrator._metric_store.load_epoch(orchestrator._epoch_id)
+        assert epoch.status == "invalid"
+        assert epoch.boundary_reason == "critical_market_data_gap"
+
+    def test_partial_staging_replay_reuses_all_candidate_evidence_without_io(
+        self, tmp_path
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        session = next_session(first_session)
+        second = orchestrator.cohorts[1]
+        original = second["engine"].screen_and_stage
+        calls: list[tuple[dict, list[dict]]] = []
+        fail_once = True
+
+        def fail_after_resolution(*args, **kwargs):
+            nonlocal fail_once
+            calls.append(
+                (
+                    dict(kwargs["data"]["_execution_reference_bars"]),
+                    [dict(signal) for signal in kwargs["shared_signals"]],
+                )
+            )
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("post-resolution staging failure")
+            return original(*args, **kwargs)
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            second["engine"].screen_and_stage = fail_after_resolution
+            first = orchestrator.run_daily(session.isoformat())
+            calls_after_first = len(source.candidate_calls)
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert first["horizon_30d"]["error"] is False
+        assert first["horizon_3m"]["error"] is True
+        assert len(source.candidate_calls) == calls_after_first
+        assert len(calls) == 2
+        assert calls[0] == calls[1]
+        assert set(calls[1][0]) == {"AAPL", "BIL", "MSFT", "SPY"}
+        assert [signal["ticker"] for signal in calls[1][1]] == ["MSFT"]
+        assert all(
+            result["error"] is False
+            and result["degraded"] is True
+            and result["staging_valid"] is False
+            and result["candidate_bar_quarantines"] == ["ALX"]
+            for result in replay.values()
+        )
+        records = orchestrator._metric_store.read_candidate_bar_recoveries(
+            orchestrator._epoch_id, session
+        )
+        assert [(record.ticker, record.outcome) for record in records] == [
+            ("ALX", "quarantined"),
+            ("MSFT", "accepted"),
+        ]
+        regime = orchestrator.cohorts[0]["state"].load_latest_regime()
+        assert regime["staging_valid"] is False
+        assert regime["candidate_bar_quarantines"] == ["ALX"]
 
 
 class TestCohortComparison:

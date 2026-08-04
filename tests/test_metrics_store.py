@@ -72,6 +72,22 @@ def test_candidate_bar_recoveries_round_trip_in_deterministic_order(tmp_path) ->
     ] == datetime(2026, 8, 3, 20, 1, tzinfo=timezone.utc)
 
 
+def test_one_attempt_accepted_candidate_round_trips(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = replace(
+        _record("candidate-accepted-msft", ticker="MSFT"),
+        outcome="accepted",
+        attempts=(_attempt(1, ticker="MSFT", error=None),),
+        signal_identities=(
+            {"event_key": "event-msft", "strategy": "earnings_call"},
+        ),
+    )
+
+    store.save_candidate_bar_recovery(record)
+
+    assert store.read_candidate_bar_recoveries("epoch-1") == (record,)
+
+
 def test_candidate_bar_recovery_rejects_unequal_duplicate_payload(tmp_path) -> None:
     store = MetricStore(tmp_path / "metrics.sqlite3")
     record = _record()

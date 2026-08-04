@@ -1076,10 +1076,13 @@ class CohortOrchestrator:
                 )
             )
             benchmark_symbols = fresh_execution[0]["executor"].benchmark_symbols
+            governed_tickers = tuple(
+                sorted(set(required_tickers) | set(benchmark_symbols))
+            )
             try:
                 bundle = SessionExecutor.fetch_input_bundle(
                     session,
-                    required_tickers,
+                    governed_tickers,
                     self._price_source,
                     benchmark_symbols,
                 )
@@ -1158,11 +1161,14 @@ class CohortOrchestrator:
                     name = cohort["config"].name
                     executor = cohort["executor"]
                     required = executor.required_tickers(session, self._epoch_id)
+                    governed = tuple(
+                        sorted(set(required) | set(executor.benchmark_symbols))
+                    )
                     try:
                         executor.validate_execution_input_bundle(
                             session,
                             self._epoch_id,
-                            bundle.for_tickers(required),
+                            bundle.for_tickers(governed),
                             processed_at,
                         )
                     except CorporateActionBatchError as error:
@@ -1198,10 +1204,16 @@ class CohortOrchestrator:
                         required = cohort["executor"].required_tickers(
                             session, self._epoch_id
                         )
+                        governed = tuple(
+                            sorted(
+                                set(required)
+                                | set(cohort["executor"].benchmark_symbols)
+                            )
+                        )
                         lifecycle = cohort["executor"].execute_open_and_mark(
                             session,
                             self._epoch_id,
-                            bundle.for_tickers(required),
+                            bundle.for_tickers(governed),
                             {},
                             processed_at,
                         )
@@ -1342,6 +1354,7 @@ class CohortOrchestrator:
         try:
             from tradingagents.strategies.execution.models import MarketBar
             from tradingagents.strategies.execution.price_source import (
+                CandidateBarAttempt,
                 CandidateBarResolution,
             )
             from tradingagents.strategies.execution.ids import stable_id
@@ -1359,7 +1372,7 @@ class CohortOrchestrator:
                     for field in ("open", "high", "low", "close")
                 ):
                     raise ValueError(
-                        f"recovered candidate evidence is incomplete for {ticker}"
+                        f"resolved candidate evidence is incomplete for {ticker}"
                     )
                 candidate_reference_bars[ticker] = MarketBar(
                     ticker,
@@ -1373,14 +1386,15 @@ class CohortOrchestrator:
                     False,
                 )
 
-            unresolved_tickers = candidate_only_tickers - set(existing_recoveries)
-            if unresolved_tickers:
+            resolutions: list[tuple[set[str], CandidateBarResolution]] = []
+            unresolved_candidates = candidate_only_tickers - set(existing_recoveries)
+            if unresolved_candidates:
                 resolver = getattr(
                     self._price_source, "resolve_candidate_daily_bars", None
                 )
                 if callable(resolver):
                     resolution = resolver(
-                        sorted(unresolved_tickers),
+                        sorted(unresolved_candidates),
                         session,
                         processed_at,
                         timedelta(
@@ -1394,7 +1408,7 @@ class CohortOrchestrator:
                 else:
                     strict_bars = ensure_reference_bars(
                         self._price_source,
-                        unresolved_tickers,
+                        unresolved_candidates,
                         session,
                         processed_at,
                         timedelta(
@@ -1410,10 +1424,27 @@ class CohortOrchestrator:
                             (ticker, session): bar
                             for ticker, bar in strict_bars.items()
                         },
-                        attempts=(),
+                        attempts=tuple(
+                            CandidateBarAttempt(
+                                ticker=ticker,
+                                session=session,
+                                attempt=1,
+                                source=bar.source,
+                                fetched_at=bar.fetched_at,
+                                open=bar.open,
+                                high=bar.high,
+                                low=bar.low,
+                                close=bar.close,
+                                validation_error=None,
+                            )
+                            for ticker, bar in sorted(strict_bars.items())
+                        ),
                         recovered_tickers=frozenset(),
                         quarantined_tickers=frozenset(),
                     )
+                resolutions.append((unresolved_candidates, resolution))
+
+            for resolution_tickers, resolution in resolutions:
                 candidate_reference_bars.update(
                     {
                         ticker: bar
@@ -1423,10 +1454,7 @@ class CohortOrchestrator:
                 )
                 quarantined_tickers.update(resolution.quarantined_tickers)
 
-                for ticker in sorted(
-                    set(resolution.recovered_tickers)
-                    | set(resolution.quarantined_tickers)
-                ):
+                for ticker in sorted(resolution_tickers):
                     from tradingagents.strategies.orchestration.event_identity import (
                         ACTIVE_STRATEGY_NAMES,
                         canonical_event_key,
@@ -1487,7 +1515,11 @@ class CohortOrchestrator:
                             outcome=(
                                 "quarantined"
                                 if ticker in resolution.quarantined_tickers
-                                else "recovered"
+                                else (
+                                    "recovered"
+                                    if ticker in resolution.recovered_tickers
+                                    else "accepted"
+                                )
                             ),
                             attempts=attempts,
                             signal_identities=tuple(
