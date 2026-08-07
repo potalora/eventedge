@@ -8,6 +8,7 @@ can run daily in parallel, building independent track records.
 Usage:
     python scripts/run_generations.py start "Initial 7-strategy baseline"
     python scripts/run_generations.py run-daily [--date 2026-04-01]
+    python scripts/run_generations.py preflight [--date 2026-04-01]
     python scripts/run_generations.py run-learning  # refused: production learning is disabled
     python scripts/run_generations.py compare [--gens gen_001,gen_002]
     python scripts/run_generations.py list
@@ -341,6 +342,13 @@ def main():
     p_daily = sub.add_parser("run-daily", help="Run all active generations for a date")
     p_daily.add_argument("--date", default=None, help="Trading date (YYYY-MM-DD)")
 
+    # preflight
+    p_preflight = sub.add_parser(
+        "preflight",
+        help="No-write integrity check (fetch -> screen -> staging gates) for all active generations",
+    )
+    p_preflight.add_argument("--date", default=None, help="Trading date (YYYY-MM-DD)")
+
     # run-learning
     sub.add_parser("run-learning", help="Refuse retired production learning")
 
@@ -485,6 +493,40 @@ def main():
             print(f"  {gen_id}: {status} ({elapsed:.1f}s)")
             if not result["success"] and result.get("error"):
                 # Print first few lines of error
+                error_lines = result["error"].strip().split("\n")
+                for line in error_lines[:5]:
+                    print(f"    {line}")
+        if any(not result["success"] for result in results.values()):
+            raise SystemExit(1)
+
+    elif args.command == "preflight":
+        from tradingagents.strategies.orchestration.trading_calendar import is_session
+
+        requested = args.date or date.today().isoformat()
+        try:
+            trading_session = date.fromisoformat(requested)
+        except ValueError:
+            parser.error(f"invalid ISO trading date: {requested}")
+        if not is_session(trading_session):
+            parser.error(f"{requested} is not an XNYS session")
+        trading_date = trading_session.isoformat()
+        if not args.date:
+            logger.info("Using XNYS session: %s", trading_date)
+        results = manager.run_preflight(trading_date)
+        if not results:
+            print("No active generations to preflight.")
+            return
+        for gen_id, result in results.items():
+            status = (
+                "OK"
+                if result["success"]
+                else "UNSUPPORTED"
+                if result.get("unsupported")
+                else "FAILED"
+            )
+            elapsed = result.get("elapsed_s", 0)
+            print(f"  {gen_id}: PREFLIGHT {status} ({elapsed:.1f}s)")
+            if not result["success"] and result.get("error"):
                 error_lines = result["error"].strip().split("\n")
                 for line in error_lines[:5]:
                     print(f"    {line}")

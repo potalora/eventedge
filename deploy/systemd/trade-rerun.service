@@ -1,0 +1,7 @@
+[Unit]
+Description=Handle trading rerun trigger
+
+[Service]
+Type=oneshot
+ExecStartPre=-/bin/rm -f /home/hermes/trading_agents/.triggers/run-now
+ExecStart=/bin/systemctl start trade.service

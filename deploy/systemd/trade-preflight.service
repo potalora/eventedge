@@ -1,0 +1,14 @@
+[Unit]
+Description=EventEdge preflight integrity check (live fetch -> screen -> staging gates, no state writes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+Environment=HOME=/home/hermes
+WorkingDirectory=/home/hermes/trading_agents
+Environment=BLOCKED_TICKERS=GOOGL
+ExecStart=/home/hermes/trading_agents/scripts/preflight.sh
+MemoryMax=4G

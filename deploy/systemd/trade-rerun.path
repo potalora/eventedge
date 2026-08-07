@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for trading rerun trigger
+
+[Path]
+PathChanged=/home/hermes/trading_agents/.triggers/run-now
+Unit=trade-rerun.service
+
+[Install]
+WantedBy=paths.target

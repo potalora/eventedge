@@ -240,6 +240,52 @@ class GenerationManager:
         """Refuse retired production learning without touching generation state."""
         raise RuntimeError("production learning is disabled; no subprocess was started")
 
+    def run_preflight(self, trading_date: str | None = None) -> dict[str, dict]:
+        """Run the no-write integrity preflight for every active generation.
+
+        Each generation's frozen worktree runs ``run_cohorts.py --preflight``:
+        live shared fetch, per-horizon screens, and the event-identity staging
+        gates — with a throwaway state dir, no LLM, no ledger writes. Nothing
+        is recorded in run_history and the manifest is untouched, so the
+        check can repeat freely ahead of the scheduled cycle.
+
+        Worktrees frozen before the ``--preflight`` flag existed report
+        ``unsupported`` instead of a hard failure.
+
+        Returns:
+            {gen_id: {"success": bool, "elapsed_s": float,
+                      "error"?: str, "unsupported"?: bool}}
+        """
+        if not trading_date:
+            trading_date = datetime.now().strftime("%Y-%m-%d")
+
+        results: dict[str, dict] = {}
+        manifest = self._load_manifest()
+
+        for gen_data in manifest["generations"]:
+            if gen_data["status"] != "active":
+                continue
+
+            gen_id = gen_data["gen_id"]
+            logger.info("Preflight for %s (date=%s)", gen_id, trading_date)
+
+            result = self._run_cohorts_subprocess(
+                gen_data,
+                ["--date", trading_date, "--preflight"],
+                log_name="last_preflight_output.log",
+            )
+            if not result["success"] and "unrecognized arguments" in str(
+                result.get("error", "")
+            ):
+                result["unsupported"] = True
+                result["error"] = (
+                    "worktree predates --preflight support; "
+                    "start a new generation from current main to enable it"
+                )
+            results[gen_id] = result
+
+        return results
+
     def pause_generation(self, gen_id: str) -> None:
         """Set a generation's status to 'paused'."""
         manifest = self._load_manifest()
@@ -327,6 +373,7 @@ class GenerationManager:
         self,
         gen_data: dict,
         extra_args: list[str],
+        log_name: str = "last_run_output.log",
     ) -> dict:
         """Run scripts/run_cohorts.py in a generation's worktree.
 
@@ -361,7 +408,7 @@ class GenerationManager:
             # per-strategy signal counts, etc.) so a silent strategy can always
             # be diagnosed after the fact — required by the "never ignore silent
             # strategies" rule. Kept on success too, not just on failure.
-            self._write_run_log(gen_data, proc.stdout, proc.stderr)
+            self._write_run_log(gen_data, proc.stdout, proc.stderr, log_name)
 
             # The printed cohort results are authoritative for the distinction
             # between execution failure and candidate-data quarantine.  Parse
@@ -477,15 +524,21 @@ class GenerationManager:
                 "error": str(e),
             }
 
-    def _write_run_log(self, gen_data: dict, stdout: str, stderr: str) -> None:
+    def _write_run_log(
+        self,
+        gen_data: dict,
+        stdout: str,
+        stderr: str,
+        log_name: str = "last_run_output.log",
+    ) -> None:
         """Write a generation run's captured output to its state dir.
 
-        Overwrites {state_dir}/last_run_output.log each run (bounded, no growth).
+        Overwrites {state_dir}/{log_name} each run (bounded, no growth).
         This is the durable record of what each strategy's data fetch returned —
         the evidence needed to classify any silent strategy.
         """
         try:
-            log_path = Path(gen_data["state_dir"]) / "last_run_output.log"
+            log_path = Path(gen_data["state_dir"]) / log_name
             log_path.parent.mkdir(parents=True, exist_ok=True)
             header = f"=== {gen_data.get('gen_id', '?')} run @ {datetime.now().isoformat()} ===\n"
             log_path.write_text(

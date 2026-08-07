@@ -1,0 +1,14 @@
+[Unit]
+Description=EventEdge daily paper-trading cycle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+Environment=HOME=/home/hermes
+WorkingDirectory=/home/hermes/trading_agents
+Environment=BLOCKED_TICKERS=GOOGL
+ExecStart=/home/hermes/trading_agents/scripts/daily_trading.sh
+MemoryMax=4G

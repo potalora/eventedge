@@ -7,6 +7,7 @@ Usage:
     python scripts/run_cohorts.py --compare             # print comparison report
     python scripts/run_cohorts.py --reset               # refused: start a fresh generation
     python scripts/run_cohorts.py --date 2026-04-05 --no-llm  # without LLM enrichment
+    python scripts/run_cohorts.py --date 2026-04-05 --preflight  # no-write integrity check
 """
 
 from __future__ import annotations
@@ -135,6 +136,14 @@ def main():
         help="Disable LLM enrichment (on by default).",
     )
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "Run the no-write integrity preflight (live fetch -> screen -> "
+            "event-identity staging gates) instead of the daily cycle."
+        ),
+    )
+    parser.add_argument(
         "--block-tickers",
         default="",
         help="Comma-separated tickers to exclude (compliance). Also reads BLOCKED_TICKERS env var.",
@@ -214,6 +223,33 @@ def main():
         tickers = [t.strip().upper() for t in blocked.split(",") if t.strip()]
         config["autoresearch"]["blocked_tickers"] = tickers
         logger.info("Blocked tickers: %s", tickers)
+
+    # Preflight: no-write integrity check. Routed before cohort/ledger
+    # construction so generation state is never opened.
+    if args.preflight:
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        start = time.time()
+        report = run_preflight(config, exact_trading_date)
+        elapsed = time.time() - start
+        print(json.dumps(report, indent=2, default=str))
+        staged = sum(
+            entry["staged"]
+            for horizon in report["horizons"].values()
+            for entry in horizon.values()
+        )
+        if report["ok"]:
+            print(
+                f"PREFLIGHT OK: {exact_trading_date} — {staged} candidates staged "
+                f"across {len(report['horizons'])} horizons in {elapsed:.1f}s"
+            )
+            return
+        print(
+            f"PREFLIGHT FAILED: {exact_trading_date} — {len(report['failures'])} "
+            f"failure(s); {staged} candidates staged in {elapsed:.1f}s",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Build cohort configs
     cohort_configs = build_default_cohorts(config)
