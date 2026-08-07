@@ -20,6 +20,12 @@ Notes:
   closed, so same-day bars may be absent from prices; signal counts can
   differ from the real run. The gates validated here (screen exceptions,
   candidate identity/observation-time conformance) are unaffected.
+- Candidates with empty tickers are counted as ``pending_llm`` and are not
+  gate-checked: production ``screen_and_enrich`` discards empty-ticker
+  signals before staging (LLM enrichment resolves tickers first for
+  ``needs_llm_analysis`` candidates from regulatory_pipeline/litigation).
+  Staging of LLM-resolved candidates is therefore outside this no-LLM
+  check's coverage; everything the deterministic path stages is covered.
 - Candidate screening is deliberately re-run per horizon, mirroring the
   four screen passes of the daily cycle.
 """
@@ -51,9 +57,10 @@ def run_preflight(
             omitted, one is constructed against a throwaway state dir.
 
     Returns:
-        JSON-serializable report: per-horizon, per-strategy candidate and
-        staged counts, fetch-source list, and an ``ok`` flag with a
-        ``failures`` list naming every rejected candidate or broken screen.
+        JSON-serializable report: per-horizon, per-strategy candidate,
+        staged, and pending_llm counts, fetch-source list, and an ``ok``
+        flag with a ``failures`` list naming every rejected candidate or
+        broken screen.
 
     Raises:
         ValueError: if trading_date is not an XNYS session.
@@ -106,6 +113,7 @@ def run_preflight(
                 entry: dict[str, Any] = {
                     "candidates": 0,
                     "staged": 0,
+                    "pending_llm": 0,
                     "errors": [],
                 }
                 try:
@@ -126,6 +134,13 @@ def run_preflight(
                     continue
                 for candidate in candidates:
                     entry["candidates"] += 1
+                    ticker = str(candidate.ticker or "").strip()
+                    if not ticker:
+                        # Mirror production: screen_and_enrich discards
+                        # empty-ticker signals before staging (LLM
+                        # enrichment resolves tickers first).
+                        entry["pending_llm"] += 1
+                        continue
                     try:
                         canonical_event_key(
                             strategy.name,
