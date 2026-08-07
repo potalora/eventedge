@@ -37,6 +37,17 @@ LOG_FILE="$LOG_DIR/daily_${TODAY}.log"
 # (or move to the always-on VPS) for reliable execution.
 RUN_CMD=("$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" run-daily --date "$TODAY")
 
+# Preflight integrity check (non-gating): runs each generation's live
+# fetch -> screen -> event-identity staging gates against a throwaway state
+# dir. A failure here means the scheduled run will fail the same way, but
+# surfacing it in this log (and in trade-preflight.timer's midday run)
+# leaves time to fix and rerun instead of losing the session. It never
+# blocks the scheduled run, which has its own degradation handling.
+echo "=== Preflight check: $TODAY ===" >> "$LOG_FILE"
+if ! "$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" >> "$LOG_FILE" 2>&1; then
+    echo "PREFLIGHT FAILED for $TODAY (continuing to scheduled run)" >> "$LOG_FILE"
+fi
+
 echo "=== Daily trading run: $TODAY ===" >> "$LOG_FILE"
 if command -v caffeinate >/dev/null 2>&1; then
     caffeinate -ims "${RUN_CMD[@]}" >> "$LOG_FILE" 2>&1

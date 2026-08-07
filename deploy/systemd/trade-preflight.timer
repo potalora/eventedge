@@ -1,0 +1,9 @@
+[Unit]
+Description=Run EventEdge preflight weekdays at 11:45 ET (ahead of the 18:00 ET cycle)
+
+[Timer]
+OnCalendar=Mon..Fri 11:45 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target
