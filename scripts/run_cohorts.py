@@ -161,13 +161,23 @@ def main():
             "reset is disabled for ledger-backed generation state; "
             "start a fresh generation instead"
         )
+    if args.preflight and args.compare:
+        parser.error("--preflight cannot be combined with --compare")
 
+    # Bound for the checker; the flag exits above guarantee assignment
+    # before any branch that reads it (preflight or daily run).
+    exact_trading_date = ""
     if not (args.learning or args.compare or args.reset):
         requested = args.date or date.today().isoformat()
         try:
             trading_session = date.fromisoformat(requested)
         except ValueError:
             parser.error(f"invalid ISO trading date: {requested}")
+
+        from tradingagents.strategies.orchestration.trading_calendar import is_session
+
+        if not is_session(trading_session):
+            parser.error(f"{requested} is not an XNYS session")
         exact_trading_date = trading_session.isoformat()
 
     generation_id = os.environ.get("EVENTEDGE_GENERATION_ID", "").strip()
@@ -176,12 +186,6 @@ def main():
         parser.error(
             "EVENTEDGE_GENERATION_ID and EVENTEDGE_GENERATION_COMMIT are required"
         )
-
-    if not (args.learning or args.compare or args.reset):
-        from tradingagents.strategies.orchestration.trading_calendar import is_session
-
-        if not is_session(trading_session):
-            parser.error(f"{requested} is not an XNYS session")
 
     from dotenv import load_dotenv
 

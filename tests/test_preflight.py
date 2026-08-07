@@ -114,6 +114,45 @@ class TestRunPreflight:
         assert failure["strategy"] == "broken_strategy"
         assert "screen failed" in failure["error"]
 
+    def test_empty_ticker_candidates_counted_as_pending_llm(self, tmp_path, monkeypatch):
+        """Production screen_and_enrich discards empty-ticker signals before
+        staging (LLM enrichment resolves tickers first); preflight must mirror
+        that filter instead of failing on it."""
+        from tradingagents.strategies.modules.base import Candidate
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        config, engine = _make_engine(tmp_path)
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+
+        llm_mapped = MagicMock()
+        llm_mapped.name = "regulatory_pipeline"
+        llm_mapped.screen.return_value = [
+            Candidate(
+                ticker="",
+                date="2026-08-06",
+                direction="short",
+                score=0.5,
+                metadata={"needs_llm_analysis": True, "document_id": "RULE-1"},
+            ),
+            Candidate(
+                ticker="   ",
+                date="2026-08-06",
+                direction="short",
+                score=0.5,
+                metadata={"needs_llm_analysis": True, "document_id": "RULE-2"},
+            ),
+        ]
+        monkeypatch.setattr(engine, "paper_trade_strategies", [llm_mapped])
+
+        report = run_preflight(config, "2026-08-06", engine=engine)
+
+        entry = report["horizons"]["30d"]["regulatory_pipeline"]
+        assert entry["candidates"] == 2
+        assert entry["pending_llm"] == 2
+        assert entry["staged"] == 0
+        assert report["ok"] is True
+        assert report["failures"] == []
+
     def test_non_session_rejected(self, tmp_path):
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
