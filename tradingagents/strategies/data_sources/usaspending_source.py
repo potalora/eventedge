@@ -1,12 +1,38 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.usaspending.gov/api/v2/"
+
+
+def _normalize_award_date(value: object) -> str:
+    """Normalize USASpending date fields to date-only ISO strings.
+
+    The API returns modification timestamps as naive datetime strings such as
+    ``"2026-08-05 10:11:25"``. Downstream event-identity staging rejects
+    naive timestamps, so truncate to the calendar date (``YYYY-MM-DD``),
+    which the date-only availability path interprets unambiguously as UTC.
+    Unparseable values become ``""`` so callers treat them as absent.
+    """
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        candidate = value.strip()
+        for separator in (" ", "T"):
+            if separator in candidate:
+                candidate = candidate.split(separator, 1)[0]
+                break
+        try:
+            return date.fromisoformat(candidate).isoformat()
+        except ValueError:
+            return ""
+    return ""
 
 
 class USASpendingSource:
@@ -136,8 +162,10 @@ class USASpendingSource:
                         "recipient_name": row.get("Recipient Name", ""),
                         "amount": row.get("Award Amount", 0),
                         "agency": row.get("Awarding Agency", ""),
-                        "start_date": row.get("Start Date", ""),
-                        "last_modified_date": row.get("Last Modified Date", ""),
+                        "start_date": _normalize_award_date(row.get("Start Date", "")),
+                        "last_modified_date": _normalize_award_date(
+                            row.get("Last Modified Date", "")
+                        ),
                         "description": row.get("Description", ""),
                     }
                 )
