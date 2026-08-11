@@ -684,6 +684,53 @@ def _bind_partial_governed_session(tmp_path):
     return ledger, store, record, intent
 
 
+def _replay_mutation_state(ledger, store_path, intent_id):
+    with sqlite3.connect(store_path) as connection:
+        outcomes = connection.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
+    return {
+        "intent_status": ledger.intent(intent_id).status,
+        "invalid_reason": ledger.session_invalid_reason(MONDAY),
+        "phases": ledger.connection.execute(
+            "SELECT COUNT(*) FROM session_phases"
+        ).fetchone()[0],
+        "fills": ledger.connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0],
+        "marks": ledger.connection.execute("SELECT COUNT(*) FROM marks").fetchone()[0],
+        "snapshots": ledger.connection.execute(
+            "SELECT COUNT(*) FROM account_snapshots"
+        ).fetchone()[0],
+        "session_runs": ledger.connection.execute(
+            "SELECT COUNT(*) FROM session_runs"
+        ).fetchone()[0],
+        "outcomes": outcomes,
+    }
+
+
+def _bind_complete_governed_session(tmp_path):
+    ledger = _ledger(tmp_path)
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = _governed_record()
+    store.save_governed_bar_recovery(record)
+    intent = _intent(ledger, "ESS", "buy", MONDAY, 1)
+    result = SessionExecutor(
+        ledger, _config(), metric_store=store
+    ).execute_open_and_mark(
+        MONDAY,
+        "epoch",
+        SessionInputBundle(
+            MONDAY,
+            ("ESS",),
+            {("ESS", MONDAY): _record_bar(record)},
+            (),
+            FakePriceSource().adjusted,
+            governed_recoveries={"ESS": _record_binding(record)},
+        ),
+        {},
+        PROCESSED,
+    )
+    assert result.valid
+    return ledger, store, record, intent
+
+
 def test_governed_partial_resume_reuses_intact_record_without_provider_call(
     tmp_path,
 ):
@@ -707,7 +754,7 @@ def test_governed_partial_resume_reuses_intact_record_without_provider_call(
 def test_governed_resume_rejects_broken_record_before_persisted_phase(tmp_path, tamper):
     case = tmp_path / tamper
     case.mkdir()
-    ledger, store, record, _ = _bind_partial_governed_session(case)
+    ledger, store, record, intent = _bind_partial_governed_session(case)
     provider = MagicMock()
     db_path = case / "metrics.sqlite3"
     with sqlite3.connect(db_path) as connection:
@@ -733,9 +780,7 @@ def test_governed_resume_rejects_broken_record_before_persisted_phase(tmp_path, 
                 "UPDATE governed_bar_recoveries SET contract_version = 'yfinance-60m-v0'",
             )
     try:
-        before_phases = ledger.connection.execute(
-            "SELECT COUNT(*) FROM session_phases"
-        ).fetchone()[0]
+        before = _replay_mutation_state(ledger, db_path, intent.intent_id)
 
         result = SessionExecutor(
             ledger, _config(), metric_store=store
@@ -744,20 +789,63 @@ def test_governed_resume_rejects_broken_record_before_persisted_phase(tmp_path, 
         assert not result.valid
         assert "execution context conflict" in result.invalid_reason
         assert provider.mock_calls == []
+        assert _replay_mutation_state(ledger, db_path, intent.intent_id) == before
+    finally:
+        ledger.close()
+
+
+def test_complete_governed_replay_record_deletion_is_read_only(tmp_path):
+    ledger, store, record, intent = _bind_complete_governed_session(tmp_path)
+    store_path = tmp_path / "metrics.sqlite3"
+    provider = MagicMock()
+    try:
+        before = _replay_mutation_state(ledger, store_path, intent.intent_id)
+        with sqlite3.connect(store_path) as connection:
+            connection.execute(
+                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                (record.recovery_id,),
+            )
+
+        result = SessionExecutor(
+            ledger, _config(), metric_store=store
+        ).execute_open_and_mark(MONDAY, "epoch", provider, {}, PROCESSED)
+
+        assert not result.valid
+        assert "execution context conflict" in result.invalid_reason
+        assert provider.mock_calls == []
+        assert _replay_mutation_state(ledger, store_path, intent.intent_id) == before
+    finally:
+        ledger.close()
+
+
+def test_direct_execution_does_not_infer_governed_cohort_membership(tmp_path):
+    class GovernedCapableSource(FakePriceSource):
+        def __init__(self):
+            super().__init__({("AAPL", MONDAY): _bar("AAPL")})
+            self.governed_calls = []
+
+        def resolve_governed_daily_bars(self, *args, **kwargs):
+            self.governed_calls.append((args, kwargs))
+            raise AssertionError("direct execution must not invoke governed resolution")
+
+    ledger = _ledger(tmp_path)
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    source = GovernedCapableSource()
+    try:
+        _intent(ledger, "AAPL", "buy", MONDAY, 1)
+
+        result = SessionExecutor(
+            ledger, _config(), metric_store=store
+        ).execute_open_and_mark(MONDAY, "epoch", source, {}, PROCESSED)
+
+        assert result.valid
+        assert source.governed_calls == []
+        assert source.raw_requests == [(("AAPL",), MONDAY, MONDAY, False)]
         assert (
-            ledger.connection.execute("SELECT COUNT(*) FROM session_phases").fetchone()[
-                0
-            ]
-            == before_phases
-        )
-        assert (
-            ledger.connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
-        )
-        assert (
-            ledger.connection.execute(
-                "SELECT COUNT(*) FROM account_snapshots"
-            ).fetchone()[0]
-            == 0
+            store.load_governed_bar_recovery(
+                epoch_id="epoch", session=MONDAY, ticker="AAPL"
+            )
+            is None
         )
     finally:
         ledger.close()

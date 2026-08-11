@@ -191,6 +191,10 @@ class CorporateActionBatchError(ValueError):
         super().__init__("; ".join(errors))
 
 
+class _GovernedRecoveryConflictError(LedgerConflictError):
+    """Recovery evidence is unusable without authorizing ledger mutation."""
+
+
 class SessionExecutor:
     """Run exact daily economics before any new signal is staged."""
 
@@ -844,7 +848,7 @@ class SessionExecutor:
             not isinstance(market_recoveries, dict)
             or market_recoveries != provenance_recoveries
         ):
-            raise LedgerConflictError(
+            raise _GovernedRecoveryConflictError(
                 "governed recovery market/provenance binding conflict"
             )
         try:
@@ -861,11 +865,13 @@ class SessionExecutor:
                 == {"recovery_id", "contract_version", "evidence_digest"}
             }
         except (KeyError, TypeError, ValueError) as error:
-            raise LedgerConflictError(
+            raise _GovernedRecoveryConflictError(
                 "governed recovery binding payload conflict"
             ) from error
         if len(governed_recoveries) != len(market_recoveries):
-            raise LedgerConflictError("governed recovery binding payload conflict")
+            raise _GovernedRecoveryConflictError(
+                "governed recovery binding payload conflict"
+            )
         bars = {
             (str(item["ticker"]), session): MarketBar(
                 str(item["ticker"]),
@@ -953,7 +959,7 @@ class SessionExecutor:
             and ticker not in governed_recoveries
         )
         if unbound_reconstructions:
-            raise LedgerConflictError(
+            raise _GovernedRecoveryConflictError(
                 "governed recovery evidence conflict for "
                 + ",".join(unbound_reconstructions)
                 + f"/{session}"
@@ -982,7 +988,7 @@ class SessionExecutor:
                 ):
                     raise ValueError("record does not match binding")
             except Exception as error:
-                raise LedgerConflictError(
+                raise _GovernedRecoveryConflictError(
                     f"governed recovery evidence conflict for {ticker}/{session}"
                 ) from error
 
@@ -1121,6 +1127,9 @@ class SessionExecutor:
                     return SessionExecutionResult(
                         session, True, existing[0], "", PHASES
                     )
+            except _GovernedRecoveryConflictError as error:
+                reason = f"execution context conflict: {error}"
+                return SessionExecutionResult(session, False, None, reason, ())
             except LedgerConflictError as error:
                 reason = f"execution context conflict: {error}"
                 if not existing:
@@ -1152,23 +1161,11 @@ class SessionExecutor:
             elif isinstance(price_source, SessionInputBundle):
                 bundle = price_source
             else:
-                governed_capable = callable(
-                    getattr(price_source, "resolve_governed_daily_bars", None)
-                )
                 bundle = self.fetch_input_bundle(
                     session,
                     required,
                     price_source,
                     self.benchmark_symbols,
-                    metric_store=(self.metric_store if governed_capable else None),
-                    epoch_id=(epoch_id if governed_capable else None),
-                    cohort_ids_by_ticker=(
-                        {ticker: (self.ledger.cohort_id,) for ticker in required}
-                        if governed_capable
-                        else None
-                    ),
-                    processed_at=(processed_at if governed_capable else None),
-                    persist=True,
                 )
             bars, actions, benchmarks = self._validate_bundle(
                 bundle, required, session, processed_at
@@ -1255,6 +1252,13 @@ class SessionExecutor:
                 error.errors,
                 processed_at,
             )
+            return SessionExecutionResult(session, False, None, reason, ())
+        except _GovernedRecoveryConflictError as error:
+            reason = f"execution context conflict: {error}"
+            if bound_context is None:
+                self.ledger.invalidate_session_and_cancel_due(
+                    session, reason, processed_at
+                )
             return SessionExecutionResult(session, False, None, reason, ())
         except LedgerConflictError as error:
             reason = f"execution context conflict: {error}"
