@@ -772,6 +772,185 @@ class TestIdempotencyDoubleRun:
         assert marker.governed_failure_map == failure_map
         assert "secret" not in json.dumps(results)
 
+    def test_partial_restart_reuses_full_governed_membership_without_provider_refetch(
+        self, tmp_path
+    ):
+        from test_session_executor import (
+            MONDAY,
+            _governed_record,
+            _record_bar,
+            _record_binding,
+        )
+
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        session = MONDAY
+        affected = ("cohort_0", "cohort_1")
+        for cohort in orchestrator.cohorts:
+            cohort["executor"].required_tickers = lambda *_args: ("ESS",)
+            cohort["executor"].ledger_config["bar_max_age_hours"] = 100_000
+            cohort["engine"].screen_and_stage = lambda **_kwargs: {}
+        orchestrator._screen_for_horizon = lambda *_args: ([], {}, [])
+        orchestrator._persist_horizon_health = lambda *_args: True
+
+        fetched_at = datetime.now(timezone.utc)
+        raw_bars = {
+            (ticker, session): MarketBar(
+                ticker,
+                session,
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+                "yfinance",
+                fetched_at,
+                False,
+            )
+            for ticker in ("SPY", "BIL")
+        }
+        adjusted = source.get_total_return_closes(("SPY", "BIL"), session, session)
+        fetch_calls = []
+
+        def governed_bundle(*args, **kwargs):
+            fetch_calls.append(kwargs["cohort_ids_by_ticker"])
+            assert kwargs["cohort_ids_by_ticker"] == {
+                "BIL": affected,
+                "ESS": affected,
+                "SPY": affected,
+            }
+            record = _governed_record(epoch_id=kwargs["epoch_id"], cohorts=affected)
+            kwargs["metric_store"].save_governed_bar_recovery(record)
+            binding = _record_binding(record)
+            summary = {
+                "ticker": "ESS",
+                "session": session.isoformat(),
+                "recovery_id": record.recovery_id,
+                "contract_version": record.contract_version,
+                "evidence_digest": record.evidence_digest,
+                "affected_cohort_ids": affected,
+            }
+            return SessionInputBundle(
+                session=session,
+                tickers=("BIL", "ESS", "SPY"),
+                bars={("ESS", session): _record_bar(record), **raw_bars},
+                actions=(),
+                benchmarks=adjusted,
+                governed_recoveries={"ESS": binding},
+                governed_recovery_summaries=(summary,),
+            )
+
+        second = orchestrator.cohorts[1]["executor"]
+        original_second_execute = second.execute_open_and_mark
+        crash_once = True
+
+        def crash_before_binding(*args, **kwargs):
+            nonlocal crash_once
+            if crash_once:
+                crash_once = False
+                raise RuntimeError("crash before context binding")
+            return original_second_execute(*args, **kwargs)
+
+        second.execute_open_and_mark = crash_before_binding
+        provider_calls_before = len(source.raw_calls)
+        with patch.object(
+            SessionExecutor, "fetch_input_bundle", side_effect=governed_bundle
+        ):
+            first = orchestrator.run_daily(session.isoformat())
+            assert first["cohort_1"]["error"] is True
+            assert first["cohort_1"]["execution_valid"] is False
+            assert (
+                orchestrator.cohorts[1]["ledger"].session_execution_context(session)
+                is None
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(fetch_calls) == 2
+        assert len(source.raw_calls) == provider_calls_before
+        assert all(result["error"] is False for result in replay.values())
+        assert all(result["degraded"] is True for result in replay.values())
+        record = orchestrator._metric_store.load_governed_bar_recovery(
+            epoch_id=orchestrator._epoch_id, session=session, ticker="ESS"
+        )
+        assert record is not None
+        assert record.affected_cohort_ids == affected
+
+    def test_fresh_peer_failure_precedes_completed_outcome_and_stored_resume_mutation(
+        self, tmp_path
+    ):
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohorts=3, strategy_modules=[FakeStrategy()]
+        )
+        session = date(2026, 3, 30)
+        first = orchestrator.cohorts[0]
+        stored = orchestrator.cohorts[1]
+        epoch = first["executor"].ensure_metric_epoch(
+            orchestrator._metric_epoch_context, session
+        )
+        orchestrator._epoch_id = epoch.epoch_id
+        complete_bundle = SessionExecutor.fetch_input_bundle(
+            session,
+            first["executor"].benchmark_symbols,
+            source,
+            first["executor"].benchmark_symbols,
+        )
+        completed = first["executor"].execute_open_and_mark(
+            session, epoch.epoch_id, complete_bundle, {}, datetime.now(timezone.utc)
+        )
+        assert completed.valid and completed.snapshot is not None
+        policy_id = "foundation-30d"
+        first["ledger"].complete_staging(
+            session,
+            epoch.epoch_id,
+            policy_id,
+            datetime.now(timezone.utc),
+            lambda: None,
+            first["ledger"].execution_governed_state_digest(session),
+        )
+
+        def crash_after_validation(phase):
+            if phase == "validate_market_data":
+                raise RuntimeError("stored resume fixture")
+
+        stored["executor"]._after_phase_commit = crash_after_validation
+        with pytest.raises(RuntimeError, match="stored resume fixture"):
+            stored["executor"].execute_open_and_mark(
+                session,
+                epoch.epoch_id,
+                complete_bundle,
+                {},
+                datetime.now(timezone.utc),
+            )
+        stored["executor"]._after_phase_commit = lambda _phase: None
+        events = []
+        first["executor"].record_due_outcomes = lambda *_args: events.append("outcome")
+        original_resume = stored["executor"].execute_open_and_mark
+
+        def recording_resume(*args, **kwargs):
+            events.append("resume")
+            return original_resume(*args, **kwargs)
+
+        stored["executor"].execute_open_and_mark = recording_resume
+        due_signal = type("DueSignal", (), {"ticker": "SPY"})()
+        first["executor"].due_outcome_signals = lambda *_args: ((due_signal, 5),)
+        first["executor"].record_due_invalid_outcomes = lambda *_args, **_kwargs: None
+
+        def failed_fetch(*_args, **_kwargs):
+            events.append("fetch")
+            raise GovernedMarketDataError({"SPY": f"invalid SPY/{session.isoformat()}"})
+
+        with patch.object(
+            SessionExecutor, "fetch_input_bundle", side_effect=failed_fetch
+        ):
+            result = orchestrator.run_daily(session.isoformat())
+
+        assert events == ["fetch"]
+        assert result[first["config"].name]["execution_valid"] is True
+        assert result[stored["config"].name]["execution_valid"] is False
+        assert (
+            result[orchestrator.cohorts[2]["config"].name]["execution_valid"] is False
+        )
+
     def test_shared_corporate_action_error_without_bundle_starts_one_clean_gap(
         self, tmp_path
     ):
@@ -2090,7 +2269,7 @@ class TestIdempotencyDoubleRun:
         ]
         assert store.read_outcomes(orchestrator._epoch_id) == (valid_outcome,)
         assert valid_outcome.status == "valid"
-        assert committed_due_calls == [False]
+        assert committed_due_calls == []
         assert committed_invalid_calls == [True]
         assert epoch is not None and epoch.status == "invalid"
         assert orchestrator.cohorts[1]["ledger"].session_invalid_reason(sessions[-1])

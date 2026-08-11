@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -31,6 +32,8 @@ _MAX_GOVERNED_REPORT_TEXT = 4_096
 _GOVERNED_FAILURE_KINDS = frozenset(
     {"missing", "incoherent", "invalid", "invalid_benchmark"}
 )
+_MARKET_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9.^_-]{0,31}")
+_COHORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def aggregate_governed_reporting(
@@ -51,7 +54,10 @@ def aggregate_governed_reporting(
     failure_conflicts: set[str] = set()
     summary_budget = _MAX_GOVERNED_REPORT_ITEMS
     failure_budget = _MAX_GOVERNED_REPORT_ITEMS
-    cohort_names = sorted(key for key in results if isinstance(key, str))
+    cohort_names = sorted(
+        key for key in results if isinstance(key, str) and _COHORT_ID_RE.fullmatch(key)
+    )
+    valid_cohort_ids = set(cohort_names)
     for cohort_name in cohort_names[:_MAX_GOVERNED_REPORT_ITEMS]:
         result = results[cohort_name]
         if not isinstance(result, dict):
@@ -77,6 +83,7 @@ def aggregate_governed_reporting(
                         for value in texts
                     )
                     or ticker != ticker.strip().upper()
+                    or _MARKET_TICKER_RE.fullmatch(ticker) is None
                     or contract != GOVERNED_BAR_RECOVERY_CONTRACT
                     or not recovery_id.startswith("governed_bar_recovery:")
                     or len(recovery_id.removeprefix("governed_bar_recovery:")) != 64
@@ -111,6 +118,10 @@ def aggregate_governed_reporting(
                         for value in affected_ids
                     )
                     or affected_ids != sorted(set(affected_ids))
+                    or any(
+                        _COHORT_ID_RE.fullmatch(value) is None for value in affected_ids
+                    )
+                    or not set(affected_ids) <= valid_cohort_ids
                 ):
                     continue
                 canonical = {
@@ -136,6 +147,7 @@ def aggregate_governed_reporting(
                 not isinstance(ticker, str)
                 or not ticker
                 or ticker != ticker.strip().upper()
+                or _MARKET_TICKER_RE.fullmatch(ticker) is None
                 or len(ticker) > _MAX_GOVERNED_REPORT_TEXT
                 or not isinstance(failure, str)
                 or len(failure) > _MAX_GOVERNED_REPORT_TEXT
@@ -1215,7 +1227,7 @@ class CohortOrchestrator:
                 if not summaries or not isinstance(result, dict):
                     continue
                 result["degraded"] = True
-                result.setdefault("execution_valid", True)
+                result.setdefault("execution_valid", not bool(result.get("error")))
                 result.setdefault("staging_valid", False)
                 result.setdefault("candidate_bar_quarantines", [])
                 result["governed_bar_recoveries"] = summaries
@@ -1313,32 +1325,11 @@ class CohortOrchestrator:
             else:
                 execution_needed.append(cohort)
         results.update(complete_replays)
-        for cohort in completed_cohorts:
-            name = cohort["config"].name
-            executor = cohort["executor"]
-            if not executor.due_outcome_signals(session, self._epoch_id):
-                continue
-            try:
-                executor.record_due_outcomes(
-                    session,
-                    self._epoch_id,
-                    executor.persisted_input_bundle(session).bars,
-                )
-            except Exception as error:
-                results[name] = {"error": True, "invalid_reason": str(error)}
-                return self._stop_for_critical_market_data_gap(
-                    session,
-                    processed_at,
-                    results,
-                    {},
-                    str(error),
-                    original_error=error,
-                )
-        if not execution_needed and not stage_only:
-            return finalize_results()
-
         valid_cohorts: list[dict[str, Any]] = list(stage_only)
         fresh_execution: list[dict[str, Any]] = []
+        stored_execution: list[dict[str, Any]] = []
+        persisted_by_cohort: dict[str, Any] = {}
+        persisted_borrow_by_cohort: dict[str, dict[str, Decimal | None]] = {}
         bundle = None
         if execution_needed:
             for cohort in execution_needed:
@@ -1356,15 +1347,11 @@ class CohortOrchestrator:
                     persisted_borrow = cohort["executor"].persisted_borrow_rates(
                         session
                     )
-                    lifecycle = cohort["executor"].execute_open_and_mark(
-                        session,
-                        self._epoch_id,
-                        persisted,
-                        persisted_borrow,
-                        processed_at,
-                    )
+                    persisted_by_cohort[name] = persisted
+                    persisted_borrow_by_cohort[name] = persisted_borrow
+                    stored_execution.append(cohort)
                 except Exception as error:
-                    logger.error("Cohort %s stored resume failed", name, exc_info=True)
+                    logger.error("Cohort %s stored resume preparation failed", name)
                     results[name] = {"error": True, "invalid_reason": str(error)}
                     return self._stop_for_critical_market_data_gap(
                         session,
@@ -1374,14 +1361,6 @@ class CohortOrchestrator:
                         str(error),
                         original_error=error,
                     )
-                if not lifecycle.valid or lifecycle.snapshot is None:
-                    results[name] = {
-                        "error": True,
-                        "invalid_reason": lifecycle.invalid_reason,
-                    }
-                    continue
-                cohort["marked_account"] = lifecycle.snapshot
-                valid_cohorts.append(cohort)
 
         if fresh_execution:
             memberships: dict[str, set[str]] = {}
@@ -1395,13 +1374,26 @@ class CohortOrchestrator:
                 benchmark_symbols_set.update(benchmarks)
                 scope = tuple(sorted(required | benchmarks))
                 cohort_scopes[name] = scope
-                for ticker in scope:
+            governed_tickers = tuple(
+                sorted({ticker for scope in cohort_scopes.values() for ticker in scope})
+            )
+            fresh_needed = set(governed_tickers)
+            for cohort in self.cohorts:
+                name = cohort["config"].name
+                executor = cohort["executor"]
+                context = cohort["ledger"].session_execution_context(session)
+                required = set(
+                    context["required_tickers"]
+                    if context is not None
+                    else executor.required_tickers(session, self._epoch_id)
+                )
+                scope = required | set(executor.benchmark_symbols)
+                for ticker in sorted(scope & fresh_needed):
                     memberships.setdefault(ticker, set()).add(name)
             benchmark_symbols = tuple(sorted(benchmark_symbols_set))
-            governed_tickers = tuple(sorted(memberships))
             cohort_ids_by_ticker = {
-                ticker: tuple(sorted(cohort_ids))
-                for ticker, cohort_ids in sorted(memberships.items())
+                ticker: tuple(sorted(memberships[ticker]))
+                for ticker in governed_tickers
             }
             try:
                 bundle = SessionExecutor.fetch_input_bundle(
@@ -1547,50 +1539,98 @@ class CohortOrchestrator:
                         "critical_market_data_gap",
                         corporate_action_errors=preflight_corporate_errors,
                     )
-                execution_bundle_gap = False
-                for cohort in fresh_execution:
-                    name = cohort["config"].name
-                    try:
-                        required = cohort["executor"].required_tickers(
-                            session, self._epoch_id
-                        )
-                        governed = tuple(
-                            sorted(
-                                set(required)
-                                | set(cohort["executor"].benchmark_symbols)
-                            )
-                        )
-                        lifecycle = cohort["executor"].execute_open_and_mark(
-                            session,
-                            self._epoch_id,
-                            bundle.for_tickers(governed),
-                            {},
-                            processed_at,
-                        )
-                    except Exception as error:
-                        logger.error("Cohort %s execution failed", name, exc_info=True)
-                        results[name] = {"error": True, "invalid_reason": str(error)}
-                        continue
-                    if not lifecycle.valid or lifecycle.snapshot is None:
-                        results[name] = {
-                            "error": True,
-                            "invalid_reason": lifecycle.invalid_reason,
-                        }
-                        if lifecycle.invalid_reason.startswith(
-                            "market data validation failed:"
-                        ):
-                            execution_bundle_gap = True
-                        continue
-                    cohort["marked_account"] = lifecycle.snapshot
-                    valid_cohorts.append(cohort)
-                if execution_bundle_gap:
-                    return self._stop_for_critical_market_data_gap(
+        for cohort in completed_cohorts:
+            name = cohort["config"].name
+            executor = cohort["executor"]
+            if not executor.due_outcome_signals(session, self._epoch_id):
+                continue
+            try:
+                executor.record_due_outcomes(
+                    session,
+                    self._epoch_id,
+                    executor.persisted_input_bundle(session).bars,
+                )
+            except Exception as error:
+                results[name] = {"error": True, "invalid_reason": str(error)}
+                return self._stop_for_critical_market_data_gap(
+                    session,
+                    processed_at,
+                    results,
+                    {},
+                    str(error),
+                    original_error=error,
+                )
+
+        if not execution_needed and not stage_only:
+            return finalize_results()
+
+        for cohort in stored_execution:
+            name = cohort["config"].name
+            try:
+                lifecycle = cohort["executor"].execute_open_and_mark(
+                    session,
+                    self._epoch_id,
+                    persisted_by_cohort[name],
+                    persisted_borrow_by_cohort[name],
+                    processed_at,
+                )
+            except Exception as error:
+                logger.error("Cohort %s stored resume failed", name, exc_info=True)
+                results[name] = {"error": True, "invalid_reason": str(error)}
+                return self._stop_for_critical_market_data_gap(
+                    session,
+                    processed_at,
+                    results,
+                    {},
+                    str(error),
+                    original_error=error,
+                )
+            if not lifecycle.valid or lifecycle.snapshot is None:
+                results[name] = {
+                    "error": True,
+                    "invalid_reason": lifecycle.invalid_reason,
+                }
+                continue
+            cohort["marked_account"] = lifecycle.snapshot
+            valid_cohorts.append(cohort)
+
+        execution_bundle_gap = False
+        if bundle is not None:
+            for cohort in fresh_execution:
+                name = cohort["config"].name
+                try:
+                    governed = cohort_scopes[name]
+                    lifecycle = cohort["executor"].execute_open_and_mark(
                         session,
+                        self._epoch_id,
+                        bundle.for_tickers(governed),
+                        {},
                         processed_at,
-                        results,
-                        bundle.bars,
-                        "critical_market_data_gap",
                     )
+                except Exception as error:
+                    logger.error("Cohort %s execution failed", name, exc_info=True)
+                    results[name] = {"error": True, "invalid_reason": str(error)}
+                    continue
+                if not lifecycle.valid or lifecycle.snapshot is None:
+                    results[name] = {
+                        "error": True,
+                        "invalid_reason": lifecycle.invalid_reason,
+                    }
+                    if lifecycle.invalid_reason.startswith(
+                        "market data validation failed:"
+                    ):
+                        execution_bundle_gap = True
+                    continue
+                cohort["marked_account"] = lifecycle.snapshot
+                valid_cohorts.append(cohort)
+        if execution_bundle_gap:
+            return self._stop_for_critical_market_data_gap(
+                session,
+                processed_at,
+                results,
+                bundle.bars if bundle is not None else {},
+                "critical_market_data_gap",
+            )
 
         if not valid_cohorts:
             return finalize_results()

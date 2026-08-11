@@ -127,6 +127,35 @@ def test_governed_reporting_is_deduplicated_sorted_and_bounded():
     assert "secret" not in json.dumps({"summaries": summaries, "failures": failures})
 
 
+def test_governed_reporting_omits_secret_like_ticker_and_cohort_identifiers():
+    baseline = {
+        "ticker": "ESS",
+        "session": "2026-08-10",
+        "recovery_id": "governed_bar_recovery:" + "b" * 64,
+        "contract_version": "yfinance-60m-v1",
+        "evidence_digest": "sha256:" + "a" * 64,
+        "affected_cohort_ids": ["cohort-a"],
+    }
+    results = {
+        "cohort-a": {
+            "governed_bar_recoveries": [
+                baseline,
+                {**baseline, "ticker": "PROVIDER SECRET"},
+                {**baseline, "affected_cohort_ids": ["PASSWORD=SECRET"]},
+            ],
+            "governed_failure_map": {
+                "PROVIDER SECRET": "invalid PROVIDER SECRET/2026-08-10"
+            },
+        }
+    }
+
+    summaries, failures = aggregate_governed_reporting(results)
+
+    assert summaries == [baseline]
+    assert failures == {}
+    assert "SECRET" not in json.dumps({"summaries": summaries, "failures": failures})
+
+
 def test_governed_reporting_accepts_canonical_ids_with_one_global_cap_and_unsafe_keys():
     results = {
         f"cohort-{index:04d}": {
