@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from importlib.metadata import version as package_version
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Mapping
 
 from tradingagents.strategies.execution import (
@@ -36,6 +37,13 @@ from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     session_close,
     session_open,
+)
+from tradingagents.strategies.orchestration.governed_market_data import (
+    GOVERNED_BAR_RECOVERY_CONTRACT,
+    GovernedMarketDataError,
+    GovernedRecoveryBinding,
+    _bar_from_record,
+    resolve_governed_bars,
 )
 from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, SignalMetricRecord
 from tradingagents.strategies.metrics.epochs import EpochContext, EpochManager
@@ -75,6 +83,10 @@ _SIDE_PRIORITY = {"sell": 0, "cover": 0, "buy": 1, "short": 1}
 _POLICY_VOLATILITY_EVIDENCE_KEY = "portfolio_policy_volatility_evidence"
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _canonical_json_value(value: object) -> object:
     """Convert bounded execution configuration/state to deterministic JSON."""
     if isinstance(value, dict):
@@ -109,6 +121,22 @@ class SessionInputBundle:
     bars: dict[tuple[str, date], MarketBar]
     actions: tuple[CorporateAction, ...]
     benchmarks: dict[tuple[str, date], AdjustedClose]
+    governed_recoveries: Mapping[str, GovernedRecoveryBinding] = field(
+        default_factory=dict
+    )
+    governed_failure_map: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "governed_recoveries",
+            MappingProxyType(dict(sorted(self.governed_recoveries.items()))),
+        )
+        object.__setattr__(
+            self,
+            "governed_failure_map",
+            MappingProxyType(dict(sorted(self.governed_failure_map.items()))),
+        )
 
     def for_tickers(self, tickers: tuple[str, ...]) -> SessionInputBundle:
         """Return a cohort-scoped view of one validated shared response."""
@@ -121,6 +149,16 @@ class SessionInputBundle:
             {key: value for key, value in self.bars.items() if key[0] in selected},
             tuple(action for action in self.actions if action.ticker in selected),
             self.benchmarks,
+            {
+                ticker: binding
+                for ticker, binding in self.governed_recoveries.items()
+                if ticker in selected
+            },
+            {
+                ticker: reason
+                for ticker, reason in self.governed_failure_map.items()
+                if ticker in selected
+            },
         )
 
 
@@ -128,7 +166,7 @@ class SessionInputBundle:
 class _PersistedSessionInputBundle(SessionInputBundle):
     """Internal bundle whose freshness was validated when its context was bound."""
 
-    validated_at: datetime
+    validated_at: datetime = field(kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -285,7 +323,9 @@ class SessionExecutor:
                 {
                     "reference_session": reference_session.isoformat(),
                     "context_digest": context_digest,
-                    "candidate_tickers": sorted(sources[(reference_session, context_digest)]),
+                    "candidate_tickers": sorted(
+                        sources[(reference_session, context_digest)]
+                    ),
                 }
                 for reference_session, context_digest in sorted(sources)
             ],
@@ -359,7 +399,9 @@ class SessionExecutor:
                 "missing bound portfolio policy volatility evidence"
             ) from error
         if not isinstance(document, Mapping) or not isinstance(raw_sources, list):
-            raise LedgerConflictError("invalid bound portfolio policy volatility evidence")
+            raise LedgerConflictError(
+                "invalid bound portfolio policy volatility evidence"
+            )
         stored = self._validated_staging_volatility(
             {
                 "annualized_volatility": raw_values,
@@ -377,11 +419,12 @@ class SessionExecutor:
                 reference_session = date.fromisoformat(str(item["reference_session"]))
                 context_digest = str(item["context_digest"])
                 candidates = {
-                    str(ticker).strip().upper()
-                    for ticker in item["candidate_tickers"]
+                    str(ticker).strip().upper() for ticker in item["candidate_tickers"]
                 }
             except (KeyError, TypeError, ValueError) as error:
-                raise LedgerConflictError("invalid volatility source binding") from error
+                raise LedgerConflictError(
+                    "invalid volatility source binding"
+                ) from error
             binding = self.ledger.read_policy_session_context(
                 reference_session, binding_kind="staging"
             )
@@ -438,9 +481,7 @@ class SessionExecutor:
                 f"committed execution policy binding mismatch for {session}"
             )
 
-    def ensure_metric_epoch(
-        self, context: EpochContext, session: date
-    ) -> MetricEpoch:
+    def ensure_metric_epoch(self, context: EpochContext, session: date) -> MetricEpoch:
         epoch = EpochManager(self.metric_store).ensure_epoch(context, session)
         if epoch.status == "invalid" and epoch.end_session == session:
             return epoch
@@ -494,9 +535,10 @@ class SessionExecutor:
                 tickers.add(metric_signal.ticker)
                 continue
             for window in OUTCOME_WINDOWS:
-                if self.outcome_calculator.calendar.held_session(
-                    entry_session, window
-                ) == session:
+                if (
+                    self.outcome_calculator.calendar.held_session(entry_session, window)
+                    == session
+                ):
                     tickers.add(metric_signal.ticker)
                     break
         return tuple(sorted(tickers))
@@ -677,23 +719,100 @@ class SessionExecutor:
         tickers: tuple[str, ...],
         price_source: PriceSource,
         benchmark_symbols: tuple[str, ...] = ("SPY", "BIL"),
+        *,
+        metric_store: MetricStore | None = None,
+        epoch_id: str | None = None,
+        cohort_ids_by_ticker: Mapping[str, tuple[str, ...]] | None = None,
+        processed_at: datetime | None = None,
+        persist: bool = True,
     ) -> SessionInputBundle:
         """Fetch the raw/action/adjusted set once for any number of cohorts."""
-        bars = (
-            price_source.get_daily_bars(list(tickers), session, session, adjusted=False)
-            if tickers
-            else {}
+        routing_fields = (
+            epoch_id is not None,
+            cohort_ids_by_ticker is not None,
+            processed_at is not None,
         )
+        governed_context = all(routing_fields)
+        if (
+            any(routing_fields) != governed_context
+            or (metric_store is not None and not governed_context)
+            or (governed_context and persist and metric_store is None)
+        ):
+            raise ValueError("incomplete governed market-data governance context")
+        if governed_context and tickers:
+            resolved = resolve_governed_bars(
+                price_source=price_source,
+                metric_store=metric_store,
+                epoch_id=epoch_id,
+                session=session,
+                tickers=tickers,
+                cohort_ids_by_ticker=cohort_ids_by_ticker,
+                processed_at=processed_at,
+                persist=persist,
+            )
+            bars = {(ticker, session): bar for ticker, bar in resolved.bars.items()}
+            recoveries = resolved.recovery_bindings
+            failure_map = dict(resolved.failure_map)
+        else:
+            bars = (
+                price_source.get_daily_bars(
+                    list(tickers), session, session, adjusted=False
+                )
+                if tickers
+                else {}
+            )
+            recoveries = {}
+            failure_map = {}
         actions = (
             tuple(price_source.get_corporate_actions(list(tickers), session))
             if tickers
             else ()
         )
-        benchmarks = price_source.get_total_return_closes(
-            list(benchmark_symbols), session, session
+        try:
+            benchmarks = price_source.get_total_return_closes(
+                list(benchmark_symbols), session, session
+            )
+        except Exception:
+            benchmarks = {}
+            failure_map.update(
+                {
+                    symbol: f"invalid_benchmark {symbol}/{session.isoformat()}"
+                    for symbol in benchmark_symbols
+                }
+            )
+        benchmark_validation_at = (
+            max(processed_at, _utc_now()) if processed_at is not None else None
         )
+        for symbol in benchmark_symbols:
+            if (symbol, session) not in benchmarks:
+                failure_map[symbol] = (
+                    f"invalid_benchmark {symbol}/{session.isoformat()}"
+                )
+                continue
+            if benchmark_validation_at is not None:
+                try:
+                    validate_adjusted_closes(
+                        {(symbol, session): benchmarks[(symbol, session)]},
+                        {symbol},
+                        session,
+                        benchmark_validation_at,
+                    )
+                    if benchmarks[(symbol, session)].fetched_at < session_close(
+                        session
+                    ):
+                        raise BarValidationError(f"pre-close {symbol}/{session}")
+                except (BarValidationError, KeyError, TypeError, ValueError):
+                    failure_map[symbol] = (
+                        f"invalid_benchmark {symbol}/{session.isoformat()}"
+                    )
         return SessionInputBundle(
-            session, tuple(sorted(tickers)), bars, actions, benchmarks
+            session,
+            tuple(sorted(tickers)),
+            bars,
+            actions,
+            benchmarks,
+            recoveries,
+            failure_map,
         )
 
     def validate_execution_input_bundle(
@@ -706,12 +825,8 @@ class SessionExecutor:
         """Preflight a fresh cohort bundle without mutating its P0 ledger."""
         self._validate_clock(session, epoch_id, processed_at)
         required = self.required_tickers(session, epoch_id)
-        _, actions, _ = self._validate_bundle(
-            bundle, required, session, processed_at
-        )
-        state_errors = self.ledger.corporate_action_batch_state_errors(
-            session, actions
-        )
+        _, actions, _ = self._validate_bundle(bundle, required, session, processed_at)
+        state_errors = self.ledger.corporate_action_batch_state_errors(session, actions)
         if state_errors:
             raise CorporateActionBatchError(actions, state_errors)
 
@@ -723,6 +838,34 @@ class SessionExecutor:
         economic = json.loads(str(context["economic_inputs_json"]))
         market = economic.get("market", {})
         provenance = json.loads(str(context["provenance_json"]))
+        market_recoveries = market.get("governed_recoveries", {})
+        provenance_recoveries = provenance.get("governed_recoveries", {})
+        if (
+            not isinstance(market_recoveries, dict)
+            or market_recoveries != provenance_recoveries
+        ):
+            raise LedgerConflictError(
+                "governed recovery market/provenance binding conflict"
+            )
+        try:
+            governed_recoveries = {
+                str(ticker): GovernedRecoveryBinding(
+                    ticker=str(ticker),
+                    recovery_id=str(binding["recovery_id"]),
+                    contract_version=str(binding["contract_version"]),
+                    evidence_digest=str(binding["evidence_digest"]),
+                )
+                for ticker, binding in sorted(market_recoveries.items())
+                if isinstance(binding, dict)
+                and set(binding)
+                == {"recovery_id", "contract_version", "evidence_digest"}
+            }
+        except (KeyError, TypeError, ValueError) as error:
+            raise LedgerConflictError(
+                "governed recovery binding payload conflict"
+            ) from error
+        if len(governed_recoveries) != len(market_recoveries):
+            raise LedgerConflictError("governed recovery binding payload conflict")
         bars = {
             (str(item["ticker"]), session): MarketBar(
                 str(item["ticker"]),
@@ -771,6 +914,12 @@ class SessionExecutor:
             )
             for item in market.get("benchmarks", [])
         }
+        self._verify_governed_recoveries(
+            session=session,
+            epoch_id=str(context["epoch_id"]),
+            bars={ticker: bar for (ticker, _), bar in bars.items()},
+            governed_recoveries=governed_recoveries,
+        )
         return _PersistedSessionInputBundle(
             session,
             tuple(
@@ -783,8 +932,59 @@ class SessionExecutor:
             bars,
             actions,
             benchmarks,
+            governed_recoveries,
+            {},
             validated_at=context["bound_at"],
         )
+
+    def _verify_governed_recoveries(
+        self,
+        *,
+        session: date,
+        epoch_id: str,
+        bars: Mapping[str, MarketBar],
+        governed_recoveries: Mapping[str, GovernedRecoveryBinding],
+    ) -> None:
+        """Require every bound reconstruction to match its immutable record."""
+        unbound_reconstructions = sorted(
+            ticker
+            for ticker, bar in bars.items()
+            if bar.source == "yfinance-60m-reconstruction"
+            and ticker not in governed_recoveries
+        )
+        if unbound_reconstructions:
+            raise LedgerConflictError(
+                "governed recovery evidence conflict for "
+                + ",".join(unbound_reconstructions)
+                + f"/{session}"
+            )
+        for ticker, binding in sorted(governed_recoveries.items()):
+            try:
+                record = self.metric_store.load_governed_bar_recovery_by_id(
+                    binding.recovery_id
+                )
+                if record is None:
+                    raise ValueError("record is missing")
+                record.validate_integrity()
+                if (
+                    binding.ticker != ticker
+                    or binding.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT
+                    or record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT
+                    or record.recovery_id != binding.recovery_id
+                    or record.evidence_digest != binding.evidence_digest
+                    or record.contract_version != binding.contract_version
+                    or record.epoch_id != epoch_id
+                    or record.session != session
+                    or record.ticker != ticker
+                    or self.ledger.cohort_id not in record.affected_cohort_ids
+                    or ticker not in bars
+                    or _bar_from_record(record) != bars[ticker]
+                ):
+                    raise ValueError("record does not match binding")
+            except Exception as error:
+                raise LedgerConflictError(
+                    f"governed recovery evidence conflict for {ticker}/{session}"
+                ) from error
 
     def validated_execution_reference_bars(
         self, session: date, epoch_id: str
@@ -799,10 +999,7 @@ class SessionExecutor:
             raise ValueError("execution reference bars require completed valid P0")
         self.validate_bound_context(session, epoch_id)
         bundle = self.persisted_input_bundle(session)
-        return {
-            ticker: bundle.bars[(ticker, session)]
-            for ticker in bundle.tickers
-        }
+        return {ticker: bundle.bars[(ticker, session)] for ticker in bundle.tickers}
 
     def persisted_borrow_rates(self, session: date) -> dict[str, Decimal | None]:
         """Rehydrate the exact canonical borrow document bound to a session."""
@@ -824,6 +1021,7 @@ class SessionExecutor:
             raise LedgerConflictError(f"missing execution context for {session}")
         if context["epoch_id"] != epoch_id:
             raise LedgerConflictError(f"execution context epoch conflict for {session}")
+        self.persisted_input_bundle(session)
         borrow_rates = self.persisted_borrow_rates(session)
         config_inputs, borrow_inputs = self._static_context_documents(
             tuple(context["required_tickers"]), borrow_rates
@@ -859,8 +1057,6 @@ class SessionExecutor:
         invalid_reason = self.ledger.session_invalid_reason(session)
         if invalid_reason:
             return SessionExecutionResult(session, False, None, invalid_reason, ())
-
-        self.ledger.cancel_overdue_next_open_intents(session, session_open(session))
 
         bound_context = self.ledger.session_execution_context(session)
         if bound_context is not None and bound_context["epoch_id"] != epoch_id:
@@ -916,6 +1112,15 @@ class SessionExecutor:
                         bound_context,
                         epoch_id,
                     )
+                if fully_complete:
+                    completed_market = json.loads(
+                        str(bound_context["economic_inputs_json"])
+                    ).get("market", {})
+                    if completed_market.get("governed_recoveries", {}):
+                        self.persisted_input_bundle(session)
+                    return SessionExecutionResult(
+                        session, True, existing[0], "", PHASES
+                    )
             except LedgerConflictError as error:
                 reason = f"execution context conflict: {error}"
                 if not existing:
@@ -923,8 +1128,6 @@ class SessionExecutor:
                         session, reason, processed_at
                     )
                 return SessionExecutionResult(session, False, None, reason, ())
-        if fully_complete and bound_context is not None:
-            return SessionExecutionResult(session, True, existing[0], "", PHASES)
         for ticker in required:
             quarantine_reason = self.ledger.session_invalid_reason(session, ticker)
             if quarantine_reason:
@@ -938,17 +1141,48 @@ class SessionExecutor:
                 self._resolve_staged_volatility_evidence(session, epoch_id)
             )
         try:
-            bundle = (
-                price_source
-                if isinstance(price_source, SessionInputBundle)
-                else self.fetch_input_bundle(
-                    session, required, price_source, self.benchmark_symbols
-                )
+            bound_market = (
+                json.loads(str(bound_context["economic_inputs_json"])).get("market", {})
+                if bound_context is not None
+                else {}
             )
+            bound_recoveries = bound_market.get("governed_recoveries", {})
+            if bound_context is not None and bound_recoveries:
+                bundle = self.persisted_input_bundle(session)
+            elif isinstance(price_source, SessionInputBundle):
+                bundle = price_source
+            else:
+                governed_capable = callable(
+                    getattr(price_source, "resolve_governed_daily_bars", None)
+                )
+                bundle = self.fetch_input_bundle(
+                    session,
+                    required,
+                    price_source,
+                    self.benchmark_symbols,
+                    metric_store=(self.metric_store if governed_capable else None),
+                    epoch_id=(epoch_id if governed_capable else None),
+                    cohort_ids_by_ticker=(
+                        {ticker: (self.ledger.cohort_id,) for ticker in required}
+                        if governed_capable
+                        else None
+                    ),
+                    processed_at=(processed_at if governed_capable else None),
+                    persist=True,
+                )
             bars, actions, benchmarks = self._validate_bundle(
                 bundle, required, session, processed_at
             )
+            self._verify_governed_recoveries(
+                session=session,
+                epoch_id=epoch_id,
+                bars=bars,
+                governed_recoveries=bundle.governed_recoveries,
+            )
             if bound_context is None:
+                self.ledger.cancel_overdue_next_open_intents(
+                    session, session_open(session)
+                )
                 state_errors = self.ledger.corporate_action_batch_state_errors(
                     session, actions
                 )
@@ -962,6 +1196,7 @@ class SessionExecutor:
                     actions,
                     benchmarks,
                     borrow_rates,
+                    bundle.governed_recoveries,
                 )
             )
             if bound_context is None:
@@ -1027,6 +1262,12 @@ class SessionExecutor:
                 self.ledger.invalidate_session_and_cancel_due(
                     session, reason, processed_at
                 )
+            return SessionExecutionResult(session, False, None, reason, ())
+        except GovernedMarketDataError as error:
+            reason = "market data validation failed: " + "; ".join(
+                error.failure_map.values()
+            )
+            self.ledger.invalidate_session_and_cancel_due(session, reason, processed_at)
             return SessionExecutionResult(session, False, None, reason, ())
         except Exception as error:
             reason = f"market data validation failed: {error}"
@@ -1161,6 +1402,7 @@ class SessionExecutor:
         actions: tuple[CorporateAction, ...],
         benchmarks: dict[str, AdjustedClose],
         borrow_rates: dict[str, Decimal | None],
+        governed_recoveries: Mapping[str, GovernedRecoveryBinding],
     ) -> tuple[
         dict[str, object],
         dict[str, object],
@@ -1168,9 +1410,19 @@ class SessionExecutor:
         dict[str, object],
     ]:
         """Canonical economics exclude refetch timestamps; provenance retains them."""
+        recovery_inputs = {
+            ticker: {
+                "recovery_id": binding.recovery_id,
+                "contract_version": binding.contract_version,
+                "evidence_digest": binding.evidence_digest,
+            }
+            for ticker, binding in sorted(governed_recoveries.items())
+            if ticker in bars
+        }
         market_inputs: dict[str, object] = {
             "session": session.isoformat(),
             "required_tickers": list(required),
+            "governed_recoveries": recovery_inputs,
             "raw_bars": [
                 {
                     "ticker": ticker,
@@ -1214,9 +1466,9 @@ class SessionExecutor:
             required, borrow_rates
         )
         provenance: dict[str, object] = {
+            "governed_recoveries": recovery_inputs,
             "raw_bars": {
-                ticker: bars[ticker].fetched_at.isoformat()
-                for ticker in sorted(bars)
+                ticker: bars[ticker].fetched_at.isoformat() for ticker in sorted(bars)
             },
             "corporate_actions": {
                 action.action_id: action.fetched_at.isoformat() for action in actions
@@ -1247,28 +1499,28 @@ class SessionExecutor:
             for name in PaperCostModel.DEFAULTS
         }
         semantic_inputs: dict[str, object] = {
-                "policy_document_version": POLICY_DOCUMENT_VERSION,
-                "execution": {
-                    "mode": self.config.get("execution", {}).get("mode", "paper"),
-                    "price_rules": ["next_session_open", "resting_stop"],
-                },
-                "schema_version": SCHEMA_VERSION,
-                "pricing_contract": PRICING_VERSION,
-                "execution_clock_contract": EXECUTION_CLOCK_VERSION,
-                "cost_model_contract": COST_MODEL_VERSION,
-                "calendar": {
-                    "name": "XNYS",
-                    "provider": "exchange-calendars",
-                    "provider_version": package_version("exchange-calendars"),
-                },
-                "bar_max_age_hours": self.ledger_config.get("bar_max_age_hours", 24),
-                "benchmark_symbols": list(self.benchmark_symbols),
-                "cost_model": cost_model,
-                "risk_gate": asdict(RiskGateConfig.from_dict(self.config)),
-                "short_selling": {
-                    "borrow_cost_reject_above": format(self.borrow_reject_above, "f"),
-                },
-            }
+            "policy_document_version": POLICY_DOCUMENT_VERSION,
+            "execution": {
+                "mode": self.config.get("execution", {}).get("mode", "paper"),
+                "price_rules": ["next_session_open", "resting_stop"],
+            },
+            "schema_version": SCHEMA_VERSION,
+            "pricing_contract": PRICING_VERSION,
+            "execution_clock_contract": EXECUTION_CLOCK_VERSION,
+            "cost_model_contract": COST_MODEL_VERSION,
+            "calendar": {
+                "name": "XNYS",
+                "provider": "exchange-calendars",
+                "provider_version": package_version("exchange-calendars"),
+            },
+            "bar_max_age_hours": self.ledger_config.get("bar_max_age_hours", 24),
+            "benchmark_symbols": list(self.benchmark_symbols),
+            "cost_model": cost_model,
+            "risk_gate": asdict(RiskGateConfig.from_dict(self.config)),
+            "short_selling": {
+                "borrow_cost_reject_above": format(self.borrow_reject_above, "f"),
+            },
+        }
         policy_document = self.portfolio_policy_document()
         if policy_document is not None:
             semantic_inputs["portfolio_policy"] = policy_document
@@ -1319,9 +1571,7 @@ class SessionExecutor:
                 current_positions=current,
                 pending_positions=pending,
                 price_cache=None,
-                annualized_volatility_evidence=(
-                    active_volatility_evidence or None
-                ),
+                annualized_volatility_evidence=(active_volatility_evidence or None),
                 earnings_dates={},
                 short_interest={},
                 borrow_available=borrow_available,
@@ -1392,9 +1642,7 @@ class SessionExecutor:
         current = self.ledger.policy_open_lot_projection(session)
         pending = self._policy_pending_with_execution_prices(
             session,
-            self.ledger.policy_pending_entry_projection(
-                exclude_intent_id=intent_id
-            ),
+            self.ledger.policy_pending_entry_projection(exclude_intent_id=intent_id),
             opening_prices,
         )
         account = self.ledger.account_state()
@@ -1416,9 +1664,7 @@ class SessionExecutor:
             current_positions=current,
             pending_positions=pending,
             price_cache=None,
-            annualized_volatility_evidence=(
-                baseline.annualized_volatility or None
-            ),
+            annualized_volatility_evidence=(baseline.annualized_volatility or None),
             earnings_dates=baseline.earnings_dates,
             short_interest=baseline.short_interest,
             borrow_available=borrow_available,
@@ -1492,9 +1738,7 @@ class SessionExecutor:
                     raise LedgerConflictError(
                         f"missing execution policy context for {intent.intent_id}"
                     )
-                provenance = self.ledger.read_intent_policy_provenance(
-                    intent.intent_id
-                )
+                provenance = self.ledger.read_intent_policy_provenance(intent.intent_id)
                 if provenance is None:
                     raise LedgerConflictError(
                         f"missing intent policy provenance {intent.intent_id}"
@@ -1522,13 +1766,13 @@ class SessionExecutor:
                         ticker: borrow_rates.get(ticker) is not None,
                     },
                 )
-                proposed_value = float(Decimal(intent.requested_qty) * bars[ticker].open)
+                proposed_value = float(
+                    Decimal(intent.requested_qty) * bars[ticker].open
+                )
                 recommendation = TradeRecommendation(
                     ticker=ticker,
                     direction=direction,
-                    position_size_pct=(
-                        proposed_value / intent_context.portfolio_value
-                    ),
+                    position_size_pct=(proposed_value / intent_context.portfolio_value),
                     confidence=0.0,
                     rationale="rehydrated immutable intent provenance",
                     contributing_strategies=list(provenance["strategy_tags"]),
@@ -1611,6 +1855,8 @@ class SessionExecutor:
     ]:
         if bundle.session != session:
             raise ValueError("input bundle session mismatch")
+        if bundle.governed_failure_map:
+            raise GovernedMarketDataError(bundle.governed_failure_map)
         if not set(required).issubset(bundle.tickers):
             raise ValueError("input bundle does not cover every required ticker")
         max_age = timedelta(
