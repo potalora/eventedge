@@ -35,7 +35,9 @@ Production should be scheduled for 18:00 ET, after XNYS daily bars finalize; the
 
 Each cohort has its own authoritative SQLite `portfolio.db`. Signals, next-open intents, fills, lots, marks, benchmark observations, and account snapshots are recorded there with explicit slippage, commission, other fees, borrow costs, and financing. The familiar JSON files are deterministic read-compatible projections from SQLite; they are not accounting authority.
 
-Paper-trading safety comes before a performance result: a missing or invalid raw price for a governed record blocks execution or accounting rather than being guessed. For a new trade candidate, EventEdge makes one normal batch validation and, if needed, one fresh single-ticker check that bypasses the cache. If the price still cannot be recovered, that candidate is excluded only from the current session and the accepted, recovered, or quarantined evidence is kept permanently. A quarantine is shown as a data/availability failure, never as a clean performance observation.
+Paper-trading safety comes before a performance result. Governed execution, mark, and benchmark prices remain fail-closed. If a yfinance daily bar has internally inconsistent OHLC after the XNYS close, EventEdge can make one narrow recovery from that ticker's regular-session 60-minute bars. The interval coverage, daily open and close, and the unaffected daily extreme must agree; exactly one broken extreme can be replaced. The evidence is saved and bound to replay. Missing, ambiguous, or mismatched data still blocks the run.
+
+Candidate prices use a separate path. EventEdge makes one normal batch validation and, if needed, one fresh single-ticker check that bypasses the cache. If the price still cannot be recovered, that candidate is excluded only from the current session and the accepted, recovered, or quarantined evidence is kept permanently. A quarantine is shown as a data/availability failure, never as a clean performance observation.
 
 The generation management system supports parallel frozen code versions through git worktrees. EventEdge runs 16 dependent scenario portfolios. Headline performance shows four separate $100k horizon books plus an equal-weighted scenario panel; the panel is not investable fund AUM. Smaller books are concentration stress tests. Metrics use XNYS sessions, next-session-open signal outcomes, persisted SPY/BIL benchmarks, explicit costs, and immutable schema-v2 epochs. A separate, bounded policy audit counts each attributed recommendation once for accept, trim, or reject and reports signal-level ingress blocks and committee non-selection; it is governance evidence, not alpha validation. Production learning is disabled. Promotion output is advisory and requires Pedro's manual review against precommitted 30/60/90-session gates and complete benchmark, cost, and provenance evidence. Covered-call execution remains inactive until authoritative premium, assignment, expiry, and contract-mark accounting exists. Autoresearch LLM calls use Claude Sonnet 5 at medium effort, with rule-based synthesis as the failure fallback.
 
@@ -59,6 +61,11 @@ You'll need an Anthropic API key for the autoresearch LLM calls. Stock prices co
 ```bash
 # Daily automation — run all active generations
 python scripts/run_generations.py run-daily --date 2026-07-31
+
+# Optional direct checks. The scheduled daily script runs the screen first,
+# then requires the governed check to be ready before it starts trading.
+python scripts/run_generations.py preflight --date 2026-07-31 --preflight-mode screen
+python scripts/run_generations.py preflight --date 2026-07-31 --preflight-mode governed
 
 # Inventory legacy JSON without importing it
 python scripts/migrate_ledger_state.py --legacy-state /path/to/legacy --output-dir /tmp/eventedge-ledger-check --dry-run
