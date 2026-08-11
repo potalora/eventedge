@@ -1535,3 +1535,76 @@ def test_run_generations_busy_is_bounded_without_traceback(monkeypatch, capsys, 
     assert '"busy": true' in captured.err
     assert '"success": false' in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_run_generations_constructor_lock_invalid_is_bounded_without_traceback(
+    monkeypatch, capsys
+):
+    from scripts import run_generations
+    from tradingagents.strategies.orchestration.generation_manager import (
+        GenerationManager,
+    )
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockInvalid
+
+    def invalid(*args, **kwargs):
+        raise RuntimeLockInvalid("canonical runtime lock path is invalid")
+
+    monkeypatch.setattr(GenerationManager, "__init__", invalid)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_generations.py",
+            "preflight",
+            "--date",
+            "2026-08-06",
+            "--preflight-mode",
+            "governed",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_generations.main()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 1
+    assert json.loads(captured.err) == {
+        "busy": False,
+        "error": "canonical runtime lock path is invalid",
+        "success": False,
+    }
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("command", ("run-daily", "preflight"))
+def test_run_generations_method_lock_invalid_is_bounded_without_traceback(
+    monkeypatch, capsys, command
+):
+    from scripts import run_generations
+    from tradingagents.strategies.orchestration.generation_manager import (
+        GenerationManager,
+    )
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockInvalid
+
+    def invalid(*args, **kwargs):
+        raise RuntimeLockInvalid("runtime lock identity changed")
+
+    monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(GenerationManager, "run_daily", invalid)
+    monkeypatch.setattr(GenerationManager, "run_preflight", invalid)
+    argv = ["run_generations.py", command, "--date", "2026-08-06"]
+    if command == "preflight":
+        argv.extend(("--preflight-mode", "governed"))
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as raised:
+        run_generations.main()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 1
+    assert json.loads(captured.err) == {
+        "busy": False,
+        "error": "runtime lock identity changed",
+        "success": False,
+    }
+    assert "Traceback" not in captured.err

@@ -14,6 +14,7 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
     build_default_cohorts,
 )
+from tradingagents.strategies.orchestration.session_executor import SessionInputBundle
 from tradingagents.strategies.orchestration.trading_calendar import previous_session
 from tradingagents.strategies.trading.portfolio_policy import annualized_volatility
 
@@ -196,6 +197,17 @@ def _run_staging_matrix(
         )
         monkeypatch.setattr(
             cohort["executor"], "validate_bound_context", lambda *_args: {}
+        )
+        monkeypatch.setattr(
+            cohort["executor"],
+            "persisted_input_bundle",
+            lambda _session: SessionInputBundle(
+                session=SESSION,
+                tickers=(),
+                bars={},
+                actions=(),
+                benchmarks={},
+            ),
         )
         monkeypatch.setattr(
             cohort["executor"],

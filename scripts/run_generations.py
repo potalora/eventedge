@@ -43,10 +43,16 @@ class PromotionAdvisoryUnavailable(RuntimeError):
     """Authoritative inputs do not support a fail-closed promotion decision."""
 
 
-def _exit_runtime_busy(error: Exception) -> None:
+def _exit_runtime_lock_error(error: Exception) -> None:
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
     print(
         json.dumps(
-            {"success": False, "busy": True, "error": str(error)[:4_096]},
+            {
+                "success": False,
+                "busy": isinstance(error, RuntimeLockBusy),
+                "error": str(error)[:4_096],
+            },
             sort_keys=True,
         ),
         file=sys.stderr,
@@ -471,9 +477,16 @@ def main():
     from tradingagents.strategies.orchestration.generation_manager import (
         GenerationManager,
     )
+    from tradingagents.strategies.orchestration.runtime_lock import (
+        RuntimeLockBusy,
+        RuntimeLockInvalid,
+    )
 
     repo = _repo_root()
-    manager = GenerationManager(repo)
+    try:
+        manager = GenerationManager(repo)
+    except RuntimeLockInvalid as error:
+        _exit_runtime_lock_error(error)
 
     if args.command == "start":
         gen = manager.start_generation(args.description)
@@ -497,12 +510,10 @@ def main():
         trading_date = trading_session.isoformat()
         if not args.date:
             logger.info("Using XNYS session: %s", trading_date)
-        from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
-
         try:
             results = manager.run_daily(trading_date)
-        except RuntimeLockBusy as error:
-            _exit_runtime_busy(error)
+        except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+            _exit_runtime_lock_error(error)
         for gen_id, result in results.items():
             status = (
                 "OK"
@@ -534,12 +545,10 @@ def main():
         trading_date = trading_session.isoformat()
         if not args.date:
             logger.info("Using XNYS session: %s", trading_date)
-        from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
-
         try:
             results = manager.run_preflight(trading_date, mode=args.preflight_mode)
-        except RuntimeLockBusy as error:
-            _exit_runtime_busy(error)
+        except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+            _exit_runtime_lock_error(error)
         if not results:
             print("No active generations to preflight.")
             if args.preflight_mode in {"all", "governed"}:

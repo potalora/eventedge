@@ -94,6 +94,7 @@ def test_generation_timeout_message_matches_constant(tmp_path):
     """The TimeoutExpired branch must report the real cap, not a stale literal."""
     from tradingagents.strategies.orchestration import generation_manager as gm
 
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     mgr = gm.GenerationManager(repo_root=str(tmp_path))
     gen_data = {
         "gen_id": "gen_test",

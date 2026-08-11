@@ -34,6 +34,21 @@ with runtime_lock(
 print("borrowed", flush=True)
 """
 
+_INHERITED_HOLDER = """
+import sys
+from pathlib import Path
+from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+with runtime_lock(
+    Path(sys.argv[1]),
+    exclusive=True,
+    inherited_fd=int(sys.argv[2]),
+    inherited_exclusive=True,
+):
+    print("borrowed", flush=True)
+    sys.stdin.readline()
+"""
+
 
 def _holder(lock_path: Path, *, exclusive: bool) -> subprocess.Popen[str]:
     process = subprocess.Popen(
@@ -273,3 +288,44 @@ def test_inherited_fd_handoff_crosses_process_without_unlocking_parent(
         with pytest.raises(RuntimeLockBusy, match="runtime lock is busy"):
             with runtime_lock(lock_path, exclusive=False):
                 raise AssertionError("unreachable")
+
+
+def test_unlocked_inherited_fd_acquires_lock_across_processes(tmp_path: Path) -> None:
+    from tradingagents.strategies.orchestration.runtime_lock import (
+        RuntimeLockBusy,
+        runtime_lock,
+    )
+
+    lock_path = tmp_path / "eventedge.lock"
+    lock_path.touch()
+    inherited_fd = os.open(lock_path, os.O_RDWR)
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _INHERITED_HOLDER,
+            str(lock_path),
+            str(inherited_fd),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        pass_fds=(inherited_fd,),
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "borrowed"
+        with pytest.raises(RuntimeLockBusy, match="runtime lock is busy"):
+            with runtime_lock(lock_path, exclusive=True):
+                raise AssertionError("unreachable")
+    finally:
+        assert child.stdin is not None
+        child.stdin.write("release\n")
+        child.stdin.flush()
+        stdout, stderr = child.communicate(timeout=5)
+        os.close(inherited_fd)
+        assert child.returncode == 0, (stdout, stderr)
+
+    with runtime_lock(lock_path, exclusive=True):
+        pass

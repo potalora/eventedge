@@ -179,6 +179,7 @@ def runtime_lock(
 ) -> Iterator[RuntimeLockHandle]:
     """Acquire one non-blocking shared or exclusive process lock."""
     target = _absolute_lexical(lock_path)
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     if inherited_fd is not None:
         if inherited_exclusive is not exclusive:
             raise RuntimeLockInvalid("inherited runtime lock mode is invalid")
@@ -187,6 +188,12 @@ def runtime_lock(
             try:
                 _verify_lock_identity(target, parent_fd, inherited_fd)
             except RuntimeLockInvalid as error:
+                raise RuntimeLockInvalid("inherited runtime lock is invalid") from error
+            try:
+                fcntl.flock(inherited_fd, mode | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeLockBusy(target) from error
+            except OSError as error:
                 raise RuntimeLockInvalid("inherited runtime lock is invalid") from error
             try:
                 yield RuntimeLockHandle(
@@ -213,7 +220,6 @@ def runtime_lock(
     except OSError as error:
         os.close(parent_fd)
         raise RuntimeLockInvalid("canonical runtime lock path is invalid") from error
-    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     try:
         _verify_lock_identity(target, parent_fd, lock_fd)
         try:
