@@ -8,6 +8,8 @@ real production code paths.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
+from types import MappingProxyType
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,7 +57,9 @@ class TestRunPreflight:
 
         config, engine = _make_engine(tmp_path)
         monkeypatch.setattr(
-            engine, "_fetch_all_data", lambda start, end: _govt_contracts_fixture("2026-07-07")
+            engine,
+            "_fetch_all_data",
+            lambda start, end: _govt_contracts_fixture("2026-07-07"),
         )
 
         report = run_preflight(config, "2026-08-06", engine=engine)
@@ -114,7 +118,9 @@ class TestRunPreflight:
         assert failure["strategy"] == "broken_strategy"
         assert "screen failed" in failure["error"]
 
-    def test_empty_ticker_candidates_counted_as_pending_llm(self, tmp_path, monkeypatch):
+    def test_empty_ticker_candidates_counted_as_pending_llm(
+        self, tmp_path, monkeypatch
+    ):
         """Production screen_and_enrich discards empty-ticker signals before
         staging (LLM enrichment resolves tickers first); preflight must mirror
         that filter instead of failing on it."""
@@ -173,6 +179,307 @@ class TestRunPreflight:
         assert not state_dir.exists() or not any(state_dir.iterdir())
 
 
+class TestGovernedPreflight:
+    @staticmethod
+    def _snapshot(tmp_path, *, status="uninitialized"):
+        from tradingagents.strategies.orchestration.preflight_state import (
+            PreflightStateSnapshot,
+        )
+
+        return PreflightStateSnapshot(
+            state_status=status,
+            epoch_id="preflight-prospective-2026-08-10",
+            governed_tickers=("BIL", "SPY"),
+            cohort_ids_by_ticker=MappingProxyType(
+                {"BIL": ("cohort-a",), "SPY": ("cohort-a",)}
+            ),
+            metric_store_path=None,
+            file_identities=(),
+        )
+
+    def test_preclose_governed_probe_is_not_ready_without_provider_call(
+        self, tmp_path, monkeypatch
+    ):
+        from tradingagents.strategies.execution import (
+            price_source as price_source_module,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+        from tradingagents.strategies.orchestration.trading_calendar import (
+            session_close,
+        )
+
+        snapshot = self._snapshot(tmp_path)
+        inspector = MagicMock(return_value=snapshot)
+        resolver = MagicMock()
+        price_source = MagicMock()
+        monkeypatch.setattr(
+            price_source_module,
+            "YFinancePriceSource",
+            MagicMock(side_effect=AssertionError("provider instantiated pre-close")),
+        )
+        before_close = session_close(date(2026, 8, 10)) - timedelta(seconds=1)
+        config = {
+            "autoresearch": {
+                "state_dir": str(tmp_path / "state"),
+                "paper_ledger": {"benchmark_symbols": ["SPY", "BIL"]},
+            }
+        }
+
+        report = run_preflight(
+            config,
+            "2026-08-10",
+            mode="governed",
+            price_source=price_source,
+            processed_at=before_close,
+            state_inspector=inspector,
+            governed_resolver=resolver,
+        )
+
+        assert report["ok"] is True
+        assert report["state_status"] == "uninitialized"
+        assert report["governed_probe_status"] == "not_ready"
+        assert report["governed_tickers"] == ["BIL", "SPY"]
+        assert report["governed_bar_recoveries"] == []
+        assert report["governed_failure_map"] == {}
+        resolver.assert_not_called()
+        price_source.assert_not_called()
+        assert price_source.mock_calls == []
+
+        default_report = run_preflight(
+            config,
+            "2026-08-10",
+            mode="governed",
+            processed_at=before_close,
+            state_inspector=inspector,
+            governed_resolver=resolver,
+        )
+        assert default_report["governed_probe_status"] == "not_ready"
+        price_source_module.YFinancePriceSource.assert_not_called()
+
+    def test_after_close_uses_shared_resolver_without_persistence(self, tmp_path):
+        from tradingagents.strategies.orchestration.governed_market_data import (
+            GovernedInputResolution,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        snapshot = self._snapshot(tmp_path)
+        resolution = GovernedInputResolution(
+            bars={},
+            recovery_bindings={},
+            recovery_summaries=(
+                {
+                    "ticker": "SPY",
+                    "session": "2026-08-10",
+                    "recovery_id": "recovery-spy",
+                    "contract_version": "yfinance-60m-v1",
+                    "evidence_digest": "digest-spy",
+                    "affected_cohort_ids": ("cohort-a",),
+                },
+            ),
+            failure_map={},
+        )
+        resolver = MagicMock(return_value=resolution)
+        price_source = MagicMock()
+        engine = MagicMock()
+        processed_at = datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
+        config = {"autoresearch": {"state_dir": str(tmp_path / "state")}}
+
+        report = run_preflight(
+            config,
+            "2026-08-10",
+            engine=engine,
+            mode="governed",
+            price_source=price_source,
+            processed_at=processed_at,
+            state_inspector=MagicMock(return_value=snapshot),
+            governed_resolver=resolver,
+        )
+
+        assert report["ok"] is True
+        assert report["governed_probe_status"] == "ready"
+        assert report["governed_failure_map"] == {}
+        assert report["governed_bar_recoveries"] == [
+            {
+                "ticker": "SPY",
+                "session": "2026-08-10",
+                "recovery_id": "recovery-spy",
+                "contract_version": "yfinance-60m-v1",
+                "evidence_digest": "digest-spy",
+                "affected_cohort_ids": ["cohort-a"],
+            }
+        ]
+        kwargs = resolver.call_args.kwargs
+        assert kwargs["persist"] is False
+        assert kwargs["price_source"] is price_source
+        assert kwargs["tickers"] == ("BIL", "SPY")
+        assert kwargs["cohort_ids_by_ticker"] == snapshot.cohort_ids_by_ticker
+        assert engine.mock_calls == []
+
+    def test_governed_failure_map_is_exact_and_marks_report_failed(self, tmp_path):
+        from tradingagents.strategies.orchestration.governed_market_data import (
+            GovernedInputResolution,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        snapshot = self._snapshot(tmp_path)
+        resolver = MagicMock(
+            return_value=GovernedInputResolution(
+                bars={},
+                recovery_bindings={},
+                recovery_summaries=(),
+                failure_map={
+                    "BIL": "missing BIL/2026-08-10",
+                    "SPY": "invalid SPY/2026-08-10",
+                },
+            )
+        )
+        report = run_preflight(
+            {"autoresearch": {"state_dir": str(tmp_path / "state")}},
+            "2026-08-10",
+            mode="governed",
+            price_source=MagicMock(),
+            processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+            state_inspector=MagicMock(return_value=snapshot),
+            governed_resolver=resolver,
+        )
+
+        assert report["ok"] is False
+        assert report["governed_probe_status"] == "failed"
+        assert report["governed_failure_map"] == {
+            "BIL": "missing BIL/2026-08-10",
+            "SPY": "invalid SPY/2026-08-10",
+        }
+
+    @pytest.mark.parametrize(
+        "failure_map",
+        (
+            {},
+            {"OTHER": "invalid OTHER/2026-08-10"},
+            {"SPY": ""},
+        ),
+    )
+    def test_invalid_governed_error_map_fails_entire_snapshot(
+        self, tmp_path, failure_map
+    ):
+        from tradingagents.strategies.orchestration.governed_market_data import (
+            GovernedMarketDataError,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        snapshot = self._snapshot(tmp_path)
+        resolver = MagicMock(side_effect=GovernedMarketDataError(failure_map))
+        report = run_preflight(
+            {"autoresearch": {"state_dir": str(tmp_path / "state")}},
+            "2026-08-10",
+            mode="governed",
+            price_source=MagicMock(),
+            processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+            state_inspector=MagicMock(return_value=snapshot),
+            governed_resolver=resolver,
+        )
+
+        assert report["ok"] is False
+        assert report["governed_probe_status"] == "failed"
+        assert report["governed_failure_map"] == {
+            "BIL": "invalid BIL/2026-08-10",
+            "SPY": "invalid SPY/2026-08-10",
+        }
+
+    def test_uninitialized_topology_creation_during_resolution_fails_closed(
+        self, tmp_path
+    ):
+        from tradingagents.strategies.metrics.store import MetricStore
+        from tradingagents.strategies.orchestration.governed_market_data import (
+            GovernedInputResolution,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        state_dir = tmp_path / "state"
+
+        def mutate_topology(**_kwargs):
+            MetricStore(state_dir / "metrics_v2.sqlite3")
+            return GovernedInputResolution({}, {}, (), {})
+
+        report = run_preflight(
+            {"autoresearch": {"state_dir": str(state_dir)}},
+            "2026-08-10",
+            mode="governed",
+            price_source=MagicMock(),
+            processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+            governed_resolver=mutate_topology,
+        )
+
+        assert report["ok"] is False
+        assert report["governed_probe_status"] == "failed"
+        assert report["governed_failure_map"] == {}
+        assert report["failures"][0]["error"] == (
+            "state topology changed during preflight"
+        )
+
+    def test_already_invalid_state_skips_provider(self, tmp_path):
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        snapshot = self._snapshot(tmp_path, status="state_already_invalid")
+        resolver = MagicMock()
+        price_source = MagicMock()
+        report = run_preflight(
+            {"autoresearch": {"state_dir": str(tmp_path / "state")}},
+            "2026-08-10",
+            mode="governed",
+            price_source=price_source,
+            processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+            state_inspector=MagicMock(return_value=snapshot),
+            governed_resolver=resolver,
+        )
+
+        assert report["ok"] is False
+        assert report["state_status"] == "state_already_invalid"
+        assert report["governed_probe_status"] == "state_already_invalid"
+        resolver.assert_not_called()
+        assert price_source.mock_calls == []
+
+    def test_all_mode_composes_existing_screen_and_governed_reports(
+        self, tmp_path, monkeypatch
+    ):
+        from tradingagents.strategies.orchestration.governed_market_data import (
+            GovernedInputResolution,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        config, engine = _make_engine(tmp_path)
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        snapshot = self._snapshot(tmp_path)
+        report = run_preflight(
+            config,
+            "2026-08-10",
+            engine=engine,
+            mode="all",
+            price_source=MagicMock(),
+            processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+            state_inspector=MagicMock(return_value=snapshot),
+            governed_resolver=MagicMock(
+                return_value=GovernedInputResolution({}, {}, (), {})
+            ),
+        )
+
+        assert report["horizons"]
+        assert report["governed_probe_status"] == "ready"
+        assert report["ok"] is True
+
+    def test_invalid_mode_rejected_before_any_work(self, tmp_path):
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        engine = MagicMock()
+        with pytest.raises(ValueError, match="preflight mode"):
+            run_preflight(
+                {"autoresearch": {"state_dir": str(tmp_path)}},
+                "2026-08-10",
+                engine=engine,
+                mode="other",
+            )
+        assert engine.mock_calls == []
+
+
 class TestGenerationManagerPreflight:
     def _manager(self, tmp_path, monkeypatch, results_by_gen):
         from tradingagents.strategies.orchestration.generation_manager import (
@@ -198,8 +505,8 @@ class TestGenerationManagerPreflight:
         monkeypatch.setattr(
             manager,
             "_run_cohorts_subprocess",
-            lambda gen_data, extra_args, log_name="last_run_output.log": (
-                dict(results_by_gen[gen_data["gen_id"]], _args=extra_args)
+            lambda gen_data, extra_args, log_name="last_run_output.log": dict(
+                results_by_gen[gen_data["gen_id"]], _args=extra_args
             ),
         )
         return manager, manifest, saved
