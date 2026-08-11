@@ -35,6 +35,95 @@ logging.basicConfig(
 logger = logging.getLogger("run_cohorts")
 
 
+def _runtime_lock_context(*, exclusive: bool):
+    from pathlib import Path
+
+    from tradingagents.strategies.orchestration.runtime_lock import (
+        RuntimeLockInvalid,
+        canonical_runtime_lock_path,
+        runtime_lock,
+    )
+
+    lock_path = canonical_runtime_lock_path(Path(__file__).resolve().parent)
+    fd_value = os.environ.get("EVENTEDGE_RUNTIME_LOCK_FD")
+    mode_value = os.environ.get("EVENTEDGE_RUNTIME_LOCK_MODE")
+    if fd_value is None and mode_value is None:
+        return runtime_lock(lock_path, exclusive=exclusive)
+    if fd_value is None or mode_value not in {"shared", "exclusive"}:
+        raise RuntimeLockInvalid("inherited runtime lock environment is invalid")
+    try:
+        inherited_fd = int(fd_value)
+    except ValueError as error:
+        raise RuntimeLockInvalid("inherited runtime lock environment is invalid") from error
+    return runtime_lock(
+        lock_path,
+        exclusive=exclusive,
+        inherited_fd=inherited_fd,
+        inherited_exclusive=mode_value == "exclusive",
+    )
+
+
+def _exit_runtime_lock_error(error: Exception) -> None:
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+    payload = {
+        "success": False,
+        "busy": isinstance(error, RuntimeLockBusy),
+        "error": str(error)[:4_096],
+    }
+    print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _preflight_exit_status(
+    report: object, mode: str, trading_date: str | None = None
+) -> tuple[int, str]:
+    """Return one bounded, mode-appropriate preflight outcome."""
+    from tradingagents.strategies.orchestration.generation_manager import (
+        normalize_preflight_report,
+    )
+
+    report_date = (
+        trading_date
+        if trading_date is not None
+        else report.get("trading_date")
+        if isinstance(report, dict)
+        else None
+    )
+    if not isinstance(report_date, str):
+        return 1, f"PREFLIGHT {mode.upper()} FAILED: malformed report"
+    normalized = normalize_preflight_report(
+        report, mode=mode, trading_date=report_date
+    )
+    if normalized is None:
+        return 1, f"PREFLIGHT {mode.upper()} FAILED: malformed report"
+    if mode in {"governed", "all"}:
+        status = normalized["governed_probe_status"]
+        failure_map = normalized["governed_failure_map"]
+        recoveries = normalized["governed_bar_recoveries"]
+        ready = (
+            normalized["ok"] is True
+            and status == "ready"
+            and not failure_map
+        )
+        recovery_count = len(recoveries)
+        if ready:
+            return (
+                0,
+                f"PREFLIGHT {mode.upper()} READY: governed probe ready; "
+                f"{recovery_count} recovery summary(s)",
+            )
+        bounded_status = str(status if isinstance(status, str) else "malformed")[:128]
+        return 1, f"PREFLIGHT {mode.upper()} FAILED: governed status {bounded_status}"
+    success = normalized["ok"] is True and normalized["screen_ok"] is True
+    failure_count = normalized["screen_failure_count"]
+    return (
+        0 if success else 1,
+        f"PREFLIGHT SCREEN {'OK' if success else 'FAILED'}: "
+        f"{failure_count} failure(s)",
+    )
+
+
 def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
     """Return the alerting exit outcome for cohort execution results.
 
@@ -147,6 +236,12 @@ def main():
         ),
     )
     parser.add_argument(
+        "--preflight-mode",
+        choices=("all", "screen", "governed"),
+        default=None,
+        help="Preflight checks to run (default with --preflight: all)",
+    )
+    parser.add_argument(
         "--block-tickers",
         default="",
         help="Comma-separated tickers to exclude (compliance). Also reads BLOCKED_TICKERS env var.",
@@ -166,6 +261,9 @@ def main():
         )
     if args.preflight and args.compare:
         parser.error("--preflight cannot be combined with --compare")
+    if not args.preflight and args.preflight_mode is not None:
+        parser.error("--preflight-mode requires --preflight")
+    preflight_mode = args.preflight_mode or "all"
 
     # Bound for the checker; the flag exits above guarantee assignment
     # before any branch that reads it (preflight or daily run).
@@ -235,43 +333,61 @@ def main():
     # construction so generation state is never opened.
     if args.preflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
-
-        start = time.time()
-        report = run_preflight(config, exact_trading_date)
-        elapsed = time.time() - start
-        print(json.dumps(report, indent=2, default=str))
-        staged = sum(
-            entry["staged"]
-            for horizon in report["horizons"].values()
-            for entry in horizon.values()
+        from tradingagents.strategies.orchestration.runtime_lock import (
+            RuntimeLockBusy,
+            RuntimeLockInvalid,
         )
-        if report["ok"]:
-            print(
-                f"PREFLIGHT OK: {exact_trading_date} — {staged} candidates staged "
-                f"across {len(report['horizons'])} horizons in {elapsed:.1f}s"
-            )
-            return
+
+        try:
+            with _runtime_lock_context(exclusive=False):
+                start = time.time()
+                report = run_preflight(config, exact_trading_date, mode=preflight_mode)
+                elapsed = time.time() - start
+        except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+            _exit_runtime_lock_error(error)
+        from tradingagents.strategies.orchestration.generation_manager import (
+            normalize_preflight_report,
+        )
+
+        normalized_report = normalize_preflight_report(
+            report,
+            mode=preflight_mode,
+            trading_date=exact_trading_date,
+        )
         print(
-            f"PREFLIGHT FAILED: {exact_trading_date} — {len(report['failures'])} "
-            f"failure(s); {staged} candidates staged in {elapsed:.1f}s",
-            file=sys.stderr,
+            json.dumps(
+                normalized_report
+                if normalized_report is not None
+                else {
+                    "ok": False,
+                    "preflight_mode": preflight_mode,
+                    "error": "malformed preflight report",
+                },
+                indent=2,
+                default=str,
+            )
         )
-        sys.exit(1)
+        exit_code, message = _preflight_exit_status(
+            report, preflight_mode, exact_trading_date
+        )
+        rendered = f"{message} ({exact_trading_date}, {elapsed:.1f}s)"
+        if exit_code == 0:
+            print(rendered)
+            return
+        print(rendered, file=sys.stderr)
+        sys.exit(exit_code)
 
-    # Build cohort configs
-    cohort_configs = build_default_cohorts(config)
-
-    # Disable LLM only if explicitly requested
-    if args.no_llm:
-        for cc in cohort_configs:
-            cc.use_llm = False
-
-    orchestrator = CohortOrchestrator(
-        cohort_configs,
-        config,
-        generation_id=generation_id,
-        generation_commit=generation_commit,
-    )
+    def build_orchestrator():
+        cohort_configs = build_default_cohorts(config)
+        if args.no_llm:
+            for cohort_config in cohort_configs:
+                cohort_config.use_llm = False
+        return CohortOrchestrator(
+            cohort_configs,
+            config,
+            generation_id=generation_id,
+            generation_commit=generation_commit,
+        )
 
     # Route to the right action
     if args.compare:
@@ -280,6 +396,7 @@ def main():
             CohortComparison,
         )
 
+        orchestrator = build_orchestrator()
         ledgers = {
             cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
         }
@@ -299,10 +416,20 @@ def main():
         return
 
     # Default: daily trading
+    from tradingagents.strategies.orchestration.runtime_lock import (
+        RuntimeLockBusy,
+        RuntimeLockInvalid,
+    )
+
     trading_date = exact_trading_date
-    start = time.time()
-    result = orchestrator.run_daily(trading_date)
-    elapsed = time.time() - start
+    try:
+        with _runtime_lock_context(exclusive=True):
+            start = time.time()
+            orchestrator = build_orchestrator()
+            result = orchestrator.run_daily(trading_date)
+            elapsed = time.time() - start
+    except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+        _exit_runtime_lock_error(error)
 
     print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
     print(json.dumps(result, indent=2, default=str))

@@ -43,6 +43,17 @@ class PromotionAdvisoryUnavailable(RuntimeError):
     """Authoritative inputs do not support a fail-closed promotion decision."""
 
 
+def _exit_runtime_busy(error: Exception) -> None:
+    print(
+        json.dumps(
+            {"success": False, "busy": True, "error": str(error)[:4_096]},
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 def _read_generation_manifest(repo: Path) -> dict[str, Mapping[str, object]]:
     """Read the manifest directly; unlike GenerationManager this creates nothing."""
     manifest_path = repo / "data" / "generations" / "manifest.json"
@@ -348,6 +359,12 @@ def main():
         help="No-write integrity check (fetch -> screen -> staging gates) for all active generations",
     )
     p_preflight.add_argument("--date", default=None, help="Trading date (YYYY-MM-DD)")
+    p_preflight.add_argument(
+        "--preflight-mode",
+        choices=("all", "screen", "governed"),
+        default="all",
+        help="Preflight checks to run (default: all)",
+    )
 
     # run-learning
     sub.add_parser("run-learning", help="Refuse retired production learning")
@@ -480,7 +497,12 @@ def main():
         trading_date = trading_session.isoformat()
         if not args.date:
             logger.info("Using XNYS session: %s", trading_date)
-        results = manager.run_daily(trading_date)
+        from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+        try:
+            results = manager.run_daily(trading_date)
+        except RuntimeLockBusy as error:
+            _exit_runtime_busy(error)
         for gen_id, result in results.items():
             status = (
                 "OK"
@@ -512,9 +534,16 @@ def main():
         trading_date = trading_session.isoformat()
         if not args.date:
             logger.info("Using XNYS session: %s", trading_date)
-        results = manager.run_preflight(trading_date)
+        from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+        try:
+            results = manager.run_preflight(trading_date, mode=args.preflight_mode)
+        except RuntimeLockBusy as error:
+            _exit_runtime_busy(error)
         if not results:
             print("No active generations to preflight.")
+            if args.preflight_mode in {"all", "governed"}:
+                raise SystemExit(1)
             return
         for gen_id, result in results.items():
             status = (

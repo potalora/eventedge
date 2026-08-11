@@ -4,8 +4,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
-LOG_DIR="$REPO_ROOT/data/logs"
+VENV_PYTHON="${EVENTEDGE_PYTHON:-$REPO_ROOT/.venv/bin/python}"
+LOG_DIR="${EVENTEDGE_LOG_DIR:-$REPO_ROOT/data/logs}"
 mkdir -p "$LOG_DIR"
 
 TODAY=$(date +%Y-%m-%d)
@@ -37,15 +37,18 @@ LOG_FILE="$LOG_DIR/daily_${TODAY}.log"
 # (or move to the always-on VPS) for reliable execution.
 RUN_CMD=("$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" run-daily --date "$TODAY")
 
-# Preflight integrity check (non-gating): runs each generation's live
-# fetch -> screen -> event-identity staging gates against a throwaway state
-# dir. A failure here means the scheduled run will fail the same way, but
-# surfacing it in this log (and in trade-preflight.timer's midday run)
-# leaves time to fix and rerun instead of losing the session. It never
-# blocks the scheduled run, which has its own degradation handling.
-echo "=== Preflight check: $TODAY ===" >> "$LOG_FILE"
-if ! "$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" >> "$LOG_FILE" 2>&1; then
-    echo "PREFLIGHT FAILED for $TODAY (continuing to scheduled run)" >> "$LOG_FILE"
+# The screen remains an integration warning. It cannot authorize P0 trading.
+echo "=== Screen preflight: $TODAY ===" >> "$LOG_FILE"
+if ! "$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" --preflight-mode screen >> "$LOG_FILE" 2>&1; then
+    echo "SCREEN PREFLIGHT FAILED for $TODAY (continuing to governed gate)" >> "$LOG_FILE"
+fi
+
+# The after-close governed probe is the hard P0 gate. Python owns exact XNYS
+# close readiness; shell time comparisons and fallback execution are forbidden.
+echo "=== Governed preflight: $TODAY ===" >> "$LOG_FILE"
+if ! "$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" --preflight-mode governed >> "$LOG_FILE" 2>&1; then
+    echo "GOVERNED PREFLIGHT FAILED for $TODAY; daily run blocked" >> "$LOG_FILE"
+    exit 1
 fi
 
 echo "=== Daily trading run: $TODAY ===" >> "$LOG_FILE"

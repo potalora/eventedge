@@ -8,6 +8,9 @@ real production code paths.
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -24,6 +27,10 @@ def _state_context(snapshot, metric_store=None):
 
 def _state_context_factory(snapshot, metric_store=None):
     return lambda **_kwargs: _state_context(snapshot, metric_store)
+
+
+def _init_empty_git_repo(path):
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
 
 
 def _make_engine(tmp_path):
@@ -730,6 +737,7 @@ class TestGenerationManagerPreflight:
             GenerationManager,
         )
 
+        _init_empty_git_repo(tmp_path)
         manager = GenerationManager(str(tmp_path))
         manifest = {
             "generations": [
@@ -749,8 +757,10 @@ class TestGenerationManagerPreflight:
         monkeypatch.setattr(
             manager,
             "_run_cohorts_subprocess",
-            lambda gen_data, extra_args, log_name="last_run_output.log": dict(
-                results_by_gen[gen_data["gen_id"]], _args=extra_args
+            lambda gen_data, extra_args, **kwargs: dict(
+                results_by_gen[gen_data["gen_id"]],
+                _args=extra_args,
+                _kwargs=kwargs,
             ),
         )
         return manager, manifest, saved
@@ -807,3 +817,721 @@ class TestGenerationManagerPreflight:
 
         assert results["gen_004"]["success"] is False
         assert results["gen_004"].get("unsupported") is not True
+
+    def test_mode_is_passed_without_generation_state_logging(
+        self, tmp_path, monkeypatch
+    ):
+        manager, manifest, saved = self._manager(
+            tmp_path,
+            monkeypatch,
+            {
+                "gen_004": {
+                    "success": True,
+                    "elapsed_s": 1.0,
+                    "governed_probe_status": "ready",
+                }
+            },
+        )
+        calls = []
+
+        def capture(
+            gen_data,
+            extra_args,
+            *,
+            preflight_mode=None,
+            write_log=True,
+            inherited_lock=None,
+        ):
+            calls.append(
+                (gen_data["gen_id"], extra_args, preflight_mode, write_log, inherited_lock)
+            )
+            return {
+                "success": True,
+                "elapsed_s": 1.0,
+                "governed_probe_status": "ready",
+            }
+
+        monkeypatch.setattr(manager, "_run_cohorts_subprocess", capture)
+        results = manager.run_preflight("2026-08-06", mode="governed")
+
+        assert results["gen_004"]["success"] is True
+        assert calls and calls[0][1] == [
+            "--date",
+            "2026-08-06",
+            "--preflight",
+            "--preflight-mode",
+            "governed",
+        ]
+        assert calls[0][2:4] == ("governed", False)
+        assert calls[0][4] is not None
+        assert manifest["generations"][0]["run_history"] == []
+        assert saved == {}
+
+    def test_preflight_busy_starts_no_child_and_changes_no_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        from tradingagents.strategies.orchestration.runtime_lock import (
+            RuntimeLockBusy,
+            runtime_lock,
+        )
+
+        manager, manifest, saved = self._manager(
+            tmp_path,
+            monkeypatch,
+            {"gen_004": {"success": True, "elapsed_s": 1.0}},
+        )
+        child = MagicMock()
+        monkeypatch.setattr(manager, "_run_cohorts_subprocess", child)
+
+        with runtime_lock(manager._runtime_lock_path, exclusive=True):
+            with pytest.raises(RuntimeLockBusy, match="runtime lock is busy"):
+                manager.run_preflight("2026-08-06", mode="screen")
+
+        child.assert_not_called()
+        assert manifest["generations"][0]["run_history"] == []
+        assert saved == {}
+
+    @pytest.mark.parametrize(
+        ("status", "ok", "governed_ok", "has_recovery", "expected_success"),
+        (
+            ("ready", True, True, True, True),
+            ("not_ready", True, True, False, False),
+            ("failed", False, False, False, False),
+        ),
+    )
+    def test_preflight_subprocess_uses_distinct_report_parser_and_governed_gate(
+        self,
+        tmp_path,
+        monkeypatch,
+        status,
+        ok,
+        governed_ok,
+        has_recovery,
+        expected_success,
+    ):
+        import tradingagents.strategies.orchestration.generation_manager as gm
+
+        _init_empty_git_repo(tmp_path)
+        manager = gm.GenerationManager(str(tmp_path))
+        state_dir = tmp_path / "state"
+        worktree = tmp_path / "worktree"
+        state_dir.mkdir()
+        worktree.mkdir()
+        recovery = {
+            "ticker": "ESS",
+            "session": "2026-08-06",
+            "recovery_id": "governed_bar_recovery:" + "b" * 64,
+            "contract_version": "yfinance-60m-v1",
+            "evidence_digest": "sha256:" + "a" * 64,
+            "affected_cohort_ids": ["cohort-a"],
+        }
+        report = {
+            "ok": ok,
+            "failures": [],
+            "horizons": {},
+            "state_status": "ready",
+            "governed_probe_status": status,
+            "governed_ok": governed_ok,
+            "governed_bar_recoveries": [recovery] if has_recovery else [],
+            "governed_failure_map": {},
+        }
+        process = MagicMock(
+            returncode=0,
+            stdout="diagnostic\n" + json.dumps(report, indent=2) + "\nPREFLIGHT\n",
+            stderr="",
+        )
+        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+        result = manager._run_cohorts_subprocess(
+            {
+                "gen_id": "gen_001",
+                "git_commit": "a" * 40,
+                "state_dir": str(state_dir),
+                "worktree_path": str(worktree),
+            },
+            ["--date", "2026-08-06", "--preflight"],
+            preflight_mode="governed",
+            write_log=False,
+        )
+
+        assert result["success"] is expected_success
+        assert result["governed_probe_status"] == status
+        assert result["governed_bar_recoveries"] == (
+            [recovery] if has_recovery else []
+        )
+        assert result["governed_failure_map"] == {}
+        assert "horizons" not in result
+        assert not (state_dir / "last_preflight_output.log").exists()
+
+    def test_malformed_governed_report_fails_closed(self, tmp_path, monkeypatch):
+        import tradingagents.strategies.orchestration.generation_manager as gm
+
+        _init_empty_git_repo(tmp_path)
+        manager = gm.GenerationManager(str(tmp_path))
+        worktree = tmp_path / "worktree"
+        state_dir = tmp_path / "state"
+        worktree.mkdir()
+        state_dir.mkdir()
+        process = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"ok": True, "horizon_fake": {}}),
+            stderr="",
+        )
+        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+
+        result = manager._run_cohorts_subprocess(
+            {
+                "gen_id": "gen_001",
+                "git_commit": "a" * 40,
+                "state_dir": str(state_dir),
+                "worktree_path": str(worktree),
+            },
+            ["--date", "2026-08-06", "--preflight"],
+            preflight_mode="governed",
+            write_log=False,
+        )
+
+        assert result["success"] is False
+        assert "malformed preflight report" in result["error"]
+
+    def test_legacy_preflight_rejection_is_classified_without_raw_stderr(self):
+        from tradingagents.strategies.orchestration.generation_manager import (
+            _preflight_subprocess_result,
+        )
+
+        result = _preflight_subprocess_result(
+            stdout="",
+            stderr=(
+                "usage: run_cohorts.py\n"
+                "unrecognized arguments: --preflight PROVIDER_SECRET"
+            ),
+            returncode=2,
+            elapsed=0.1,
+            mode="all",
+            trading_date="2026-08-06",
+        )
+
+        assert result["success"] is False
+        assert "unrecognized arguments" in result["error"]
+        assert "PROVIDER_SECRET" not in result["error"]
+
+    def test_preflight_reporting_deduplicates_only_exact_canonical_recoveries(self):
+        from tradingagents.strategies.orchestration.generation_manager import (
+            _preflight_subprocess_result,
+        )
+
+        recovery = {
+            "ticker": "ESS",
+            "session": "2026-08-06",
+            "recovery_id": "governed_bar_recovery:" + "b" * 64,
+            "contract_version": "yfinance-60m-v1",
+            "evidence_digest": "sha256:" + "a" * 64,
+            "affected_cohort_ids": ["cohort-a"],
+        }
+        report = {
+            "ok": True,
+            "failures": [],
+            "horizons": {},
+            "state_status": "ready",
+            "governed_probe_status": "ready",
+            "governed_ok": True,
+            "governed_bar_recoveries": [recovery, dict(recovery)],
+            "governed_failure_map": {},
+        }
+
+        result = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="governed",
+            trading_date="2026-08-06",
+        )
+
+        assert result["success"] is True
+        assert result["governed_bar_recoveries"] == [recovery]
+
+        report["governed_failure_map"] = {
+            "SPY": "invalid SPY/2026-08-06"
+        }
+        inconsistent = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="governed",
+            trading_date="2026-08-06",
+        )
+        assert inconsistent["success"] is False
+        assert inconsistent["error"] == "malformed preflight report"
+
+        report["governed_failure_map"] = {}
+        report["governed_bar_recoveries"] = [
+            recovery,
+            {**recovery, "affected_cohort_ids": ["cohort-b"]},
+        ]
+        result = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="governed",
+            trading_date="2026-08-06",
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "malformed preflight report"
+        assert "governed_bar_recoveries" not in result
+
+    def test_preflight_reporting_uses_task5_grammar_and_256_item_cap(self):
+        from tradingagents.strategies.orchestration.generation_manager import (
+            _preflight_subprocess_result,
+        )
+
+        def recovery(index):
+            digest = f"{index:064x}"
+            return {
+                "ticker": f"T{index:04d}",
+                "session": "2026-08-06",
+                "recovery_id": "governed_bar_recovery:" + digest,
+                "contract_version": "yfinance-60m-v1",
+                "evidence_digest": "sha256:" + digest,
+                "affected_cohort_ids": [f"cohort-{index:04d}"],
+            }
+
+        report = {
+            "ok": True,
+            "failures": [],
+            "horizons": {},
+            "state_status": "ready",
+            "governed_probe_status": "ready",
+            "governed_ok": True,
+            "governed_bar_recoveries": [recovery(index) for index in range(256)],
+            "governed_failure_map": {},
+        }
+        result = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="governed",
+            trading_date="2026-08-06",
+        )
+        assert result["success"] is True
+        assert len(result["governed_bar_recoveries"]) == 256
+
+        report["governed_bar_recoveries"].append(recovery(256))
+        oversized = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="governed",
+            trading_date="2026-08-06",
+        )
+        assert oversized["success"] is False
+        assert oversized["error"] == "malformed preflight report"
+
+        report["governed_bar_recoveries"] = [
+            {**recovery(0), "provider_secret": "do-not-propagate"}
+        ]
+        malformed = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="governed",
+            trading_date="2026-08-06",
+        )
+        assert malformed["success"] is False
+        assert "do-not-propagate" not in json.dumps(malformed)
+
+    def test_preflight_parser_omits_raw_failure_fields_and_rejects_bad_status(self):
+        from tradingagents.strategies.orchestration.generation_manager import (
+            _preflight_subprocess_result,
+        )
+
+        report = {
+            "ok": False,
+            "failures": [],
+            "horizons": {},
+            "screen_ok": False,
+            "governed_ok": True,
+            "state_status": "ready",
+            "governed_probe_status": "ready",
+            "screen_failures": [
+                {"error": "provider-secret", "nested": {"raw": "payload"}}
+            ],
+            "governed_failures": [{"error": "another-secret"}],
+            "governed_bar_recoveries": [],
+            "governed_failure_map": {},
+        }
+        result = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="all",
+            trading_date="2026-08-06",
+        )
+
+        assert result["screen_ok"] is False
+        assert result["governed_ok"] is True
+        assert result["success"] is False
+        assert result["error"] == "preflight all status: ready"
+        assert "screen_failures" not in result
+        assert "governed_failures" not in result
+        assert "secret" not in json.dumps(result)
+
+        report["ok"] = True
+        contradictory = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="all",
+            trading_date="2026-08-06",
+        )
+        assert contradictory["success"] is False
+        assert contradictory["error"] == "malformed preflight report"
+
+        report["governed_probe_status"] = "x" * 10_000
+        malformed = _preflight_subprocess_result(
+            stdout=json.dumps(report, indent=2),
+            stderr="",
+            returncode=0,
+            elapsed=0.1,
+            mode="all",
+            trading_date="2026-08-06",
+        )
+        assert malformed["success"] is False
+        assert malformed["error"] == "malformed preflight report"
+        assert "x" * 100 not in json.dumps(malformed)
+
+
+def test_run_cohorts_preflight_exit_contract_is_mode_specific():
+    from scripts.run_cohorts import _preflight_exit_status
+
+    assert _preflight_exit_status(
+        {
+            "ok": True,
+            "failures": [],
+            "horizons": {},
+            "trading_date": "2026-08-06",
+            "governed_ok": True,
+            "state_status": "ready",
+            "governed_probe_status": "ready",
+            "governed_bar_recoveries": [],
+            "governed_failure_map": {},
+        },
+        "governed",
+    )[0] == 0
+    assert _preflight_exit_status(
+        {"ok": True, "governed_probe_status": "not_ready"}, "governed"
+    )[0] != 0
+    assert _preflight_exit_status(
+        {
+            "ok": True,
+            "governed_probe_status": "ready",
+            "governed_failure_map": {"SPY": "invalid SPY/2026-08-06"},
+        },
+        "governed",
+    )[0] != 0
+    assert _preflight_exit_status(
+        {
+            "ok": True,
+            "failures": [],
+            "horizons": {},
+            "trading_date": "2026-08-06",
+            "screen_ok": True,
+            "screen_failures": [],
+        },
+        "screen",
+    )[0] == 0
+    assert _preflight_exit_status(
+        {
+            "ok": False,
+            "failures": [{}],
+            "horizons": {},
+            "trading_date": "2026-08-06",
+            "screen_ok": False,
+            "screen_failures": [{}],
+        },
+        "screen",
+    )[0] != 0
+    assert _preflight_exit_status({"ok": True}, "all")[0] != 0
+
+
+def test_direct_preflight_rejects_malformed_governed_evidence_without_rendering_raw(
+    monkeypatch, capsys, tmp_path
+):
+    from scripts import run_cohorts
+    from tradingagents.strategies.orchestration import preflight
+
+    report = {
+        "ok": True,
+        "failures": [],
+        "horizons": {},
+        "trading_date": "2026-08-06",
+        "governed_ok": True,
+        "state_status": "ready",
+        "governed_probe_status": "ready",
+        "governed_bar_recoveries": [{"provider_secret": "DO_NOT_RENDER"}],
+        "governed_failure_map": {},
+    }
+
+    @contextmanager
+    def lock_context(**_kwargs):
+        yield MagicMock()
+
+    monkeypatch.setattr(preflight, "run_preflight", lambda *args, **kwargs: report)
+    monkeypatch.setattr(run_cohorts, "_runtime_lock_context", lock_context)
+    monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
+    monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "a" * 40)
+    monkeypatch.setenv("AUTORESEARCH_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_cohorts.py",
+            "--date",
+            "2026-08-06",
+            "--preflight",
+            "--preflight-mode",
+            "governed",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_cohorts.main()
+
+    assert raised.value.code == 1
+    rendered = capsys.readouterr()
+    assert "DO_NOT_RENDER" not in rendered.out + rendered.err
+    assert "malformed report" in rendered.err
+
+
+@pytest.mark.parametrize("mode", ("screen", "governed", "all"))
+def test_direct_preflight_wire_round_trips_through_manager_parser(
+    mode, monkeypatch, capsys, tmp_path
+):
+    from scripts import run_cohorts
+    from tradingagents.strategies.orchestration import preflight
+    from tradingagents.strategies.orchestration.generation_manager import (
+        _preflight_subprocess_result,
+    )
+
+    report = {
+        "ok": True,
+        "failures": [],
+        "horizons": {},
+        "trading_date": "2026-08-06",
+    }
+    if mode in {"screen", "all"}:
+        report.update({"screen_ok": True, "screen_failures": []})
+    if mode in {"governed", "all"}:
+        report.update(
+            {
+                "governed_ok": True,
+                "state_status": "ready",
+                "governed_probe_status": "ready",
+                "governed_bar_recoveries": [],
+                "governed_failure_map": {},
+            }
+        )
+
+    @contextmanager
+    def lock_context(**_kwargs):
+        yield MagicMock()
+
+    monkeypatch.setattr(preflight, "run_preflight", lambda *args, **kwargs: report)
+    monkeypatch.setattr(run_cohorts, "_runtime_lock_context", lock_context)
+    monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
+    monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "a" * 40)
+    monkeypatch.setenv("AUTORESEARCH_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_cohorts.py",
+            "--date",
+            "2026-08-06",
+            "--preflight",
+            "--preflight-mode",
+            mode,
+        ],
+    )
+
+    run_cohorts.main()
+    worker_stdout = capsys.readouterr().out
+    result = _preflight_subprocess_result(
+        stdout=worker_stdout,
+        stderr="",
+        returncode=0,
+        elapsed=0.1,
+        mode=mode,
+        trading_date="2026-08-06",
+    )
+
+    assert result["success"] is True
+    assert "failures" not in result
+    assert "horizons" not in result
+
+
+def test_run_cohorts_rejects_preflight_mode_without_preflight(monkeypatch, capsys):
+    from scripts import run_cohorts
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_cohorts.py",
+            "--date",
+            "2026-08-06",
+            "--preflight-mode",
+            "governed",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_cohorts.main()
+
+    assert raised.value.code == 2
+    assert "--preflight-mode requires --preflight" in capsys.readouterr().err
+
+
+def test_direct_run_cohorts_preflight_holds_shared_lock_during_probe(
+    monkeypatch, tmp_path
+):
+    from scripts import run_cohorts
+    from tradingagents.strategies.orchestration import preflight
+
+    active = []
+
+    @contextmanager
+    def lock_context(*, exclusive):
+        assert exclusive is False
+        active.append(True)
+        try:
+            yield MagicMock()
+        finally:
+            active.pop()
+
+    def run(config, trading_date, *, mode):
+        assert active == [True]
+        assert mode == "screen"
+        return {
+            "ok": True,
+            "screen_ok": True,
+            "screen_failures": [],
+            "failures": [],
+            "horizons": {},
+        }
+
+    monkeypatch.setattr(run_cohorts, "_runtime_lock_context", lock_context)
+    monkeypatch.setattr(preflight, "run_preflight", run)
+    monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
+    monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "a" * 40)
+    monkeypatch.setenv("AUTORESEARCH_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_cohorts.py",
+            "--date",
+            "2026-08-06",
+            "--preflight",
+            "--preflight-mode",
+            "screen",
+        ],
+    )
+
+    run_cohorts.main()
+    assert active == []
+
+
+def test_run_generations_preflight_mode_defaults_all_and_zero_governed_fails(
+    monkeypatch, capsys
+):
+    from scripts import run_generations
+    from tradingagents.strategies.orchestration.generation_manager import (
+        GenerationManager,
+    )
+
+    captured = []
+    monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(
+        GenerationManager,
+        "run_preflight",
+        lambda self, date, *, mode: captured.append((date, mode)) or {},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_generations.py", "preflight", "--date", "2026-08-06"],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_generations.main()
+
+    assert raised.value.code == 1
+    assert captured == [("2026-08-06", "all")]
+    assert "No active generations" in capsys.readouterr().out
+
+
+def test_run_generations_screen_mode_allows_zero_active(monkeypatch):
+    from scripts import run_generations
+    from tradingagents.strategies.orchestration.generation_manager import (
+        GenerationManager,
+    )
+
+    monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(
+        GenerationManager,
+        "run_preflight",
+        lambda self, date, *, mode: {},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_generations.py",
+            "preflight",
+            "--date",
+            "2026-08-06",
+            "--preflight-mode",
+            "screen",
+        ],
+    )
+
+    run_generations.main()
+
+
+@pytest.mark.parametrize("command", ("run-daily", "preflight"))
+def test_run_generations_busy_is_bounded_without_traceback(monkeypatch, capsys, command):
+    from pathlib import Path
+
+    from scripts import run_generations
+    from tradingagents.strategies.orchestration.generation_manager import (
+        GenerationManager,
+    )
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+    def busy(*args, **kwargs):
+        raise RuntimeLockBusy(Path("/tmp/eventedge-runtime.lock"))
+
+    monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(GenerationManager, "run_daily", busy)
+    monkeypatch.setattr(GenerationManager, "run_preflight", busy)
+    argv = ["run_generations.py", command, "--date", "2026-08-06"]
+    if command == "preflight":
+        argv.extend(("--preflight-mode", "governed"))
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as raised:
+        run_generations.main()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 1
+    assert '"busy": true' in captured.err
+    assert '"success": false' in captured.err
+    assert "Traceback" not in captured.err

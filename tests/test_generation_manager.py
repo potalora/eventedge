@@ -98,12 +98,30 @@ def _add_commit(repo: Path, filename: str, content: str, message: str) -> str:
     return _head_sha(repo)
 
 
+def _init_empty_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+
+
 # ------------------------------------------------------------------
 # TestGenerationStart
 # ------------------------------------------------------------------
 
 
 class TestGenerationStart:
+    def test_manager_in_linked_worktree_uses_main_repo_runtime_lock(self, git_repo):
+        linked = git_repo.parent / "linked-manager"
+        subprocess.run(
+            ["git", "-C", str(git_repo), "worktree", "add", str(linked), "--detach"],
+            check=True,
+            capture_output=True,
+        )
+
+        linked_manager = GenerationManager(str(linked))
+
+        assert linked_manager._runtime_lock_path == (
+            git_repo / "data" / "operational" / "eventedge-runtime.lock"
+        ).resolve()
+
     def test_start_creates_worktree_and_state(self, git_repo, manager):
         info = manager.start_generation("first gen")
 
@@ -188,6 +206,189 @@ class TestGenerationLifecycle:
 
 
 class TestGenerationDailyRun:
+    def test_direct_run_cohorts_daily_locks_before_orchestrator_construction(
+        self, monkeypatch
+    ):
+        from contextlib import contextmanager
+
+        from scripts import run_cohorts
+        from tradingagents.strategies.orchestration import cohort_orchestrator
+
+        active = []
+
+        @contextmanager
+        def lock_context(*, exclusive):
+            assert exclusive is True
+            active.append(True)
+            try:
+                yield MagicMock()
+            finally:
+                active.pop()
+
+        class Orchestrator:
+            def __init__(self, *args, **kwargs):
+                assert active == [True]
+
+            def run_daily(self, trading_date):
+                assert active == [True]
+                return {}
+
+        monkeypatch.setattr(run_cohorts, "_runtime_lock_context", lock_context)
+        monkeypatch.setattr(cohort_orchestrator, "CohortOrchestrator", Orchestrator)
+        monkeypatch.setattr(cohort_orchestrator, "build_default_cohorts", lambda config: [])
+        monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
+        monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "a" * 40)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_cohorts.py", "--date", "2026-08-06"],
+        )
+
+        run_cohorts.main()
+        assert active == []
+
+    def test_manager_preflight_preserves_whole_generation_tree(
+        self, git_repo, manager, monkeypatch
+    ):
+        import hashlib
+
+        import tradingagents.strategies.orchestration.generation_manager as gm
+
+        manager.start_generation("read-only preflight")
+        tree = git_repo / "data" / "generations"
+
+        def identity():
+            result = {}
+            for path in sorted(tree.rglob("*")):
+                relative = str(path.relative_to(tree))
+                stat_result = path.stat()
+                result[relative] = (
+                    path.is_dir(),
+                    stat_result.st_ino,
+                    stat_result.st_size,
+                    stat_result.st_mtime_ns,
+                    (
+                        ""
+                        if path.is_dir()
+                        else hashlib.sha256(path.read_bytes()).hexdigest()
+                    ),
+                )
+            return result
+
+        report = {
+            "ok": True,
+            "screen_ok": True,
+            "screen_failures": [],
+            "failures": [],
+            "horizons": {},
+        }
+        process = MagicMock(
+            returncode=0, stdout=json.dumps(report, indent=2), stderr=""
+        )
+        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+        before = identity()
+
+        results = manager.run_preflight("2026-08-06", mode="screen")
+
+        assert results["gen_001"]["success"] is True
+        assert identity() == before
+        assert not any(tree.rglob("last_preflight_output.log"))
+
+    def test_daily_busy_is_bounded_and_starts_no_child_or_history(
+        self, git_repo, manager
+    ):
+        from tradingagents.strategies.orchestration.runtime_lock import (
+            RuntimeLockBusy,
+            runtime_lock,
+        )
+
+        manager.start_generation("busy daily")
+        before = manager.get_generation("gen_001").run_history
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            with runtime_lock(manager._runtime_lock_path, exclusive=False):
+                with pytest.raises(RuntimeLockBusy, match="runtime lock is busy"):
+                    manager.run_daily("2026-08-06")
+
+        run_child.assert_not_called()
+        assert manager.get_generation("gen_001").run_history == before == []
+
+    def test_daily_exclusive_lock_spans_child_history_and_manifest_save(
+        self, git_repo, manager, monkeypatch
+    ):
+        from tradingagents.strategies.orchestration.runtime_lock import (
+            RuntimeLockBusy,
+            runtime_lock,
+        )
+
+        manager.start_generation("exclusive daily")
+        observed = []
+
+        def child(gen_data, extra_args, *, inherited_lock=None, **kwargs):
+            assert inherited_lock is not None and inherited_lock.exclusive is True
+            with pytest.raises(RuntimeLockBusy):
+                with runtime_lock(manager._runtime_lock_path, exclusive=False):
+                    raise AssertionError("unreachable")
+            observed.append("child")
+            return {"success": True, "elapsed_s": 1.0}
+
+        original_save = manager._save_manifest
+
+        def save_while_locked(manifest):
+            with pytest.raises(RuntimeLockBusy):
+                with runtime_lock(manager._runtime_lock_path, exclusive=False):
+                    raise AssertionError("unreachable")
+            observed.append("save")
+            original_save(manifest)
+
+        monkeypatch.setattr(manager, "_run_cohorts_subprocess", child)
+        monkeypatch.setattr(manager, "_save_manifest", save_while_locked)
+
+        manager.run_daily("2026-08-06")
+
+        assert observed == ["child", "save"]
+
+    def test_daily_lock_releases_when_child_raises(self, git_repo, manager):
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        manager.start_generation("raising child")
+        with patch.object(
+            manager, "_run_cohorts_subprocess", side_effect=RuntimeError("boom")
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                manager.run_daily("2026-08-06")
+
+        with runtime_lock(manager._runtime_lock_path, exclusive=True):
+            pass
+
+    def test_subprocess_inherits_verified_lock_fd_and_mode(
+        self, git_repo, manager
+    ):
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        info = manager.start_generation("inherited lock handoff")
+        captured = {}
+
+        def capture_run(*args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        gen_data = {
+            "gen_id": info.gen_id,
+            "git_commit": info.git_commit,
+            "state_dir": info.state_dir,
+            "worktree_path": info.worktree_path,
+        }
+        with runtime_lock(manager._runtime_lock_path, exclusive=True) as lock:
+            with patch.object(gm_mod.subprocess, "run", side_effect=capture_run):
+                manager._run_cohorts_subprocess(
+                    gen_data, ["--date", "2026-08-06"], inherited_lock=lock
+                )
+
+        assert captured["pass_fds"] == (lock.fd,)
+        assert captured["env"]["EVENTEDGE_RUNTIME_LOCK_FD"] == str(lock.fd)
+        assert captured["env"]["EVENTEDGE_RUNTIME_LOCK_MODE"] == "exclusive"
+
     def test_run_daily_executes_subprocess(self, git_repo, manager):
         """Verify env vars and cwd are set correctly for subprocess calls."""
         # Start generation with real git (no mocking yet)
@@ -313,6 +514,102 @@ class TestGenerationDailyRun:
         assert entry["governed_failure_map"] == {
             "SPY": "invalid_benchmark SPY/2026-08-10"
         }
+
+    def test_daily_history_sorts_canonical_governed_evidence_and_omits_raw_values(
+        self, git_repo, manager
+    ):
+        manager.start_generation("canonical governed history")
+
+        def summary(ticker, digest):
+            return {
+                "ticker": ticker,
+                "session": "2026-08-06",
+                "recovery_id": "governed_bar_recovery:" + digest * 64,
+                "contract_version": "yfinance-60m-v1",
+                "evidence_digest": "sha256:" + digest * 64,
+                "affected_cohort_ids": ["cohort-a", "cohort-b"],
+            }
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.side_effect = (
+                {
+                    "success": False,
+                    "degraded": True,
+                    "execution_valid": True,
+                    "governed_bar_recoveries": [summary("ZZZ", "b"), summary("AAA", "a")],
+                    "governed_failure_map": {
+                        "SPY": "invalid SPY/2026-08-06",
+                        "BIL": "missing BIL/2026-08-06",
+                    },
+                    "elapsed_s": 1.0,
+                },
+                {
+                    "success": False,
+                    "governed_bar_recoveries": [
+                        {"ticker": "RAW", "provider_secret": "do-not-persist"}
+                    ],
+                    "governed_failure_map": {
+                        "RAW": "provider payload do-not-persist"
+                    },
+                    "elapsed_s": 1.0,
+                },
+            )
+            manager.run_daily("2026-08-06")
+            manager.run_daily("2026-08-06")
+
+        history = manager.get_generation("gen_001").run_history
+        assert [row["ticker"] for row in history[0]["governed_bar_recoveries"]] == [
+            "AAA",
+            "ZZZ",
+        ]
+        assert history[0]["governed_bar_recoveries"][0][
+            "affected_cohort_ids"
+        ] == ["cohort-a", "cohort-b"]
+        assert list(history[0]["governed_failure_map"]) == ["BIL", "SPY"]
+        assert "governed_bar_recoveries" not in history[1]
+        assert "governed_failure_map" not in history[1]
+
+    def test_daily_history_deduplicates_exact_summaries_and_omits_conflicts(
+        self, git_repo, manager
+    ):
+        manager.start_generation("canonical governed conflicts")
+
+        def summary(ticker, digest, cohorts):
+            return {
+                "ticker": ticker,
+                "session": "2026-08-06",
+                "recovery_id": "governed_bar_recovery:" + digest * 64,
+                "contract_version": "yfinance-60m-v1",
+                "evidence_digest": "sha256:" + digest * 64,
+                "affected_cohort_ids": cohorts,
+            }
+
+        accepted = summary("AAA", "a", ["cohort-a"])
+        conflicted = summary("ESS", "b", ["cohort-a"])
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "success": True,
+                "elapsed_s": 1.0,
+                "governed_bar_recoveries": [
+                    accepted,
+                    dict(accepted),
+                    conflicted,
+                    {**conflicted, "affected_cohort_ids": ["cohort-b"]},
+                    {**accepted, "provider_secret": "do-not-persist"},
+                ],
+                "governed_failure_map": {
+                    "SPY": "invalid SPY/2026-08-06",
+                    "PROVIDER SECRET": "invalid PROVIDER SECRET/2026-08-06",
+                },
+            }
+            manager.run_daily("2026-08-06")
+
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["governed_bar_recoveries"] == [accepted]
+        assert entry["governed_failure_map"] == {
+            "SPY": "invalid SPY/2026-08-06"
+        }
+        assert "SECRET" not in json.dumps(entry)
 
     def test_run_daily_records_mixed_failure_and_degradation_history(
         self, git_repo, manager
@@ -475,7 +772,7 @@ class TestFailureIsolation:
 
         call_count = {"n": 0}
 
-        def side_effect(gen_data, extra_args):
+        def side_effect(gen_data, extra_args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return {"success": False, "elapsed_s": 0.5, "error": "simulated"}
@@ -620,6 +917,7 @@ class TestRunLogPersistence:
             GenerationManager,
         )
 
+        _init_empty_git_repo(tmp_path)
         mgr = GenerationManager(str(tmp_path))
         state_dir = tmp_path / "state"
         state_dir.mkdir()
@@ -639,6 +937,7 @@ class TestRunLogPersistence:
     def test_run_subprocess_writes_log_on_success(self, tmp_path, monkeypatch):
         from tradingagents.strategies.orchestration import generation_manager as gm
 
+        _init_empty_git_repo(tmp_path)
         mgr = gm.GenerationManager(str(tmp_path))
         state_dir = tmp_path / "s"
         state_dir.mkdir()
