@@ -28,6 +28,12 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Mapping
 
+# Direct worktree invocations must load the code beside this script rather than
+# an editable install that may still point at the main checkout.
+_SCRIPT_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _SCRIPT_REPO_ROOT != sys.path[0]:
+    sys.path.insert(0, _SCRIPT_REPO_ROOT)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
