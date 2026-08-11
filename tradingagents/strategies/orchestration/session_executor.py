@@ -125,6 +125,7 @@ class SessionInputBundle:
         default_factory=dict
     )
     governed_failure_map: Mapping[str, str] = field(default_factory=dict)
+    governed_recovery_summaries: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -137,6 +138,19 @@ class SessionInputBundle:
             "governed_failure_map",
             MappingProxyType(dict(sorted(self.governed_failure_map.items()))),
         )
+        summaries = tuple(
+            MappingProxyType(
+                {
+                    **dict(summary),
+                    "affected_cohort_ids": tuple(summary["affected_cohort_ids"]),
+                }
+            )
+            for summary in sorted(
+                self.governed_recovery_summaries,
+                key=lambda item: str(item.get("ticker", "")),
+            )
+        )
+        object.__setattr__(self, "governed_recovery_summaries", summaries)
 
     def for_tickers(self, tickers: tuple[str, ...]) -> SessionInputBundle:
         """Return a cohort-scoped view of one validated shared response."""
@@ -144,21 +158,28 @@ class SessionInputBundle:
         if not set(selected).issubset(self.tickers):
             raise ValueError("cohort ticker scope is outside the shared input bundle")
         return SessionInputBundle(
-            self.session,
-            selected,
-            {key: value for key, value in self.bars.items() if key[0] in selected},
-            tuple(action for action in self.actions if action.ticker in selected),
-            self.benchmarks,
-            {
+            session=self.session,
+            tickers=selected,
+            bars={key: value for key, value in self.bars.items() if key[0] in selected},
+            actions=tuple(
+                action for action in self.actions if action.ticker in selected
+            ),
+            benchmarks=self.benchmarks,
+            governed_recoveries={
                 ticker: binding
                 for ticker, binding in self.governed_recoveries.items()
                 if ticker in selected
             },
-            {
+            governed_failure_map={
                 ticker: reason
                 for ticker, reason in self.governed_failure_map.items()
                 if ticker in selected
             },
+            governed_recovery_summaries=tuple(
+                summary
+                for summary in self.governed_recovery_summaries
+                if summary.get("ticker") in selected
+            ),
         )
 
 
@@ -756,6 +777,7 @@ class SessionExecutor:
             )
             bars = {(ticker, session): bar for ticker, bar in resolved.bars.items()}
             recoveries = resolved.recovery_bindings
+            recovery_summaries = resolved.recovery_summaries
             failure_map = dict(resolved.failure_map)
         else:
             bars = (
@@ -766,6 +788,7 @@ class SessionExecutor:
                 else {}
             )
             recoveries = {}
+            recovery_summaries = ()
             failure_map = {}
         actions = (
             tuple(price_source.get_corporate_actions(list(tickers), session))
@@ -817,6 +840,7 @@ class SessionExecutor:
             benchmarks,
             recoveries,
             failure_map,
+            recovery_summaries,
         )
 
     def validate_execution_input_bundle(
@@ -920,7 +944,7 @@ class SessionExecutor:
             )
             for item in market.get("benchmarks", [])
         }
-        self._verify_governed_recoveries(
+        recovery_summaries = self._verify_governed_recoveries(
             session=session,
             epoch_id=str(context["epoch_id"]),
             bars={ticker: bar for (ticker, _), bar in bars.items()},
@@ -940,6 +964,7 @@ class SessionExecutor:
             benchmarks,
             governed_recoveries,
             {},
+            recovery_summaries,
             validated_at=context["bound_at"],
         )
 
@@ -950,8 +975,9 @@ class SessionExecutor:
         epoch_id: str,
         bars: Mapping[str, MarketBar],
         governed_recoveries: Mapping[str, GovernedRecoveryBinding],
-    ) -> None:
+    ) -> tuple[Mapping[str, object], ...]:
         """Require every bound reconstruction to match its immutable record."""
+        summaries: list[Mapping[str, object]] = []
         unbound_reconstructions = sorted(
             ticker
             for ticker, bar in bars.items()
@@ -987,10 +1013,21 @@ class SessionExecutor:
                     or _bar_from_record(record) != bars[ticker]
                 ):
                     raise ValueError("record does not match binding")
+                summaries.append(
+                    {
+                        "ticker": record.ticker,
+                        "session": record.session.isoformat(),
+                        "recovery_id": record.recovery_id,
+                        "contract_version": record.contract_version,
+                        "evidence_digest": record.evidence_digest,
+                        "affected_cohort_ids": record.affected_cohort_ids,
+                    }
+                )
             except Exception as error:
                 raise _GovernedRecoveryConflictError(
                     f"governed recovery evidence conflict for {ticker}/{session}"
                 ) from error
+        return tuple(summaries)
 
     def validated_execution_reference_bars(
         self, session: date, epoch_id: str

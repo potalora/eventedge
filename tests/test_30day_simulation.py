@@ -31,7 +31,11 @@ from tradingagents.strategies.execution import (
     SignalRecord,
     stable_id,
 )
-from tradingagents.strategies.execution.price_source import AdjustedClose
+from tradingagents.strategies.execution.price_source import (
+    AdjustedClose,
+    GovernedDailyBarAttempt,
+    GovernedDailyBarResolution,
+)
 
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortConfig,
@@ -44,6 +48,11 @@ from tradingagents.strategies.orchestration.session_executor import (
     CorporateActionBatchError,
     PHASES,
     SessionExecutor,
+    SessionInputBundle,
+)
+from tradingagents.strategies.orchestration.governed_market_data import (
+    GovernedMarketDataError,
+    GovernedRecoveryBinding,
 )
 from tradingagents.strategies.orchestration.trading_calendar import (
     next_session,
@@ -371,6 +380,35 @@ class AuthoritativePriceSource:
             for ticker in tickers
         }
 
+    def resolve_governed_daily_bars(self, tickers, session, *, processed_at):
+        raw = self.get_daily_bars(tickers, session, session, adjusted=False)
+        bars = {
+            ticker: replace(raw[(ticker, session)], source="yfinance")
+            for ticker in tickers
+        }
+        attempts = {
+            ticker: GovernedDailyBarAttempt(
+                ticker=ticker,
+                session=session,
+                source="yfinance",
+                fetched_at=bars[ticker].fetched_at,
+                raw_ohlc={
+                    "open": bars[ticker].open,
+                    "high": bars[ticker].high,
+                    "low": bars[ticker].low,
+                    "close": bars[ticker].close,
+                },
+                validation_error=None,
+            )
+            for ticker in tickers
+        }
+        return GovernedDailyBarResolution(
+            bars=bars,
+            attempts=attempts,
+            recoveries={},
+            failure_map={},
+        )
+
     def get_corporate_actions(self, tickers, session):
         self.action_calls.append((tuple(sorted(tickers)), session))
         return []
@@ -544,6 +582,251 @@ def _corrupt_persisted_market_bundle(ledger, session: date) -> None:
 
 
 class TestIdempotencyDoubleRun:
+    def test_16_cohorts_share_exact_governed_resolution_and_degrade_clean_staging(
+        self, tmp_path
+    ):
+        horizons = ("30d", "3m", "6m", "1y")
+        sizes = ("5k", "10k", "50k", "100k")
+        configs = [
+            CohortConfig(
+                name=f"horizon_{horizon}_size_{size}",
+                state_dir=str(tmp_path / f"{horizon}-{size}"),
+                horizon=horizon,
+                size_profile=size,
+                use_llm=False,
+            )
+            for horizon in horizons
+            for size in sizes
+        ]
+        orchestrator, source = _authoritative_orchestrator(
+            tmp_path, cohort_configs=configs, strategy_modules=[FakeStrategy()]
+        )
+        session = date(2026, 3, 30)
+        affected = tuple(sorted(config.name for config in configs))
+        fetched_at = datetime.now(timezone.utc)
+        recovered_bar = MarketBar(
+            "ESS",
+            session,
+            Decimal("10"),
+            Decimal("11"),
+            Decimal("9"),
+            Decimal("10.5"),
+            "yfinance-60m-reconstruction",
+            fetched_at,
+            False,
+        )
+        benchmark_bars = {
+            (ticker, session): MarketBar(
+                ticker,
+                session,
+                Decimal("100"),
+                Decimal("101"),
+                Decimal("99"),
+                Decimal("100"),
+                "yfinance",
+                fetched_at,
+                False,
+            )
+            for ticker in ("SPY", "BIL")
+        }
+        binding = GovernedRecoveryBinding(
+            "ESS",
+            "governed_bar_recovery:" + "b" * 64,
+            "yfinance-60m-v1",
+            "sha256:" + "a" * 64,
+        )
+        summary = {
+            "ticker": "ESS",
+            "session": session.isoformat(),
+            "recovery_id": binding.recovery_id,
+            "contract_version": binding.contract_version,
+            "evidence_digest": binding.evidence_digest,
+            "affected_cohort_ids": affected,
+        }
+        bundle = SessionInputBundle(
+            session=session,
+            tickers=("BIL", "ESS", "SPY"),
+            bars={("ESS", session): recovered_bar, **benchmark_bars},
+            actions=(),
+            benchmarks=source.get_total_return_closes(("SPY", "BIL"), session, session),
+            governed_recoveries={"ESS": binding},
+            governed_recovery_summaries=(summary,),
+        )
+        seen_bar_ids = []
+        seen_binding_ids = []
+        for cohort in orchestrator.cohorts:
+            executor = cohort["executor"]
+            executor.required_tickers = lambda *_args: ("ESS",)
+            executor._verify_governed_recoveries = lambda **_kwargs: (summary,)
+            original_execute = executor.execute_open_and_mark
+
+            def recording_execute(*args, _execute=original_execute, **kwargs):
+                scoped = args[2]
+                seen_bar_ids.append(id(scoped.bars[("ESS", session)]))
+                seen_binding_ids.append(id(scoped.governed_recoveries["ESS"]))
+                return _execute(*args, **kwargs)
+
+            executor.execute_open_and_mark = recording_execute
+            cohort["engine"].screen_and_stage = lambda **_kwargs: {}
+        orchestrator._screen_for_horizon = lambda *_args: ([], {}, [])
+        orchestrator._persist_horizon_health = lambda *_args: True
+
+        with patch.object(
+            SessionExecutor, "fetch_input_bundle", return_value=bundle
+        ) as shared_fetch:
+            results = orchestrator.run_daily(session.isoformat())
+            replay = orchestrator.run_daily(session.isoformat())
+
+        shared_fetch.assert_called_once()
+        assert shared_fetch.call_args.kwargs["cohort_ids_by_ticker"] == {
+            "BIL": affected,
+            "ESS": affected,
+            "SPY": affected,
+        }
+        assert shared_fetch.call_args.kwargs["persist"] is True
+        assert len(set(seen_bar_ids)) == len(set(seen_binding_ids)) == 1
+        assert all(result["execution_valid"] is True for result in results.values())
+        assert all(result["staging_valid"] is True for result in results.values())
+        assert all(result["degraded"] is True for result in results.values())
+        assert all(
+            result["governed_bar_recoveries"] == [summary]
+            for result in results.values()
+        )
+        assert all(result["degraded"] is True for result in replay.values())
+        assert all(
+            result["governed_bar_recoveries"] == [summary] for result in replay.values()
+        )
+
+    def test_16_cohort_governed_rejection_stops_once_before_economic_mutation(
+        self, tmp_path
+    ):
+        configs = [
+            CohortConfig(
+                name=f"horizon_{horizon}_size_{size}",
+                state_dir=str(tmp_path / f"gap-{horizon}-{size}"),
+                horizon=horizon,
+                size_profile=size,
+                use_llm=False,
+            )
+            for horizon in ("30d", "3m", "6m", "1y")
+            for size in ("5k", "10k", "50k", "100k")
+        ]
+        orchestrator, _ = _authoritative_orchestrator(
+            tmp_path, cohort_configs=configs, strategy_modules=[FakeStrategy()]
+        )
+        session = date(2026, 3, 30)
+        for cohort in orchestrator.cohorts:
+            cohort["executor"].required_tickers = lambda *_args: ("ESS",)
+        stop_calls = []
+        original_stop = orchestrator._stop_for_critical_market_data_gap
+
+        def recording_stop(*args, **kwargs):
+            stop_calls.append((args, kwargs))
+            return original_stop(*args, **kwargs)
+
+        def assert_pre_gap_clean(_marker):
+            for cohort in orchestrator.cohorts:
+                connection = cohort["ledger"].connection
+                for table in (
+                    "fills",
+                    "marks",
+                    "account_snapshots",
+                    "signals",
+                    "order_intents",
+                ):
+                    assert (
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {table}"  # noqa: S608 - fixed fixture names
+                        ).fetchone()[0]
+                        == 0
+                    )
+            with sqlite3.connect(orchestrator._metric_store.path) as connection:
+                assert (
+                    connection.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
+                    == 0
+                )
+
+        orchestrator._stop_for_critical_market_data_gap = recording_stop
+        orchestrator._after_gap_blocker = assert_pre_gap_clean
+        failure_map = {"ESS": f"missing ESS/{session.isoformat()}"}
+        with patch.object(
+            SessionExecutor,
+            "fetch_input_bundle",
+            side_effect=GovernedMarketDataError(failure_map),
+        ):
+            results = orchestrator.run_daily(session.isoformat())
+
+        assert len(stop_calls) == 1
+        assert len(results) == 16
+        assert all(result["error"] is True for result in results.values())
+        assert all(result["degraded"] is False for result in results.values())
+        assert all(result["execution_valid"] is False for result in results.values())
+        assert all(result["staging_valid"] is False for result in results.values())
+        assert all(
+            result["governed_failure_map"] == failure_map for result in results.values()
+        )
+        marker = orchestrator._metric_store.load_critical_gap(
+            stable_id("critical_gap_marker", orchestrator._epoch_id, session)
+        )
+        assert marker.status == "completed"
+        assert marker.governed_failure_map == failure_map
+        assert "secret" not in json.dumps(results)
+
+    def test_shared_corporate_action_error_without_bundle_starts_one_clean_gap(
+        self, tmp_path
+    ):
+        orchestrator, _ = _authoritative_orchestrator(
+            tmp_path, cohorts=2, strategy_modules=[FakeStrategy()]
+        )
+        session = date(2026, 3, 30)
+        stop_calls = []
+        original_stop = orchestrator._stop_for_critical_market_data_gap
+
+        def recording_stop(*args, **kwargs):
+            stop_calls.append((args, kwargs))
+            return original_stop(*args, **kwargs)
+
+        def assert_pre_gap_clean(_marker):
+            for cohort in orchestrator.cohorts:
+                connection = cohort["ledger"].connection
+                for table in (
+                    "fills",
+                    "marks",
+                    "account_snapshots",
+                    "signals",
+                    "order_intents",
+                ):
+                    assert (
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {table}"  # noqa: S608 - fixed names
+                        ).fetchone()[0]
+                        == 0
+                    )
+            with sqlite3.connect(orchestrator._metric_store.path) as connection:
+                assert (
+                    connection.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
+                    == 0
+                )
+
+        orchestrator._stop_for_critical_market_data_gap = recording_stop
+        orchestrator._after_gap_blocker = assert_pre_gap_clean
+        corporate_error = CorporateActionBatchError(
+            (), ("corporate action provider unavailable",)
+        )
+        with patch.object(
+            SessionExecutor, "fetch_input_bundle", side_effect=corporate_error
+        ):
+            results = orchestrator.run_daily(session.isoformat())
+
+        assert len(stop_calls) == 1
+        assert len(results) == 2
+        assert all(result["error"] is True for result in results.values())
+        assert all(result["execution_valid"] is False for result in results.values())
+        marker = orchestrator._metric_store.load_critical_gap(
+            stable_id("critical_gap_marker", orchestrator._epoch_id, session)
+        )
+        assert marker.status == "completed"
+
     def test_registered_metric_epoch_is_shared_p0_and_v2_identity(self, tmp_path):
         from tradingagents.strategies.metrics.identity import signal_id
 
@@ -625,11 +908,14 @@ class TestIdempotencyDoubleRun:
         assert {row.epoch_id for row in snapshots} == {new_epoch.epoch_id}
 
     @pytest.mark.parametrize(
-        ("gap", "expected_reason"),
-        (("missing", "missing_exit_bar"), ("stale", "stale_exit_bar")),
+        ("gap", "expected_reason", "secondary_fetches"),
+        (
+            ("missing", "missing_exit_bar", 1),
+            ("stale", "missing_exit_bar", 0),
+        ),
     )
     def test_due_exit_gap_persists_invalid_then_invalidates_and_replays_read_only(
-        self, tmp_path, gap, expected_reason
+        self, tmp_path, gap, expected_reason, secondary_fetches
     ):
         orchestrator, source = _authoritative_orchestrator(
             tmp_path, strategy_modules=[FakeStrategy()]
@@ -687,8 +973,8 @@ class TestIdempotencyDoubleRun:
         assert rows[0].invalid_reason == expected_reason
         assert calls_after == (
             calls_before[0] + 1,
-            calls_before[1] + 1,
-            calls_before[2] + 1,
+            calls_before[1] + secondary_fetches,
+            calls_before[2] + secondary_fetches,
         )
         assert replay["cohort_0"]["error"]
         assert (

@@ -57,6 +57,7 @@ class CriticalGapMarker:
     corporate_action_rejections: dict[str, dict[str, object]] = field(
         default_factory=dict
     )
+    governed_failure_map: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -189,7 +190,10 @@ def _deep_freeze(value: object) -> object:
 def canonical_governed_recovery_json(payload: Mapping[str, object]) -> str:
     """Return the single canonical representation used for durable evidence."""
     return json.dumps(
-        _canonical_value(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        _canonical_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
     )
 
 
@@ -224,8 +228,7 @@ class GovernedBarRecoveryRecord:
         original_validation_error: str | None,
         expected_starts: tuple[object, ...] | list[object],
         observed_starts: tuple[object, ...] | list[object],
-        intraday_rows: tuple[Mapping[str, object], ...]
-        | list[Mapping[str, object]],
+        intraday_rows: tuple[Mapping[str, object], ...] | list[Mapping[str, object]],
         reconstructed_bar: Mapping[str, object],
         final_validation_error: str | None,
         affected_cohort_ids: tuple[str, ...] | list[str],
@@ -244,11 +247,13 @@ class GovernedBarRecoveryRecord:
             "ticker": ticker.upper(),
             "original_daily": canonical_original,
             "original_validation_error": original_validation_error,
-            "expected_starts": tuple(_canonical_timestamp(item) for item in expected_starts),
-            "observed_starts": tuple(_canonical_timestamp(item) for item in observed_starts),
-            "intraday_rows": tuple(
-                _canonical_value(item) for item in intraday_rows
+            "expected_starts": tuple(
+                _canonical_timestamp(item) for item in expected_starts
             ),
+            "observed_starts": tuple(
+                _canonical_timestamp(item) for item in observed_starts
+            ),
+            "intraday_rows": tuple(_canonical_value(item) for item in intraday_rows),
             "reconstructed_bar": _canonical_value(reconstructed_bar),
             "final_validation_error": final_validation_error,
             "affected_cohort_ids": tuple(sorted(set(affected_cohort_ids))),
@@ -256,9 +261,12 @@ class GovernedBarRecoveryRecord:
         canonical_fields = _canonical_value(fields)
         if not isinstance(canonical_fields, dict):  # pragma: no cover - typed above
             raise ValueError("governed bar recovery evidence is invalid")
-        digest = "sha256:" + hashlib.sha256(
-            canonical_governed_recovery_json(canonical_fields).encode("utf-8")
-        ).hexdigest()
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                canonical_governed_recovery_json(canonical_fields).encode("utf-8")
+            ).hexdigest()
+        )
         identity = {
             "contract_version": canonical_fields["contract_version"],
             "epoch_id": canonical_fields["epoch_id"],
@@ -266,11 +274,16 @@ class GovernedBarRecoveryRecord:
             "ticker": canonical_fields["ticker"],
             "evidence_digest": digest,
         }
-        computed_recovery_id = "governed_bar_recovery:" + hashlib.sha256(
-            canonical_governed_recovery_json(identity).encode("utf-8")
-        ).hexdigest()
+        computed_recovery_id = (
+            "governed_bar_recovery:"
+            + hashlib.sha256(
+                canonical_governed_recovery_json(identity).encode("utf-8")
+            ).hexdigest()
+        )
         if evidence_digest is not None and evidence_digest != digest:
-            raise ValueError("governed bar recovery evidence digest does not match payload")
+            raise ValueError(
+                "governed bar recovery evidence digest does not match payload"
+            )
         if recovery_id is not None and recovery_id != computed_recovery_id:
             raise ValueError("governed bar recovery recovery id does not match payload")
         return cls(
@@ -329,9 +342,7 @@ class GovernedBarRecoveryRecord:
             canonical != self
             or not isinstance(self.original_daily, MappingProxyType)
             or not isinstance(self.reconstructed_bar, MappingProxyType)
-            or any(
-                not isinstance(row, MappingProxyType) for row in self.intraday_rows
-            )
+            or any(not isinstance(row, MappingProxyType) for row in self.intraday_rows)
         ):
             raise ValueError("governed bar recovery record is not canonical")
 

@@ -31,9 +31,14 @@ from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.execution.price_source import (
     CandidateBarAttempt,
     CandidateBarResolution,
+    GovernedDailyBarAttempt,
+    GovernedDailyBarResolution,
 )
 from tradingagents.strategies.metrics.models import OutcomeRecord, SignalMetricRecord
-from tradingagents.strategies.metrics.outcomes import OutcomeCalculator, directional_accuracy
+from tradingagents.strategies.metrics.outcomes import (
+    OutcomeCalculator,
+    directional_accuracy,
+)
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.modules.base import Candidate
 
@@ -520,6 +525,40 @@ class _CandidateRecoveryPriceSource:
     def get_corporate_actions(self, tickers, session):
         return self._governed.get_corporate_actions(tickers, session)
 
+    def resolve_governed_daily_bars(self, tickers, session, *, processed_at):
+        bars_by_key = self.get_daily_bars(tickers, session, session, adjusted=False)
+        bars = {
+            ticker: MarketBar(
+                **{
+                    **bars_by_key[(ticker, session)].__dict__,
+                    "source": "yfinance",
+                }
+            )
+            for ticker in tickers
+        }
+        attempts = {
+            ticker: GovernedDailyBarAttempt(
+                ticker=ticker,
+                session=session,
+                source="yfinance",
+                fetched_at=bars[ticker].fetched_at,
+                raw_ohlc={
+                    "open": bars[ticker].open,
+                    "high": bars[ticker].high,
+                    "low": bars[ticker].low,
+                    "close": bars[ticker].close,
+                },
+                validation_error=None,
+            )
+            for ticker in tickers
+        }
+        return GovernedDailyBarResolution(
+            bars=bars,
+            attempts=attempts,
+            recoveries={},
+            failure_map={},
+        )
+
     def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
         return self._governed.get_total_return_closes(
             symbols, start_session, end_session_inclusive
@@ -569,9 +608,7 @@ class _CandidateRecoveryPriceSource:
                 )
             )
             retry_error = (
-                None
-                if self.outcome == "recovered"
-                else "incoherent ALX candidate bar"
+                None if self.outcome == "recovered" else "incoherent ALX candidate bar"
             )
             attempts.append(
                 CandidateBarAttempt(
@@ -816,9 +853,7 @@ class TestCandidateBarLifecycle:
         original_stage = engine.screen_and_stage
 
         def capture_reference_bars(*args, **kwargs):
-            raw_reference_bars.append(
-                dict(kwargs["data"]["_execution_reference_bars"])
-            )
+            raw_reference_bars.append(dict(kwargs["data"]["_execution_reference_bars"]))
             return original_stage(*args, **kwargs)
 
         engine.screen_and_stage = capture_reference_bars
@@ -832,9 +867,7 @@ class TestCandidateBarLifecycle:
         assert source.raw_calls == [(("BIL", "SPY"), session)]
         assert result["cohort_0"]["error"] is False
         assert result["cohort_0"]["staging_valid"] is True
-        assert [signal["ticker"] for signal in result["cohort_0"]["signals"]] == [
-            "SPY"
-        ]
+        assert [signal["ticker"] for signal in result["cohort_0"]["signals"]] == ["SPY"]
         assert raw_reference_bars[0]["SPY"].adjusted is False
 
     def test_invalid_raw_benchmark_bar_fails_closed_in_p0(self, tmp_path):
@@ -871,7 +904,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("quarantined")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         second = orchestrator.cohorts[1]
         original = second["engine"].screen_and_stage
@@ -945,9 +980,7 @@ class TestCandidateBarLifecycle:
         def stage_without_initial_position_then_fail_once(*args, **kwargs):
             nonlocal fail_once
             if kwargs["trading_date"] == first_session.isoformat():
-                return original_second_stage(
-                    *args, **{**kwargs, "shared_signals": []}
-                )
+                return original_second_stage(*args, **{**kwargs, "shared_signals": []})
             replay_reference_bars.append(
                 set(kwargs["data"]["_execution_reference_bars"])
             )
@@ -956,9 +989,9 @@ class TestCandidateBarLifecycle:
                 raise RuntimeError("post-resolution staging failure")
             return original_second_stage(*args, **kwargs)
 
-        second["engine"].screen_and_stage = (
-            stage_without_initial_position_then_fail_once
-        )
+        second[
+            "engine"
+        ].screen_and_stage = stage_without_initial_position_then_fail_once
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
             side_effect=_authoritative_committee,
@@ -985,7 +1018,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("quarantined")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         original_screen = orchestrator._screen_for_horizon
 
@@ -1036,7 +1071,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("valid")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         strategy = orchestrator.cohorts[0]["engine"].paper_trade_strategies[0]
         strategy._later_tickers = ("ALX",)
@@ -1123,9 +1160,10 @@ class TestCandidateBarLifecycle:
         assert conflict["error"] is True
         assert conflict["execution_valid"] is True
         assert conflict["degraded"] is False
-        assert "deterministic candidate replay identity conflict" in conflict[
-            "invalid_reason"
-        ]
+        assert (
+            "deterministic candidate replay identity conflict"
+            in conflict["invalid_reason"]
+        )
         assert "AAPL" in conflict["invalid_reason"]
 
     def test_partial_replay_rejects_unequal_completed_and_unfinished_p0_bars(
@@ -1174,9 +1212,9 @@ class TestCandidateBarLifecycle:
                 )
                 return bars
 
-            second["executor"].validated_execution_reference_bars = (
-                conflicting_reference_bars
-            )
+            second[
+                "executor"
+            ].validated_execution_reference_bars = conflicting_reference_bars
             try:
                 replay = orchestrator.run_daily(session.isoformat())
             except ValueError as error:
@@ -1190,14 +1228,14 @@ class TestCandidateBarLifecycle:
         assert epoch.boundary_reason == "critical_market_data_gap"
         assert "conflicting governed execution bar" in str(replay)
 
-    def test_post_quarantine_volatility_failure_preserves_both_statuses(
-        self, tmp_path
-    ):
+    def test_post_quarantine_volatility_failure_preserves_both_statuses(self, tmp_path):
         from test_30day_simulation import _authoritative_committee
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("quarantined")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
@@ -1229,7 +1267,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("valid")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         second = orchestrator.cohorts[1]
         original_second_stage = second["engine"].screen_and_stage
@@ -1261,7 +1301,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("valid")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         original_screen = orchestrator._screen_for_horizon
 
@@ -1304,7 +1346,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("quarantined")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         second = orchestrator.cohorts[1]
         original_second_stage = second["engine"].screen_and_stage
@@ -1342,9 +1386,11 @@ class TestCandidateBarLifecycle:
         assert orchestrator._epoch_id == epoch_id
         assert orchestrator._metric_store.load_epoch(epoch_id).status == "open"
         assert all(
-            len(cohort["ledger"].read_snapshots(
-                session, session, epoch_id=epoch_id, valid_only=True
-            ))
+            len(
+                cohort["ledger"].read_snapshots(
+                    session, session, epoch_id=epoch_id, valid_only=True
+                )
+            )
             == 1
             for cohort in orchestrator.cohorts
         )
@@ -1381,7 +1427,9 @@ class TestCandidateBarLifecycle:
         from tradingagents.strategies.orchestration.trading_calendar import next_session
 
         source = _CandidateRecoveryPriceSource("quarantined")
-        orchestrator, first_session = _candidate_lifecycle_orchestrator(tmp_path, source)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
         session = next_session(first_session)
         second = orchestrator.cohorts[1]
         original_second_stage = second["engine"].screen_and_stage
@@ -1426,9 +1474,10 @@ class TestCandidateBarLifecycle:
         assert conflict["degraded"] is True
         assert conflict["execution_valid"] is True
         assert conflict["staging_valid"] is False
-        assert "deterministic candidate replay identity conflict" in conflict[
-            "invalid_reason"
-        ]
+        assert (
+            "deterministic candidate replay identity conflict"
+            in conflict["invalid_reason"]
+        )
         assert "GOOG" in conflict["invalid_reason"]
         assert "MSFT" not in conflict["invalid_reason"]
         assert count_failed_cohorts(replay) == (1, 2, ["horizon_3m"])

@@ -43,6 +43,7 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
     Execution failures retain exit status 1; degraded runs use 2.
     """
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        aggregate_governed_reporting,
         count_degraded_cohorts,
         count_failed_cohorts,
     )
@@ -56,6 +57,8 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
             for ticker in result[name].get("candidate_bar_quarantines", [])
         }
     )
+    recoveries, _ = aggregate_governed_reporting(result)
+    recovered_tickers = sorted({str(summary["ticker"]) for summary in recoveries})
     if n_failed:
         message = f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
         if n_degraded:
@@ -65,9 +68,7 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
                 f"{', '.join(degraded)}"
             )
             if quarantined_tickers:
-                message += "; quarantined tickers: " + ", ".join(
-                    quarantined_tickers
-                )
+                message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
         return 1, message
 
     if n_degraded:
@@ -78,6 +79,8 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
         )
         if quarantined_tickers:
             message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
+        if recovered_tickers:
+            message += "; recovered tickers: " + ", ".join(recovered_tickers)
         return 2, message
     return 0, ""
 

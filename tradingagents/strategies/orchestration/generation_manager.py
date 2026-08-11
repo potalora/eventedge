@@ -4,6 +4,7 @@ Each generation is a frozen snapshot of the codebase at a specific commit,
 running in its own git worktree with isolated state. This allows comparing
 trading performance across code versions side-by-side.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,16 +40,16 @@ def _extract_cohort_results(stdout: str) -> dict | None:
     if not stdout:
         return None
     lines = stdout.splitlines()
-    end = next((i for i in range(len(lines) - 1, -1, -1)
-                if lines[i].rstrip() == "}"), None)
+    end = next(
+        (i for i in range(len(lines) - 1, -1, -1) if lines[i].rstrip() == "}"), None
+    )
     if end is None:
         return None
-    start = next((i for i in range(end, -1, -1)
-                  if lines[i].startswith("{")), None)
+    start = next((i for i in range(end, -1, -1) if lines[i].startswith("{")), None)
     if start is None:
         return None
     try:
-        obj = json.loads("\n".join(lines[start:end + 1]))
+        obj = json.loads("\n".join(lines[start : end + 1]))
     except (json.JSONDecodeError, ValueError):
         return None
     return obj if isinstance(obj, dict) else None
@@ -58,14 +59,14 @@ def _extract_cohort_results(stdout: str) -> dict | None:
 class GenerationInfo:
     """Metadata for a single generation (frozen code snapshot)."""
 
-    gen_id: str               # "gen_001", "gen_002", ...
-    git_commit: str           # Full SHA
-    git_branch: str           # Branch name at creation time
-    worktree_path: str        # Absolute path to .worktrees/gen_NNN
-    state_dir: str            # Absolute path to data/generations/gen_NNN
-    created_at: str           # ISO timestamp
-    status: str               # "active", "paused", "retired"
-    description: str          # User-provided description
+    gen_id: str  # "gen_001", "gen_002", ...
+    git_commit: str  # Full SHA
+    git_branch: str  # Branch name at creation time
+    worktree_path: str  # Absolute path to .worktrees/gen_NNN
+    state_dir: str  # Absolute path to data/generations/gen_NNN
+    created_at: str  # ISO timestamp
+    status: str  # "active", "paused", "retired"
+    description: str  # User-provided description
     run_history: list[dict] = field(default_factory=list)
 
 
@@ -112,7 +113,8 @@ class GenerationManager:
         status_result = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=self._repo_root,
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if status_result.stdout.strip():
             logger.warning(
@@ -175,7 +177,9 @@ class GenerationManager:
 
         logger.info(
             "Started generation %s: branch=%s commit=%s",
-            gen_id, branch, commit[:12],
+            gen_id,
+            branch,
+            commit[:12],
         )
         return info
 
@@ -208,28 +212,40 @@ class GenerationManager:
             results[gen_id] = result
 
             # Record in run_history
-            gen_data["run_history"].append({
-                "date": trading_date,
-                "action": "daily",
-                "success": result["success"],
-                "elapsed_s": result["elapsed_s"],
-                **({"degraded": True} if result.get("degraded") else {}),
-                **(
-                    {"execution_valid": result["execution_valid"]}
-                    if "execution_valid" in result
-                    else {}
-                ),
-                **(
-                    {
-                        "candidate_bar_quarantines": result[
-                            "candidate_bar_quarantines"
-                        ]
-                    }
-                    if "candidate_bar_quarantines" in result
-                    else {}
-                ),
-                **({"error": result["error"]} if "error" in result else {}),
-            })
+            gen_data["run_history"].append(
+                {
+                    "date": trading_date,
+                    "action": "daily",
+                    "success": result["success"],
+                    "elapsed_s": result["elapsed_s"],
+                    **({"degraded": True} if result.get("degraded") else {}),
+                    **(
+                        {"execution_valid": result["execution_valid"]}
+                        if "execution_valid" in result
+                        else {}
+                    ),
+                    **(
+                        {
+                            "candidate_bar_quarantines": result[
+                                "candidate_bar_quarantines"
+                            ]
+                        }
+                        if "candidate_bar_quarantines" in result
+                        else {}
+                    ),
+                    **(
+                        {"governed_bar_recoveries": result["governed_bar_recoveries"]}
+                        if "governed_bar_recoveries" in result
+                        else {}
+                    ),
+                    **(
+                        {"governed_failure_map": result["governed_failure_map"]}
+                        if "governed_failure_map" in result
+                        else {}
+                    ),
+                    **({"error": result["error"]} if "error" in result else {}),
+                }
+            )
             # Cap history
             gen_data["run_history"] = gen_data["run_history"][-_MAX_RUN_HISTORY:]
 
@@ -343,7 +359,8 @@ class GenerationManager:
                 except subprocess.CalledProcessError as e:
                     logger.warning(
                         "Failed to remove worktree for %s: %s",
-                        gen_id, e.stderr.strip(),
+                        gen_id,
+                        e.stderr.strip(),
                     )
 
         self._save_manifest(manifest)
@@ -352,10 +369,7 @@ class GenerationManager:
     def list_generations(self) -> list[GenerationInfo]:
         """Return all generations from manifest."""
         manifest = self._load_manifest()
-        return [
-            GenerationInfo(**gen_data)
-            for gen_data in manifest["generations"]
-        ]
+        return [GenerationInfo(**gen_data) for gen_data in manifest["generations"]]
 
     def get_generation(self, gen_id: str) -> GenerationInfo | None:
         """Look up a single generation by ID."""
@@ -417,6 +431,7 @@ class GenerationManager:
             cohort_results = _extract_cohort_results(proc.stdout)
             if cohort_results is not None:
                 from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                    aggregate_governed_reporting,
                     count_degraded_cohorts,
                     count_failed_cohorts,
                 )
@@ -424,8 +439,7 @@ class GenerationManager:
                 n_failed, n_total, failed = count_failed_cohorts(cohort_results)
                 n_degraded, _, degraded = count_degraded_cohorts(cohort_results)
                 execution_valid = bool(cohort_results) and all(
-                    isinstance(result, dict)
-                    and result.get("execution_valid") is True
+                    isinstance(result, dict) and result.get("execution_valid") is True
                     for result in cohort_results.values()
                 )
                 quarantined_tickers = sorted(
@@ -437,15 +451,23 @@ class GenerationManager:
                         )
                     }
                 )
-                if n_failed:
-                    msg = (
-                        f"{n_failed}/{n_total} cohorts failed: "
-                        f"{', '.join(failed)}"
+                governed_recoveries, governed_failures = aggregate_governed_reporting(
+                    cohort_results
+                )
+                if governed_recoveries and quarantined_tickers:
+                    degradation_label = (
+                        "candidate data quarantined; governed bar recovery"
                     )
+                elif governed_recoveries:
+                    degradation_label = "governed bar recovery"
+                else:
+                    degradation_label = "candidate data quarantined"
+                if n_failed:
+                    msg = f"{n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
                     if n_degraded:
                         msg += (
                             f"; {n_degraded}/{n_total} cohorts degraded "
-                            f"(candidate data quarantined): {', '.join(degraded)}"
+                            f"({degradation_label}): {', '.join(degraded)}"
                         )
                         if quarantined_tickers:
                             msg += "; quarantined tickers: " + ", ".join(
@@ -465,19 +487,23 @@ class GenerationManager:
                                 "candidate_bar_quarantines": quarantined_tickers,
                             }
                         )
+                    if governed_recoveries:
+                        failure["governed_bar_recoveries"] = governed_recoveries
+                    if governed_failures:
+                        failure["governed_failure_map"] = governed_failures
                     return failure
 
                 if n_degraded:
                     msg = (
                         f"{n_degraded}/{n_total} cohorts degraded "
-                        f"(candidate data quarantined): {', '.join(degraded)}"
+                        f"({degradation_label}): {', '.join(degraded)}"
                     )
                     if quarantined_tickers:
                         msg += "; quarantined tickers: " + ", ".join(
                             quarantined_tickers
                         )
                     logger.warning("Generation %s: %s", gen_data["gen_id"], msg)
-                    return {
+                    degraded_result = {
                         "success": False,
                         "degraded": True,
                         "execution_valid": execution_valid,
@@ -485,6 +511,11 @@ class GenerationManager:
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
                     }
+                    if governed_recoveries:
+                        degraded_result["governed_bar_recoveries"] = governed_recoveries
+                    if governed_failures:
+                        degraded_result["governed_failure_map"] = governed_failures
+                    return degraded_result
 
             if proc.returncode != 0:
                 error_msg = (proc.stderr or proc.stdout or "").strip()
@@ -493,7 +524,9 @@ class GenerationManager:
                     error_msg = error_msg[:2000] + "...(truncated)"
                 logger.error(
                     "Generation %s failed (rc=%d): %s",
-                    gen_data["gen_id"], proc.returncode, error_msg[:200],
+                    gen_data["gen_id"],
+                    proc.returncode,
+                    error_msg[:200],
                 )
                 return {
                     "success": False,
@@ -503,13 +536,16 @@ class GenerationManager:
 
             logger.info(
                 "Generation %s completed in %.1fs",
-                gen_data["gen_id"], elapsed,
+                gen_data["gen_id"],
+                elapsed,
             )
             return {"success": True, "elapsed_s": round(elapsed, 2)}
 
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - start
-            logger.error("Generation %s timed out after %.0fs", gen_data["gen_id"], elapsed)
+            logger.error(
+                "Generation %s timed out after %.0fs", gen_data["gen_id"], elapsed
+            )
             return {
                 "success": False,
                 "elapsed_s": round(elapsed, 2),
@@ -543,11 +579,17 @@ class GenerationManager:
             header = f"=== {gen_data.get('gen_id', '?')} run @ {datetime.now().isoformat()} ===\n"
             log_path.write_text(
                 header
-                + "----- STDOUT -----\n" + (stdout or "")
-                + "\n----- STDERR -----\n" + (stderr or "")
+                + "----- STDOUT -----\n"
+                + (stdout or "")
+                + "\n----- STDERR -----\n"
+                + (stderr or "")
             )
         except Exception:
-            logger.warning("Failed to persist run log for %s", gen_data.get("gen_id"), exc_info=True)
+            logger.warning(
+                "Failed to persist run log for %s",
+                gen_data.get("gen_id"),
+                exc_info=True,
+            )
 
     def _next_gen_id(self) -> str:
         """Return the next sequential gen_id like 'gen_001', 'gen_002'."""

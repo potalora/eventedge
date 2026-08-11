@@ -220,6 +220,7 @@ class MetricStore:
     def _critical_gap(payload: str) -> CriticalGapMarker:
         data = json.loads(payload)
         data["gap_session"] = date.fromisoformat(data["gap_session"])
+        data.setdefault("governed_failure_map", {})
         if "affected_cohorts" not in data:
             data["affected_cohorts"] = {}
             data["detail_status"] = "legacy_unbound"
@@ -395,7 +396,10 @@ class MetricStore:
             record.ticker,
         ):
             raise ValueError("governed bar recovery metadata does not match payload")
-        if expected_recovery_id is not None and record.recovery_id != expected_recovery_id:
+        if (
+            expected_recovery_id is not None
+            and record.recovery_id != expected_recovery_id
+        ):
             raise ValueError("governed bar recovery metadata does not match lookup")
         if expected_scope is not None:
             epoch_id, session, ticker = expected_scope
@@ -561,7 +565,9 @@ class MetricStore:
         raise ValueError("governed bar recovery evidence value is invalid")
 
     @staticmethod
-    def _governed_ohlc_values(bar: object) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
+    def _governed_ohlc_values(
+        bar: object,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
         if not isinstance(bar, Mapping):
             return None
         try:
@@ -584,7 +590,9 @@ class MetricStore:
         if values is None:
             return False
         opening, high, low, close = values
-        return high >= max(opening, close) and low <= min(opening, close) and high >= low
+        return (
+            high >= max(opening, close) and low <= min(opening, close) and high >= low
+        )
 
     def _validate_governed_bar_recovery(
         self, record: GovernedBarRecoveryRecord
@@ -612,7 +620,9 @@ class MetricStore:
                 _NEW_YORK
             )
         except ValueError as error:
-            raise ValueError("governed bar recovery interval schedule is invalid") from error
+            raise ValueError(
+                "governed bar recovery interval schedule is invalid"
+            ) from error
         derived_starts: list[str] = []
         interval_start = session_open
         while interval_start < session_close:
@@ -625,13 +635,19 @@ class MetricStore:
         ):
             raise ValueError("governed bar recovery interval schedule is invalid")
         if len(record.expected_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
-            raise ValueError("governed bar recovery expected interval count exceeds bound")
+            raise ValueError(
+                "governed bar recovery expected interval count exceeds bound"
+            )
         if len(record.observed_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
-            raise ValueError("governed bar recovery observed interval count exceeds bound")
+            raise ValueError(
+                "governed bar recovery observed interval count exceeds bound"
+            )
         if len(record.intraday_rows) > _MAX_GOVERNED_RECOVERY_ROWS:
             raise ValueError("governed bar recovery intraday row count exceeds bound")
         if len(record.affected_cohort_ids) > _MAX_GOVERNED_RECOVERY_COHORTS:
-            raise ValueError("governed bar recovery affected cohort count exceeds bound")
+            raise ValueError(
+                "governed bar recovery affected cohort count exceeds bound"
+            )
         if record.expected_starts != tuple(sorted(set(record.expected_starts))):
             raise ValueError("governed bar recovery expected starts are not canonical")
         if record.observed_starts != tuple(sorted(set(record.observed_starts))):
@@ -664,43 +680,66 @@ class MetricStore:
             if set(row) != {"start", "open", "high", "low", "close", "fetched_at"}:
                 raise ValueError("governed bar recovery intraday evidence is invalid")
             if not self._governed_ohlc_is_positive_and_coherent(row):
-                raise ValueError("governed bar recovery intraday evidence is incoherent")
+                raise ValueError(
+                    "governed bar recovery intraday evidence is incoherent"
+                )
         original_values = self._governed_ohlc_values(record.original_daily)
         if original_values is None:
             raise ValueError("governed bar recovery original daily evidence is invalid")
         if self._governed_ohlc_is_positive_and_coherent(record.original_daily):
-            raise ValueError("governed bar recovery original daily evidence is coherent")
+            raise ValueError(
+                "governed bar recovery original daily evidence is coherent"
+            )
         if record.original_validation_error != (
             f"incoherent {record.ticker}/{record.session.isoformat()}"
         ):
-            raise ValueError("governed bar recovery original validation reason is invalid")
+            raise ValueError(
+                "governed bar recovery original validation reason is invalid"
+            )
         reconstructed_values = self._governed_ohlc_values(record.reconstructed_bar)
         if (
             reconstructed_values is None
-            or not self._governed_ohlc_is_positive_and_coherent(record.reconstructed_bar)
+            or not self._governed_ohlc_is_positive_and_coherent(
+                record.reconstructed_bar
+            )
         ):
-            raise ValueError("governed bar recovery reconstructed evidence is incoherent")
+            raise ValueError(
+                "governed bar recovery reconstructed evidence is incoherent"
+            )
         if record.original_daily["source"] != "yfinance":
             raise ValueError("governed bar recovery original source is invalid")
         if record.reconstructed_bar["source"] != "yfinance-60m-reconstruction":
             raise ValueError("governed bar recovery reconstructed source is invalid")
         original_open, original_high, original_low, original_close = original_values
-        reconstructed_open, reconstructed_high, reconstructed_low, reconstructed_close = (
-            reconstructed_values
-        )
+        (
+            reconstructed_open,
+            reconstructed_high,
+            reconstructed_low,
+            reconstructed_close,
+        ) = reconstructed_values
         if original_open != reconstructed_open:
-            raise ValueError("governed bar recovery original open does not match reconstruction")
+            raise ValueError(
+                "governed bar recovery original open does not match reconstruction"
+            )
         if original_close != reconstructed_close:
-            raise ValueError("governed bar recovery original close does not match reconstruction")
+            raise ValueError(
+                "governed bar recovery original close does not match reconstruction"
+            )
         high_broken = original_high < max(original_open, original_close)
         low_broken = original_low > min(original_open, original_close)
         if high_broken == low_broken:
             raise ValueError("governed bar recovery both envelope bounds are invalid")
         if high_broken and original_low != reconstructed_low:
-            raise ValueError("governed bar recovery unbroken low does not match reconstruction")
+            raise ValueError(
+                "governed bar recovery unbroken low does not match reconstruction"
+            )
         if low_broken and original_high != reconstructed_high:
-            raise ValueError("governed bar recovery unbroken high does not match reconstruction")
-        intraday_values = [self._governed_ohlc_values(row) for row in record.intraday_rows]
+            raise ValueError(
+                "governed bar recovery unbroken high does not match reconstruction"
+            )
+        intraday_values = [
+            self._governed_ohlc_values(row) for row in record.intraday_rows
+        ]
         if any(values is None for values in intraday_values):  # pragma: no cover
             raise ValueError("governed bar recovery intraday evidence is invalid")
         first_open = intraday_values[0][0]
@@ -761,6 +800,32 @@ class MetricStore:
             raise ValueError("critical gap cohort reasons must be a mapping")
         if not isinstance(marker.corporate_action_rejections, dict):
             raise ValueError("critical gap corporate action intents must be a mapping")
+        if not isinstance(marker.governed_failure_map, dict):
+            raise ValueError("critical gap governed failure map must be a mapping")
+        if len(marker.governed_failure_map) > _MAX_GAP_TICKERS:
+            raise ValueError("critical gap governed failure count exceeds bound")
+        if list(marker.governed_failure_map) != sorted(marker.governed_failure_map):
+            raise ValueError("critical gap governed failure map is not canonical")
+        for ticker, failure in marker.governed_failure_map.items():
+            if (
+                not isinstance(ticker, str)
+                or not ticker
+                or ticker != ticker.strip().upper()
+                or len(ticker) > _MAX_GAP_TEXT
+                or not isinstance(failure, str)
+                or len(failure) > _MAX_GAP_DETAIL_TEXT
+            ):
+                raise ValueError("critical gap governed failure is invalid")
+            parts = failure.split(" ")
+            if len(parts) != 2 or parts[0] not in {
+                "missing",
+                "incoherent",
+                "invalid",
+                "invalid_benchmark",
+            }:
+                raise ValueError("critical gap governed failure is invalid")
+            if parts[1] != f"{ticker}/{marker.gap_session.isoformat()}":
+                raise ValueError("critical gap governed failure scope is invalid")
         if marker.detail_status == "minimal":
             if marker.cohort_invalid_reasons or marker.corporate_action_rejections:
                 raise ValueError("minimal critical gap cannot contain recovery detail")
@@ -1059,6 +1124,7 @@ class MetricStore:
                 marker.gap_session,
                 marker.reason,
                 marker.affected_cohorts,
+                marker.governed_failure_map,
                 marker.status,
             )
             current_core = (
@@ -1067,6 +1133,7 @@ class MetricStore:
                 current.gap_session,
                 current.reason,
                 current.affected_cohorts,
+                current.governed_failure_map,
                 current.status,
             )
             if current_core != core:

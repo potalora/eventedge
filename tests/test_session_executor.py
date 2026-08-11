@@ -241,6 +241,15 @@ def _record_binding(record: GovernedBarRecoveryRecord) -> GovernedRecoveryBindin
 
 
 def test_session_input_bundle_scopes_immutable_governed_evidence():
+    aapl_summary = {
+        "ticker": "AAPL",
+        "session": MONDAY.isoformat(),
+        "recovery_id": "recovery-aapl",
+        "contract_version": GOVERNED_BAR_RECOVERY_CONTRACT,
+        "evidence_digest": "a" * 64,
+        "affected_cohort_ids": ("cohort-a",),
+    }
+    msft_summary = {**aapl_summary, "ticker": "MSFT", "recovery_id": "recovery-msft"}
     shared = SessionInputBundle(
         MONDAY,
         ("AAPL", "MSFT"),
@@ -255,6 +264,7 @@ def test_session_input_bundle_scopes_immutable_governed_evidence():
             "AAPL": _recovery_binding("AAPL"),
         },
         governed_failure_map={"MSFT": "invalid MSFT/2026-08-03"},
+        governed_recovery_summaries=(msft_summary, aapl_summary),
     )
 
     scoped = shared.for_tickers(("AAPL",))
@@ -262,6 +272,8 @@ def test_session_input_bundle_scopes_immutable_governed_evidence():
     assert tuple(shared.governed_recoveries) == ("AAPL", "MSFT")
     assert scoped.governed_recoveries == {"AAPL": _recovery_binding("AAPL")}
     assert scoped.governed_failure_map == {}
+    assert scoped.governed_recovery_summaries == (aapl_summary,)
+    assert shared.governed_recovery_summaries[0]["ticker"] == "AAPL"
     with pytest.raises(TypeError):
         shared.governed_recoveries["AAPL"] = _recovery_binding("MSFT")
     with pytest.raises(TypeError):
@@ -274,7 +286,16 @@ def test_fetch_input_bundle_uses_governed_coordinator_for_p0_tickers():
     resolved = GovernedInputResolution(
         bars={"AAPL": _bar("AAPL")},
         recovery_bindings={"AAPL": binding},
-        recovery_summaries=(),
+        recovery_summaries=(
+            {
+                "ticker": "AAPL",
+                "session": MONDAY.isoformat(),
+                "recovery_id": binding.recovery_id,
+                "contract_version": binding.contract_version,
+                "evidence_digest": binding.evidence_digest,
+                "affected_cohort_ids": ("cohort",),
+            },
+        ),
         failure_map={},
     )
     store = MagicMock()
@@ -307,6 +328,7 @@ def test_fetch_input_bundle_uses_governed_coordinator_for_p0_tickers():
     assert source.raw_requests == []
     assert bundle.bars == {("AAPL", MONDAY): _bar("AAPL")}
     assert bundle.governed_recoveries == {"AAPL": binding}
+    assert bundle.governed_recovery_summaries[0]["ticker"] == "AAPL"
 
 
 def test_fetch_input_bundle_normalizes_invalid_benchmark_failure():
@@ -734,12 +756,24 @@ def _bind_complete_governed_session(tmp_path):
 def test_governed_partial_resume_reuses_intact_record_without_provider_call(
     tmp_path,
 ):
-    ledger, store, _, _ = _bind_partial_governed_session(tmp_path)
+    ledger, store, record, _ = _bind_partial_governed_session(tmp_path)
     provider = MagicMock()
     try:
-        result = SessionExecutor(
-            ledger, _config(), metric_store=store
-        ).execute_open_and_mark(MONDAY, "epoch", provider, {}, PROCESSED)
+        executor = SessionExecutor(ledger, _config(), metric_store=store)
+        persisted = executor.persisted_input_bundle(MONDAY)
+        assert persisted.governed_recovery_summaries == (
+            {
+                "ticker": record.ticker,
+                "session": record.session.isoformat(),
+                "recovery_id": record.recovery_id,
+                "contract_version": record.contract_version,
+                "evidence_digest": record.evidence_digest,
+                "affected_cohort_ids": record.affected_cohort_ids,
+            },
+        )
+        result = executor.execute_open_and_mark(
+            MONDAY, "epoch", provider, {}, PROCESSED
+        )
 
         assert result.valid
         assert provider.mock_calls == []

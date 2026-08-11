@@ -284,6 +284,36 @@ class TestGenerationDailyRun:
         assert entry["degraded"] is True
         assert entry["execution_valid"] is True
 
+    def test_run_daily_records_governed_recovery_and_failure_history(
+        self, git_repo, manager
+    ):
+        manager.start_generation("governed history test")
+        summary = {
+            "ticker": "ESS",
+            "session": "2026-08-10",
+            "recovery_id": "governed_bar_recovery:" + "b" * 64,
+            "contract_version": "yfinance-60m-v1",
+            "evidence_digest": "sha256:" + "a" * 64,
+            "affected_cohort_ids": ["cohort-a"],
+        }
+        with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
+            mock_rcs.return_value = {
+                "success": False,
+                "degraded": True,
+                "execution_valid": True,
+                "governed_bar_recoveries": [summary],
+                "governed_failure_map": {"SPY": "invalid_benchmark SPY/2026-08-10"},
+                "elapsed_s": 2.1,
+                "error": "governed market data",
+            }
+            manager.run_daily("2026-08-10")
+
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["governed_bar_recoveries"] == [summary]
+        assert entry["governed_failure_map"] == {
+            "SPY": "invalid_benchmark SPY/2026-08-10"
+        }
+
     def test_run_daily_records_mixed_failure_and_degradation_history(
         self, git_repo, manager
     ):
