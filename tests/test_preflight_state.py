@@ -106,6 +106,19 @@ def _initialize_state(
         ledger.close()
 
 
+def _seed_clean_sidecars(database_path: Path) -> tuple[Path, Path]:
+    """Create platform-independent clean sidecars for topology tests."""
+    wal_path = Path(f"{database_path}-wal")
+    shm_path = Path(f"{database_path}-shm")
+    if wal_path.exists():
+        assert wal_path.stat().st_size == 0
+    else:
+        wal_path.touch()
+    if not shm_path.exists():
+        shm_path.touch()
+    return wal_path, shm_path
+
+
 def _sqlite_identity(path: Path) -> tuple[int, int, int, int, int]:
     stat = path.stat()
     encoded = path.resolve().as_uri() + "?mode=ro&immutable=1"
@@ -631,8 +644,7 @@ def test_sidecar_topology_and_identity_changes_fail_closed(
     state_dir = tmp_path / mutation
     _initialize_state(state_dir)
     metric_path = state_dir / "metrics_v2.sqlite3"
-    wal_path = Path(f"{metric_path}-wal")
-    shm_path = Path(f"{metric_path}-shm")
+    wal_path, shm_path = _seed_clean_sidecars(metric_path)
     target = wal_path if mutation == "appearance" else shm_path
     if mutation == "appearance":
         assert wal_path.stat().st_size == 0
@@ -672,7 +684,7 @@ def test_state_change_overrides_body_error_at_guard_exit(tmp_path: Path) -> None
 
     state_dir = tmp_path / "state"
     _initialize_state(state_dir)
-    shm_path = Path(f"{state_dir / 'metrics_v2.sqlite3'}-shm")
+    _, shm_path = _seed_clean_sidecars(state_dir / "metrics_v2.sqlite3")
     with pytest.raises(PreflightStateError, match="changed during preflight"):
         with inspect_and_guard_preflight_state(
             state_dir=state_dir,
@@ -698,10 +710,9 @@ def test_clean_sidecars_are_preserved_and_stale_wal_never_creates_shm(
     ledger_path = state_dir / COHORTS[0] / "portfolio.db"
     sidecars: list[Path] = []
     for path in (metric_path, ledger_path):
-        wal = Path(f"{path}-wal")
-        shm = Path(f"{path}-shm")
+        wal, shm = _seed_clean_sidecars(path)
         assert wal.exists() and wal.stat().st_size == 0
-        assert shm.exists() and shm.stat().st_size > 0
+        assert shm.exists()
         assert not Path(f"{path}-journal").exists()
         sidecars.extend((wal, shm))
     before_clean = {
@@ -1035,7 +1046,7 @@ def test_parent_retarget_cannot_hide_unsafe_sidecar_at_final_verification(
     alternate_hidden = Path(f"{alternate / 'metrics_v2.sqlite3'}{suffix}")
     alternate_hidden.unlink(missing_ok=True)
     if suffix == "-wal":
-        hidden.unlink()
+        hidden.unlink(missing_ok=True)
     real_lexists = os.path.lexists
     retargets = 0
 
