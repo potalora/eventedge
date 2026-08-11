@@ -206,6 +206,8 @@ def _validate_governed_resolution(
         bar = resolution.bars[ticker]
         if type(bar) is not MarketBar or bar.ticker != ticker or bar.session != session:
             raise ValueError("governed bar identity is invalid")
+        if bar.source not in {"yfinance", "yfinance-60m-reconstruction"}:
+            raise ValueError("governed bar source is invalid")
         if bar.fetched_at < session_close(session):
             raise ValueError("governed bar predates the session close")
         raw_bars[(ticker, session)] = bar

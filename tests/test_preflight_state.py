@@ -104,23 +104,6 @@ def _initialize_state(
             state_dir / cohort_id / "portfolio.db", cohort_id, Decimal("5000")
         )
         ledger.close()
-    _finalize_fixture_state(state_dir)
-
-
-def _finalize_fixture_state(state_dir: Path) -> None:
-    """Checkpoint fixture writers, then remove only their clean sidecars."""
-    for path in sorted(state_dir.glob("**/*.db")) + sorted(
-        state_dir.glob("metrics_v2.sqlite3")
-    ):
-        connection = sqlite3.connect(path)
-        try:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        finally:
-            connection.close()
-        wal = Path(f"{path}-wal")
-        assert not wal.exists() or wal.stat().st_size == 0
-        for suffix in ("-wal", "-shm", "-journal"):
-            Path(f"{path}{suffix}").unlink(missing_ok=True)
 
 
 def _sqlite_identity(path: Path) -> tuple[int, int, int, int, int]:
@@ -182,7 +165,6 @@ def test_partial_initialization_fails_closed(tmp_path: Path, missing: str) -> No
             state_dir / COHORTS[0] / "portfolio.db", COHORTS[0], Decimal("5000")
         )
         ledger.close()
-        _finalize_fixture_state(state_dir)
     else:
         _initialize_state(state_dir, cohort_ids=(COHORTS[0],))
 
@@ -205,10 +187,19 @@ def test_complete_state_uses_read_only_openers_and_closes_ledgers(
     state_dir = tmp_path / "state"
     _initialize_state(state_dir)
     opened: list[str] = []
+    opened_paths: list[Path] = []
     closed: list[str] = []
     metric_open = MetricStore.open_existing.__func__
     ledger_open = PortfolioLedger.open_existing.__func__
     ledger_close = PortfolioLedger.close
+    sqlite_connect = sqlite3.connect
+    sqlite_targets: list[str] = []
+
+    def connect_snapshot(database, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        encoded = str(database)
+        assert str(state_dir) not in encoded
+        sqlite_targets.append(encoded)
+        return sqlite_connect(database, *args, **kwargs)
 
     def forbid_metric_init(self, path):  # noqa: ANN001
         raise AssertionError(f"writable MetricStore opened: {path}")
@@ -218,11 +209,17 @@ def test_complete_state_uses_read_only_openers_and_closes_ledgers(
 
     def open_metric(cls, path, *, immutable=False):  # noqa: ANN001
         assert immutable is True
+        opened_path = Path(path)
+        assert not opened_path.resolve().is_relative_to(state_dir.resolve())
+        opened_paths.append(opened_path)
         opened.append("metric")
         return metric_open(cls, path, immutable=immutable)
 
     def open_ledger(cls, path, *, immutable=False):  # noqa: ANN001
         assert immutable is True
+        opened_path = Path(path)
+        assert not opened_path.resolve().is_relative_to(state_dir.resolve())
+        opened_paths.append(opened_path)
         ledger = ledger_open(cls, path, immutable=immutable)
         opened.append(ledger.cohort_id)
         return ledger
@@ -236,6 +233,7 @@ def test_complete_state_uses_read_only_openers_and_closes_ledgers(
     monkeypatch.setattr(PortfolioLedger, "__init__", forbid_ledger_init)
     monkeypatch.setattr(PortfolioLedger, "open_existing", classmethod(open_ledger))
     monkeypatch.setattr(PortfolioLedger, "close", close_ledger)
+    monkeypatch.setattr(sqlite3, "connect", connect_snapshot)
 
     snapshot = inspect_preflight_state(
         state_dir=state_dir,
@@ -245,8 +243,11 @@ def test_complete_state_uses_read_only_openers_and_closes_ledgers(
     )
 
     assert snapshot.state_status == "ready"
+    assert snapshot.metric_store_path == state_dir / "metrics_v2.sqlite3"
     assert opened == ["metric", *COHORTS]
     assert sorted(closed) == list(COHORTS)
+    assert sqlite_targets
+    assert opened_paths and all(not path.exists() for path in opened_paths)
 
 
 def test_exact_governed_tickers_and_all_relevant_cohort_membership(
@@ -315,7 +316,6 @@ def test_exact_governed_tickers_and_all_relevant_cohort_membership(
         ),
     )
     second.close()
-    _finalize_fixture_state(state_dir)
 
     snapshot = inspect_preflight_state(
         state_dir=state_dir,
@@ -358,7 +358,6 @@ def test_closed_older_epoch_uses_nonmatching_prospective_identity(
         )
     )
     ledger.close()
-    _finalize_fixture_state(state_dir)
 
     snapshot = inspect_preflight_state(
         state_dir=state_dir,
@@ -381,7 +380,6 @@ def test_already_invalid_requested_session_is_reported(tmp_path: Path) -> None:
     MetricStore(state_dir / "metrics_v2.sqlite3").invalidate_epoch(
         "epoch-current", SESSION, "critical_market_data_gap"
     )
-    _finalize_fixture_state(state_dir)
 
     snapshot = inspect_preflight_state(
         state_dir=state_dir,
@@ -444,7 +442,6 @@ def test_overlapping_epochs_unexpected_ledger_and_embedded_identity_fail_closed(
     MetricStore(overlapping / "metrics_v2.sqlite3").save_epoch(
         _epoch(epoch_id="second-open", start_session=date(2026, 8, 4))
     )
-    _finalize_fixture_state(overlapping)
     with pytest.raises(PreflightStateError, match="epoch identity"):
         inspect_preflight_state(
             state_dir=overlapping,
@@ -461,7 +458,6 @@ def test_overlapping_epochs_unexpected_ledger_and_embedded_identity_fail_closed(
         Decimal("5000"),
     )
     extra.close()
-    _finalize_fixture_state(unexpected)
     with pytest.raises(PreflightStateError, match="unexpected cohort ledgers"):
         inspect_preflight_state(
             state_dir=unexpected,
@@ -479,7 +475,6 @@ def test_overlapping_epochs_unexpected_ledger_and_embedded_identity_fail_closed(
             mismatched / cohort_id / "portfolio.db", embedded, Decimal("5000")
         )
         ledger.close()
-    _finalize_fixture_state(mismatched)
     with pytest.raises(PreflightStateError, match="cohort identity"):
         inspect_preflight_state(
             state_dir=mismatched,
@@ -509,7 +504,6 @@ def test_epoch_row_identity_and_ledger_invalidation_topology_fail_closed(
         connection.commit()
     finally:
         connection.close()
-    _finalize_fixture_state(mismatched_epoch)
     with pytest.raises(PreflightStateError, match="epoch identity"):
         inspect_preflight_state(
             state_dir=mismatched_epoch,
@@ -525,7 +519,6 @@ def test_epoch_row_identity_and_ledger_invalidation_topology_fail_closed(
     )
     first.invalidate_session(SESSION, "critical_market_data_gap")
     first.close()
-    _finalize_fixture_state(invalid)
     closed: list[str] = []
     original_close = PortfolioLedger.close
 
@@ -548,7 +541,6 @@ def test_epoch_row_identity_and_ledger_invalidation_topology_fail_closed(
     )
     second.invalidate_session(SESSION, "critical_market_data_gap")
     second.close()
-    _finalize_fixture_state(invalid)
     snapshot = inspect_preflight_state(
         state_dir=invalid,
         cohort_ids=COHORTS,
@@ -600,7 +592,99 @@ def test_identity_and_data_version_remain_stable_and_context_detects_mutation(
                 writer.close()
 
 
-def test_immutable_openers_and_stale_wal_rejection_never_create_sidecars(
+def test_certified_temp_snapshot_lives_through_guard_body_and_is_cleaned(
+    tmp_path: Path,
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        inspect_and_guard_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    _initialize_state(state_dir)
+    snapshot_path: Path | None = None
+    with inspect_and_guard_preflight_state(
+        state_dir=state_dir,
+        cohort_ids=COHORTS,
+        session=SESSION,
+        benchmark_tickers=("SPY",),
+    ) as (snapshot, metric_store):
+        assert snapshot.metric_store_path == state_dir / "metrics_v2.sqlite3"
+        assert metric_store is not None
+        snapshot_path = metric_store.path
+        assert snapshot_path.exists()
+        assert not snapshot_path.resolve().is_relative_to(state_dir.resolve())
+        assert metric_store.current_epoch() == _epoch()
+    assert snapshot_path is not None and not snapshot_path.exists()
+
+
+@pytest.mark.parametrize(
+    "mutation", ("appearance", "disappearance", "replacement", "change")
+)
+def test_sidecar_topology_and_identity_changes_fail_closed(
+    tmp_path: Path, mutation: str
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_and_guard_preflight_state,
+    )
+
+    state_dir = tmp_path / mutation
+    _initialize_state(state_dir)
+    metric_path = state_dir / "metrics_v2.sqlite3"
+    wal_path = Path(f"{metric_path}-wal")
+    shm_path = Path(f"{metric_path}-shm")
+    target = wal_path if mutation == "appearance" else shm_path
+    if mutation == "appearance":
+        assert wal_path.stat().st_size == 0
+        wal_path.unlink()
+    mutated = False
+
+    with pytest.raises(PreflightStateError, match="changed during preflight"):
+        with inspect_and_guard_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        ):
+            if mutation == "appearance":
+                target.touch()
+            elif mutation == "disappearance":
+                target.unlink()
+            elif mutation == "replacement":
+                replacement = state_dir / "replacement.shm"
+                shutil.copy2(target, replacement)
+                os.replace(replacement, target)
+            else:
+                stat_result = target.stat()
+                os.utime(
+                    target,
+                    ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 1),
+                )
+            mutated = True
+    assert mutated is True
+
+
+def test_state_change_overrides_body_error_at_guard_exit(tmp_path: Path) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_and_guard_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    _initialize_state(state_dir)
+    shm_path = Path(f"{state_dir / 'metrics_v2.sqlite3'}-shm")
+    with pytest.raises(PreflightStateError, match="changed during preflight"):
+        with inspect_and_guard_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        ):
+            shm_path.unlink()
+            raise RuntimeError("resolver failed concurrently")
+
+
+def test_clean_sidecars_are_preserved_and_stale_wal_never_creates_shm(
     tmp_path: Path,
 ) -> None:
     from tradingagents.strategies.orchestration.preflight_state import (
@@ -612,24 +696,48 @@ def test_immutable_openers_and_stale_wal_rejection_never_create_sidecars(
     _initialize_state(state_dir)
     metric_path = state_dir / "metrics_v2.sqlite3"
     ledger_path = state_dir / COHORTS[0] / "portfolio.db"
-
-    metric = MetricStore.open_existing(metric_path, immutable=True)
-    ledger = PortfolioLedger.open_existing(ledger_path, immutable=True)
-    try:
-        assert metric.read_only is True
-        assert ledger.connection.execute("PRAGMA query_only").fetchone()[0] == 1
-    finally:
-        ledger.close()
+    sidecars: list[Path] = []
     for path in (metric_path, ledger_path):
-        assert not Path(f"{path}-wal").exists()
-        assert not Path(f"{path}-shm").exists()
+        wal = Path(f"{path}-wal")
+        shm = Path(f"{path}-shm")
+        assert wal.exists() and wal.stat().st_size == 0
+        assert shm.exists() and shm.stat().st_size > 0
         assert not Path(f"{path}-journal").exists()
+        sidecars.extend((wal, shm))
+    before_clean = {
+        path: (
+            path.stat().st_dev,
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in sidecars
+    }
+
+    snapshot = inspect_preflight_state(
+        state_dir=state_dir,
+        cohort_ids=COHORTS,
+        session=SESSION,
+        benchmark_tickers=("SPY",),
+    )
+
+    assert snapshot.state_status == "ready"
+    assert {
+        path: (
+            path.stat().st_dev,
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in sidecars
+    } == before_clean
 
     wal_path = Path(f"{metric_path}-wal")
+    shm_path = Path(f"{metric_path}-shm")
+    shm_path.unlink()
     wal_path.write_bytes(b"stale-wal-evidence")
     os.utime(wal_path, ns=(1_700_000_000_000_000_000,) * 2)
     before = wal_path.stat()
-    shm_path = Path(f"{metric_path}-shm")
     assert not shm_path.exists()
 
     with pytest.raises(PreflightStateError, match="SQLite sidecar"):
@@ -683,3 +791,154 @@ def test_symlink_and_atomic_database_replacement_fail_closed(tmp_path: Path) -> 
             replacement = replacement_state / "replacement.sqlite3"
             shutil.copy2(metric_path, replacement)
             os.replace(replacement, metric_path)
+
+
+@pytest.mark.parametrize("component", ("state-parent", "cohort"))
+def test_symlinked_existing_path_components_fail_closed(
+    tmp_path: Path, component: str
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_preflight_state,
+    )
+
+    real_parent = tmp_path / "real-parent"
+    state_dir = real_parent / "state"
+    _initialize_state(state_dir)
+    if component == "state-parent":
+        alias = tmp_path / "state-parent-alias"
+        alias.symlink_to(real_parent, target_is_directory=True)
+        inspected_state = alias / "state"
+    else:
+        real_cohort = state_dir / "cohort-a-real"
+        (state_dir / COHORTS[0]).rename(real_cohort)
+        (state_dir / COHORTS[0]).symlink_to(
+            real_cohort.name, target_is_directory=True
+        )
+        inspected_state = state_dir
+
+    with pytest.raises(PreflightStateError, match="symlink"):
+        inspect_preflight_state(
+            state_dir=inspected_state,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        )
+
+
+def test_corrupt_second_database_closes_previously_certified_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_and_guard_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    _initialize_state(state_dir)
+    (state_dir / COHORTS[0] / "portfolio.db").write_bytes(b"not sqlite")
+    real_open = os.open
+    real_close = os.close
+    opened: dict[int, Path] = {}
+    closed: set[int] = set()
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):  # noqa: ANN001
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        candidate = Path(path)
+        if candidate.name in {"metrics_v2.sqlite3", "portfolio.db"}:
+            opened[fd] = candidate
+        return fd
+
+    def tracked_close(fd):  # noqa: ANN001
+        closed.add(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "close", tracked_close)
+
+    with pytest.raises(PreflightStateError):
+        with inspect_and_guard_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        ):
+            pass
+
+    assert len(opened) >= 2
+    assert set(opened) <= closed
+
+
+def test_source_disappearance_during_certification_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    _initialize_state(state_dir)
+    disappearing = state_dir / COHORTS[0] / "portfolio.db"
+    real_open = os.open
+    removed = False
+
+    def remove_then_open(path, flags, mode=0o777, *, dir_fd=None):  # noqa: ANN001
+        nonlocal removed
+        if Path(path).name == "portfolio.db" and not removed:
+            disappearing.unlink()
+            removed = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", remove_then_open)
+    with pytest.raises(PreflightStateError, match="certification"):
+        inspect_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        )
+    assert removed is True
+
+
+def test_directory_retarget_cannot_change_certified_query_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_and_guard_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    alternate = tmp_path / "alternate"
+    held = tmp_path / "held-original"
+    _initialize_state(state_dir)
+    _initialize_state(alternate, epoch=_epoch(epoch_id="alternate-epoch"))
+    real_open = os.open
+    swapped = False
+
+    def retarget_before_metric_open(
+        path, flags, mode=0o777, *, dir_fd=None  # noqa: ANN001
+    ):
+        nonlocal swapped
+        if Path(path).name == "metrics_v2.sqlite3" and not swapped:
+            state_dir.rename(held)
+            alternate.rename(state_dir)
+            swapped = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", retarget_before_metric_open)
+    observed_epochs: list[str] = []
+    with pytest.raises(PreflightStateError, match="identity.*changed"):
+        with inspect_and_guard_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        ) as (snapshot, _metric_store):
+            observed_epochs.append(snapshot.epoch_id)
+
+    assert swapped is True
+    # The retained directory FD prevents opening the replacement. The live-path
+    # identity check then rejects the swap before any SQLite query is exposed.
+    assert observed_epochs == []

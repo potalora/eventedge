@@ -7,8 +7,9 @@ import hashlib
 import os
 import sqlite3
 import stat
+import tempfile
 from collections.abc import Collection, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -66,26 +67,12 @@ class PreflightStateSnapshot:
 @dataclass
 class _Observer:
     path: Path
-    fd: int
     connection: sqlite3.Connection
 
     @classmethod
     def open(cls, path: Path) -> _Observer:
-        target = Path(path).absolute()
-        _reject_sqlite_sidecars((target,))
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
+        target = _absolute_path(path)
         try:
-            fd = os.open(target, flags)
-        except OSError as error:
-            if error.errno == errno.ELOOP or target.is_symlink():
-                raise PreflightStateError(
-                    "state database symlink is invalid"
-                ) from error
-            raise
-        try:
-            _require_fd_path_identity(target, fd)
             connection = sqlite3.connect(
                 f"{target.as_uri()}?mode=ro&immutable=1",
                 uri=True,
@@ -93,82 +80,245 @@ class _Observer:
             )
             connection.execute("PRAGMA query_only=ON")
             connection.execute("SELECT 1").fetchone()
-            _require_fd_path_identity(target, fd)
-            _reject_sqlite_sidecars((target,))
         except BaseException:
             if "connection" in locals():
                 connection.close()
-            os.close(fd)
             raise
-        return cls(target, fd, connection)
+        return cls(target, connection)
 
-    def identity(self) -> PreflightFileIdentity:
-        _reject_sqlite_sidecars((self.path,))
-        file_stat = _require_fd_path_identity(self.path, self.fd)
+    def identity(self) -> tuple[int, int, int, int, int]:
+        file_stat = self.path.stat()
         row = self.connection.execute("PRAGMA data_version").fetchone()
         if row is None:
             raise PreflightStateError("state data version is unavailable")
-        return PreflightFileIdentity(
-            path=self.path,
-            dev=file_stat.st_dev,
-            ino=file_stat.st_ino,
-            size=file_stat.st_size,
-            mtime_ns=file_stat.st_mtime_ns,
-            data_version=int(row[0]),
+        return (
+            file_stat.st_dev,
+            file_stat.st_ino,
+            file_stat.st_size,
+            file_stat.st_mtime_ns,
+            int(row[0]),
         )
 
     def close(self) -> None:
+        self.connection.close()
+
+
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        stat.S_IFMT(value.st_mode),
+    )
+
+
+def _open_flags(*, directory: bool) -> int:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _symlink_error(
+    *, parent_fd: int | None, name: str | Path, error: OSError
+) -> PreflightStateError:
+    try:
+        target_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        target_stat = None
+    if error.errno == errno.ELOOP or (
+        target_stat is not None and stat.S_ISLNK(target_stat.st_mode)
+    ):
+        return PreflightStateError("state path symlink is invalid")
+    return PreflightStateError("state path topology is invalid")
+
+
+def _require_fd_path_identity(
+    path: Path, fd: int, *, directory: bool
+) -> os.stat_result:
+    fd_stat = os.fstat(fd)
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if not expected_type(fd_stat.st_mode):
+        kind = "directory" if directory else "file"
+        raise PreflightStateError(f"state {kind} has invalid type")
+    try:
+        path_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        kind = "directory" if directory else "file"
+        raise PreflightStateError(f"state {kind} identity changed") from error
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise PreflightStateError("state path symlink is invalid")
+    if (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino):
+        kind = "directory" if directory else "file"
+        raise PreflightStateError(f"state {kind} identity changed")
+    return fd_stat
+
+
+@dataclass
+class _CertifiedDirectory:
+    path: Path
+    fd: int
+    baseline: os.stat_result
+
+    @classmethod
+    def open_root(cls, path: Path) -> _CertifiedDirectory:
+        target = _absolute_path(path)
         try:
-            self.connection.close()
+            fd = os.open(target, _open_flags(directory=True))
+        except OSError as error:
+            raise _symlink_error(parent_fd=None, name=target, error=error) from error
+        try:
+            baseline = _require_fd_path_identity(target, fd, directory=True)
+        except BaseException:
+            os.close(fd)
+            raise
+        return cls(target, fd, baseline)
+
+    @classmethod
+    def open_child(
+        cls, parent: _CertifiedDirectory, name: str, path: Path
+    ) -> _CertifiedDirectory:
+        target = _absolute_path(path)
+        try:
+            fd = os.open(name, _open_flags(directory=True), dir_fd=parent.fd)
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise _symlink_error(
+                parent_fd=parent.fd, name=name, error=error
+            ) from error
+        try:
+            baseline = _require_fd_path_identity(target, fd, directory=True)
+        except BaseException:
+            os.close(fd)
+            raise
+        return cls(target, fd, baseline)
+
+    def verify(self) -> None:
+        current = _require_fd_path_identity(self.path, self.fd, directory=True)
+        if (
+            current.st_dev,
+            current.st_ino,
+            stat.S_IFMT(current.st_mode),
+        ) != (
+            self.baseline.st_dev,
+            self.baseline.st_ino,
+            stat.S_IFMT(self.baseline.st_mode),
+        ):
+            raise PreflightStateError("state directory identity changed")
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+@contextmanager
+def _certified_directory_chain(
+    target: Path,
+) -> Iterator[
+    tuple[
+        _CertifiedDirectory | None,
+        tuple[_CertifiedDirectory, ...],
+        tuple[_CertifiedDirectory, str] | None,
+    ]
+]:
+    """Open every existing component relative to its retained parent FD."""
+    absolute = _absolute_path(target)
+    handles: list[_CertifiedDirectory] = []
+    try:
+        current = _CertifiedDirectory.open_root(Path(absolute.anchor))
+        handles.append(current)
+        complete = True
+        missing: tuple[_CertifiedDirectory, str] | None = None
+        current_path = Path(absolute.anchor)
+        for component in absolute.parts[1:]:
+            current_path /= component
+            try:
+                current = _CertifiedDirectory.open_child(
+                    current, component, current_path
+                )
+            except FileNotFoundError:
+                complete = False
+                missing = (current, component)
+                break
+            handles.append(current)
+        yield current if complete else None, tuple(handles), missing
+    finally:
+        for handle in reversed(handles):
+            handle.close()
+
+
+@dataclass
+class _CertifiedFile:
+    path: Path
+    fd: int
+    baseline: os.stat_result
+
+    @classmethod
+    def open(
+        cls, path: Path, *, parent: _CertifiedDirectory
+    ) -> _CertifiedFile:
+        target = _absolute_path(path)
+        try:
+            fd = os.open(
+                target.name,
+                _open_flags(directory=False),
+                dir_fd=parent.fd,
+            )
+        except OSError as error:
+            classified = _symlink_error(
+                parent_fd=parent.fd, name=target.name, error=error
+            )
+            if "symlink" in classified.reason:
+                raise classified from error
+            raise PreflightStateError("state file certification failed") from error
+        try:
+            baseline = _require_fd_path_identity(target, fd, directory=False)
+        except BaseException:
+            os.close(fd)
+            raise
+        return cls(target, fd, baseline)
+
+    def verify(self) -> os.stat_result:
+        current = _require_fd_path_identity(self.path, self.fd, directory=False)
+        if _stat_identity(current) != _stat_identity(self.baseline):
+            raise PreflightStateError("state file identity changed")
+        return current
+
+    def copy_to(self, destination: Path) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        output_fd = os.open(destination, flags, 0o600)
+        try:
+            offset = 0
+            while True:
+                chunk = os.pread(self.fd, 1024 * 1024, offset)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(output_fd, view)
+                    if written <= 0:
+                        raise OSError("short write while copying certified state")
+                    view = view[written:]
+                offset += len(chunk)
+            os.fsync(output_fd)
         finally:
-            os.close(self.fd)
+            os.close(output_fd)
+        self.verify()
+
+    def close(self) -> None:
+        os.close(self.fd)
 
 
 def _sqlite_sidecars(path: Path) -> tuple[Path, ...]:
     return tuple(Path(f"{path}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
-
-
-def _reject_sqlite_sidecars(paths: Collection[Path]) -> None:
-    if any(
-        os.path.lexists(sidecar) for path in paths for sidecar in _sqlite_sidecars(path)
-    ):
-        raise PreflightStateError("SQLite sidecar state is not safe for preflight")
-
-
-def _reject_state_sidecars(state_dir: Path, paths: Collection[Path]) -> None:
-    _reject_sqlite_sidecars(paths)
-    if not state_dir.is_dir():
-        return
-    candidates = (
-        *state_dir.glob("metrics_v2.sqlite3-*"),
-        *state_dir.glob("*/portfolio.db-*"),
-    )
-    if any(
-        candidate.name.endswith(("-wal", "-shm", "-journal"))
-        and os.path.lexists(candidate)
-        for candidate in candidates
-    ):
-        raise PreflightStateError("SQLite sidecar state is not safe for preflight")
-
-
-def _reject_database_symlinks(paths: Collection[Path]) -> None:
-    if any(os.path.lexists(path) and path.is_symlink() for path in paths):
-        raise PreflightStateError("state database symlink is invalid")
-
-
-def _require_fd_path_identity(path: Path, fd: int) -> os.stat_result:
-    fd_stat = os.fstat(fd)
-    if not stat.S_ISREG(fd_stat.st_mode):
-        raise PreflightStateError("state database is not a regular file")
-    try:
-        path_stat = os.stat(path, follow_symlinks=False)
-    except FileNotFoundError as error:
-        raise PreflightStateError("state database identity changed") from error
-    if stat.S_ISLNK(path_stat.st_mode):
-        raise PreflightStateError("state database symlink is invalid")
-    if (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino):
-        raise PreflightStateError("state database identity changed")
-    return fd_stat
 
 
 def _canonical_text(value: object, label: str) -> str:
@@ -223,7 +373,7 @@ def _prospective_epoch_id(
 ) -> str:
     occupied = {epoch.epoch_id for epoch in epochs}
     digest = hashlib.sha256(
-        f"{state_dir.resolve()}|{session.isoformat()}".encode()
+        f"{_absolute_path(state_dir)}|{session.isoformat()}".encode()
     ).hexdigest()[:16]
     candidate = f"preflight-prospective-{session.isoformat()}-{digest}"
     if candidate in occupied:
@@ -386,85 +536,198 @@ def _cohort_tickers(
     return tickers
 
 
-def _unexpected_ledgers(state_dir: Path, expected: set[Path]) -> bool:
-    if not state_dir.is_dir():
+def _entry_stat(
+    parent: _CertifiedDirectory, name: str
+) -> os.stat_result | None:
+    try:
+        result = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise PreflightStateError("state path topology is invalid") from error
+    if stat.S_ISLNK(result.st_mode):
+        raise PreflightStateError("state path symlink is invalid")
+    return result
+
+
+def _unexpected_ledgers(
+    state_dir: _CertifiedDirectory | None, expected_cohorts: set[str]
+) -> bool:
+    if state_dir is None:
         return False
-    discovered = {
-        path.absolute()
-        for path in state_dir.glob("*/portfolio.db")
-        if os.path.lexists(path)
+    discovered: set[str] = set()
+    try:
+        children = os.listdir(state_dir.fd)
+    except OSError as error:
+        raise PreflightStateError("state topology is invalid") from error
+    for name in children:
+        entry = _entry_stat(state_dir, name)
+        if entry is None or not stat.S_ISDIR(entry.st_mode):
+            continue
+        child_path = state_dir.path / name
+        child = _CertifiedDirectory.open_child(state_dir, name, child_path)
+        try:
+            portfolio = _entry_stat(child, "portfolio.db")
+        finally:
+            child.close()
+        if portfolio is None:
+            continue
+        if not stat.S_ISREG(portfolio.st_mode):
+            raise PreflightStateError("state file has invalid type")
+        discovered.add(name)
+    return not discovered.issubset(expected_cohorts)
+
+
+def _discovered_sidecars(state_dir: Path) -> set[Path]:
+    if not state_dir.is_dir():
+        return set()
+    candidates = (
+        *state_dir.glob("metrics_v2.sqlite3-*"),
+        *state_dir.glob("*/portfolio.db-*"),
+    )
+    return {
+        _absolute_path(path)
+        for path in candidates
+        if path.name.endswith(("-wal", "-shm", "-journal"))
+        and os.path.lexists(path)
     }
-    return discovered != {path.absolute() for path in expected if os.path.lexists(path)}
 
 
-def inspect_preflight_state(
+def _verify_sidecars(
     *,
     state_dir: Path,
-    cohort_ids: Collection[str],
-    session: date,
-    benchmark_tickers: Collection[str],
-) -> PreflightStateSnapshot:
-    """Discover the exact governed scope without initializing or mutating state."""
-    if not isinstance(session, date) or not XNYSCalendar().is_session(session):
-        raise PreflightStateError("session is invalid")
-    target = Path(state_dir)
-    cohorts = _canonical_cohorts(cohort_ids)
-    benchmarks = _canonical_tickers(benchmark_tickers)
-    metric_path = target / "metrics_v2.sqlite3"
-    ledger_paths = {cohort: target / cohort / "portfolio.db" for cohort in cohorts}
-    expected_ledgers = set(ledger_paths.values())
-    all_database_paths = (metric_path, *ledger_paths.values())
-    _reject_database_symlinks(all_database_paths)
-    _reject_state_sidecars(target, all_database_paths)
+    database_paths: tuple[Path, ...],
+    certified: Mapping[Path, _CertifiedFile],
+    during_probe: bool,
+) -> None:
+    current: set[Path] = set()
+    for database_path in database_paths:
+        wal, shm, journal = _sqlite_sidecars(database_path)
+        if os.path.lexists(journal):
+            if during_probe:
+                raise PreflightStateError("state changed during preflight")
+            raise PreflightStateError("SQLite sidecar journal is not safe")
+        for sidecar in (wal, shm):
+            if os.path.lexists(sidecar):
+                current.add(_absolute_path(sidecar))
+    if current != set(certified) or _discovered_sidecars(state_dir) != current:
+        if during_probe:
+            raise PreflightStateError("state changed during preflight")
+        raise PreflightStateError("SQLite sidecar topology is not safe")
+    for path, handle in certified.items():
+        try:
+            current_stat = handle.verify()
+        except PreflightStateError as error:
+            if during_probe:
+                raise PreflightStateError("state changed during preflight") from error
+            raise
+        if path.name.endswith("-wal") and current_stat.st_size != 0:
+            if during_probe:
+                raise PreflightStateError("state changed during preflight")
+            raise PreflightStateError("SQLite sidecar WAL is not clean")
 
-    metric_exists = os.path.lexists(metric_path)
-    existing_ledgers = {
-        cohort for cohort, path in ledger_paths.items() if os.path.lexists(path)
-    }
-    if _unexpected_ledgers(target, expected_ledgers):
-        raise PreflightStateError("state topology has unexpected cohort ledgers")
-    if not metric_exists and not existing_ledgers:
-        prospective = _prospective_epoch_id(target, session, ())
-        membership = {ticker: cohorts for ticker in benchmarks}
-        return PreflightStateSnapshot(
-            state_status="uninitialized",
-            epoch_id=prospective,
-            governed_tickers=benchmarks,
-            cohort_ids_by_ticker=membership,
-            metric_store_path=None,
-            file_identities=(),
+
+@contextmanager
+def _certified_copies(
+    *,
+    state_dir: Path,
+    database_paths: tuple[Path, ...],
+    database_parents: Mapping[Path, _CertifiedDirectory],
+    destination_dir: Path,
+) -> Iterator[
+    tuple[
+        Mapping[Path, Path],
+        Mapping[Path, _CertifiedFile],
+        Mapping[Path, _CertifiedFile],
+    ]
+]:
+    handles: list[_CertifiedFile] = []
+    sources: dict[Path, _CertifiedFile] = {}
+    sidecars: dict[Path, _CertifiedFile] = {}
+    copies: dict[Path, Path] = {}
+    try:
+        for index, raw_path in enumerate(database_paths):
+            path = _absolute_path(raw_path)
+            parent = database_parents[path]
+            source = _CertifiedFile.open(path, parent=parent)
+            handles.append(source)
+            sources[path] = source
+            wal, shm, journal = _sqlite_sidecars(path)
+            if os.path.lexists(journal):
+                raise PreflightStateError("SQLite sidecar journal is not safe")
+            for sidecar_path in (wal, shm):
+                if not os.path.lexists(sidecar_path):
+                    continue
+                sidecar = _CertifiedFile.open(sidecar_path, parent=parent)
+                handles.append(sidecar)
+                sidecars[sidecar.path] = sidecar
+                if sidecar_path == wal and sidecar.baseline.st_size != 0:
+                    raise PreflightStateError("SQLite sidecar WAL is not clean")
+            snapshot_path = destination_dir / f"database-{index:03d}.sqlite3"
+            source.copy_to(snapshot_path)
+            copies[path] = snapshot_path
+        _verify_sidecars(
+            state_dir=state_dir,
+            database_paths=database_paths,
+            certified=sidecars,
+            during_probe=False,
         )
-    if not metric_exists or existing_ledgers != set(cohorts):
-        raise PreflightStateError("state is partially initialized")
+        yield MappingProxyType(copies), MappingProxyType(sources), MappingProxyType(
+            sidecars
+        )
+    finally:
+        for handle in reversed(handles):
+            handle.close()
 
-    observers: list[_Observer] = []
+
+def _source_identity(
+    source: _CertifiedFile, observer: _Observer
+) -> PreflightFileIdentity:
+    source_stat = source.verify()
+    data_version = observer.identity()[-1]
+    return PreflightFileIdentity(
+        path=source.path,
+        dev=source_stat.st_dev,
+        ino=source_stat.st_ino,
+        size=source_stat.st_size,
+        mtime_ns=source_stat.st_mtime_ns,
+        data_version=data_version,
+    )
+
+
+def _inspect_complete_snapshot(
+    *,
+    target: Path,
+    cohorts: tuple[str, ...],
+    benchmarks: tuple[str, ...],
+    session: date,
+    metric_path: Path,
+    ledger_paths: Mapping[str, Path],
+    copies: Mapping[Path, Path],
+    observers: Mapping[Path, _Observer],
+    identities: tuple[PreflightFileIdentity, ...],
+) -> tuple[PreflightStateSnapshot, MetricStore]:
     ledgers: list[PortfolioLedger] = []
     try:
-        metric_observer = _Observer.open(metric_path)
-        observers.append(metric_observer)
-        observer_by_cohort: dict[str, _Observer] = {}
-        for cohort in cohorts:
-            observer = _Observer.open(ledger_paths[cohort])
-            observers.append(observer)
-            observer_by_cohort[cohort] = observer
-        before = tuple(observer.identity() for observer in observers)
-
-        metric_store = MetricStore.open_existing(metric_path, immutable=True)
+        metric_observer = observers[metric_path]
+        metric_store = MetricStore.open_existing(copies[metric_path], immutable=True)
         epochs = _load_epochs(metric_store, metric_observer)
         epoch_id, state_status = _select_epoch(
             state_dir=target, session=session, epochs=epochs
         )
-
         membership: dict[str, set[str]] = {
             ticker: set(cohorts) for ticker in benchmarks
         }
         invalid_reasons: dict[str, str] = {}
         for cohort in cohorts:
-            ledger = PortfolioLedger.open_existing(ledger_paths[cohort], immutable=True)
+            original_path = ledger_paths[cohort]
+            ledger = PortfolioLedger.open_existing(
+                copies[original_path], immutable=True
+            )
             ledgers.append(ledger)
             if ledger.cohort_id != cohort:
                 raise PreflightStateError("ledger cohort identity is inconsistent")
-            observer = observer_by_cohort[cohort]
+            observer = observers[original_path]
             _bounded_count(
                 observer,
                 "SELECT COUNT(*) FROM session_invalidations "
@@ -507,10 +770,6 @@ def inspect_preflight_state(
             state_status = "state_already_invalid"
         if len(membership) > _MAX_TICKERS:
             raise PreflightStateError("governed ticker set is unbounded")
-
-        after = tuple(observer.identity() for observer in observers)
-        if before != after:
-            raise PreflightStateError("state changed during preflight inspection")
         frozen_membership = {
             ticker: tuple(sorted(cohort_set))
             for ticker, cohort_set in sorted(membership.items())
@@ -518,23 +777,35 @@ def inspect_preflight_state(
         governed_tickers = tuple(sorted(frozen_membership))
         if len(set(normalize_tickers(list(governed_tickers)))) != len(governed_tickers):
             raise PreflightStateError("governed ticker normalization is ambiguous")
-        return PreflightStateSnapshot(
+        snapshot = PreflightStateSnapshot(
             state_status=state_status,
             epoch_id=epoch_id,
             governed_tickers=governed_tickers,
             cohort_ids_by_ticker=frozen_membership,
             metric_store_path=metric_path,
-            file_identities=before,
+            file_identities=identities,
         )
-    except PreflightStateError:
-        raise
-    except Exception as error:
-        raise PreflightStateError("state inspection failed") from error
+        return snapshot, metric_store
     finally:
         for ledger in reversed(ledgers):
             ledger.close()
-        for observer in reversed(observers):
-            observer.close()
+
+
+def inspect_preflight_state(
+    *,
+    state_dir: Path,
+    cohort_ids: Collection[str],
+    session: date,
+    benchmark_tickers: Collection[str],
+) -> PreflightStateSnapshot:
+    """Discover exact governed scope through a certified temporary snapshot."""
+    with inspect_and_guard_preflight_state(
+        state_dir=state_dir,
+        cohort_ids=cohort_ids,
+        session=session,
+        benchmark_tickers=benchmark_tickers,
+    ) as (snapshot, _metric_store):
+        return snapshot
 
 
 @contextmanager
@@ -545,98 +816,197 @@ def inspect_and_guard_preflight_state(
     session: date,
     benchmark_tickers: Collection[str],
 ) -> Iterator[tuple[PreflightStateSnapshot, MetricStore | None]]:
-    """Inspect state while one observer set spans discovery and resolution."""
-    target = Path(state_dir)
+    """Hold certified sources while SQLite reads only temporary copies."""
+    if not isinstance(session, date) or not XNYSCalendar().is_session(session):
+        raise PreflightStateError("session is invalid")
+    target = _absolute_path(state_dir)
     cohorts = _canonical_cohorts(cohort_ids)
+    benchmarks = _canonical_tickers(benchmark_tickers)
     metric_path = target / "metrics_v2.sqlite3"
-    expected_ledgers = tuple(target / cohort / "portfolio.db" for cohort in cohorts)
-    all_database_paths = (metric_path, *expected_ledgers)
-    _reject_database_symlinks(all_database_paths)
-    _reject_state_sidecars(target, all_database_paths)
-    observed_paths = tuple(
-        path for path in (metric_path, *expected_ledgers) if os.path.lexists(path)
-    )
-    observers: list[_Observer] = []
-    verification_error: PreflightStateError | None = None
+    ledger_paths = {cohort: target / cohort / "portfolio.db" for cohort in cohorts}
+    database_paths = (metric_path, *ledger_paths.values())
     yielded = False
-    try:
-        observers = [_Observer.open(path) for path in observed_paths]
-        before = tuple(observer.identity() for observer in observers)
-        snapshot = inspect_preflight_state(
-            state_dir=target,
-            cohort_ids=cohorts,
-            session=session,
-            benchmark_tickers=benchmark_tickers,
-        )
-        if tuple(observer.identity() for observer in observers) != before:
-            raise PreflightStateError("state changed during preflight inspection")
-        if snapshot.file_identities:
-            if snapshot.file_identities != before:
-                raise PreflightStateError("state identity is inconsistent")
-            if snapshot.metric_store_path is None:
-                raise PreflightStateError("preflight metric store identity is missing")
-            metric_store = MetricStore.open_existing(
-                snapshot.metric_store_path, immutable=True
+    verification_error: PreflightStateError | None = None
+    with ExitStack() as stack:
+        temporary_dir = Path(
+            stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="eventedge-preflight-state-")
             )
-            if not metric_store.read_only:
-                raise PreflightStateError("governed preflight metric store is writable")
-        else:
-            if observed_paths or snapshot.metric_store_path is not None:
-                raise PreflightStateError(
-                    "uninitialized state identity is inconsistent"
+        )
+        state_directory, directory_chain, missing_directory = stack.enter_context(
+            _certified_directory_chain(target)
+        )
+        cohort_directories: dict[str, _CertifiedDirectory] = {}
+        if state_directory is not None:
+            for cohort in cohorts:
+                cohort_entry = _entry_stat(state_directory, cohort)
+                if cohort_entry is None:
+                    continue
+                if not stat.S_ISDIR(cohort_entry.st_mode):
+                    raise PreflightStateError("state cohort path has invalid type")
+                try:
+                    cohort_directory = _CertifiedDirectory.open_child(
+                        state_directory, cohort, target / cohort
+                    )
+                except FileNotFoundError as error:
+                    raise PreflightStateError(
+                        "state topology changed during certification"
+                    ) from error
+                cohort_directories[cohort] = cohort_directory
+                stack.callback(cohort_directory.close)
+
+        metric_entry = (
+            _entry_stat(state_directory, metric_path.name)
+            if state_directory is not None
+            else None
+        )
+        if metric_entry is not None and not stat.S_ISREG(metric_entry.st_mode):
+            raise PreflightStateError("state file has invalid type")
+        metric_exists = metric_entry is not None
+        existing_ledgers: set[str] = set()
+        for cohort, directory in cohort_directories.items():
+            ledger_entry = _entry_stat(directory, "portfolio.db")
+            if ledger_entry is None:
+                continue
+            if not stat.S_ISREG(ledger_entry.st_mode):
+                raise PreflightStateError("state file has invalid type")
+            existing_ledgers.add(cohort)
+        if _unexpected_ledgers(state_directory, set(cohorts)):
+            raise PreflightStateError("state topology has unexpected cohort ledgers")
+        if metric_exists != bool(existing_ledgers) or (
+            existing_ledgers and existing_ledgers != set(cohorts)
+        ):
+            raise PreflightStateError("state is partially initialized")
+        complete = metric_exists and existing_ledgers == set(cohorts)
+        active_database_paths = database_paths if complete else ()
+        database_parents: dict[Path, _CertifiedDirectory] = {}
+        if complete:
+            if state_directory is None:
+                raise PreflightStateError("state topology is invalid")
+            database_parents[metric_path] = state_directory
+            for cohort, path in ledger_paths.items():
+                database_parents[path] = cohort_directories[cohort]
+
+        copies, sources, sidecars = stack.enter_context(
+            _certified_copies(
+                state_dir=target,
+                database_paths=active_database_paths,
+                database_parents=database_parents,
+                destination_dir=temporary_dir,
+            )
+        )
+        observers: dict[Path, _Observer] = {}
+        try:
+            if complete:
+                for original_path in database_paths:
+                    observer = _Observer.open(copies[original_path])
+                    observers[original_path] = observer
+                    stack.callback(observer.close)
+                observer_before = tuple(
+                    observers[path].identity() for path in database_paths
                 )
-            metric_store = None
+                identities = tuple(
+                    _source_identity(sources[path], observers[path])
+                    for path in database_paths
+                )
+                snapshot, metric_store = _inspect_complete_snapshot(
+                    target=target,
+                    cohorts=cohorts,
+                    benchmarks=benchmarks,
+                    session=session,
+                    metric_path=metric_path,
+                    ledger_paths=ledger_paths,
+                    copies=copies,
+                    observers=observers,
+                    identities=identities,
+                )
+                if tuple(observers[path].identity() for path in database_paths) != (
+                    observer_before
+                ) or tuple(
+                    _source_identity(sources[path], observers[path])
+                    for path in database_paths
+                ) != identities:
+                    raise PreflightStateError(
+                        "state changed during preflight inspection"
+                    )
+            else:
+                if _discovered_sidecars(target):
+                    raise PreflightStateError("SQLite sidecar topology is not safe")
+                prospective = _prospective_epoch_id(target, session, ())
+                snapshot = PreflightStateSnapshot(
+                    state_status="uninitialized",
+                    epoch_id=prospective,
+                    governed_tickers=benchmarks,
+                    cohort_ids_by_ticker={ticker: cohorts for ticker in benchmarks},
+                    metric_store_path=None,
+                    file_identities=(),
+                )
+                metric_store = None
+                observer_before = ()
+        except PreflightStateError:
+            raise
+        except Exception as error:
+            raise PreflightStateError("state inspection failed") from error
         try:
             yielded = True
             yield snapshot, metric_store
         finally:
-            try:
-                expected_existing = {
-                    identity.path.absolute() for identity in snapshot.file_identities
-                }
-                current_existing = {
-                    path.absolute()
-                    for path in (metric_path, *expected_ledgers)
-                    if os.path.lexists(path)
-                }
-                if current_existing != expected_existing or _unexpected_ledgers(
-                    target, set(expected_ledgers)
-                ):
-                    verification_error = PreflightStateError(
-                        "state topology changed during preflight"
+            if yielded:
+                try:
+                    for directory in (
+                        *directory_chain,
+                        *cohort_directories.values(),
+                    ):
+                        try:
+                            directory.verify()
+                        except PreflightStateError as error:
+                            raise PreflightStateError(
+                                "state directory identity changed during preflight"
+                            ) from error
+                    if missing_directory is not None:
+                        missing_parent, missing_name = missing_directory
+                        if _entry_stat(missing_parent, missing_name) is not None:
+                            raise PreflightStateError(
+                                "state topology changed during preflight"
+                            )
+                    expected_existing = (
+                        {_absolute_path(path) for path in database_paths}
+                        if complete
+                        else set()
                     )
-                else:
-                    try:
-                        if (
-                            tuple(observer.identity() for observer in observers)
-                            != before
-                        ):
-                            verification_error = PreflightStateError(
-                                "state changed during preflight"
-                            )
-                        _reject_database_symlinks(all_database_paths)
-                        _reject_state_sidecars(target, all_database_paths)
-                    except PreflightStateError as error:
-                        if "sidecar" in error.reason:
-                            verification_error = PreflightStateError(
-                                "state changed during preflight"
-                            )
-                        else:
-                            verification_error = error
-            except PreflightStateError as error:
-                verification_error = error
-            except Exception:
-                verification_error = PreflightStateError(
-                    "state changed during preflight"
-                )
-    except PreflightStateError:
-        raise
-    except Exception as error:
-        if yielded:
-            raise
-        raise PreflightStateError("state guard failed") from error
-    finally:
-        for observer in reversed(observers):
-            observer.close()
-        if verification_error is not None:
-            raise verification_error
+                    current_existing = {
+                        _absolute_path(path)
+                        for path in database_paths
+                        if os.path.lexists(path)
+                    }
+                    if current_existing != expected_existing or _unexpected_ledgers(
+                        state_directory, set(cohorts)
+                    ):
+                        raise PreflightStateError(
+                            "state topology changed during preflight"
+                        )
+                    for source in sources.values():
+                        try:
+                            source.verify()
+                        except PreflightStateError as error:
+                            raise PreflightStateError(
+                                "state file identity changed during preflight"
+                            ) from error
+                    _verify_sidecars(
+                        state_dir=target,
+                        database_paths=active_database_paths,
+                        certified=sidecars,
+                        during_probe=True,
+                    )
+                    if complete and tuple(
+                        observers[path].identity() for path in database_paths
+                    ) != observer_before:
+                        raise PreflightStateError("state changed during preflight")
+                except PreflightStateError as error:
+                    verification_error = error
+                except Exception:
+                    verification_error = PreflightStateError(
+                        "state changed during preflight"
+                    )
+                if verification_error is not None:
+                    raise verification_error

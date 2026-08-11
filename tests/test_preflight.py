@@ -455,6 +455,7 @@ class TestGovernedPreflight:
             "unbound_reconstruction",
             "healthy_bound",
             "malformed_summary_identity",
+            "untrusted_source",
         ),
     )
     def test_resolution_must_be_concrete_complete_and_internally_bound(
@@ -531,6 +532,12 @@ class TestGovernedPreflight:
                     "SPY", source="yfinance-60m-reconstruction"
                 )
                 summaries[0]["evidence_digest"] = "raw-provider-secret"
+            elif variant == "untrusted_source":
+                recovery_bars["SPY"] = self._bar(
+                    "SPY", source="raw-provider-secret"
+                )
+                bindings = {}
+                summaries = ()
             resolution = GovernedInputResolution(
                 recovery_bars, bindings, summaries, {}
             )
