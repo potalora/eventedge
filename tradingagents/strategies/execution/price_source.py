@@ -7,6 +7,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
 
@@ -86,6 +87,12 @@ class GovernedDailyBarAttempt:
     raw_ohlc: Mapping[str, Decimal] | None
     validation_error: str | None
 
+    def __post_init__(self) -> None:
+        if self.raw_ohlc is not None:
+            object.__setattr__(
+                self, "raw_ohlc", MappingProxyType(dict(self.raw_ohlc))
+            )
+
 
 @dataclass(frozen=True)
 class IntradayBarEvidence:
@@ -121,6 +128,12 @@ class GovernedDailyBarResolution:
     attempts: Mapping[str, GovernedDailyBarAttempt]
     recoveries: Mapping[str, GovernedBarRecoveryEvidence]
     failure_map: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        for field in ("bars", "attempts", "recoveries", "failure_map"):
+            object.__setattr__(
+                self, field, MappingProxyType(dict(getattr(self, field)))
+            )
 
 
 class PriceSource(Protocol):
@@ -321,12 +334,13 @@ class YFinancePriceSource:
                 raise TypeError("daily provider result must be a DataFrame")
             validation_at = max(processed_at, self._fetched_at())
         except Exception:
+            detected_at = self._safe_fetched_at()
             attempts = {
                 ticker: GovernedDailyBarAttempt(
                     ticker=ticker,
                     session=session,
                     source="yfinance",
-                    fetched_at=processed_at,
+                    fetched_at=detected_at,
                     raw_ohlc=None,
                     validation_error=_governed_failure("invalid", ticker, session),
                 )
@@ -418,6 +432,12 @@ class YFinancePriceSource:
                 ticker, session, "yfinance", fetched_at, None, invalid
             )
         assert timestamp is not None
+        try:
+            _require_single_ticker_daily_provenance(frame, ticker)
+        except BarValidationError:
+            return None, GovernedDailyBarAttempt(
+                ticker, session, "yfinance", fetched_at, None, invalid
+            )
         normalized_ticker = normalize_tickers([ticker])[0]
         raw_ohlc: dict[str, Decimal] = {}
         for field in ("Open", "High", "Low", "Close"):
@@ -444,22 +464,22 @@ class YFinancePriceSource:
             fetched_at=fetched_at,
             adjusted=False,
         )
-        validation_error: str | None = None
-        try:
-            validate_required_bars(
-                {(ticker, session): bar},
-                {ticker},
-                session,
-                processed_at,
-                max_age,
-            )
-        except BarValidationError as exc:
-            if str(exc) == _governed_failure("incoherent", ticker, session):
-                validation_error = str(exc)
-            else:
-                validation_error = invalid
-        if validation_error is None and fetched_at < session_close(session):
-            validation_error = invalid
+        validation_error: str | None = invalid
+        if fetched_at >= session_close(session):
+            validation_error = None
+            try:
+                validate_required_bars(
+                    {(ticker, session): bar},
+                    {ticker},
+                    session,
+                    processed_at,
+                    max_age,
+                )
+            except BarValidationError as exc:
+                if str(exc) == _governed_failure("incoherent", ticker, session):
+                    validation_error = str(exc)
+                else:
+                    validation_error = invalid
         return bar, GovernedDailyBarAttempt(
             ticker=ticker,
             session=session,
@@ -917,6 +937,12 @@ class YFinancePriceSource:
             raise ValueError("now must return a timezone-aware datetime")
         return fetched_at.astimezone(timezone.utc)
 
+    def _safe_fetched_at(self) -> datetime:
+        try:
+            return self._fetched_at()
+        except Exception:
+            return datetime.now(timezone.utc)
+
 
 def _session_date(value: object) -> date:
     return pd.Timestamp(value).date()
@@ -964,6 +990,24 @@ def _validated_governed_daily_index(
     if len(sessions) != 1 or sessions[0] != session:
         return None, "invalid"
     return frame.index[0], None
+
+
+def _require_single_ticker_daily_provenance(
+    frame: pd.DataFrame, ticker: str
+) -> None:
+    if not isinstance(frame.columns, pd.MultiIndex):
+        return
+    aliases = {ticker, normalize_tickers([ticker])[0]}
+    for field in ("Open", "High", "Low", "Close"):
+        matches = [
+            column
+            for column in frame.columns
+            if len(column) >= 2
+            and column[0] == field
+            and str(column[1]) in aliases
+        ]
+        if len(matches) != 1:
+            raise BarValidationError("invalid daily provenance")
 
 
 def _governed_failure(kind: str, ticker: str, session: date) -> str:

@@ -315,6 +315,7 @@ def test_governed_resolver_reconstructs_exact_ess_incident(mock_download):
         fetched_at=_GOVERNED_FETCHED_AT,
         adjusted=False,
     )
+    assert resolution.bars["ESS"].adjusted is False
     assert resolution.failure_map == {}
     assert resolution.attempts["ESS"].validation_error == (
         "incoherent ESS/2026-08-10"
@@ -324,6 +325,7 @@ def test_governed_resolver_reconstructs_exact_ess_incident(mock_download):
     assert recovery.observed_starts == recovery.expected_starts
     assert len(recovery.intraday_bars) == 7
     intraday_kwargs = mock_download.call_args_list[1].kwargs
+    assert mock_download.call_args_list[0].kwargs["auto_adjust"] is False
     assert intraday_kwargs == {
         "start": "2026-08-10",
         "end": "2026-08-11",
@@ -525,6 +527,27 @@ def test_governed_daily_noncoherence_failures_never_fetch_intraday(
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_governed_preclose_incoherent_daily_never_fetches_intraday(mock_download):
+    before_close = datetime(2026, 8, 10, 19, 59, tzinfo=timezone.utc)
+    after_close = datetime(2026, 8, 10, 20, 0, 1, tzinfo=timezone.utc)
+    clock = [before_close, after_close]
+    mock_download.return_value = _daily_frame({"ESS": _ESS_DAILY})
+
+    resolution = YFinancePriceSource(
+        now=lambda: clock.pop(0)
+    ).resolve_governed_daily_bars(
+        ["ESS"],
+        _GOVERNED_SESSION,
+        processed_at=before_close - timedelta(minutes=1),
+    )
+
+    assert resolution.bars == {}
+    assert resolution.recoveries == {}
+    assert resolution.failure_map == {"ESS": "invalid ESS/2026-08-10"}
+    assert mock_download.call_count == 1
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_governed_ambiguous_batch_identity_never_fetches_intraday(mock_download):
     mock_download.return_value = pd.DataFrame(
         [[100, 103, 99, 102]],
@@ -544,6 +567,50 @@ def test_governed_ambiguous_batch_identity_never_fetches_intraday(mock_download)
         "ESS": "invalid ESS/2026-08-10",
         "IBM": "invalid IBM/2026-08-10",
     }
+    assert mock_download.call_count == 1
+
+
+@pytest.mark.parametrize("provenance", ["alias-conflict", "duplicate", "absent"])
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_governed_daily_multiindex_requires_exact_alias_provenance(
+    mock_download, provenance: str
+):
+    ticker = "BRK/B"
+    if provenance == "alias-conflict":
+        frame = _daily_frame({ticker: _ESS_DAILY, "BRK-B": _ESS_DAILY})
+    elif provenance == "duplicate":
+        columns = pd.MultiIndex.from_tuples(
+            [
+                (field, ticker)
+                for field in ("Open", "High", "Low", "Close")
+                for _ in range(2)
+            ]
+        )
+        values = [
+            value
+            for field in ("Open", "High", "Low", "Close")
+            for value in (_ESS_DAILY[field], _ESS_DAILY[field])
+        ]
+        frame = pd.DataFrame(
+            [values],
+            index=pd.DatetimeIndex([_GOVERNED_SESSION.isoformat()]),
+            columns=columns,
+        )
+    else:
+        frame = _daily_frame({"OTHER": _ESS_DAILY})
+    mock_download.return_value = frame
+
+    resolution = YFinancePriceSource(
+        now=lambda: _GOVERNED_FETCHED_AT
+    ).resolve_governed_daily_bars(
+        [ticker],
+        _GOVERNED_SESSION,
+        processed_at=_GOVERNED_PROCESSED_AT,
+    )
+
+    assert resolution.bars == {}
+    assert resolution.recoveries == {}
+    assert resolution.failure_map == {ticker: f"invalid {ticker}/2026-08-10"}
     assert mock_download.call_count == 1
 
 
@@ -647,6 +714,39 @@ def test_governed_provider_exception_is_normalized_and_attempted_once(mock_downl
         resolution.recoveries["ESS"].validation_error or ""
     )
     assert mock_download.call_count == 2
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_governed_initial_provider_failure_uses_detection_timestamp(mock_download):
+    processed_at = datetime(2026, 8, 10, 20, tzinfo=timezone.utc)
+    detected_at = datetime(2026, 8, 10, 20, 0, 5, tzinfo=timezone.utc)
+    mock_download.side_effect = RuntimeError("provider unavailable")
+
+    resolution = YFinancePriceSource(now=lambda: detected_at).resolve_governed_daily_bars(
+        ["ESS"], _GOVERNED_SESSION, processed_at=processed_at
+    )
+
+    assert resolution.attempts["ESS"].fetched_at == detected_at
+    assert resolution.attempts["ESS"].fetched_at != processed_at
+    assert resolution.failure_map == {"ESS": "invalid ESS/2026-08-10"}
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_governed_resolution_evidence_maps_are_deeply_immutable(mock_download):
+    resolution = _resolve_ess(mock_download, _hourly_frame())
+    attempt = resolution.attempts["ESS"]
+    assert attempt.raw_ohlc is not None
+
+    mutations = (
+        (resolution.bars, "OTHER", resolution.bars["ESS"]),
+        (resolution.attempts, "OTHER", attempt),
+        (resolution.recoveries, "OTHER", resolution.recoveries["ESS"]),
+        (resolution.failure_map, "OTHER", "invalid OTHER/2026-08-10"),
+        (attempt.raw_ohlc, "open", Decimal("1")),
+    )
+    for mapping, key, value in mutations:
+        with pytest.raises(TypeError):
+            mapping[key] = value  # type: ignore[index]
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")
