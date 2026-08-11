@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import sqlite3
+import stat
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -64,41 +66,109 @@ class PreflightStateSnapshot:
 @dataclass
 class _Observer:
     path: Path
+    fd: int
     connection: sqlite3.Connection
 
     @classmethod
     def open(cls, path: Path) -> _Observer:
-        target = Path(path)
+        target = Path(path).absolute()
+        _reject_sqlite_sidecars((target,))
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
+            fd = os.open(target, flags)
+        except OSError as error:
+            if error.errno == errno.ELOOP or target.is_symlink():
+                raise PreflightStateError(
+                    "state database symlink is invalid"
+                ) from error
+            raise
+        try:
+            _require_fd_path_identity(target, fd)
             connection = sqlite3.connect(
-                f"{target.resolve().as_uri()}?mode=ro",
+                f"{target.as_uri()}?mode=ro&immutable=1",
                 uri=True,
                 isolation_level=None,
             )
             connection.execute("PRAGMA query_only=ON")
             connection.execute("SELECT 1").fetchone()
+            _require_fd_path_identity(target, fd)
+            _reject_sqlite_sidecars((target,))
         except BaseException:
             if "connection" in locals():
                 connection.close()
+            os.close(fd)
             raise
-        return cls(target, connection)
+        return cls(target, fd, connection)
 
     def identity(self) -> PreflightFileIdentity:
-        stat = self.path.stat()
+        _reject_sqlite_sidecars((self.path,))
+        file_stat = _require_fd_path_identity(self.path, self.fd)
         row = self.connection.execute("PRAGMA data_version").fetchone()
         if row is None:
             raise PreflightStateError("state data version is unavailable")
         return PreflightFileIdentity(
             path=self.path,
-            dev=stat.st_dev,
-            ino=stat.st_ino,
-            size=stat.st_size,
-            mtime_ns=stat.st_mtime_ns,
+            dev=file_stat.st_dev,
+            ino=file_stat.st_ino,
+            size=file_stat.st_size,
+            mtime_ns=file_stat.st_mtime_ns,
             data_version=int(row[0]),
         )
 
     def close(self) -> None:
-        self.connection.close()
+        try:
+            self.connection.close()
+        finally:
+            os.close(self.fd)
+
+
+def _sqlite_sidecars(path: Path) -> tuple[Path, ...]:
+    return tuple(Path(f"{path}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
+
+
+def _reject_sqlite_sidecars(paths: Collection[Path]) -> None:
+    if any(
+        os.path.lexists(sidecar) for path in paths for sidecar in _sqlite_sidecars(path)
+    ):
+        raise PreflightStateError("SQLite sidecar state is not safe for preflight")
+
+
+def _reject_state_sidecars(state_dir: Path, paths: Collection[Path]) -> None:
+    _reject_sqlite_sidecars(paths)
+    if not state_dir.is_dir():
+        return
+    candidates = (
+        *state_dir.glob("metrics_v2.sqlite3-*"),
+        *state_dir.glob("*/portfolio.db-*"),
+    )
+    if any(
+        candidate.name.endswith(("-wal", "-shm", "-journal"))
+        and os.path.lexists(candidate)
+        for candidate in candidates
+    ):
+        raise PreflightStateError("SQLite sidecar state is not safe for preflight")
+
+
+def _reject_database_symlinks(paths: Collection[Path]) -> None:
+    if any(os.path.lexists(path) and path.is_symlink() for path in paths):
+        raise PreflightStateError("state database symlink is invalid")
+
+
+def _require_fd_path_identity(path: Path, fd: int) -> os.stat_result:
+    fd_stat = os.fstat(fd)
+    if not stat.S_ISREG(fd_stat.st_mode):
+        raise PreflightStateError("state database is not a regular file")
+    try:
+        path_stat = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise PreflightStateError("state database identity changed") from error
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise PreflightStateError("state database symlink is invalid")
+    if (path_stat.st_dev, path_stat.st_ino) != (fd_stat.st_dev, fd_stat.st_ino):
+        raise PreflightStateError("state database identity changed")
+    return fd_stat
 
 
 def _canonical_text(value: object, label: str) -> str:
@@ -146,10 +216,6 @@ def _ticker(value: object) -> str:
     if len(result) > 64 or raw != result:
         raise PreflightStateError("governed ticker is invalid")
     return result
-
-
-def _identity_equal(left: PreflightFileIdentity, right: PreflightFileIdentity) -> bool:
-    return left == right
 
 
 def _prospective_epoch_id(
@@ -347,6 +413,9 @@ def inspect_preflight_state(
     metric_path = target / "metrics_v2.sqlite3"
     ledger_paths = {cohort: target / cohort / "portfolio.db" for cohort in cohorts}
     expected_ledgers = set(ledger_paths.values())
+    all_database_paths = (metric_path, *ledger_paths.values())
+    _reject_database_symlinks(all_database_paths)
+    _reject_state_sidecars(target, all_database_paths)
 
     metric_exists = os.path.lexists(metric_path)
     existing_ledgers = {
@@ -380,7 +449,7 @@ def inspect_preflight_state(
             observer_by_cohort[cohort] = observer
         before = tuple(observer.identity() for observer in observers)
 
-        metric_store = MetricStore.open_existing(metric_path)
+        metric_store = MetricStore.open_existing(metric_path, immutable=True)
         epochs = _load_epochs(metric_store, metric_observer)
         epoch_id, state_status = _select_epoch(
             state_dir=target, session=session, epochs=epochs
@@ -391,7 +460,7 @@ def inspect_preflight_state(
         }
         invalid_reasons: dict[str, str] = {}
         for cohort in cohorts:
-            ledger = PortfolioLedger.open_existing(ledger_paths[cohort])
+            ledger = PortfolioLedger.open_existing(ledger_paths[cohort], immutable=True)
             ledgers.append(ledger)
             if ledger.cohort_id != cohort:
                 raise PreflightStateError("ledger cohort identity is inconsistent")
@@ -481,6 +550,9 @@ def inspect_and_guard_preflight_state(
     cohorts = _canonical_cohorts(cohort_ids)
     metric_path = target / "metrics_v2.sqlite3"
     expected_ledgers = tuple(target / cohort / "portfolio.db" for cohort in cohorts)
+    all_database_paths = (metric_path, *expected_ledgers)
+    _reject_database_symlinks(all_database_paths)
+    _reject_state_sidecars(target, all_database_paths)
     observed_paths = tuple(
         path for path in (metric_path, *expected_ledgers) if os.path.lexists(path)
     )
@@ -503,7 +575,9 @@ def inspect_and_guard_preflight_state(
                 raise PreflightStateError("state identity is inconsistent")
             if snapshot.metric_store_path is None:
                 raise PreflightStateError("preflight metric store identity is missing")
-            metric_store = MetricStore.open_existing(snapshot.metric_store_path)
+            metric_store = MetricStore.open_existing(
+                snapshot.metric_store_path, immutable=True
+            )
             if not metric_store.read_only:
                 raise PreflightStateError("governed preflight metric store is writable")
         else:
@@ -517,10 +591,6 @@ def inspect_and_guard_preflight_state(
             yield snapshot, metric_store
         finally:
             try:
-                if tuple(observer.identity() for observer in observers) != before:
-                    verification_error = PreflightStateError(
-                        "state changed during preflight"
-                    )
                 expected_existing = {
                     identity.path.absolute() for identity in snapshot.file_identities
                 }
@@ -535,6 +605,26 @@ def inspect_and_guard_preflight_state(
                     verification_error = PreflightStateError(
                         "state topology changed during preflight"
                     )
+                else:
+                    try:
+                        if (
+                            tuple(observer.identity() for observer in observers)
+                            != before
+                        ):
+                            verification_error = PreflightStateError(
+                                "state changed during preflight"
+                            )
+                        _reject_database_symlinks(all_database_paths)
+                        _reject_state_sidecars(target, all_database_paths)
+                    except PreflightStateError as error:
+                        if "sidecar" in error.reason:
+                            verification_error = PreflightStateError(
+                                "state changed during preflight"
+                            )
+                        else:
+                            verification_error = error
+            except PreflightStateError as error:
+                verification_error = error
             except Exception:
                 verification_error = PreflightStateError(
                     "state changed during preflight"
@@ -544,52 +634,6 @@ def inspect_and_guard_preflight_state(
     except Exception as error:
         if yielded:
             raise
-        raise PreflightStateError("state guard failed") from error
-    finally:
-        for observer in reversed(observers):
-            observer.close()
-        if verification_error is not None:
-            raise verification_error
-
-
-@contextmanager
-def guard_preflight_state(
-    snapshot: PreflightStateSnapshot,
-) -> Iterator[MetricStore | None]:
-    """Hold RO observers across governed resolution and reject concurrent writes."""
-    if not snapshot.file_identities:
-        if snapshot.metric_store_path is not None:
-            raise PreflightStateError("preflight snapshot identity is incomplete")
-        yield None
-        return
-
-    observers: list[_Observer] = []
-    verification_error: PreflightStateError | None = None
-    try:
-        for expected in snapshot.file_identities:
-            observer = _Observer.open(expected.path)
-            observers.append(observer)
-            if not _identity_equal(observer.identity(), expected):
-                raise PreflightStateError("state changed before governed preflight")
-        if snapshot.metric_store_path is None:
-            raise PreflightStateError("preflight metric store identity is missing")
-        metric_store = MetricStore.open_existing(snapshot.metric_store_path)
-        if not metric_store.read_only:
-            raise PreflightStateError("governed preflight metric store is writable")
-        try:
-            yield metric_store
-        finally:
-            for expected, observer in zip(
-                snapshot.file_identities, observers, strict=True
-            ):
-                if not _identity_equal(observer.identity(), expected):
-                    verification_error = PreflightStateError(
-                        "state changed during preflight"
-                    )
-                    break
-    except PreflightStateError:
-        raise
-    except Exception as error:
         raise PreflightStateError("state guard failed") from error
     finally:
         for observer in reversed(observers):

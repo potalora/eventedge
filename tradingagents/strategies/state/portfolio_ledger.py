@@ -534,13 +534,18 @@ class PortfolioLedger:
         )
 
     @classmethod
-    def open_existing(cls, path: Path) -> PortfolioLedger:
+    def open_existing(cls, path: Path, *, immutable: bool = False) -> PortfolioLedger:
         """Open an initialized ledger without running any write initializer."""
         path = Path(path)
         if not os.path.lexists(path):
             raise FileNotFoundError(path)
+        uri = (
+            f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+            if immutable
+            else f"file:{path}?mode=ro"
+        )
         connection = sqlite3.connect(
-            f"file:{path}?mode=ro", uri=True, isolation_level=None
+            uri, uri=True, isolation_level=None
         )
         connection.row_factory = sqlite3.Row
         try:

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -129,6 +130,7 @@ class MetricStore:
         self.path = Path(path)
         self._calendar = XNYSCalendar()
         self._read_only = False
+        self._immutable = False
         self._has_candidate_bar_recoveries = True
         self._has_candidate_signal_identity_bindings = True
         self._has_governed_bar_recoveries = True
@@ -137,7 +139,9 @@ class MetricStore:
             connection.executescript(_SCHEMA)
 
     @classmethod
-    def open_existing(cls, path: str | Path) -> "MetricStore":
+    def open_existing(
+        cls, path: str | Path, *, immutable: bool = False
+    ) -> "MetricStore":
         """Open an existing metric store without schema or journal mutations."""
         target = Path(path)
         if not target.is_file():
@@ -146,6 +150,7 @@ class MetricStore:
         store.path = target
         store._calendar = XNYSCalendar()
         store._read_only = True
+        store._immutable = bool(immutable)
         with store._connect() as connection:
             tables = {
                 row[0]
@@ -172,11 +177,20 @@ class MetricStore:
     def read_only(self) -> bool:
         return self._read_only
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._read_only:
             encoded = quote(str(self.path.resolve()), safe="/")
-            return sqlite3.connect(f"file:{encoded}?mode=ro", uri=True)
-        return sqlite3.connect(self.path)
+            immutable = "&immutable=1" if self._immutable else ""
+            connection = sqlite3.connect(f"file:{encoded}?mode=ro{immutable}", uri=True)
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            connection = sqlite3.connect(self.path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _json(record: object) -> str:

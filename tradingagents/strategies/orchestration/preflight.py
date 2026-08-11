@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 _PREFLIGHT_MODES = frozenset({"screen", "governed", "all"})
 _MAX_RECOVERY_SUMMARIES = 64
 _MAX_REPORT_TEXT = 4_096
+_LOWER_HEX = frozenset("0123456789abcdef")
 
 
 def run_preflight(
@@ -58,7 +59,7 @@ def run_preflight(
     mode: str = "screen",
     price_source: Any | None = None,
     processed_at: datetime | None = None,
-    state_inspector: Any | None = None,
+    state_context_factory: Any | None = None,
     governed_resolver: Any | None = None,
 ) -> dict[str, Any]:
     """Run the selected screen and/or read-only governed-data checks."""
@@ -80,15 +81,20 @@ def run_preflight(
             "ok": True,
         }
     )
+    if mode in {"screen", "all"}:
+        report["screen_ok"] = bool(report["ok"])
+        report["screen_failures"] = list(report["failures"])
     if mode in {"governed", "all"}:
         governed_report = _run_governed_preflight(
             config,
             session,
             price_source=price_source,
             processed_at=processed_at,
-            state_inspector=state_inspector,
+            state_context_factory=state_context_factory,
             governed_resolver=governed_resolver,
         )
+        report["governed_ok"] = bool(governed_report["ok"])
+        report["governed_failures"] = list(governed_report["failures"])
         report.update(
             {
                 key: value
@@ -104,6 +110,8 @@ def run_preflight(
 def _bounded_recovery_summaries(
     summaries: tuple[Any, ...],
 ) -> list[dict[str, Any]]:
+    if len(summaries) > _MAX_RECOVERY_SUMMARIES:
+        raise ValueError("governed recovery summaries are unbounded")
     bounded: list[dict[str, Any]] = []
     fields = (
         "ticker",
@@ -112,7 +120,7 @@ def _bounded_recovery_summaries(
         "contract_version",
         "evidence_digest",
     )
-    for summary in summaries[:_MAX_RECOVERY_SUMMARIES]:
+    for summary in summaries:
         row: dict[str, Any] = {}
         for field in fields:
             value = summary.get(field)
@@ -133,6 +141,116 @@ def _bounded_recovery_summaries(
         row["affected_cohort_ids"] = list(normalized)
         bounded.append(row)
     return bounded
+
+
+def _canonical_failure_map(tickers: tuple[str, ...], session: date) -> dict[str, str]:
+    return {ticker: f"invalid {ticker}/{session.isoformat()}" for ticker in tickers}
+
+
+def _normalized_failure(ticker: str, session: date, reason: object) -> bool:
+    if not isinstance(reason, str) or len(reason) > _MAX_REPORT_TEXT:
+        return False
+    kind, separator, scope = reason.partition(" ")
+    return (
+        bool(separator)
+        and kind in {"missing", "incoherent", "invalid", "invalid_benchmark"}
+        and scope == f"{ticker}/{session.isoformat()}"
+    )
+
+
+def _fixed_digest(value: object, prefix: str) -> bool:
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return False
+    suffix = value.removeprefix(prefix)
+    return len(suffix) == 64 and all(character in _LOWER_HEX for character in suffix)
+
+
+def _validate_governed_resolution(
+    resolution: Any,
+    *,
+    snapshot: Any,
+    session: date,
+    processed_at: datetime,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    from tradingagents.strategies.execution.models import MarketBar
+    from tradingagents.strategies.execution.price_source import (
+        validate_required_bars,
+    )
+    from tradingagents.strategies.metrics.models import (
+        GOVERNED_BAR_RECOVERY_CONTRACT,
+    )
+    from tradingagents.strategies.orchestration.governed_market_data import (
+        GovernedInputResolution,
+        GovernedRecoveryBinding,
+    )
+    from tradingagents.strategies.orchestration.trading_calendar import session_close
+
+    if type(resolution) is not GovernedInputResolution:
+        raise ValueError("governed resolution type is invalid")
+    expected = set(snapshot.governed_tickers)
+    bars = set(resolution.bars)
+    failures = set(resolution.failure_map)
+    if (
+        not expected
+        or bars & failures
+        or bars | failures != expected
+        or not bars.issubset(expected)
+        or not failures.issubset(expected)
+    ):
+        raise ValueError("governed resolution scope is invalid")
+    for ticker in sorted(failures):
+        if not _normalized_failure(ticker, session, resolution.failure_map[ticker]):
+            raise ValueError("governed failure is invalid")
+    raw_bars: dict[tuple[str, date], MarketBar] = {}
+    for ticker in sorted(bars):
+        bar = resolution.bars[ticker]
+        if type(bar) is not MarketBar or bar.ticker != ticker or bar.session != session:
+            raise ValueError("governed bar identity is invalid")
+        if bar.fetched_at < session_close(session):
+            raise ValueError("governed bar predates the session close")
+        raw_bars[(ticker, session)] = bar
+    validate_required_bars(raw_bars, bars, session, processed_at)
+    reconstructed = {
+        ticker
+        for ticker in bars
+        if resolution.bars[ticker].source == "yfinance-60m-reconstruction"
+    }
+    if set(resolution.recovery_bindings) != reconstructed:
+        raise ValueError("governed recovery binding source is invalid")
+
+    recoveries = _bounded_recovery_summaries(resolution.recovery_summaries)
+    summary_by_ticker: dict[str, dict[str, Any]] = {}
+    for summary in recoveries:
+        ticker = summary["ticker"]
+        if (
+            ticker in summary_by_ticker
+            or ticker not in bars
+            or summary["session"] != session.isoformat()
+            or summary["contract_version"] != GOVERNED_BAR_RECOVERY_CONTRACT
+            or not _fixed_digest(
+                summary["recovery_id"], "governed_bar_recovery:"
+            )
+            or not _fixed_digest(summary["evidence_digest"], "sha256:")
+            or tuple(summary["affected_cohort_ids"])
+            != snapshot.cohort_ids_by_ticker[ticker]
+        ):
+            raise ValueError("governed recovery summary scope is invalid")
+        summary_by_ticker[ticker] = summary
+    if set(resolution.recovery_bindings) != set(summary_by_ticker):
+        raise ValueError("governed recovery binding scope is invalid")
+    for ticker, binding in resolution.recovery_bindings.items():
+        summary = summary_by_ticker[ticker]
+        if (
+            type(binding) is not GovernedRecoveryBinding
+            or binding.ticker != ticker
+            or binding.recovery_id != summary["recovery_id"]
+            or binding.contract_version != summary["contract_version"]
+            or binding.evidence_digest != summary["evidence_digest"]
+        ):
+            raise ValueError("governed recovery binding is invalid")
+    return recoveries, {
+        ticker: resolution.failure_map[ticker] for ticker in sorted(failures)
+    }
 
 
 def _governed_snapshot_report(
@@ -175,7 +293,6 @@ def _governed_snapshot_report(
         from tradingagents.strategies.execution.price_source import YFinancePriceSource
 
         price_source = YFinancePriceSource()
-    caught_governed_error = False
     try:
         resolution = resolve(
             price_source=price_source,
@@ -187,49 +304,39 @@ def _governed_snapshot_report(
             processed_at=now,
             persist=False,
         )
-        recoveries = _bounded_recovery_summaries(resolution.recovery_summaries)
-        failure_map = dict(sorted(resolution.failure_map.items()))
-        governed = set(snapshot.governed_tickers)
-        if any(
-            row["ticker"] not in governed
-            or row["session"] != session.isoformat()
-            or tuple(row["affected_cohort_ids"])
-            != snapshot.cohort_ids_by_ticker[row["ticker"]]
-            for row in recoveries
-        ):
-            raise ValueError("governed recovery summary scope is invalid")
-        if any(
-            ticker not in governed
-            or not isinstance(reason, str)
-            or not reason
-            or len(reason) > _MAX_REPORT_TEXT
-            for ticker, reason in failure_map.items()
-        ):
-            raise ValueError("governed failure map is invalid")
+        recoveries, failure_map = _validate_governed_resolution(
+            resolution,
+            snapshot=snapshot,
+            session=session,
+            processed_at=now,
+        )
     except GovernedMarketDataError as error:
-        caught_governed_error = True
         recoveries = []
-        failure_map = dict(sorted(error.failure_map.items()))
+        try:
+            raw_failures = dict(error.failure_map)
+        except Exception:
+            raw_failures = {}
+        governed = set(snapshot.governed_tickers)
+        if (
+            not raw_failures
+            or not set(raw_failures).issubset(governed)
+            or any(
+                not _normalized_failure(ticker, session, reason)
+                for ticker, reason in raw_failures.items()
+            )
+        ):
+            failure_map = _canonical_failure_map(snapshot.governed_tickers, session)
+        else:
+            failure_map = {
+                ticker: raw_failures.get(
+                    ticker, f"invalid {ticker}/{session.isoformat()}"
+                )
+                for ticker in snapshot.governed_tickers
+            }
     except PreflightStateError:
         raise
     except Exception:
-        failure_map = {
-            ticker: f"invalid {ticker}/{session.isoformat()}"
-            for ticker in snapshot.governed_tickers
-        }
-        recoveries = []
-    governed = set(snapshot.governed_tickers)
-    if (caught_governed_error and not failure_map) or any(
-        ticker not in governed
-        or not isinstance(reason, str)
-        or not reason
-        or len(reason) > _MAX_REPORT_TEXT
-        for ticker, reason in failure_map.items()
-    ):
-        failure_map = {
-            ticker: f"invalid {ticker}/{session.isoformat()}"
-            for ticker in snapshot.governed_tickers
-        }
+        failure_map = _canonical_failure_map(snapshot.governed_tickers, session)
         recoveries = []
     base["governed_bar_recoveries"] = recoveries
     base["governed_failure_map"] = failure_map
@@ -255,7 +362,7 @@ def _run_governed_preflight(
     *,
     price_source: Any | None,
     processed_at: datetime | None,
-    state_inspector: Any | None,
+    state_context_factory: Any | None,
     governed_resolver: Any | None,
 ) -> dict[str, Any]:
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -266,10 +373,8 @@ def _run_governed_preflight(
     )
     from tradingagents.strategies.orchestration.preflight_state import (
         PreflightStateError,
-        guard_preflight_state,
         inspect_and_guard_preflight_state,
     )
-    from tradingagents.strategies.orchestration.trading_calendar import session_close
 
     now = processed_at or datetime.now(timezone.utc)
     if now.tzinfo is None or now.utcoffset() is None:
@@ -291,43 +396,13 @@ def _run_governed_preflight(
         "ok": False,
     }
     try:
-        if state_inspector is None:
-            with inspect_and_guard_preflight_state(
-                state_dir=state_dir,
-                cohort_ids=cohort_ids,
-                session=session,
-                benchmark_tickers=benchmarks,
-            ) as (snapshot, metric_store):
-                result = _governed_snapshot_report(
-                    base,
-                    snapshot=snapshot,
-                    metric_store=metric_store,
-                    session=session,
-                    now=now,
-                    price_source=price_source,
-                    resolve=resolve,
-                )
-            return result
-
-        snapshot = state_inspector(
+        context_factory = state_context_factory or inspect_and_guard_preflight_state
+        with context_factory(
             state_dir=state_dir,
             cohort_ids=cohort_ids,
             session=session,
             benchmark_tickers=benchmarks,
-        )
-        if snapshot.state_status == "state_already_invalid" or now < session_close(
-            session
-        ):
-            return _governed_snapshot_report(
-                base,
-                snapshot=snapshot,
-                metric_store=None,
-                session=session,
-                now=now,
-                price_source=price_source,
-                resolve=resolve,
-            )
-        with guard_preflight_state(snapshot) as metric_store:
+        ) as (snapshot, metric_store):
             result = _governed_snapshot_report(
                 base,
                 snapshot=snapshot,
@@ -343,6 +418,7 @@ def _run_governed_preflight(
         base["governed_probe_status"] = "failed"
         base["governed_bar_recoveries"] = []
         base["governed_failure_map"] = {}
+        base["failures"] = []
         base["failures"].append(
             {
                 "horizon": None,
