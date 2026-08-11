@@ -156,13 +156,10 @@ def test_governed_bar_recovery_rejects_unequal_evidence_in_the_same_scope(
     with pytest.raises(ValueError, match="unequal payload"):
         store.save_governed_bar_recovery(
             GovernedBarRecoveryRecord.create(
-                **{
-                    **record.evidence_fields(),
-                    "reconstructed_bar": {
-                        **record.reconstructed_bar,
-                        "close": 283.0,
-                    },
-                }
+                    **{
+                        **record.evidence_fields(),
+                        "affected_cohort_ids": ("horizon_30d_size_10k",),
+                    }
             )
         )
 
@@ -264,6 +261,277 @@ def test_open_existing_missing_governed_table_returns_no_record_without_migratio
 
 def test_governed_recovery_storage_does_not_change_metrics_schema_version() -> None:
     assert METRIC_SCHEMA_VERSION == 2
+
+
+def _recreate_governed_record(
+    record: GovernedBarRecoveryRecord, **changes: object
+) -> GovernedBarRecoveryRecord:
+    fields = record.evidence_fields()
+    fields.update(changes)
+    return GovernedBarRecoveryRecord.create(**fields)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "high": 300.0,
+                }
+            },
+            "original daily evidence is coherent",
+        ),
+        ({"original_validation_error": "incoherent ESS/2026/08/10"}, "reason"),
+        (
+            {"expected_starts": governed_recovery_record("epoch-1").expected_starts[:-1]},
+            "starts",
+        ),
+        (
+            {
+                "reconstructed_bar": {
+                    **governed_recovery_record("epoch-1").reconstructed_bar,
+                    "high": 280.0,
+                }
+            },
+            "reconstructed",
+        ),
+        (
+            {
+                "reconstructed_bar": {
+                    **governed_recovery_record("epoch-1").reconstructed_bar,
+                    "source": "other",
+                }
+            },
+            "source",
+        ),
+        ({"final_validation_error": "still invalid"}, "final validation"),
+    ],
+)
+def test_governed_storage_accepts_only_complete_accepted_reconstructions(
+    tmp_path, changes: dict[str, object], error: str
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+
+    with pytest.raises(ValueError, match=error):
+        store.save_governed_bar_recovery(
+            _recreate_governed_record(governed_recovery_record("epoch-1"), **changes)
+        )
+
+
+@pytest.mark.parametrize("field_value", [True, 0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("evidence_kind", ["original", "reconstructed", "intraday"])
+def test_governed_storage_rejects_invalid_ohlc_values_with_value_error(
+    tmp_path, evidence_kind: str, field_value: object
+) -> None:
+    record = governed_recovery_record("epoch-1")
+    fields = record.evidence_fields()
+    if evidence_kind == "original":
+        fields["original_daily"] = {**record.original_daily, "open": field_value}
+    elif evidence_kind == "reconstructed":
+        fields["reconstructed_bar"] = {
+            **record.reconstructed_bar,
+            "open": field_value,
+        }
+    else:
+        fields["intraday_rows"] = (
+            {**record.intraday_rows[0], "open": field_value},
+            *record.intraday_rows[1:],
+        )
+
+    with pytest.raises(ValueError, match="governed bar recovery"):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            GovernedBarRecoveryRecord.create(**fields)
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "source": "other",
+                }
+            },
+            "original source",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "open": 287.0,
+                }
+            },
+            "open does not match",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "close": 286.0,
+                }
+            },
+            "close does not match",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "high": 280.0,
+                    "low": 284.0,
+                }
+            },
+            "both envelope bounds",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "low": 281.0,
+                }
+            },
+            "unbroken low",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "high": 287.0,
+                    "low": 284.0,
+                }
+            },
+            "unbroken high",
+        ),
+        (
+            {
+                "intraday_rows": (
+                    {
+                        **governed_recovery_record("epoch-1").intraday_rows[0],
+                        "open": 285.0,
+                    },
+                    *governed_recovery_record("epoch-1").intraday_rows[1:],
+                )
+            },
+            "aggregation",
+        ),
+    ],
+)
+def test_governed_storage_binds_reconstruction_to_original_and_intraday_evidence(
+    tmp_path, changes: dict[str, object], error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            _recreate_governed_record(governed_recovery_record("epoch-1"), **changes)
+        )
+
+
+@pytest.mark.parametrize(
+    ("row_index", "field", "value"),
+    [
+        (0, "open", 285.0),
+        (2, "high", 290.0),
+        (4, "low", 280.0),
+        (6, "close", 283.0),
+    ],
+)
+def test_governed_storage_rejects_each_intraday_aggregation_mismatch(
+    tmp_path, row_index: int, field: str, value: float
+) -> None:
+    record = governed_recovery_record("epoch-1")
+    rows = [dict(row) for row in record.intraday_rows]
+    rows[row_index][field] = value
+
+    with pytest.raises(ValueError, match="aggregation"):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            _recreate_governed_record(record, intraday_rows=tuple(rows))
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "scope"),
+    [
+        ("recovery_id", "tampered-id", ("epoch-1", date(2026, 8, 10), "ESS")),
+        ("contract_version", "other-contract", ("epoch-1", date(2026, 8, 10), "ESS")),
+        ("evidence_digest", "sha256:tampered", ("epoch-1", date(2026, 8, 10), "ESS")),
+        ("epoch_id", "other-epoch", ("other-epoch", date(2026, 8, 10), "ESS")),
+        ("session", "2026-08-11", ("epoch-1", date(2026, 8, 11), "ESS")),
+        ("ticker", "OTHER", ("epoch-1", date(2026, 8, 10), "OTHER")),
+    ],
+)
+def test_governed_loads_fail_closed_on_tampered_persisted_metadata(
+    tmp_path, column: str, value: str, scope: tuple[str, date, str]
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+    with sqlite3.connect(store.path) as connection:
+        payload = connection.execute(
+            "SELECT payload_json FROM governed_bar_recoveries"
+        ).fetchone()[0]
+        connection.execute(
+            f"UPDATE governed_bar_recoveries SET {column} = ?", (value,)
+        )
+        assert connection.execute(
+            "SELECT payload_json FROM governed_bar_recoveries"
+        ).fetchone()[0] == payload
+
+    recovery_id = value if column == "recovery_id" else record.recovery_id
+    with pytest.raises(ValueError, match="metadata"):
+        store.load_governed_bar_recovery_by_id(recovery_id)
+    with pytest.raises(ValueError, match="metadata"):
+        store.load_governed_bar_recovery(
+            epoch_id=scope[0], session=scope[1], ticker=scope[2]
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"x":' * 1_100 + "0" + "}" * 1_100,
+        "{not json",
+        "x" * 100_001,
+    ],
+)
+def test_governed_load_rejects_malformed_or_unbounded_persisted_payload(
+    tmp_path, payload: str
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE governed_bar_recoveries SET payload_json = ?", (payload,)
+        )
+
+    with pytest.raises(ValueError, match="payload"):
+        store.load_governed_bar_recovery_by_id(record.recovery_id)
+
+
+def test_governed_record_nested_evidence_is_immutable_after_create_and_load(
+    tmp_path,
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+
+    for evidence in (
+        record,
+        store.load_governed_bar_recovery_by_id(record.recovery_id),
+        store.load_governed_bar_recovery(
+            epoch_id="epoch-1", session=date(2026, 8, 10), ticker="ESS"
+        ),
+    ):
+        assert evidence is not None
+        with pytest.raises(TypeError):
+            evidence.original_daily["open"] = 1.0
+        with pytest.raises(TypeError):
+            evidence.intraday_rows[0]["close"] = 1.0
+        with pytest.raises(TypeError):
+            evidence.reconstructed_bar["close"] = 1.0
+        evidence.validate_integrity()
 
 
 def _attempt(

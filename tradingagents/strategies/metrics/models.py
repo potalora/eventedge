@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Literal, Mapping
 
 Direction = Literal["long", "short", "neutral"]
@@ -174,6 +175,16 @@ def _canonical_value(value: object, *, key: str | None = None) -> object:
     raise ValueError("governed bar recovery value is not canonical JSON")
 
 
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _deep_freeze(item) for key, item in value.items()}
+        )
+    if isinstance(value, (tuple, list)):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
 def canonical_governed_recovery_json(payload: Mapping[str, object]) -> str:
     """Return the single canonical representation used for durable evidence."""
     return json.dumps(
@@ -191,12 +202,12 @@ class GovernedBarRecoveryRecord:
     epoch_id: str
     session: date
     ticker: str
-    original_daily: dict[str, object]
+    original_daily: Mapping[str, object]
     original_validation_error: str | None
     expected_starts: tuple[str, ...]
     observed_starts: tuple[str, ...]
-    intraday_rows: tuple[dict[str, object], ...]
-    reconstructed_bar: dict[str, object]
+    intraday_rows: tuple[Mapping[str, object], ...]
+    reconstructed_bar: Mapping[str, object]
     final_validation_error: str | None
     affected_cohort_ids: tuple[str, ...]
 
@@ -268,14 +279,14 @@ class GovernedBarRecoveryRecord:
             epoch_id=str(canonical_fields["epoch_id"]),
             session=session,
             ticker=str(canonical_fields["ticker"]),
-            original_daily=dict(canonical_fields["original_daily"]),
+            original_daily=_deep_freeze(canonical_fields["original_daily"]),
             original_validation_error=canonical_fields["original_validation_error"],
             expected_starts=tuple(canonical_fields["expected_starts"]),
             observed_starts=tuple(canonical_fields["observed_starts"]),
             intraday_rows=tuple(
-                dict(row) for row in canonical_fields["intraday_rows"]
+                _deep_freeze(row) for row in canonical_fields["intraday_rows"]
             ),
-            reconstructed_bar=dict(canonical_fields["reconstructed_bar"]),
+            reconstructed_bar=_deep_freeze(canonical_fields["reconstructed_bar"]),
             final_validation_error=canonical_fields["final_validation_error"],
             affected_cohort_ids=tuple(canonical_fields["affected_cohort_ids"]),
         )
@@ -313,7 +324,14 @@ class GovernedBarRecoveryRecord:
             evidence_digest=self.evidence_digest,
             recovery_id=self.recovery_id,
         )
-        if canonical != self:
+        if (
+            canonical != self
+            or not isinstance(self.original_daily, MappingProxyType)
+            or not isinstance(self.reconstructed_bar, MappingProxyType)
+            or any(
+                not isinstance(row, MappingProxyType) for row in self.intraday_rows
+            )
+        ):
             raise ValueError("governed bar recovery record is not canonical")
 
 
