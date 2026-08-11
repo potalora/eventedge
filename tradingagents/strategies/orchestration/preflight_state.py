@@ -201,9 +201,9 @@ class _CertifiedDirectory:
             raise
         return cls(target, fd, baseline)
 
-    def verify(self) -> None:
+    def verify(self, *, contents: bool = False) -> None:
         current = _require_fd_path_identity(self.path, self.fd, directory=True)
-        if (
+        identity_changed = (
             current.st_dev,
             current.st_ino,
             stat.S_IFMT(current.st_mode),
@@ -211,6 +211,9 @@ class _CertifiedDirectory:
             self.baseline.st_dev,
             self.baseline.st_ino,
             stat.S_IFMT(self.baseline.st_mode),
+        )
+        if identity_changed or (
+            contents and _stat_identity(current) != _stat_identity(self.baseline)
         ):
             raise PreflightStateError("state directory identity changed")
 
@@ -288,6 +291,17 @@ class _CertifiedFile:
     def verify(self) -> os.stat_result:
         current = _require_fd_path_identity(self.path, self.fd, directory=False)
         if _stat_identity(current) != _stat_identity(self.baseline):
+            raise PreflightStateError("state file identity changed")
+        return current
+
+    def verify_relative(self, parent: _CertifiedDirectory) -> os.stat_result:
+        current = os.fstat(self.fd)
+        entry = _entry_stat(parent, self.path.name)
+        if entry is None or not stat.S_ISREG(entry.st_mode):
+            raise PreflightStateError("state file identity changed")
+        if (entry.st_dev, entry.st_ino) != (current.st_dev, current.st_ino) or (
+            _stat_identity(current) != _stat_identity(self.baseline)
+        ):
             raise PreflightStateError("state file identity changed")
         return current
 
@@ -578,59 +592,100 @@ def _unexpected_ledgers(
     return not discovered.issubset(expected_cohorts)
 
 
-def _discovered_sidecars(state_dir: Path) -> set[Path]:
-    if not state_dir.is_dir():
+def _sidecars_in_directory(
+    directory: _CertifiedDirectory, database_name: str
+) -> set[Path]:
+    try:
+        names = set(os.listdir(directory.fd))
+    except OSError as error:
+        raise PreflightStateError("SQLite sidecar topology is not safe") from error
+    discovered: set[Path] = set()
+    for suffix in ("-wal", "-shm", "-journal"):
+        name = f"{database_name}{suffix}"
+        if name not in names:
+            continue
+        entry = _entry_stat(directory, name)
+        if entry is None:
+            raise PreflightStateError("SQLite sidecar topology is not safe")
+        if not stat.S_ISREG(entry.st_mode):
+            raise PreflightStateError("SQLite sidecar type is not safe")
+        discovered.add(directory.path / name)
+    return discovered
+
+
+def _enumerate_sidecars(
+    state_directory: _CertifiedDirectory | None,
+    cohort_directories: Mapping[str, _CertifiedDirectory],
+) -> set[Path]:
+    """Enumerate all governed SQLite sidecars through retained directory FDs."""
+    if state_directory is None:
         return set()
-    candidates = (
-        *state_dir.glob("metrics_v2.sqlite3-*"),
-        *state_dir.glob("*/portfolio.db-*"),
+    discovered = _sidecars_in_directory(
+        state_directory, "metrics_v2.sqlite3"
     )
-    return {
-        _absolute_path(path)
-        for path in candidates
-        if path.name.endswith(("-wal", "-shm", "-journal"))
-        and os.path.lexists(path)
-    }
+    try:
+        children = os.listdir(state_directory.fd)
+    except OSError as error:
+        raise PreflightStateError("SQLite sidecar topology is not safe") from error
+    for name in children:
+        entry = _entry_stat(state_directory, name)
+        if entry is None or not stat.S_ISDIR(entry.st_mode):
+            continue
+        directory = cohort_directories.get(name)
+        temporary = directory is None
+        if directory is None:
+            directory = _CertifiedDirectory.open_child(
+                state_directory, name, state_directory.path / name
+            )
+        try:
+            discovered.update(_sidecars_in_directory(directory, "portfolio.db"))
+        finally:
+            if temporary:
+                directory.close()
+    return discovered
 
 
 def _verify_sidecars(
     *,
-    state_dir: Path,
+    state_directory: _CertifiedDirectory | None,
+    cohort_directories: Mapping[str, _CertifiedDirectory],
     database_paths: tuple[Path, ...],
+    database_parents: Mapping[Path, _CertifiedDirectory],
     certified: Mapping[Path, _CertifiedFile],
     during_probe: bool,
 ) -> None:
-    current: set[Path] = set()
-    for database_path in database_paths:
-        wal, shm, journal = _sqlite_sidecars(database_path)
-        if os.path.lexists(journal):
-            if during_probe:
-                raise PreflightStateError("state changed during preflight")
-            raise PreflightStateError("SQLite sidecar journal is not safe")
-        for sidecar in (wal, shm):
-            if os.path.lexists(sidecar):
-                current.add(_absolute_path(sidecar))
-    if current != set(certified) or _discovered_sidecars(state_dir) != current:
+    current = _enumerate_sidecars(state_directory, cohort_directories)
+    if any(path.name.endswith("-journal") for path in current):
+        if during_probe:
+            raise PreflightStateError("state changed during preflight")
+        raise PreflightStateError("SQLite sidecar journal is not safe")
+    if current != set(certified):
         if during_probe:
             raise PreflightStateError("state changed during preflight")
         raise PreflightStateError("SQLite sidecar topology is not safe")
-    for path, handle in certified.items():
-        try:
-            current_stat = handle.verify()
-        except PreflightStateError as error:
-            if during_probe:
-                raise PreflightStateError("state changed during preflight") from error
-            raise
-        if path.name.endswith("-wal") and current_stat.st_size != 0:
-            if during_probe:
-                raise PreflightStateError("state changed during preflight")
-            raise PreflightStateError("SQLite sidecar WAL is not clean")
+    for database_path in database_paths:
+        parent = database_parents[database_path]
+        for path in _sqlite_sidecars(database_path):
+            handle = certified.get(path)
+            if handle is None:
+                continue
+            try:
+                current_stat = handle.verify_relative(parent)
+            except PreflightStateError as error:
+                if during_probe:
+                    raise PreflightStateError("state changed during preflight") from error
+                raise
+            if path.name.endswith("-wal") and current_stat.st_size != 0:
+                if during_probe:
+                    raise PreflightStateError("state changed during preflight")
+                raise PreflightStateError("SQLite sidecar WAL is not clean")
 
 
 @contextmanager
 def _certified_copies(
     *,
-    state_dir: Path,
+    state_directory: _CertifiedDirectory | None,
+    cohort_directories: Mapping[str, _CertifiedDirectory],
     database_paths: tuple[Path, ...],
     database_parents: Mapping[Path, _CertifiedDirectory],
     destination_dir: Path,
@@ -646,17 +701,25 @@ def _certified_copies(
     sidecars: dict[Path, _CertifiedFile] = {}
     copies: dict[Path, Path] = {}
     try:
+        discovered = _enumerate_sidecars(state_directory, cohort_directories)
+        if any(path.name.endswith("-journal") for path in discovered):
+            raise PreflightStateError("SQLite sidecar journal is not safe")
+        expected = {
+            sidecar
+            for database_path in database_paths
+            for sidecar in _sqlite_sidecars(database_path)
+        }
+        if not discovered.issubset(expected):
+            raise PreflightStateError("SQLite sidecar topology is not safe")
         for index, raw_path in enumerate(database_paths):
             path = _absolute_path(raw_path)
             parent = database_parents[path]
             source = _CertifiedFile.open(path, parent=parent)
             handles.append(source)
             sources[path] = source
-            wal, shm, journal = _sqlite_sidecars(path)
-            if os.path.lexists(journal):
-                raise PreflightStateError("SQLite sidecar journal is not safe")
+            wal, shm, _journal = _sqlite_sidecars(path)
             for sidecar_path in (wal, shm):
-                if not os.path.lexists(sidecar_path):
+                if sidecar_path not in discovered:
                     continue
                 sidecar = _CertifiedFile.open(sidecar_path, parent=parent)
                 handles.append(sidecar)
@@ -667,8 +730,10 @@ def _certified_copies(
             source.copy_to(snapshot_path)
             copies[path] = snapshot_path
         _verify_sidecars(
-            state_dir=state_dir,
+            state_directory=state_directory,
+            cohort_directories=cohort_directories,
             database_paths=database_paths,
+            database_parents=database_parents,
             certified=sidecars,
             during_probe=False,
         )
@@ -889,7 +954,8 @@ def inspect_and_guard_preflight_state(
 
         copies, sources, sidecars = stack.enter_context(
             _certified_copies(
-                state_dir=target,
+                state_directory=state_directory,
+                cohort_directories=cohort_directories,
                 database_paths=active_database_paths,
                 database_parents=database_parents,
                 destination_dir=temporary_dir,
@@ -930,7 +996,7 @@ def inspect_and_guard_preflight_state(
                         "state changed during preflight inspection"
                     )
             else:
-                if _discovered_sidecars(target):
+                if _enumerate_sidecars(state_directory, cohort_directories):
                     raise PreflightStateError("SQLite sidecar topology is not safe")
                 prospective = _prospective_epoch_id(target, session, ())
                 snapshot = PreflightStateSnapshot(
@@ -993,11 +1059,27 @@ def inspect_and_guard_preflight_state(
                                 "state file identity changed during preflight"
                             ) from error
                     _verify_sidecars(
-                        state_dir=target,
+                        state_directory=state_directory,
+                        cohort_directories=cohort_directories,
                         database_paths=active_database_paths,
+                        database_parents=database_parents,
                         certified=sidecars,
                         during_probe=True,
                     )
+                    if state_directory is not None:
+                        try:
+                            state_directory.verify(contents=True)
+                        except PreflightStateError as error:
+                            raise PreflightStateError(
+                                "state changed during preflight"
+                            ) from error
+                    for directory in cohort_directories.values():
+                        try:
+                            directory.verify(contents=True)
+                        except PreflightStateError as error:
+                            raise PreflightStateError(
+                                "state changed during preflight"
+                            ) from error
                     if complete and tuple(
                         observers[path].identity() for path in database_paths
                     ) != observer_before:

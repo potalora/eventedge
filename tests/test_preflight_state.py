@@ -942,3 +942,124 @@ def test_directory_retarget_cannot_change_certified_query_content(
     # The retained directory FD prevents opening the replacement. The live-path
     # identity check then rejects the swap before any SQLite query is exposed.
     assert observed_epochs == []
+
+
+def test_uninitialized_unexpected_cohort_sidecar_is_fd_enumerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    unexpected = state_dir / "unexpected-cohort"
+    unexpected.mkdir(parents=True)
+    (unexpected / "portfolio.db-wal").write_bytes(b"unsafe-sidecar-evidence")
+
+    def forbid_path_discovery(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("sidecars must be enumerated through directory FDs")
+
+    monkeypatch.setattr(Path, "glob", forbid_path_discovery)
+    monkeypatch.setattr(os.path, "lexists", forbid_path_discovery)
+    with pytest.raises(PreflightStateError, match="SQLite sidecar"):
+        inspect_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        )
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-journal"))
+def test_parent_retarget_cannot_hide_unsafe_sidecar_during_initial_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    alternate = tmp_path / "alternate"
+    held = tmp_path / "held-original"
+    _initialize_state(state_dir)
+    _initialize_state(alternate)
+    hidden = Path(f"{state_dir / 'metrics_v2.sqlite3'}{suffix}")
+    alternate_hidden = Path(f"{alternate / 'metrics_v2.sqlite3'}{suffix}")
+    alternate_hidden.unlink(missing_ok=True)
+    hidden.write_bytes(b"unsafe-sidecar-evidence")
+    real_lexists = os.path.lexists
+    retargets = 0
+
+    def hide_via_parent_retarget(path):  # noqa: ANN001
+        nonlocal retargets
+        if Path(path) != hidden:
+            return real_lexists(path)
+        state_dir.rename(held)
+        alternate.rename(state_dir)
+        try:
+            retargets += 1
+            return real_lexists(path)
+        finally:
+            state_dir.rename(alternate)
+            held.rename(state_dir)
+
+    monkeypatch.setattr(os.path, "lexists", hide_via_parent_retarget)
+    with pytest.raises(PreflightStateError, match="SQLite sidecar"):
+        inspect_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        )
+    # The implementation never consults the retargetable pathname hook.
+    assert retargets == 0
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-journal"))
+def test_parent_retarget_cannot_hide_unsafe_sidecar_at_final_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+) -> None:
+    from tradingagents.strategies.orchestration.preflight_state import (
+        PreflightStateError,
+        inspect_and_guard_preflight_state,
+    )
+
+    state_dir = tmp_path / "state"
+    alternate = tmp_path / "alternate"
+    held = tmp_path / "held-original"
+    _initialize_state(state_dir)
+    _initialize_state(alternate)
+    hidden = Path(f"{state_dir / 'metrics_v2.sqlite3'}{suffix}")
+    alternate_hidden = Path(f"{alternate / 'metrics_v2.sqlite3'}{suffix}")
+    alternate_hidden.unlink(missing_ok=True)
+    if suffix == "-wal":
+        hidden.unlink()
+    real_lexists = os.path.lexists
+    retargets = 0
+
+    def hide_via_parent_retarget(path):  # noqa: ANN001
+        nonlocal retargets
+        if Path(path) != hidden:
+            return real_lexists(path)
+        state_dir.rename(held)
+        alternate.rename(state_dir)
+        try:
+            retargets += 1
+            return real_lexists(path)
+        finally:
+            state_dir.rename(alternate)
+            held.rename(state_dir)
+
+    with pytest.raises(PreflightStateError, match="changed during preflight"):
+        with inspect_and_guard_preflight_state(
+            state_dir=state_dir,
+            cohort_ids=COHORTS,
+            session=SESSION,
+            benchmark_tickers=("SPY",),
+        ):
+            hidden.write_bytes(b"unsafe-sidecar-evidence")
+            monkeypatch.setattr(os.path, "lexists", hide_via_parent_retarget)
+    # Final sidecar verification is also entirely relative to retained FDs.
+    assert retargets == 0
