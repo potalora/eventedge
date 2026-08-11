@@ -22,6 +22,7 @@ CandidateBarRecoveryOutcome = Literal["accepted", "recovered", "quarantined"]
 METRIC_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_LABEL = "1_legacy_calendar_signed"
 OUTCOME_WINDOWS = (5, 10, 20, 30)
+GOVERNED_BAR_RECOVERY_CONTRACT = "yfinance-60m-v1"
 
 
 @dataclass(frozen=True)

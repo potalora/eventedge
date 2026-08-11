@@ -5,16 +5,18 @@ import math
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import asdict, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from .calendar import XNYSCalendar
 from .models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
     CriticalGapMarker,
+    GOVERNED_BAR_RECOVERY_CONTRACT,
     GovernedBarRecoveryRecord,
     MetricEpoch,
     OutcomeRecord,
@@ -99,6 +101,7 @@ _MAX_GOVERNED_RECOVERY_TEXT = 4_096
 _MAX_GOVERNED_RECOVERY_ROWS = 7
 _MAX_GOVERNED_RECOVERY_COHORTS = 64
 _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES = 100_000
+_NEW_YORK = ZoneInfo("America/New_York")
 _CANDIDATE_ATTEMPT_KEYS = frozenset(
     {
         "ticker",
@@ -587,6 +590,8 @@ class MetricStore:
         self, record: GovernedBarRecoveryRecord
     ) -> None:
         record.validate_integrity()
+        if record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
+            raise ValueError("governed bar recovery contract is unsupported")
         for value in (
             record.recovery_id,
             record.contract_version,
@@ -598,6 +603,27 @@ class MetricStore:
                 raise ValueError("governed bar recovery identifier is invalid")
         if record.ticker != record.ticker.upper():
             raise ValueError("governed bar recovery ticker is invalid")
+        row_starts = tuple(row["start"] for row in record.intraday_rows)
+        try:
+            session_open = self._calendar.session_open(record.session).astimezone(
+                _NEW_YORK
+            )
+            session_close = self._calendar.session_close(record.session).astimezone(
+                _NEW_YORK
+            )
+        except ValueError as error:
+            raise ValueError("governed bar recovery interval schedule is invalid") from error
+        derived_starts: list[str] = []
+        interval_start = session_open
+        while interval_start < session_close:
+            derived_starts.append(interval_start.isoformat())
+            interval_start += timedelta(hours=1)
+        if not record.expected_starts or (
+            record.expected_starts != record.observed_starts
+            or record.expected_starts != row_starts
+            or record.expected_starts != tuple(derived_starts)
+        ):
+            raise ValueError("governed bar recovery interval schedule is invalid")
         if len(record.expected_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
             raise ValueError("governed bar recovery expected interval count exceeds bound")
         if len(record.observed_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
@@ -606,16 +632,15 @@ class MetricStore:
             raise ValueError("governed bar recovery intraday row count exceeds bound")
         if len(record.affected_cohort_ids) > _MAX_GOVERNED_RECOVERY_COHORTS:
             raise ValueError("governed bar recovery affected cohort count exceeds bound")
-        row_starts = tuple(row["start"] for row in record.intraday_rows)
-        if not record.expected_starts or (
-            record.expected_starts != record.observed_starts
-            or record.expected_starts != row_starts
-        ):
-            raise ValueError("governed bar recovery starts are incomplete")
         if record.expected_starts != tuple(sorted(set(record.expected_starts))):
             raise ValueError("governed bar recovery expected starts are not canonical")
         if record.observed_starts != tuple(sorted(set(record.observed_starts))):
             raise ValueError("governed bar recovery observed starts are not canonical")
+        if not all(
+            self._bounded_governed_recovery_text(cohort_id)
+            for cohort_id in record.affected_cohort_ids
+        ):
+            raise ValueError("governed bar recovery affected cohort is invalid")
         if record.affected_cohort_ids != tuple(sorted(set(record.affected_cohort_ids))):
             raise ValueError("governed bar recovery affected cohorts are not canonical")
         if set(record.original_daily) != {
@@ -1138,15 +1163,38 @@ class MetricStore:
         payload = record.canonical_payload()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            existing_by_id = connection.execute(
+                """
+                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
+                       session, ticker, payload_json
+                FROM governed_bar_recoveries
+                WHERE recovery_id = ?
+                """,
+                (record.recovery_id,),
+            ).fetchone()
+            if existing_by_id is not None:
+                existing = self._governed_bar_recovery(
+                    existing_by_id, expected_recovery_id=record.recovery_id
+                )
+                if existing != record:
+                    raise ValueError(
+                        f"immutable recovery_id {record.recovery_id!r} has unequal payload"
+                    )
+                return
             scoped = connection.execute(
                 """
-                SELECT recovery_id, payload_json
+                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
+                       session, ticker, payload_json
                 FROM governed_bar_recoveries
                 WHERE epoch_id = ? AND session = ? AND ticker = ?
                 """,
                 (record.epoch_id, record.session.isoformat(), record.ticker),
             ).fetchone()
-            if scoped is not None and scoped[0] != record.recovery_id:
+            if scoped is not None:
+                self._governed_bar_recovery(
+                    scoped,
+                    expected_scope=(record.epoch_id, record.session, record.ticker),
+                )
                 raise ValueError(
                     "immutable governed bar recovery scope has unequal payload"
                 )
