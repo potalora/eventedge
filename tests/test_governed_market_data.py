@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import traceback
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -8,6 +10,8 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 import pytest
+
+import tradingagents.strategies.orchestration.governed_market_data as governed_market_data_module
 
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.execution.price_source import (
@@ -44,6 +48,16 @@ HOURLY_OHLC = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _controlled_coordinator_clock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        governed_market_data_module,
+        "_utc_now",
+        lambda: PROCESSED_AT + timedelta(seconds=1),
+        raising=False,
+    )
+
+
 class FakePriceSource:
     def __init__(self, resolution: GovernedDailyBarResolution | Exception) -> None:
         self.resolution = resolution
@@ -74,6 +88,29 @@ def _healthy_bar(ticker: str = "AAPL") -> MarketBar:
         source="yfinance",
         fetched_at=FETCHED_AT,
         adjusted=False,
+    )
+
+
+def _healthy_attempt(
+    bar: MarketBar,
+    *,
+    raw_ohlc: Mapping[str, object] | None = None,
+) -> GovernedDailyBarAttempt:
+    evidence = raw_ohlc
+    if evidence is None:
+        evidence = {
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+        }
+    return GovernedDailyBarAttempt(
+        ticker=bar.ticker,
+        session=bar.session,
+        source=bar.source,
+        fetched_at=bar.fetched_at,
+        raw_ohlc=evidence,
+        validation_error=None,
     )
 
 
@@ -206,11 +243,7 @@ def test_healthy_bars_pass_through_without_recovery_record(tmp_path) -> None:
     source = FakePriceSource(
         GovernedDailyBarResolution(
             bars={"AAPL": bar},
-            attempts={
-                "AAPL": GovernedDailyBarAttempt(
-                    "AAPL", SESSION, "yfinance", FETCHED_AT, None, None
-                )
-            },
+            attempts={"AAPL": _healthy_attempt(bar)},
             recoveries={},
             failure_map={},
         )
@@ -268,11 +301,7 @@ def test_reused_ticker_is_removed_from_mixed_provider_batch(tmp_path) -> None:
     source = FakePriceSource(
         GovernedDailyBarResolution(
             bars={"AAPL": healthy},
-            attempts={
-                "AAPL": GovernedDailyBarAttempt(
-                    "AAPL", SESSION, "yfinance", FETCHED_AT, None, None
-                )
-            },
+            attempts={"AAPL": _healthy_attempt(healthy)},
             recoveries={},
             failure_map={},
         )
@@ -293,11 +322,7 @@ def test_changed_cohort_membership_fails_closed_without_provider_bypass(
     source = FakePriceSource(
         GovernedDailyBarResolution(
             bars={"ESS": _healthy_bar("ESS")},
-            attempts={
-                "ESS": GovernedDailyBarAttempt(
-                    "ESS", SESSION, "yfinance", FETCHED_AT, None, None
-                )
-            },
+            attempts={"ESS": _healthy_attempt(_healthy_bar("ESS"))},
             recoveries={},
             failure_map={},
         )
@@ -410,17 +435,119 @@ class StaticStore:
         self.saved.append(record)
 
 
+def _assert_secret_is_absent(
+    error: GovernedMarketDataError, secret: str
+) -> None:
+    assert secret not in str(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert secret not in "".join(traceback.format_exception(error))
+
+
+class ExplodingTickers:
+    def __iter__(self):
+        raise RuntimeError("input-credential-secret")
+
+
+class ExplodingLoadStore:
+    def load_governed_bar_recovery(self, **scope):
+        raise RuntimeError("load-credential-secret")
+
+
+class ExplodingRecord:
+    contract_version = GOVERNED_BAR_RECOVERY_CONTRACT
+    epoch_id = "epoch-1"
+    session = SESSION
+    ticker = "ESS"
+    affected_cohort_ids = ("cohort-a",)
+
+    def validate_integrity(self) -> None:
+        raise RuntimeError("record-credential-secret")
+
+
+class ExplodingSaveStore:
+    read_only = False
+
+    def load_governed_bar_recovery(self, **scope):
+        return None
+
+    def save_governed_bar_recovery(self, record) -> None:
+        raise RuntimeError("save-credential-secret")
+
+
+def test_input_failure_has_no_raw_exception_chain() -> None:
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(
+            FakePriceSource(AssertionError("provider must not be called")),
+            None,
+            tickers=ExplodingTickers(),
+            cohorts={"ESS": ("cohort-a",)},
+            persist=False,
+        )
+
+    _assert_secret_is_absent(caught.value, "input-credential-secret")
+
+
+def test_store_load_failure_has_no_raw_exception_chain() -> None:
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(
+            FakePriceSource(AssertionError("provider must not be called")),
+            ExplodingLoadStore(),
+        )
+
+    _assert_secret_is_absent(caught.value, "load-credential-secret")
+
+
+def test_record_validation_failure_has_no_raw_exception_chain() -> None:
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(
+            FakePriceSource(AssertionError("provider must not be called")),
+            StaticStore(ExplodingRecord()),
+        )
+
+    _assert_secret_is_absent(caught.value, "record-credential-secret")
+
+
+def test_provider_invariant_failure_has_no_raw_exception_chain(monkeypatch) -> None:
+    def explode(*args, **kwargs):
+        raise RuntimeError("provider-invariant-credential-secret")
+
+    monkeypatch.setattr(governed_market_data_module, "validate_required_bars", explode)
+    bar = _healthy_bar("ESS")
+    source = FakePriceSource(
+        GovernedDailyBarResolution(
+            bars={"ESS": bar},
+            attempts={"ESS": _healthy_attempt(bar)},
+            recoveries={},
+            failure_map={},
+        )
+    )
+
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(source, None, persist=False)
+
+    _assert_secret_is_absent(
+        caught.value, "provider-invariant-credential-secret"
+    )
+
+
+def test_persistence_failure_has_no_raw_exception_chain() -> None:
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(FakePriceSource(_accepted_resolution()), ExplodingSaveStore())
+
+    _assert_secret_is_absent(caught.value, "save-credential-secret")
+
+
 def test_unsupported_contract_record_is_never_reused() -> None:
     store = StaticStore(_record(contract_version="yfinance-60m-v0"))
-    source = FakePriceSource(_accepted_resolution())
+    source = FakePriceSource(AssertionError("provider must not be called"))
 
-    resolved = _resolve(source, store)
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(source, store)
 
-    assert source.calls == [(('ESS',), SESSION, PROCESSED_AT)]
-    assert resolved.recovery_bindings["ESS"].contract_version == (
-        GOVERNED_BAR_RECOVERY_CONTRACT
-    )
-    assert len(store.saved) == 1
+    assert caught.value.failure_map == {"ESS": f"invalid ESS/{SESSION}"}
+    assert source.calls == []
+    assert store.saved == []
 
 
 def test_provider_exception_is_normalized_for_each_unresolved_ticker() -> None:
@@ -487,11 +614,7 @@ def test_healthy_bar_from_non_authoritative_source_fails_closed() -> None:
     source = FakePriceSource(
         GovernedDailyBarResolution(
             bars={"ESS": bar},
-            attempts={
-                "ESS": GovernedDailyBarAttempt(
-                    "ESS", SESSION, "alpaca-iex", FETCHED_AT, None, None
-                )
-            },
+            attempts={"ESS": _healthy_attempt(bar)},
             recoveries={},
             failure_map={},
         )
@@ -509,11 +632,7 @@ def test_post_fetch_bar_timestamp_may_follow_processed_at() -> None:
     source = FakePriceSource(
         GovernedDailyBarResolution(
             bars={"ESS": bar},
-            attempts={
-                "ESS": GovernedDailyBarAttempt(
-                    "ESS", SESSION, "yfinance", fetched_at, None, None
-                )
-            },
+            attempts={"ESS": _healthy_attempt(bar)},
             recoveries={},
             failure_map={},
         )
@@ -523,6 +642,76 @@ def test_post_fetch_bar_timestamp_may_follow_processed_at() -> None:
 
     assert resolved.bars == {"ESS": bar}
     assert resolved.failure_map == {}
+
+
+def test_bar_future_relative_to_controlled_post_fetch_clock_fails_closed() -> None:
+    bar = replace(
+        _healthy_bar("ESS"), fetched_at=PROCESSED_AT + timedelta(seconds=2)
+    )
+    source = FakePriceSource(
+        GovernedDailyBarResolution(
+            bars={"ESS": bar},
+            attempts={"ESS": _healthy_attempt(bar)},
+            recoveries={},
+            failure_map={},
+        )
+    )
+
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(source, None, persist=False)
+
+    assert caught.value.failure_map == {"ESS": f"invalid ESS/{SESSION}"}
+
+
+@pytest.mark.parametrize(
+    "raw_ohlc",
+    [
+        None,
+        {"open": Decimal("100"), "high": Decimal("103"), "low": Decimal("99")},
+        {
+            "open": Decimal("100"),
+            "high": Decimal("103"),
+            "low": Decimal("99"),
+            "close": Decimal("102"),
+            "extra": Decimal("1"),
+        },
+        {
+            "open": 100.0,
+            "high": Decimal("103"),
+            "low": Decimal("99"),
+            "close": Decimal("102"),
+        },
+        {
+            "open": Decimal("100"),
+            "high": Decimal("103"),
+            "low": Decimal("99"),
+            "close": Decimal("101"),
+        },
+    ],
+)
+def test_healthy_attempt_must_bind_exact_decimal_ohlc(raw_ohlc) -> None:
+    bar = _healthy_bar("ESS")
+    attempt = GovernedDailyBarAttempt(
+        ticker="ESS",
+        session=SESSION,
+        source="yfinance",
+        fetched_at=FETCHED_AT,
+        raw_ohlc=raw_ohlc,
+        validation_error=None,
+    )
+    source = FakePriceSource(
+        GovernedDailyBarResolution(
+            bars={"ESS": bar},
+            attempts={"ESS": attempt},
+            recoveries={},
+            failure_map={},
+        )
+    )
+
+    with pytest.raises(GovernedMarketDataError) as caught:
+        _resolve(source, None, persist=False)
+
+    assert caught.value.failure_map == {"ESS": f"invalid ESS/{SESSION}"}
 
 
 def test_persisted_pre_close_recovery_fails_closed_without_binding(tmp_path) -> None:
@@ -556,16 +745,7 @@ def test_pre_close_healthy_provider_bar_fails_closed_without_binding() -> None:
     source = FakePriceSource(
         GovernedDailyBarResolution(
             bars={"ESS": bar},
-            attempts={
-                "ESS": GovernedDailyBarAttempt(
-                    "ESS",
-                    SESSION,
-                    "yfinance",
-                    PRE_CLOSE_FETCHED_AT,
-                    None,
-                    None,
-                )
-            },
+            attempts={"ESS": _healthy_attempt(bar)},
             recoveries={},
             failure_map={},
         )

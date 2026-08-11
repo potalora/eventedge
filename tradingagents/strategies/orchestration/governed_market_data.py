@@ -34,6 +34,10 @@ def _immutable_mapping(values: Mapping[str, object]) -> Mapping[str, object]:
     return MappingProxyType(dict(values))
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 @dataclass(frozen=True)
 class GovernedRecoveryBinding:
     ticker: str
@@ -350,8 +354,24 @@ def _validate_provider_resolution(
             or attempt.source != "yfinance"
             or attempt.validation_error is not None
             or attempt.fetched_at != bar.fetched_at
+            or not _healthy_attempt_binds_bar(attempt.raw_ohlc, bar)
         ):
             raise ValueError("governed provider healthy bar source is invalid")
+
+
+def _healthy_attempt_binds_bar(
+    raw_ohlc: Mapping[str, Decimal] | None, bar: MarketBar
+) -> bool:
+    fields = ("open", "high", "low", "close")
+    if raw_ohlc is None or set(raw_ohlc) != set(fields):
+        return False
+    values = tuple(raw_ohlc[field] for field in fields)
+    return all(isinstance(value, Decimal) for value in values) and values == (
+        bar.open,
+        bar.high,
+        bar.low,
+        bar.close,
+    )
 
 
 def resolve_governed_bars(
@@ -366,6 +386,7 @@ def resolve_governed_bars(
     persist: bool,
 ) -> GovernedInputResolution:
     """Resolve governed bars, reusing or persisting accepted recovery evidence."""
+    input_failed = False
     try:
         canonical_epoch = _bounded_text(epoch_id, label="epoch")
         if not isinstance(session, date) or isinstance(session, datetime):
@@ -375,8 +396,10 @@ def resolve_governed_bars(
         canonical_tickers, cohorts_by_ticker = _canonical_inputs(
             tickers, cohort_ids_by_ticker
         )
-    except Exception as error:
-        raise GovernedMarketDataError({}) from error
+    except Exception:
+        input_failed = True
+    if input_failed:
+        raise GovernedMarketDataError({})
 
     bars: dict[str, MarketBar] = {}
     records: dict[str, GovernedBarRecoveryRecord] = {}
@@ -385,15 +408,20 @@ def resolve_governed_bars(
         if metric_store is None:
             unresolved.append(ticker)
             continue
+        load_failed = False
         try:
             record = metric_store.load_governed_bar_recovery(
                 epoch_id=canonical_epoch, session=session, ticker=ticker
             )
-        except Exception as error:
-            raise _fail_closed((ticker,), session) from error
-        if record is None or record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
+        except Exception:
+            load_failed = True
+        if load_failed:
+            raise _fail_closed((ticker,), session)
+        if record is None:
             unresolved.append(ticker)
             continue
+        if record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
+            raise _fail_closed((ticker,), session)
         if (
             record.epoch_id != canonical_epoch
             or record.session != session
@@ -402,10 +430,13 @@ def resolve_governed_bars(
             raise _fail_closed((ticker,), session)
         if record.affected_cohort_ids != cohorts_by_ticker[ticker]:
             raise _fail_closed((ticker,), session)
+        validation_failed = False
         try:
             bars[ticker] = _bar_from_record(record)
-        except Exception as error:
-            raise _fail_closed((ticker,), session) from error
+        except Exception:
+            validation_failed = True
+        if validation_failed:
+            raise _fail_closed((ticker,), session)
         records[ticker] = record
 
     if unresolved:
@@ -415,12 +446,13 @@ def resolve_governed_bars(
                 session,
                 processed_at=processed_at,
             )
-            validation_at = max(processed_at, datetime.now(timezone.utc))
+            validation_at = max(processed_at, _utc_now())
         except Exception:
             failures = {
                 ticker: _invalid_failure(ticker, session) for ticker in unresolved
             }
             return _result(bars, records, failures)
+        provider_invariant_failed = False
         try:
             if not isinstance(provider_resolution, GovernedDailyBarResolution):
                 raise ValueError("governed provider result is invalid")
@@ -430,8 +462,10 @@ def resolve_governed_bars(
                 session=session,
                 processed_at=validation_at,
             )
-        except Exception as error:
-            raise _fail_closed(unresolved, session) from error
+        except Exception:
+            provider_invariant_failed = True
+        if provider_invariant_failed:
+            raise _fail_closed(unresolved, session)
 
         failures = dict(provider_resolution.failure_map)
         for ticker in unresolved:
@@ -442,6 +476,7 @@ def resolve_governed_bars(
             if recovery is None:
                 bars[ticker] = provider_bar
                 continue
+            persistence_failed = False
             try:
                 record = _record_from_recovery(
                     recovery=recovery,
@@ -456,8 +491,10 @@ def resolve_governed_bars(
                     ):
                         raise ValueError("writable metric store is required")
                     metric_store.save_governed_bar_recovery(record)
-            except Exception as error:
-                raise _fail_closed((ticker,), session) from error
+            except Exception:
+                persistence_failed = True
+            if persistence_failed:
+                raise _fail_closed((ticker,), session)
             records[ticker] = record
             bars[ticker] = provider_bar
     else:
