@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 from typing import Callable, Protocol
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -14,7 +17,14 @@ import yfinance as yf
 from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
 from tradingagents.strategies.execution.ids import stable_id
 from tradingagents.strategies.execution.models import CorporateAction, MarketBar
-from tradingagents.strategies.orchestration.trading_calendar import session_close
+from tradingagents.strategies.orchestration.trading_calendar import (
+    session_close,
+    session_open,
+)
+
+
+BOUNDED_TIMEOUT_SECONDS = 30
+_ET = ZoneInfo("America/New_York")
 
 
 class BarValidationError(ValueError):
@@ -66,6 +76,66 @@ class CandidateBarResolution:
     quarantined_tickers: frozenset[str]
 
 
+@dataclass(frozen=True)
+class GovernedDailyBarAttempt:
+    """The exact initial Yahoo daily evidence retained for one governed ticker."""
+
+    ticker: str
+    session: date
+    source: str
+    fetched_at: datetime
+    raw_ohlc: Mapping[str, Decimal] | None
+    validation_error: str | None
+
+    def __post_init__(self) -> None:
+        if self.raw_ohlc is not None:
+            object.__setattr__(
+                self, "raw_ohlc", MappingProxyType(dict(self.raw_ohlc))
+            )
+
+
+@dataclass(frozen=True)
+class IntradayBarEvidence:
+    """One exact raw Yahoo interval used by governed reconstruction."""
+
+    start: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    fetched_at: datetime
+
+
+@dataclass(frozen=True)
+class GovernedBarRecoveryEvidence:
+    """Bounded same-provider evidence for one governed reconstruction attempt."""
+
+    ticker: str
+    session: date
+    daily_attempt: GovernedDailyBarAttempt
+    expected_starts: tuple[datetime, ...]
+    observed_starts: tuple[datetime, ...]
+    intraday_bars: tuple[IntradayBarEvidence, ...]
+    reconstructed: MarketBar | None
+    validation_error: str | None
+
+
+@dataclass(frozen=True)
+class GovernedDailyBarResolution:
+    """Validated governed bars and normalized per-ticker failure evidence."""
+
+    bars: Mapping[str, MarketBar]
+    attempts: Mapping[str, GovernedDailyBarAttempt]
+    recoveries: Mapping[str, GovernedBarRecoveryEvidence]
+    failure_map: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        for field in ("bars", "attempts", "recoveries", "failure_map"):
+            object.__setattr__(
+                self, field, MappingProxyType(dict(getattr(self, field)))
+            )
+
+
 class PriceSource(Protocol):
     """Inclusive daily market-data boundary for the authoritative ledger."""
 
@@ -95,6 +165,15 @@ class PriceSource(Protocol):
         processed_at: datetime,
         max_age: timedelta,
     ) -> CandidateBarResolution: ...
+
+    def resolve_governed_daily_bars(
+        self,
+        tickers: Collection[str],
+        session: date,
+        *,
+        processed_at: datetime,
+        max_age: timedelta = timedelta(hours=24),
+    ) -> GovernedDailyBarResolution: ...
 
 
 def validate_required_bars(
@@ -229,6 +308,298 @@ class YFinancePriceSource:
             bars, set(tickers), end_session_inclusive, self._fetched_at()
         )
         return bars
+
+    def resolve_governed_daily_bars(
+        self,
+        tickers: Collection[str],
+        session: date,
+        *,
+        processed_at: datetime,
+        max_age: timedelta = timedelta(hours=24),
+    ) -> GovernedDailyBarResolution:
+        """Resolve raw governed bars and narrowly repair daily envelope defects."""
+        requested = list(tickers)
+        self._validate_range(requested, session, session)
+        normalized = normalize_tickers(requested)
+        ambiguous = {
+            ticker
+            for ticker, normalized_ticker in zip(requested, normalized)
+            if normalized.count(normalized_ticker) != 1
+        }
+        try:
+            frame, fetched_at = self._raw_frame(
+                requested, session, session, adjusted=False
+            )
+            if not isinstance(frame, pd.DataFrame):
+                raise TypeError("daily provider result must be a DataFrame")
+            validation_at = max(processed_at, self._fetched_at())
+        except Exception:
+            detected_at = self._safe_fetched_at()
+            attempts = {
+                ticker: GovernedDailyBarAttempt(
+                    ticker=ticker,
+                    session=session,
+                    source="yfinance",
+                    fetched_at=detected_at,
+                    raw_ohlc=None,
+                    validation_error=_governed_failure("invalid", ticker, session),
+                )
+                for ticker in requested
+            }
+            return GovernedDailyBarResolution(
+                bars={},
+                attempts=attempts,
+                recoveries={},
+                failure_map={
+                    ticker: _governed_failure("invalid", ticker, session)
+                    for ticker in requested
+                },
+            )
+        daily_timestamp, daily_index_failure = _validated_governed_daily_index(
+            frame, session
+        )
+
+        bars: dict[str, MarketBar] = {}
+        attempts: dict[str, GovernedDailyBarAttempt] = {}
+        recoveries: dict[str, GovernedBarRecoveryEvidence] = {}
+        failure_map: dict[str, str] = {}
+        flat_batch_is_ambiguous = (
+            not isinstance(frame.columns, pd.MultiIndex)
+            and len(set(normalized)) != 1
+        )
+        for ticker in requested:
+            bar, attempt = self._governed_daily_attempt(
+                frame,
+                ticker,
+                session,
+                fetched_at,
+                validation_at,
+                max_age,
+                timestamp=daily_timestamp,
+                index_failure=daily_index_failure,
+                ambiguous=ticker in ambiguous or flat_batch_is_ambiguous,
+            )
+            attempts[ticker] = attempt
+            if attempt.validation_error is None:
+                assert bar is not None
+                bars[ticker] = bar
+                continue
+            if attempt.validation_error != _governed_failure(
+                "incoherent", ticker, session
+            ):
+                failure_map[ticker] = attempt.validation_error
+                continue
+
+            recovery = self._recover_governed_daily_bar(
+                attempt, processed_at=processed_at, max_age=max_age
+            )
+            recoveries[ticker] = recovery
+            if recovery.validation_error is None:
+                assert recovery.reconstructed is not None
+                bars[ticker] = recovery.reconstructed
+            else:
+                assert recovery.validation_error is not None
+                failure_map[ticker] = recovery.validation_error
+
+        return GovernedDailyBarResolution(
+            bars=bars,
+            attempts=attempts,
+            recoveries=recoveries,
+            failure_map=failure_map,
+        )
+
+    def _governed_daily_attempt(
+        self,
+        frame: pd.DataFrame,
+        ticker: str,
+        session: date,
+        fetched_at: datetime,
+        processed_at: datetime,
+        max_age: timedelta,
+        *,
+        timestamp: object | None,
+        index_failure: str | None,
+        ambiguous: bool,
+    ) -> tuple[MarketBar | None, GovernedDailyBarAttempt]:
+        invalid = _governed_failure("invalid", ticker, session)
+        if index_failure is not None:
+            error = _governed_failure(index_failure, ticker, session)
+            return None, GovernedDailyBarAttempt(
+                ticker, session, "yfinance", fetched_at, None, error
+            )
+        if ambiguous:
+            return None, GovernedDailyBarAttempt(
+                ticker, session, "yfinance", fetched_at, None, invalid
+            )
+        assert timestamp is not None
+        try:
+            _require_single_ticker_daily_provenance(frame, ticker)
+        except BarValidationError:
+            return None, GovernedDailyBarAttempt(
+                ticker, session, "yfinance", fetched_at, None, invalid
+            )
+        normalized_ticker = normalize_tickers([ticker])[0]
+        raw_ohlc: dict[str, Decimal] = {}
+        for field in ("Open", "High", "Low", "Close"):
+            try:
+                value = _frame_value(
+                    frame, field, normalized_ticker, ticker, timestamp
+                )
+                raw_ohlc[field.lower()] = _decimal_bar_value(
+                    value, ticker, session, field.lower()
+                )
+            except (BarValidationError, TypeError, ValueError):
+                return None, GovernedDailyBarAttempt(
+                    ticker, session, "yfinance", fetched_at, None, invalid
+                )
+
+        bar = MarketBar(
+            ticker=ticker,
+            session=session,
+            open=raw_ohlc["open"],
+            high=raw_ohlc["high"],
+            low=raw_ohlc["low"],
+            close=raw_ohlc["close"],
+            source="yfinance",
+            fetched_at=fetched_at,
+            adjusted=False,
+        )
+        validation_error: str | None = invalid
+        if fetched_at >= session_close(session):
+            validation_error = None
+            try:
+                validate_required_bars(
+                    {(ticker, session): bar},
+                    {ticker},
+                    session,
+                    processed_at,
+                    max_age,
+                )
+            except BarValidationError as exc:
+                if str(exc) == _governed_failure("incoherent", ticker, session):
+                    validation_error = str(exc)
+                else:
+                    validation_error = invalid
+        return bar, GovernedDailyBarAttempt(
+            ticker=ticker,
+            session=session,
+            source="yfinance",
+            fetched_at=fetched_at,
+            raw_ohlc=raw_ohlc,
+            validation_error=validation_error,
+        )
+
+    def _recover_governed_daily_bar(
+        self,
+        attempt: GovernedDailyBarAttempt,
+        *,
+        processed_at: datetime,
+        max_age: timedelta,
+    ) -> GovernedBarRecoveryEvidence:
+        ticker = attempt.ticker
+        session = attempt.session
+        expected_starts = _expected_intraday_starts(session)
+        invalid = _governed_failure("invalid", ticker, session)
+        try:
+            frame = yf.download(
+                ticker,
+                start=session.isoformat(),
+                end=(session + timedelta(days=1)).isoformat(),
+                interval="60m",
+                auto_adjust=False,
+                actions=False,
+                prepost=False,
+                repair=False,
+                threads=False,
+                progress=False,
+                timeout=BOUNDED_TIMEOUT_SECONDS,
+            )
+            if not isinstance(frame, pd.DataFrame):
+                raise TypeError("intraday provider result must be a DataFrame")
+            fetched_at = self._fetched_at()
+            validation_at = max(processed_at, self._fetched_at())
+        except Exception:
+            return GovernedBarRecoveryEvidence(
+                ticker=ticker,
+                session=session,
+                daily_attempt=attempt,
+                expected_starts=expected_starts,
+                observed_starts=(),
+                intraday_bars=(),
+                reconstructed=None,
+                validation_error=invalid,
+            )
+
+        observed_starts: tuple[datetime, ...] = ()
+        intraday_bars: tuple[IntradayBarEvidence, ...] = ()
+        reconstructed: MarketBar | None = None
+        try:
+            _require_single_ticker_intraday_provenance(frame, ticker)
+            observed_starts = tuple(
+                _normalized_intraday_start(value, ticker, session)
+                for value in frame.index
+            )
+            if observed_starts != expected_starts:
+                raise BarValidationError(invalid)
+            evidence: list[IntradayBarEvidence] = []
+            normalized_ticker = normalize_tickers([ticker])[0]
+            for index, start in zip(frame.index, observed_starts):
+                values = tuple(
+                    _decimal_positive_price(
+                        _frame_value(frame, field, normalized_ticker, ticker, index),
+                        ticker,
+                        session,
+                        field.lower(),
+                    )
+                    for field in ("Open", "High", "Low", "Close")
+                )
+                if not (
+                    values[2] <= values[0] <= values[1]
+                    and values[2] <= values[3] <= values[1]
+                ):
+                    raise BarValidationError(invalid)
+                evidence.append(
+                    IntradayBarEvidence(
+                        start=start,
+                        open=values[0],
+                        high=values[1],
+                        low=values[2],
+                        close=values[3],
+                        fetched_at=fetched_at,
+                    )
+                )
+            intraday_bars = tuple(evidence)
+            reconstructed = _reconstruct_governed_bar(attempt, intraday_bars)
+            validate_required_bars(
+                {(ticker, session): reconstructed},
+                {ticker},
+                session,
+                validation_at,
+                max_age,
+            )
+            if reconstructed.fetched_at < session_close(session):
+                raise BarValidationError(invalid)
+        except (BarValidationError, KeyError, TypeError, ValueError):
+            return GovernedBarRecoveryEvidence(
+                ticker=ticker,
+                session=session,
+                daily_attempt=attempt,
+                expected_starts=expected_starts,
+                observed_starts=observed_starts,
+                intraday_bars=intraday_bars,
+                reconstructed=reconstructed,
+                validation_error=invalid,
+            )
+        return GovernedBarRecoveryEvidence(
+            ticker=ticker,
+            session=session,
+            daily_attempt=attempt,
+            expected_starts=expected_starts,
+            observed_starts=observed_starts,
+            intraday_bars=intraday_bars,
+            reconstructed=reconstructed,
+            validation_error=None,
+        )
 
     def resolve_candidate_daily_bars(
         self,
@@ -566,6 +937,12 @@ class YFinancePriceSource:
             raise ValueError("now must return a timezone-aware datetime")
         return fetched_at.astimezone(timezone.utc)
 
+    def _safe_fetched_at(self) -> datetime:
+        try:
+            return self._fetched_at()
+        except Exception:
+            return datetime.now(timezone.utc)
+
 
 def _session_date(value: object) -> date:
     return pd.Timestamp(value).date()
@@ -599,6 +976,138 @@ def _require_flat_frame_provenance(
         raise BarValidationError(
             "ambiguous flat columns for multiple requested tickers"
         )
+
+
+def _validated_governed_daily_index(
+    frame: pd.DataFrame, session: date
+) -> tuple[object | None, str | None]:
+    if len(frame.index) == 0:
+        return None, "missing"
+    try:
+        sessions = tuple(_session_date(value) for value in frame.index)
+    except (TypeError, ValueError):
+        return None, "invalid"
+    if len(sessions) != 1 or sessions[0] != session:
+        return None, "invalid"
+    return frame.index[0], None
+
+
+def _require_single_ticker_daily_provenance(
+    frame: pd.DataFrame, ticker: str
+) -> None:
+    if not isinstance(frame.columns, pd.MultiIndex):
+        return
+    aliases = {ticker, normalize_tickers([ticker])[0]}
+    for field in ("Open", "High", "Low", "Close"):
+        matches = [
+            column
+            for column in frame.columns
+            if len(column) >= 2
+            and column[0] == field
+            and str(column[1]) in aliases
+        ]
+        if len(matches) != 1:
+            raise BarValidationError("invalid daily provenance")
+
+
+def _governed_failure(kind: str, ticker: str, session: date) -> str:
+    return f"{kind} {ticker}/{session}"
+
+
+def _expected_intraday_starts(session: date) -> tuple[datetime, ...]:
+    start = session_open(session)
+    close = session_close(session)
+    starts: list[datetime] = []
+    while start < close:
+        starts.append(start.astimezone(_ET))
+        start += timedelta(hours=1)
+    return tuple(starts)
+
+
+def _normalized_intraday_start(
+    value: object, ticker: str, session: date
+) -> datetime:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise BarValidationError(_governed_failure("invalid", ticker, session))
+    return timestamp.tz_convert(_ET).to_pydatetime()
+
+
+def _require_single_ticker_intraday_provenance(
+    frame: pd.DataFrame, ticker: str
+) -> None:
+    if frame.columns.duplicated().any():
+        raise BarValidationError("invalid intraday provenance")
+    if not isinstance(frame.columns, pd.MultiIndex):
+        return
+    normalized_ticker = normalize_tickers([ticker])[0]
+    allowed = {ticker, normalized_ticker}
+    observed_tickers: set[str] = set()
+    for column in frame.columns:
+        if len(column) < 2 or column[0] not in {"Open", "High", "Low", "Close"}:
+            continue
+        observed_tickers.add(str(column[1]))
+    if not observed_tickers or not observed_tickers.issubset(allowed):
+        raise BarValidationError("invalid intraday provenance")
+    for field in ("Open", "High", "Low", "Close"):
+        matches = sum(
+            1
+            for candidate in allowed
+            if (field, candidate) in frame.columns
+        )
+        if matches != 1:
+            raise BarValidationError("invalid intraday provenance")
+
+
+def _reconstruct_governed_bar(
+    attempt: GovernedDailyBarAttempt,
+    intraday_bars: tuple[IntradayBarEvidence, ...],
+) -> MarketBar:
+    if not intraday_bars or attempt.raw_ohlc is None:
+        raise BarValidationError(
+            _governed_failure("invalid", attempt.ticker, attempt.session)
+        )
+    original = attempt.raw_ohlc
+    aggregate_open = intraday_bars[0].open
+    aggregate_high = max(row.high for row in intraday_bars)
+    aggregate_low = min(row.low for row in intraday_bars)
+    aggregate_close = intraday_bars[-1].close
+    if original["open"] != aggregate_open or original["close"] != aggregate_close:
+        raise BarValidationError(
+            _governed_failure("invalid", attempt.ticker, attempt.session)
+        )
+
+    high_is_broken = (
+        original["open"] > original["high"]
+        or original["close"] > original["high"]
+    )
+    low_is_broken = (
+        original["open"] < original["low"]
+        or original["close"] < original["low"]
+    )
+    if high_is_broken == low_is_broken:
+        raise BarValidationError(
+            _governed_failure("invalid", attempt.ticker, attempt.session)
+        )
+    if high_is_broken and original["low"] != aggregate_low:
+        raise BarValidationError(
+            _governed_failure("invalid", attempt.ticker, attempt.session)
+        )
+    if low_is_broken and original["high"] != aggregate_high:
+        raise BarValidationError(
+            _governed_failure("invalid", attempt.ticker, attempt.session)
+        )
+    return MarketBar(
+        ticker=attempt.ticker,
+        session=attempt.session,
+        open=aggregate_open,
+        high=aggregate_high,
+        low=aggregate_low,
+        close=aggregate_close,
+        source="yfinance-60m-reconstruction",
+        fetched_at=intraday_bars[0].fetched_at,
+        adjusted=False,
+    )
 
 
 def _decimal_bar_value(

@@ -216,6 +216,7 @@ def test_generation_subprocess_env_includes_exact_generation_metadata(
     worktree = repo / "frozen"
     state_dir = repo / "state"
     worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
     manager = GenerationManager(str(repo))
     captured: dict = {}
 

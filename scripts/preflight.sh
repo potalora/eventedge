@@ -10,8 +10,8 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
-LOG_DIR="$REPO_ROOT/data/logs"
+VENV_PYTHON="${EVENTEDGE_PYTHON:-$REPO_ROOT/.venv/bin/python}"
+LOG_DIR="${EVENTEDGE_LOG_DIR:-$REPO_ROOT/data/logs}"
 mkdir -p "$LOG_DIR"
 
 TODAY=$(date +%Y-%m-%d)
@@ -32,7 +32,7 @@ fi
 LOG_FILE="$LOG_DIR/preflight_${TODAY}.log"
 
 echo "=== Preflight check: $TODAY ===" >> "$LOG_FILE"
-"$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" >> "$LOG_FILE" 2>&1
+"$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" --preflight-mode screen >> "$LOG_FILE" 2>&1
 rc=$?
 echo "=== Preflight finished rc=$rc: $(date) ===" >> "$LOG_FILE"
 exit $rc

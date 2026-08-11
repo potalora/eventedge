@@ -6,6 +6,7 @@ exited 0 (per-cohort errors are caught and returned as {"error": true}), so the
 manifest logged success:true and the failure was invisible until the missing
 report was noticed.
 """
+
 from __future__ import annotations
 
 import json
@@ -17,6 +18,7 @@ import pytest
 from scripts import run_cohorts
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
+    aggregate_governed_reporting,
     count_degraded_cohorts,
     count_failed_cohorts,
 )
@@ -27,6 +29,7 @@ from tradingagents.strategies.orchestration.generation_manager import (
 
 
 # --- count_failed_cohorts (pure) ---
+
 
 def test_count_failed_cohorts_all_errored():
     results = {f"c{i}": {"error": True} for i in range(16)}
@@ -70,7 +73,9 @@ def test_candidate_quarantine_is_reportable_degradation_not_execution_failure():
 
     assert count_failed_cohorts(results) == (0, 16, [])
     assert all(result["degraded"] for result in results.values())
-    assert all(result["candidate_bar_quarantines"] == ["ALX"] for result in results.values())
+    assert all(
+        result["candidate_bar_quarantines"] == ["ALX"] for result in results.values()
+    )
 
 
 def test_count_degraded_cohorts_is_distinct_from_execution_failures():
@@ -86,6 +91,123 @@ def test_count_degraded_cohorts_is_distinct_from_execution_failures():
 
     assert count_failed_cohorts(results) == (0, 2, [])
     assert count_degraded_cohorts(results) == (1, 2, ["candidate_quarantined"])
+
+
+def test_governed_reporting_is_deduplicated_sorted_and_bounded():
+    summary = {
+        "ticker": "ESS",
+        "session": "2026-08-10",
+        "recovery_id": "governed_bar_recovery:" + "b" * 64,
+        "contract_version": "yfinance-60m-v1",
+        "evidence_digest": "sha256:" + "a" * 64,
+        "affected_cohort_ids": ["cohort-a", "cohort-b"],
+    }
+    results = {
+        "cohort-b": {
+            "governed_bar_recoveries": [summary, {**summary, "ticker": ""}],
+            "governed_failure_map": {"SPY": "invalid_benchmark SPY/2026-08-10"},
+        },
+        "cohort-a": {
+            "governed_bar_recoveries": [dict(summary)],
+            "governed_failure_map": {
+                "SPY": "invalid_benchmark SPY/2026-08-10",
+                "TOKEN": "provider secret should not escape",
+            },
+        },
+        "malformed": {
+            "governed_bar_recoveries": "x" * 100_000,
+            "governed_failure_map": ["not", "a", "map"],
+        },
+    }
+
+    summaries, failures = aggregate_governed_reporting(results)
+
+    assert summaries == [summary]
+    assert failures == {"SPY": "invalid_benchmark SPY/2026-08-10"}
+    assert "secret" not in json.dumps({"summaries": summaries, "failures": failures})
+
+
+def test_governed_reporting_omits_secret_like_ticker_and_cohort_identifiers():
+    baseline = {
+        "ticker": "ESS",
+        "session": "2026-08-10",
+        "recovery_id": "governed_bar_recovery:" + "b" * 64,
+        "contract_version": "yfinance-60m-v1",
+        "evidence_digest": "sha256:" + "a" * 64,
+        "affected_cohort_ids": ["cohort-a"],
+    }
+    results = {
+        "cohort-a": {
+            "governed_bar_recoveries": [
+                baseline,
+                {**baseline, "ticker": "PROVIDER SECRET"},
+                {**baseline, "affected_cohort_ids": ["PASSWORD=SECRET"]},
+            ],
+            "governed_failure_map": {
+                "PROVIDER SECRET": "invalid PROVIDER SECRET/2026-08-10"
+            },
+        }
+    }
+
+    summaries, failures = aggregate_governed_reporting(results)
+
+    assert summaries == [baseline]
+    assert failures == {}
+    assert "SECRET" not in json.dumps({"summaries": summaries, "failures": failures})
+
+
+def test_governed_reporting_accepts_canonical_ids_with_one_global_cap_and_unsafe_keys():
+    results = {
+        f"cohort-{index:04d}": {
+            "governed_bar_recoveries": [
+                {
+                    "ticker": f"T{index:04d}",
+                    "session": "2026-08-10",
+                    "recovery_id": "governed_bar_recovery:" + f"{index:064x}",
+                    "contract_version": "yfinance-60m-v1",
+                    "evidence_digest": "sha256:" + f"{index:064x}",
+                    "affected_cohort_ids": [f"cohort-{index:04d}"],
+                }
+            ]
+        }
+        for index in range(300)
+    }
+    results[object()] = {"governed_failure_map": {object(): "secret"}}
+
+    summaries, failures = aggregate_governed_reporting(results)
+
+    assert 0 < len(summaries) <= 256
+    assert summaries == sorted(
+        summaries, key=lambda row: (row["ticker"], row["session"], row["recovery_id"])
+    )
+    assert failures == {}
+
+
+def test_worker_status_is_degraded_for_successful_governed_recovery():
+    summary = {
+        "ticker": "ESS",
+        "session": "2026-08-10",
+        "recovery_id": "governed_bar_recovery:" + "b" * 64,
+        "contract_version": "yfinance-60m-v1",
+        "evidence_digest": "sha256:" + "a" * 64,
+        "affected_cohort_ids": ["cohort-a"],
+    }
+    result = {
+        "cohort-a": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": True,
+            "candidate_bar_quarantines": [],
+            "governed_bar_recoveries": [summary],
+            "governed_failure_map": {},
+        }
+    }
+
+    exit_code, message = run_cohorts._cohort_run_exit_status(result)
+
+    assert exit_code == 2
+    assert "recovered tickers: ESS" in message
 
 
 def test_worker_status_is_degraded_for_candidate_quarantine():
@@ -193,6 +315,7 @@ def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys
 
 # --- _extract_cohort_results (parse run_cohorts.py stdout) ---
 
+
 def test_extract_cohort_results_from_mixed_stdout():
     results = {"h_30d_5k": {"error": True}, "h_30d_10k": {"signals": []}}
     stdout = (
@@ -230,7 +353,10 @@ def test_reset_refuses_before_constructing_ledger_orchestrator(monkeypatch, caps
         run_cohorts.main()
 
     assert error.value.code == 2
-    assert "reset is disabled for ledger-backed generation state" in capsys.readouterr().err
+    assert (
+        "reset is disabled for ledger-backed generation state"
+        in capsys.readouterr().err
+    )
 
 
 def test_orchestrator_reset_refuses_before_deleting_ledger_state():
@@ -238,13 +364,16 @@ def test_orchestrator_reset_refuses_before_deleting_ledger_state():
     state = Mock()
     orchestrator.cohorts = [{"state": state}]
 
-    with pytest.raises(RuntimeError, match="reset is disabled for ledger-backed generation state"):
+    with pytest.raises(
+        RuntimeError, match="reset is disabled for ledger-backed generation state"
+    ):
         orchestrator.reset()
 
     state.reset.assert_not_called()
 
 
 # --- the core defect: rc==0 but cohorts failed => success False ---
+
 
 class _FakeProc:
     def __init__(self, returncode, stdout, stderr=""):
@@ -262,10 +391,13 @@ def _run_with_proc(tmp_path, proc):
         "state_dir": str(tmp_path / "state"),
         "worktree_path": str(tmp_path / "wt"),
     }
-    with patch(
-        "tradingagents.strategies.orchestration.generation_manager.subprocess.run",
-        return_value=proc,
-    ), patch.object(GenerationManager, "_write_run_log", lambda self, *a, **k: None):
+    with (
+        patch(
+            "tradingagents.strategies.orchestration.generation_manager.subprocess.run",
+            return_value=proc,
+        ),
+        patch.object(GenerationManager, "_write_run_log", lambda self, *a, **k: None),
+    ):
         return mgr._run_cohorts_subprocess(gen_data, ["--date", "2026-06-01"])
 
 
@@ -316,6 +448,59 @@ def test_degraded_worker_result_preserves_execution_validity(tmp_path):
     assert result["degraded"] is True
     assert result["execution_valid"] is True
     assert "1/1 cohorts degraded" in result["error"]
+
+
+def test_generation_status_labels_governed_recovery_without_candidate_quarantine(
+    tmp_path,
+):
+    summary = {
+        "ticker": "ESS",
+        "session": "2026-08-10",
+        "recovery_id": "governed_bar_recovery:" + "b" * 64,
+        "contract_version": "yfinance-60m-v1",
+        "evidence_digest": "sha256:" + "a" * 64,
+        "affected_cohort_ids": ["cohort-a"],
+    }
+    results = {
+        "cohort-a": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": [],
+            "governed_bar_recoveries": [summary],
+        }
+    }
+    stdout = "done\n" + json.dumps(results, indent=2) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "degraded"))
+
+    assert "governed bar recovery" in result["error"]
+    assert "candidate data quarantined" not in result["error"]
+
+
+def test_generation_status_labels_mixed_candidate_and_governed_degradation(tmp_path):
+    summary = {
+        "ticker": "ESS",
+        "session": "2026-08-10",
+        "recovery_id": "governed_bar_recovery:" + "b" * 64,
+        "contract_version": "yfinance-60m-v1",
+        "evidence_digest": "sha256:" + "a" * 64,
+        "affected_cohort_ids": ["cohort-a"],
+    }
+    results = {
+        "cohort-a": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": ["ALX"],
+            "governed_bar_recoveries": [summary],
+        }
+    }
+    stdout = "done\n" + json.dumps(results, indent=2) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "degraded"))
+
+    assert "candidate data quarantined; governed bar recovery" in result["error"]
 
 
 def test_failed_worker_result_preserves_simultaneous_degradation(tmp_path):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 import sqlite3
 
@@ -10,8 +10,681 @@ import pytest
 from tradingagents.strategies.metrics.models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
+    GOVERNED_BAR_RECOVERY_CONTRACT,
+    GovernedBarRecoveryRecord,
+    METRIC_SCHEMA_VERSION,
 )
 from tradingagents.strategies.metrics.store import MetricStore
+
+
+ESS_60M_ROWS = (
+    {
+        "start": "2026-08-10T09:30:00-04:00",
+        "open": 286.2099914550781,
+        "high": 286.2099914550781,
+        "low": 284.3500061035156,
+        "close": 284.79998779296875,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+    {
+        "start": "2026-08-10T10:30:00-04:00",
+        "open": 284.79998779296875,
+        "high": 285.82501220703125,
+        "low": 284.4700012207031,
+        "close": 285.5,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+    {
+        "start": "2026-08-10T11:30:00-04:00",
+        "open": 285.5,
+        "high": 285.6000061035156,
+        "low": 283.8999938964844,
+        "close": 284.1000061035156,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+    {
+        "start": "2026-08-10T12:30:00-04:00",
+        "open": 284.1000061035156,
+        "high": 284.29998779296875,
+        "low": 282.75,
+        "close": 283.0,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+    {
+        "start": "2026-08-10T13:30:00-04:00",
+        "open": 283.0,
+        "high": 283.5,
+        "low": 282.1000061035156,
+        "close": 282.45001220703125,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+    {
+        "start": "2026-08-10T14:30:00-04:00",
+        "open": 282.45001220703125,
+        "high": 283.45001220703125,
+        "low": 281.5299987792969,
+        "close": 282.8999938964844,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+    {
+        "start": "2026-08-10T15:30:00-04:00",
+        "open": 282.8999938964844,
+        "high": 283.5,
+        "low": 282.70001220703125,
+        "close": 283.2099914550781,
+        "fetched_at": "2026-08-10T22:01:31Z",
+    },
+)
+
+
+def governed_recovery_record(epoch_id: str) -> GovernedBarRecoveryRecord:
+    return GovernedBarRecoveryRecord.create(
+        contract_version=GOVERNED_BAR_RECOVERY_CONTRACT,
+        epoch_id=epoch_id,
+        session=date(2026, 8, 10),
+        ticker="ESS",
+        original_daily={
+            "open": 286.2099914550781,
+            "high": 285.82501220703125,
+            "low": 281.5299987792969,
+            "close": 283.2099914550781,
+            "source": "yfinance",
+            "fetched_at": "2026-08-10T22:01:31Z",
+        },
+        original_validation_error="incoherent ESS/2026-08-10",
+        expected_starts=(
+            "2026-08-10T09:30:00-04:00",
+            "2026-08-10T10:30:00-04:00",
+            "2026-08-10T11:30:00-04:00",
+            "2026-08-10T12:30:00-04:00",
+            "2026-08-10T13:30:00-04:00",
+            "2026-08-10T14:30:00-04:00",
+            "2026-08-10T15:30:00-04:00",
+        ),
+        observed_starts=(
+            "2026-08-10T09:30:00-04:00",
+            "2026-08-10T10:30:00-04:00",
+            "2026-08-10T11:30:00-04:00",
+            "2026-08-10T12:30:00-04:00",
+            "2026-08-10T13:30:00-04:00",
+            "2026-08-10T14:30:00-04:00",
+            "2026-08-10T15:30:00-04:00",
+        ),
+        intraday_rows=ESS_60M_ROWS,
+        reconstructed_bar={
+            "open": 286.2099914550781,
+            "high": 286.2099914550781,
+            "low": 281.5299987792969,
+            "close": 283.2099914550781,
+            "source": "yfinance-60m-reconstruction",
+        },
+        final_validation_error=None,
+        affected_cohort_ids=("horizon_30d_size_5k",),
+    )
+
+
+def _scheduled_governed_recovery_record(
+    session: date, starts: tuple[str, ...]
+) -> GovernedBarRecoveryRecord:
+    rows = tuple(
+        {**ESS_60M_ROWS[index % len(ESS_60M_ROWS)], "start": start}
+        for index, start in enumerate(starts)
+    )
+    opening = rows[0]["open"]
+    high = max(row["high"] for row in rows)
+    low = min(row["low"] for row in rows)
+    close = rows[-1]["close"]
+    return GovernedBarRecoveryRecord.create(
+        contract_version=GOVERNED_BAR_RECOVERY_CONTRACT,
+        epoch_id="epoch-1",
+        session=session,
+        ticker="ESS",
+        original_daily={
+            "open": opening,
+            "high": max(opening, close) - 0.01,
+            "low": low,
+            "close": close,
+            "source": "yfinance",
+            "fetched_at": "2026-08-10T22:01:31Z",
+        },
+        original_validation_error=f"incoherent ESS/{session.isoformat()}",
+        expected_starts=starts,
+        observed_starts=starts,
+        intraday_rows=rows,
+        reconstructed_bar={
+            "open": opening,
+            "high": high,
+            "low": low,
+            "close": close,
+            "source": "yfinance-60m-reconstruction",
+        },
+        final_validation_error=None,
+        affected_cohort_ids=("horizon_30d_size_5k",),
+    )
+
+def _legacy_schema(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE metric_epochs (epoch_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
+        CREATE TABLE outcomes (outcome_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, payload_json TEXT NOT NULL);
+        CREATE TABLE strategy_health (health_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, session TEXT NOT NULL, payload_json TEXT NOT NULL);
+        CREATE TABLE critical_gap_markers (marker_id TEXT PRIMARY KEY, status TEXT NOT NULL, gap_session TEXT NOT NULL, payload_json TEXT NOT NULL);
+        """
+    )
+
+
+def test_governed_bar_recovery_round_trips_immutably(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+
+    store.save_governed_bar_recovery(record)
+    store.save_governed_bar_recovery(record)
+
+    assert store.load_governed_bar_recovery(
+        epoch_id="epoch-1", session=date(2026, 8, 10), ticker="ess"
+    ) == record
+    assert store.load_governed_bar_recovery_by_id(record.recovery_id) == record
+
+
+def test_governed_bar_recovery_rejects_unequal_evidence_in_the_same_scope(
+    tmp_path,
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+
+    with pytest.raises(ValueError, match="unequal payload"):
+        store.save_governed_bar_recovery(
+            GovernedBarRecoveryRecord.create(
+                    **{
+                        **record.evidence_fields(),
+                        "affected_cohort_ids": ("horizon_30d_size_10k",),
+                    }
+            )
+        )
+
+
+def test_governed_bar_recovery_rejects_mismatched_supplied_identifiers() -> None:
+    record = governed_recovery_record("epoch-1")
+
+    with pytest.raises(ValueError, match="evidence digest"):
+        GovernedBarRecoveryRecord.create(
+            **record.evidence_fields(), evidence_digest="sha256:not-the-digest"
+        )
+    with pytest.raises(ValueError, match="recovery id"):
+        GovernedBarRecoveryRecord.create(
+            **record.evidence_fields(), recovery_id="not-the-recovery-id"
+        )
+
+
+def test_open_existing_reads_governed_recovery_without_creating_tables(tmp_path) -> None:
+    path = tmp_path / "existing-metrics.sqlite3"
+    record = governed_recovery_record("epoch-1")
+    with sqlite3.connect(path) as connection:
+        _legacy_schema(connection)
+        connection.execute(
+            """
+            CREATE TABLE governed_bar_recoveries (
+                recovery_id TEXT PRIMARY KEY,
+                contract_version TEXT NOT NULL,
+                evidence_digest TEXT NOT NULL,
+                epoch_id TEXT NOT NULL,
+                session TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (epoch_id, session, ticker)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO governed_bar_recoveries
+              (recovery_id, contract_version, evidence_digest, epoch_id, session,
+               ticker, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.recovery_id,
+                record.contract_version,
+                record.evidence_digest,
+                record.epoch_id,
+                record.session.isoformat(),
+                record.ticker,
+                record.canonical_payload(),
+                record.original_daily["fetched_at"],
+            ),
+        )
+
+    store = MetricStore.open_existing(path)
+
+    assert store.load_governed_bar_recovery_by_id(record.recovery_id) == record
+    with sqlite3.connect(path) as connection:
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        } == {
+            "metric_epochs",
+            "outcomes",
+            "strategy_health",
+            "critical_gap_markers",
+            "governed_bar_recoveries",
+        }
+
+
+def test_open_existing_missing_governed_table_returns_no_record_without_migration(
+    tmp_path,
+) -> None:
+    path = tmp_path / "legacy-metrics.sqlite3"
+    with sqlite3.connect(path) as connection:
+        _legacy_schema(connection)
+
+    store = MetricStore.open_existing(path)
+
+    assert (
+        store.load_governed_bar_recovery(
+            epoch_id="legacy-epoch", session=date(2026, 8, 10), ticker="ESS"
+        )
+        is None
+    )
+    assert store.load_governed_bar_recovery_by_id("missing") is None
+    with sqlite3.connect(path) as connection:
+        assert "governed_bar_recoveries" not in {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+
+
+def test_governed_recovery_storage_does_not_change_metrics_schema_version() -> None:
+    assert METRIC_SCHEMA_VERSION == 2
+
+
+def _recreate_governed_record(
+    record: GovernedBarRecoveryRecord, **changes: object
+) -> GovernedBarRecoveryRecord:
+    fields = record.evidence_fields()
+    fields.update(changes)
+    return GovernedBarRecoveryRecord.create(**fields)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "high": 300.0,
+                }
+            },
+            "original daily evidence is coherent",
+        ),
+        ({"original_validation_error": "incoherent ESS/2026/08/10"}, "reason"),
+        (
+            {"expected_starts": governed_recovery_record("epoch-1").expected_starts[:-1]},
+            "schedule",
+        ),
+        (
+            {
+                "reconstructed_bar": {
+                    **governed_recovery_record("epoch-1").reconstructed_bar,
+                    "high": 280.0,
+                }
+            },
+            "reconstructed",
+        ),
+        (
+            {
+                "reconstructed_bar": {
+                    **governed_recovery_record("epoch-1").reconstructed_bar,
+                    "source": "other",
+                }
+            },
+            "source",
+        ),
+        ({"final_validation_error": "still invalid"}, "final validation"),
+    ],
+)
+def test_governed_storage_accepts_only_complete_accepted_reconstructions(
+    tmp_path, changes: dict[str, object], error: str
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+
+    with pytest.raises(ValueError, match=error):
+        store.save_governed_bar_recovery(
+            _recreate_governed_record(governed_recovery_record("epoch-1"), **changes)
+        )
+
+
+@pytest.mark.parametrize("field_value", [True, 0, -1, float("nan"), float("inf")])
+@pytest.mark.parametrize("evidence_kind", ["original", "reconstructed", "intraday"])
+def test_governed_storage_rejects_invalid_ohlc_values_with_value_error(
+    tmp_path, evidence_kind: str, field_value: object
+) -> None:
+    record = governed_recovery_record("epoch-1")
+    fields = record.evidence_fields()
+    if evidence_kind == "original":
+        fields["original_daily"] = {**record.original_daily, "open": field_value}
+    elif evidence_kind == "reconstructed":
+        fields["reconstructed_bar"] = {
+            **record.reconstructed_bar,
+            "open": field_value,
+        }
+    else:
+        fields["intraday_rows"] = (
+            {**record.intraday_rows[0], "open": field_value},
+            *record.intraday_rows[1:],
+        )
+
+    with pytest.raises(ValueError, match="governed bar recovery"):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            GovernedBarRecoveryRecord.create(**fields)
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "source": "other",
+                }
+            },
+            "original source",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "open": 287.0,
+                }
+            },
+            "open does not match",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "close": 286.0,
+                }
+            },
+            "close does not match",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "high": 280.0,
+                    "low": 284.0,
+                }
+            },
+            "both envelope bounds",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "low": 281.0,
+                }
+            },
+            "unbroken low",
+        ),
+        (
+            {
+                "original_daily": {
+                    **governed_recovery_record("epoch-1").original_daily,
+                    "high": 287.0,
+                    "low": 284.0,
+                }
+            },
+            "unbroken high",
+        ),
+        (
+            {
+                "intraday_rows": (
+                    {
+                        **governed_recovery_record("epoch-1").intraday_rows[0],
+                        "open": 285.0,
+                    },
+                    *governed_recovery_record("epoch-1").intraday_rows[1:],
+                )
+            },
+            "aggregation",
+        ),
+    ],
+)
+def test_governed_storage_binds_reconstruction_to_original_and_intraday_evidence(
+    tmp_path, changes: dict[str, object], error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            _recreate_governed_record(governed_recovery_record("epoch-1"), **changes)
+        )
+
+
+@pytest.mark.parametrize(
+    ("row_index", "field", "value"),
+    [
+        (0, "open", 285.0),
+        (2, "high", 290.0),
+        (4, "low", 280.0),
+        (6, "close", 283.0),
+    ],
+)
+def test_governed_storage_rejects_each_intraday_aggregation_mismatch(
+    tmp_path, row_index: int, field: str, value: float
+) -> None:
+    record = governed_recovery_record("epoch-1")
+    rows = [dict(row) for row in record.intraday_rows]
+    rows[row_index][field] = value
+
+    with pytest.raises(ValueError, match="aggregation"):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            _recreate_governed_record(record, intraday_rows=tuple(rows))
+        )
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "scope"),
+    [
+        ("recovery_id", "tampered-id", ("epoch-1", date(2026, 8, 10), "ESS")),
+        ("contract_version", "other-contract", ("epoch-1", date(2026, 8, 10), "ESS")),
+        ("evidence_digest", "sha256:tampered", ("epoch-1", date(2026, 8, 10), "ESS")),
+        ("epoch_id", "other-epoch", ("other-epoch", date(2026, 8, 10), "ESS")),
+        ("session", "2026-08-11", ("epoch-1", date(2026, 8, 11), "ESS")),
+        ("ticker", "OTHER", ("epoch-1", date(2026, 8, 10), "OTHER")),
+    ],
+)
+def test_governed_loads_fail_closed_on_tampered_persisted_metadata(
+    tmp_path, column: str, value: str, scope: tuple[str, date, str]
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+    with sqlite3.connect(store.path) as connection:
+        payload = connection.execute(
+            "SELECT payload_json FROM governed_bar_recoveries"
+        ).fetchone()[0]
+        connection.execute(
+            f"UPDATE governed_bar_recoveries SET {column} = ?", (value,)
+        )
+        assert connection.execute(
+            "SELECT payload_json FROM governed_bar_recoveries"
+        ).fetchone()[0] == payload
+
+    recovery_id = value if column == "recovery_id" else record.recovery_id
+    with pytest.raises(ValueError, match="metadata"):
+        store.load_governed_bar_recovery_by_id(recovery_id)
+    with pytest.raises(ValueError, match="metadata"):
+        store.load_governed_bar_recovery(
+            epoch_id=scope[0], session=scope[1], ticker=scope[2]
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"x":' * 1_100 + "0" + "}" * 1_100,
+        "{not json",
+        "x" * 100_001,
+    ],
+)
+def test_governed_load_rejects_malformed_or_unbounded_persisted_payload(
+    tmp_path, payload: str
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE governed_bar_recoveries SET payload_json = ?", (payload,)
+        )
+
+    with pytest.raises(ValueError, match="payload"):
+        store.load_governed_bar_recovery_by_id(record.recovery_id)
+
+
+def test_governed_record_nested_evidence_is_immutable_after_create_and_load(
+    tmp_path,
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+
+    for evidence in (
+        record,
+        store.load_governed_bar_recovery_by_id(record.recovery_id),
+        store.load_governed_bar_recovery(
+            epoch_id="epoch-1", session=date(2026, 8, 10), ticker="ESS"
+        ),
+    ):
+        assert evidence is not None
+        with pytest.raises(TypeError):
+            evidence.original_daily["open"] = 1.0
+        with pytest.raises(TypeError):
+            evidence.intraday_rows[0]["close"] = 1.0
+        with pytest.raises(TypeError):
+            evidence.reconstructed_bar["close"] = 1.0
+        evidence.validate_integrity()
+
+
+def test_governed_recovery_rejects_unsupported_contract_on_save_and_load(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    unsupported = _recreate_governed_record(record, contract_version="other-v1")
+
+    with pytest.raises(ValueError, match="contract"):
+        store.save_governed_bar_recovery(unsupported)
+
+    store.save_governed_bar_recovery(record)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            """
+            UPDATE governed_bar_recoveries
+            SET recovery_id = ?, contract_version = ?, evidence_digest = ?,
+                payload_json = ?
+            """,
+            (
+                unsupported.recovery_id,
+                unsupported.contract_version,
+                unsupported.evidence_digest,
+                unsupported.canonical_payload(),
+            ),
+        )
+
+    with pytest.raises(ValueError, match="contract"):
+        store.load_governed_bar_recovery_by_id(unsupported.recovery_id)
+
+
+@pytest.mark.parametrize("cohort_id", [1, "", " ", "x" * 4_097])
+def test_governed_recovery_rejects_invalid_affected_cohort_id(
+    tmp_path, cohort_id: object
+) -> None:
+    with pytest.raises(ValueError, match="affected cohort"):
+        MetricStore(tmp_path / "metrics.sqlite3").save_governed_bar_recovery(
+            _recreate_governed_record(
+                governed_recovery_record("epoch-1"), affected_cohort_ids=(cohort_id,)
+            )
+        )
+
+
+def test_governed_recovery_requires_exact_xnys_hourly_schedule(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+
+    with pytest.raises(ValueError, match="interval schedule"):
+        store.save_governed_bar_recovery(
+            _recreate_governed_record(
+                record,
+                session=date(2026, 8, 11),
+                original_validation_error="incoherent ESS/2026-08-11",
+            )
+        )
+    with pytest.raises(ValueError, match="interval schedule"):
+        store.save_governed_bar_recovery(
+            _scheduled_governed_recovery_record(
+                date(2026, 8, 10),
+                tuple(start.replace(":30:00", ":31:00") for start in record.expected_starts),
+            )
+        )
+    with pytest.raises(ValueError, match="interval schedule"):
+        store.save_governed_bar_recovery(
+            _scheduled_governed_recovery_record(
+                date(2026, 8, 10), record.expected_starts[:-1]
+            )
+        )
+    with pytest.raises(ValueError, match="interval schedule"):
+        store.save_governed_bar_recovery(
+            _scheduled_governed_recovery_record(
+                date(2026, 8, 10),
+                record.expected_starts + ("2026-08-10T16:30:00-04:00",),
+            )
+        )
+    utc_starts = tuple(
+        (datetime(2026, 8, 10, 13, 30, tzinfo=UTC) + timedelta(hours=index)).isoformat()
+        for index in range(7)
+    )
+    with pytest.raises(ValueError, match="interval schedule"):
+        store.save_governed_bar_recovery(
+            _scheduled_governed_recovery_record(date(2026, 8, 10), utc_starts)
+        )
+
+
+def test_governed_recovery_uses_exact_black_friday_hourly_schedule(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    early_starts = tuple(
+        f"2026-11-27T{hour:02d}:30:00-05:00" for hour in range(9, 13)
+    )
+    store.save_governed_bar_recovery(
+        _scheduled_governed_recovery_record(date(2026, 11, 27), early_starts)
+    )
+
+    with pytest.raises(ValueError, match="interval schedule"):
+        store.save_governed_bar_recovery(
+            _scheduled_governed_recovery_record(
+                date(2026, 11, 27),
+                early_starts + ("2026-11-27T13:30:00-05:00",),
+            )
+        )
+
+
+def test_governed_idempotent_save_revalidates_existing_metadata(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = governed_recovery_record("epoch-1")
+    store.save_governed_bar_recovery(record)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE governed_bar_recoveries SET contract_version = 'corrupt'"
+        )
+
+    with pytest.raises(ValueError, match="metadata"):
+        store.save_governed_bar_recovery(record)
 
 
 def _attempt(

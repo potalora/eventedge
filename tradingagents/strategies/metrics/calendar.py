@@ -45,3 +45,10 @@ class XNYSCalendar:
         return self._calendar.session_close(
             self._timestamp(session)
         ).to_pydatetime()
+
+    def session_open(self, session: date) -> datetime:
+        if not self.is_session(session):
+            raise ValueError(f"{session} is not an XNYS session")
+        return self._calendar.session_open(
+            self._timestamp(session)
+        ).to_pydatetime()

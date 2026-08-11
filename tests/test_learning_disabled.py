@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,7 @@ def test_generation_manager_learning_refuses_without_subprocess(
         GenerationManager,
     )
 
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     manager = GenerationManager(tmp_path)
     before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
     monkeypatch.setattr(

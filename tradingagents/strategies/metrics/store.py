@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from .calendar import XNYSCalendar
 from .models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
     CriticalGapMarker,
+    GOVERNED_BAR_RECOVERY_CONTRACT,
+    GovernedBarRecoveryRecord,
     MetricEpoch,
     OutcomeRecord,
     StrategyHealthRecord,
@@ -46,6 +52,17 @@ CREATE TABLE IF NOT EXISTS candidate_bar_recoveries (
   epoch_id TEXT NOT NULL,
   session TEXT NOT NULL,
   payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS governed_bar_recoveries (
+  recovery_id TEXT PRIMARY KEY,
+  contract_version TEXT NOT NULL,
+  evidence_digest TEXT NOT NULL,
+  epoch_id TEXT NOT NULL,
+  session TEXT NOT NULL,
+  ticker TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (epoch_id, session, ticker)
 );
 CREATE TABLE IF NOT EXISTS candidate_signal_identity_bindings (
   binding_id TEXT PRIMARY KEY,
@@ -81,6 +98,11 @@ _MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT = 128
 _MAX_CANDIDATE_RECOVERY_ATTEMPTS = 2
 _MAX_CANDIDATE_RECOVERY_SIGNALS = 64
 _MAX_CANDIDATE_SIGNAL_IDENTITIES = 4_096
+_MAX_GOVERNED_RECOVERY_TEXT = 4_096
+_MAX_GOVERNED_RECOVERY_ROWS = 7
+_MAX_GOVERNED_RECOVERY_COHORTS = 64
+_MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES = 100_000
+_NEW_YORK = ZoneInfo("America/New_York")
 _CANDIDATE_ATTEMPT_KEYS = frozenset(
     {
         "ticker",
@@ -108,14 +130,18 @@ class MetricStore:
         self.path = Path(path)
         self._calendar = XNYSCalendar()
         self._read_only = False
+        self._immutable = False
         self._has_candidate_bar_recoveries = True
         self._has_candidate_signal_identity_bindings = True
+        self._has_governed_bar_recoveries = True
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
 
     @classmethod
-    def open_existing(cls, path: str | Path) -> "MetricStore":
+    def open_existing(
+        cls, path: str | Path, *, immutable: bool = False
+    ) -> "MetricStore":
         """Open an existing metric store without schema or journal mutations."""
         target = Path(path)
         if not target.is_file():
@@ -124,6 +150,7 @@ class MetricStore:
         store.path = target
         store._calendar = XNYSCalendar()
         store._read_only = True
+        store._immutable = bool(immutable)
         with store._connect() as connection:
             tables = {
                 row[0]
@@ -143,17 +170,27 @@ class MetricStore:
         store._has_candidate_signal_identity_bindings = (
             "candidate_signal_identity_bindings" in tables
         )
+        store._has_governed_bar_recoveries = "governed_bar_recoveries" in tables
         return store
 
     @property
     def read_only(self) -> bool:
         return self._read_only
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._read_only:
             encoded = quote(str(self.path.resolve()), safe="/")
-            return sqlite3.connect(f"file:{encoded}?mode=ro", uri=True)
-        return sqlite3.connect(self.path)
+            immutable = "&immutable=1" if self._immutable else ""
+            connection = sqlite3.connect(f"file:{encoded}?mode=ro{immutable}", uri=True)
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            connection = sqlite3.connect(self.path)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _json(record: object) -> str:
@@ -197,6 +234,7 @@ class MetricStore:
     def _critical_gap(payload: str) -> CriticalGapMarker:
         data = json.loads(payload)
         data["gap_session"] = date.fromisoformat(data["gap_session"])
+        data.setdefault("governed_failure_map", {})
         if "affected_cohorts" not in data:
             data["affected_cohorts"] = {}
             data["detail_status"] = "legacy_unbound"
@@ -229,6 +267,164 @@ class MetricStore:
         data["session"] = date.fromisoformat(data["session"])
         data["identities"] = tuple(dict(identity) for identity in data["identities"])
         return CandidateSignalIdentityBinding(**data)
+
+    @staticmethod
+    def _governed_payload_data(payload: object) -> dict[str, object]:
+        if not isinstance(payload, str):
+            raise ValueError("governed bar recovery payload is invalid")
+        if len(payload.encode("utf-8")) > _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES:
+            raise ValueError("governed bar recovery payload exceeds byte bound")
+        try:
+            data = json.loads(payload)
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as error:
+            raise ValueError("governed bar recovery payload is invalid") from error
+        record_fields = {
+            "recovery_id",
+            "contract_version",
+            "evidence_digest",
+            "epoch_id",
+            "session",
+            "ticker",
+            "original_daily",
+            "original_validation_error",
+            "expected_starts",
+            "observed_starts",
+            "intraday_rows",
+            "reconstructed_bar",
+            "final_validation_error",
+            "affected_cohort_ids",
+        }
+        if not isinstance(data, dict) or set(data) != record_fields:
+            raise ValueError("governed bar recovery payload shape is invalid")
+        text_fields = (
+            "recovery_id",
+            "contract_version",
+            "evidence_digest",
+            "epoch_id",
+            "session",
+            "ticker",
+        )
+        if not all(isinstance(data[field], str) for field in text_fields):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if data["original_validation_error"] is not None and not isinstance(
+            data["original_validation_error"], str
+        ):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if data["final_validation_error"] is not None and not isinstance(
+            data["final_validation_error"], str
+        ):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        bar_keys = {"open", "high", "low", "close"}
+        original_keys = bar_keys | {"source", "fetched_at"}
+        row_keys = bar_keys | {"start", "fetched_at"}
+        reconstructed_keys = bar_keys | {"source"}
+
+        def scalar(value: object) -> bool:
+            return value is None or isinstance(value, (str, int, float, bool))
+
+        def shaped_mapping(value: object, keys: set[str]) -> bool:
+            return (
+                isinstance(value, dict)
+                and set(value) == keys
+                and all(scalar(item) for item in value.values())
+            )
+
+        if not shaped_mapping(data["original_daily"], original_keys):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if not shaped_mapping(data["reconstructed_bar"], reconstructed_keys):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if not isinstance(data["expected_starts"], list) or not all(
+            isinstance(item, str) for item in data["expected_starts"]
+        ):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if not isinstance(data["observed_starts"], list) or not all(
+            isinstance(item, str) for item in data["observed_starts"]
+        ):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if not isinstance(data["intraday_rows"], list) or not all(
+            shaped_mapping(row, row_keys) for row in data["intraday_rows"]
+        ):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        if not isinstance(data["affected_cohort_ids"], list) or not all(
+            isinstance(item, str) for item in data["affected_cohort_ids"]
+        ):
+            raise ValueError("governed bar recovery payload shape is invalid")
+        return data
+
+    def _governed_bar_recovery(
+        self,
+        row: tuple[object, ...],
+        *,
+        expected_scope: tuple[str, date, str] | None = None,
+        expected_recovery_id: str | None = None,
+    ) -> GovernedBarRecoveryRecord:
+        if len(row) != 7:
+            raise ValueError("governed bar recovery metadata is invalid")
+        (
+            stored_recovery_id,
+            stored_contract_version,
+            stored_evidence_digest,
+            stored_epoch_id,
+            stored_session,
+            stored_ticker,
+            payload,
+        ) = row
+        metadata = (
+            stored_recovery_id,
+            stored_contract_version,
+            stored_evidence_digest,
+            stored_epoch_id,
+            stored_session,
+            stored_ticker,
+        )
+        if not all(isinstance(value, str) for value in metadata):
+            raise ValueError("governed bar recovery metadata is invalid")
+        data = self._governed_payload_data(payload)
+        try:
+            record = GovernedBarRecoveryRecord.create(
+                contract_version=data["contract_version"],
+                epoch_id=data["epoch_id"],
+                session=date.fromisoformat(data["session"]),
+                ticker=data["ticker"],
+                original_daily=data["original_daily"],
+                original_validation_error=data["original_validation_error"],
+                expected_starts=data["expected_starts"],
+                observed_starts=data["observed_starts"],
+                intraday_rows=data["intraday_rows"],
+                reconstructed_bar=data["reconstructed_bar"],
+                final_validation_error=data["final_validation_error"],
+                affected_cohort_ids=data["affected_cohort_ids"],
+                evidence_digest=data["evidence_digest"],
+                recovery_id=data["recovery_id"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("governed bar recovery payload is invalid") from error
+        if payload != record.canonical_payload():
+            raise ValueError("governed bar recovery payload is not canonical")
+        if metadata != (
+            record.recovery_id,
+            record.contract_version,
+            record.evidence_digest,
+            record.epoch_id,
+            record.session.isoformat(),
+            record.ticker,
+        ):
+            raise ValueError("governed bar recovery metadata does not match payload")
+        if (
+            expected_recovery_id is not None
+            and record.recovery_id != expected_recovery_id
+        ):
+            raise ValueError("governed bar recovery metadata does not match lookup")
+        if expected_scope is not None:
+            epoch_id, session, ticker = expected_scope
+            if (record.epoch_id, record.session, record.ticker) != (
+                epoch_id,
+                session,
+                ticker.upper(),
+            ):
+                raise ValueError("governed bar recovery metadata does not match lookup")
+        self._validate_governed_bar_recovery(record)
+        return record
 
     @staticmethod
     def _bounded_candidate_recovery_text(value: object) -> bool:
@@ -352,6 +548,229 @@ class MetricStore:
         if canonical != sorted(set(canonical)):
             raise ValueError("candidate signal identity binding is not canonical")
 
+    @staticmethod
+    def _bounded_governed_recovery_text(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and bool(value.strip())
+            and len(value) <= _MAX_GOVERNED_RECOVERY_TEXT
+        )
+
+    @classmethod
+    def _validate_governed_json_value(cls, value: object) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                if not cls._bounded_governed_recovery_text(key):
+                    raise ValueError("governed bar recovery evidence key is invalid")
+                cls._validate_governed_json_value(item)
+            return
+        if isinstance(value, tuple):
+            for item in value:
+                cls._validate_governed_json_value(item)
+            return
+        if isinstance(value, str):
+            if len(value) > _MAX_GOVERNED_RECOVERY_TEXT:
+                raise ValueError("governed bar recovery evidence text is invalid")
+            return
+        if isinstance(value, bool) or value is None or isinstance(value, int):
+            return
+        if isinstance(value, float) and math.isfinite(value):
+            return
+        raise ValueError("governed bar recovery evidence value is invalid")
+
+    @staticmethod
+    def _governed_ohlc_values(
+        bar: object,
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
+        if not isinstance(bar, Mapping):
+            return None
+        try:
+            values = []
+            for field in ("open", "high", "low", "close"):
+                value = bar[field]
+                if isinstance(value, bool):
+                    return None
+                decimal = Decimal(str(value))
+                if not decimal.is_finite() or decimal <= 0:
+                    return None
+                values.append(decimal)
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            return None
+        return tuple(values)
+
+    @classmethod
+    def _governed_ohlc_is_positive_and_coherent(cls, bar: object) -> bool:
+        values = cls._governed_ohlc_values(bar)
+        if values is None:
+            return False
+        opening, high, low, close = values
+        return (
+            high >= max(opening, close) and low <= min(opening, close) and high >= low
+        )
+
+    def _validate_governed_bar_recovery(
+        self, record: GovernedBarRecoveryRecord
+    ) -> None:
+        record.validate_integrity()
+        if record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
+            raise ValueError("governed bar recovery contract is unsupported")
+        for value in (
+            record.recovery_id,
+            record.contract_version,
+            record.evidence_digest,
+            record.epoch_id,
+            record.ticker,
+        ):
+            if not self._bounded_governed_recovery_text(value):
+                raise ValueError("governed bar recovery identifier is invalid")
+        if record.ticker != record.ticker.upper():
+            raise ValueError("governed bar recovery ticker is invalid")
+        row_starts = tuple(row["start"] for row in record.intraday_rows)
+        try:
+            session_open = self._calendar.session_open(record.session).astimezone(
+                _NEW_YORK
+            )
+            session_close = self._calendar.session_close(record.session).astimezone(
+                _NEW_YORK
+            )
+        except ValueError as error:
+            raise ValueError(
+                "governed bar recovery interval schedule is invalid"
+            ) from error
+        derived_starts: list[str] = []
+        interval_start = session_open
+        while interval_start < session_close:
+            derived_starts.append(interval_start.isoformat())
+            interval_start += timedelta(hours=1)
+        if not record.expected_starts or (
+            record.expected_starts != record.observed_starts
+            or record.expected_starts != row_starts
+            or record.expected_starts != tuple(derived_starts)
+        ):
+            raise ValueError("governed bar recovery interval schedule is invalid")
+        if len(record.expected_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
+            raise ValueError(
+                "governed bar recovery expected interval count exceeds bound"
+            )
+        if len(record.observed_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
+            raise ValueError(
+                "governed bar recovery observed interval count exceeds bound"
+            )
+        if len(record.intraday_rows) > _MAX_GOVERNED_RECOVERY_ROWS:
+            raise ValueError("governed bar recovery intraday row count exceeds bound")
+        if len(record.affected_cohort_ids) > _MAX_GOVERNED_RECOVERY_COHORTS:
+            raise ValueError(
+                "governed bar recovery affected cohort count exceeds bound"
+            )
+        if record.expected_starts != tuple(sorted(set(record.expected_starts))):
+            raise ValueError("governed bar recovery expected starts are not canonical")
+        if record.observed_starts != tuple(sorted(set(record.observed_starts))):
+            raise ValueError("governed bar recovery observed starts are not canonical")
+        if not all(
+            self._bounded_governed_recovery_text(cohort_id)
+            for cohort_id in record.affected_cohort_ids
+        ):
+            raise ValueError("governed bar recovery affected cohort is invalid")
+        if record.affected_cohort_ids != tuple(sorted(set(record.affected_cohort_ids))):
+            raise ValueError("governed bar recovery affected cohorts are not canonical")
+        if set(record.original_daily) != {
+            "open",
+            "high",
+            "low",
+            "close",
+            "source",
+            "fetched_at",
+        }:
+            raise ValueError("governed bar recovery original daily evidence is invalid")
+        if set(record.reconstructed_bar) != {
+            "open",
+            "high",
+            "low",
+            "close",
+            "source",
+        }:
+            raise ValueError("governed bar recovery reconstructed evidence is invalid")
+        for row in record.intraday_rows:
+            if set(row) != {"start", "open", "high", "low", "close", "fetched_at"}:
+                raise ValueError("governed bar recovery intraday evidence is invalid")
+            if not self._governed_ohlc_is_positive_and_coherent(row):
+                raise ValueError(
+                    "governed bar recovery intraday evidence is incoherent"
+                )
+        original_values = self._governed_ohlc_values(record.original_daily)
+        if original_values is None:
+            raise ValueError("governed bar recovery original daily evidence is invalid")
+        if self._governed_ohlc_is_positive_and_coherent(record.original_daily):
+            raise ValueError(
+                "governed bar recovery original daily evidence is coherent"
+            )
+        if record.original_validation_error != (
+            f"incoherent {record.ticker}/{record.session.isoformat()}"
+        ):
+            raise ValueError(
+                "governed bar recovery original validation reason is invalid"
+            )
+        reconstructed_values = self._governed_ohlc_values(record.reconstructed_bar)
+        if (
+            reconstructed_values is None
+            or not self._governed_ohlc_is_positive_and_coherent(
+                record.reconstructed_bar
+            )
+        ):
+            raise ValueError(
+                "governed bar recovery reconstructed evidence is incoherent"
+            )
+        if record.original_daily["source"] != "yfinance":
+            raise ValueError("governed bar recovery original source is invalid")
+        if record.reconstructed_bar["source"] != "yfinance-60m-reconstruction":
+            raise ValueError("governed bar recovery reconstructed source is invalid")
+        original_open, original_high, original_low, original_close = original_values
+        (
+            reconstructed_open,
+            reconstructed_high,
+            reconstructed_low,
+            reconstructed_close,
+        ) = reconstructed_values
+        if original_open != reconstructed_open:
+            raise ValueError(
+                "governed bar recovery original open does not match reconstruction"
+            )
+        if original_close != reconstructed_close:
+            raise ValueError(
+                "governed bar recovery original close does not match reconstruction"
+            )
+        high_broken = original_high < max(original_open, original_close)
+        low_broken = original_low > min(original_open, original_close)
+        if high_broken == low_broken:
+            raise ValueError("governed bar recovery both envelope bounds are invalid")
+        if high_broken and original_low != reconstructed_low:
+            raise ValueError(
+                "governed bar recovery unbroken low does not match reconstruction"
+            )
+        if low_broken and original_high != reconstructed_high:
+            raise ValueError(
+                "governed bar recovery unbroken high does not match reconstruction"
+            )
+        intraday_values = [
+            self._governed_ohlc_values(row) for row in record.intraday_rows
+        ]
+        if any(values is None for values in intraday_values):  # pragma: no cover
+            raise ValueError("governed bar recovery intraday evidence is invalid")
+        first_open = intraday_values[0][0]
+        maximum_high = max(values[1] for values in intraday_values)
+        minimum_low = min(values[2] for values in intraday_values)
+        final_close = intraday_values[-1][3]
+        if (first_open, maximum_high, minimum_low, final_close) != reconstructed_values:
+            raise ValueError("governed bar recovery intraday aggregation is invalid")
+        if record.final_validation_error is not None:
+            raise ValueError("governed bar recovery final validation is not accepted")
+        self._validate_governed_json_value(record.original_daily)
+        self._validate_governed_json_value(record.reconstructed_bar)
+        self._validate_governed_json_value(record.intraday_rows)
+        payload_size = len(record.canonical_payload().encode("utf-8"))
+        if payload_size > _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES:
+            raise ValueError("governed bar recovery payload exceeds byte bound")
+
     def _validate_critical_gap(self, marker: CriticalGapMarker) -> None:
         for label, value in (
             ("marker_id", marker.marker_id),
@@ -395,6 +814,32 @@ class MetricStore:
             raise ValueError("critical gap cohort reasons must be a mapping")
         if not isinstance(marker.corporate_action_rejections, dict):
             raise ValueError("critical gap corporate action intents must be a mapping")
+        if not isinstance(marker.governed_failure_map, dict):
+            raise ValueError("critical gap governed failure map must be a mapping")
+        if len(marker.governed_failure_map) > _MAX_GAP_TICKERS:
+            raise ValueError("critical gap governed failure count exceeds bound")
+        if list(marker.governed_failure_map) != sorted(marker.governed_failure_map):
+            raise ValueError("critical gap governed failure map is not canonical")
+        for ticker, failure in marker.governed_failure_map.items():
+            if (
+                not isinstance(ticker, str)
+                or not ticker
+                or ticker != ticker.strip().upper()
+                or len(ticker) > _MAX_GAP_TEXT
+                or not isinstance(failure, str)
+                or len(failure) > _MAX_GAP_DETAIL_TEXT
+            ):
+                raise ValueError("critical gap governed failure is invalid")
+            parts = failure.split(" ")
+            if len(parts) != 2 or parts[0] not in {
+                "missing",
+                "incoherent",
+                "invalid",
+                "invalid_benchmark",
+            }:
+                raise ValueError("critical gap governed failure is invalid")
+            if parts[1] != f"{ticker}/{marker.gap_session.isoformat()}":
+                raise ValueError("critical gap governed failure scope is invalid")
         if marker.detail_status == "minimal":
             if marker.cohort_invalid_reasons or marker.corporate_action_rejections:
                 raise ValueError("minimal critical gap cannot contain recovery detail")
@@ -693,6 +1138,7 @@ class MetricStore:
                 marker.gap_session,
                 marker.reason,
                 marker.affected_cohorts,
+                marker.governed_failure_map,
                 marker.status,
             )
             current_core = (
@@ -701,6 +1147,7 @@ class MetricStore:
                 current.gap_session,
                 current.reason,
                 current.affected_cohorts,
+                current.governed_failure_map,
                 current.status,
             )
             if current_core != core:
@@ -791,6 +1238,115 @@ class MetricStore:
                     "VALUES (?, ?, ?, ?)"
                 ),
             )
+
+    def save_governed_bar_recovery(self, record: GovernedBarRecoveryRecord) -> None:
+        self._validate_governed_bar_recovery(record)
+        payload = record.canonical_payload()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_by_id = connection.execute(
+                """
+                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
+                       session, ticker, payload_json
+                FROM governed_bar_recoveries
+                WHERE recovery_id = ?
+                """,
+                (record.recovery_id,),
+            ).fetchone()
+            if existing_by_id is not None:
+                existing = self._governed_bar_recovery(
+                    existing_by_id, expected_recovery_id=record.recovery_id
+                )
+                if existing != record:
+                    raise ValueError(
+                        f"immutable recovery_id {record.recovery_id!r} has unequal payload"
+                    )
+                return
+            scoped = connection.execute(
+                """
+                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
+                       session, ticker, payload_json
+                FROM governed_bar_recoveries
+                WHERE epoch_id = ? AND session = ? AND ticker = ?
+                """,
+                (record.epoch_id, record.session.isoformat(), record.ticker),
+            ).fetchone()
+            if scoped is not None:
+                self._governed_bar_recovery(
+                    scoped,
+                    expected_scope=(record.epoch_id, record.session, record.ticker),
+                )
+                raise ValueError(
+                    "immutable governed bar recovery scope has unequal payload"
+                )
+            self._insert_immutable(
+                connection,
+                table="governed_bar_recoveries",
+                id_column="recovery_id",
+                record_id=record.recovery_id,
+                payload=payload,
+                values=(
+                    record.recovery_id,
+                    record.contract_version,
+                    record.evidence_digest,
+                    record.epoch_id,
+                    record.session.isoformat(),
+                    record.ticker,
+                    payload,
+                    datetime.now().astimezone().isoformat(),
+                ),
+                insert_sql=(
+                    "INSERT INTO governed_bar_recoveries "
+                    "(recovery_id, contract_version, evidence_digest, epoch_id, "
+                    "session, ticker, payload_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                ),
+            )
+
+    def load_governed_bar_recovery(
+        self, *, epoch_id: str, session: date, ticker: str
+    ) -> GovernedBarRecoveryRecord | None:
+        if not self._has_governed_bar_recoveries:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
+                       session, ticker, payload_json
+                FROM governed_bar_recoveries
+                WHERE epoch_id = ? AND session = ? AND ticker = ?
+                """,
+                (epoch_id, session.isoformat(), ticker.upper()),
+            ).fetchone()
+        return (
+            self._governed_bar_recovery(
+                row,
+                expected_scope=(epoch_id, session, ticker),
+            )
+            if row
+            else None
+        )
+
+    def load_governed_bar_recovery_by_id(
+        self, recovery_id: str
+    ) -> GovernedBarRecoveryRecord | None:
+        if not self._has_governed_bar_recoveries:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
+                       session, ticker, payload_json
+                FROM governed_bar_recoveries
+                WHERE recovery_id = ?
+                """,
+                (recovery_id,),
+            ).fetchone()
+        return (
+            self._governed_bar_recovery(row, expected_recovery_id=recovery_id)
+            if row
+            else None
+        )
 
     def read_candidate_bar_recoveries(
         self,

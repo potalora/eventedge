@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -26,6 +28,11 @@ from tradingagents.strategies.orchestration.session_executor import (
     SessionInputBundle,
     SessionExecutor,
 )
+from tradingagents.strategies.orchestration.governed_market_data import (
+    GOVERNED_BAR_RECOVERY_CONTRACT,
+    GovernedInputResolution,
+    GovernedRecoveryBinding,
+)
 from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
@@ -41,6 +48,8 @@ from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     PortfolioLedger,
 )
+from tradingagents.strategies.metrics.models import GovernedBarRecoveryRecord
+from tradingagents.strategies.metrics.store import MetricStore
 
 
 UTC = timezone.utc
@@ -144,6 +153,811 @@ def _bar(ticker, session=MONDAY, open_="100", close="101"):
         fetched,
         False,
     )
+
+
+def _recovery_binding(ticker: str) -> GovernedRecoveryBinding:
+    return GovernedRecoveryBinding(
+        ticker=ticker,
+        recovery_id=f"recovery-{ticker}",
+        contract_version="yfinance-60m-v1",
+        evidence_digest=f"digest-{ticker}",
+    )
+
+
+def _governed_record(
+    *, epoch_id: str = "epoch", cohorts: tuple[str, ...] = ("cohort",)
+) -> GovernedBarRecoveryRecord:
+    et = ZoneInfo("America/New_York")
+    starts = tuple(datetime(2026, 8, 3, hour, 30, tzinfo=et) for hour in range(9, 16))
+    rows = (
+        ("100", "101", "99", "100"),
+        ("100", "100", "98", "99"),
+        ("99", "100", "97", "98"),
+        ("98", "99", "96", "97"),
+        ("97", "99", "95", "98"),
+        ("98", "100", "97", "99"),
+        ("99", "100", "97", "98"),
+    )
+    return GovernedBarRecoveryRecord.create(
+        contract_version=GOVERNED_BAR_RECOVERY_CONTRACT,
+        epoch_id=epoch_id,
+        session=MONDAY,
+        ticker="ESS",
+        original_daily={
+            "open": Decimal("100"),
+            "high": Decimal("99"),
+            "low": Decimal("95"),
+            "close": Decimal("98"),
+            "source": "yfinance",
+            "fetched_at": PROCESSED,
+        },
+        original_validation_error=f"incoherent ESS/{MONDAY}",
+        expected_starts=starts,
+        observed_starts=starts,
+        intraday_rows=tuple(
+            {
+                "start": start,
+                "open": Decimal(values[0]),
+                "high": Decimal(values[1]),
+                "low": Decimal(values[2]),
+                "close": Decimal(values[3]),
+                "fetched_at": PROCESSED,
+            }
+            for start, values in zip(starts, rows)
+        ),
+        reconstructed_bar={
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("95"),
+            "close": Decimal("98"),
+            "source": "yfinance-60m-reconstruction",
+        },
+        final_validation_error=None,
+        affected_cohort_ids=cohorts,
+    )
+
+
+def _record_bar(record: GovernedBarRecoveryRecord) -> MarketBar:
+    return MarketBar(
+        ticker=record.ticker,
+        session=record.session,
+        open=Decimal(str(record.reconstructed_bar["open"])),
+        high=Decimal(str(record.reconstructed_bar["high"])),
+        low=Decimal(str(record.reconstructed_bar["low"])),
+        close=Decimal(str(record.reconstructed_bar["close"])),
+        source=str(record.reconstructed_bar["source"]),
+        fetched_at=PROCESSED,
+        adjusted=False,
+    )
+
+
+def _record_binding(record: GovernedBarRecoveryRecord) -> GovernedRecoveryBinding:
+    return GovernedRecoveryBinding(
+        ticker=record.ticker,
+        recovery_id=record.recovery_id,
+        contract_version=record.contract_version,
+        evidence_digest=record.evidence_digest,
+    )
+
+
+def test_session_input_bundle_scopes_immutable_governed_evidence():
+    aapl_summary = {
+        "ticker": "AAPL",
+        "session": MONDAY.isoformat(),
+        "recovery_id": "recovery-aapl",
+        "contract_version": GOVERNED_BAR_RECOVERY_CONTRACT,
+        "evidence_digest": "a" * 64,
+        "affected_cohort_ids": ("cohort-a",),
+    }
+    msft_summary = {**aapl_summary, "ticker": "MSFT", "recovery_id": "recovery-msft"}
+    shared = SessionInputBundle(
+        MONDAY,
+        ("AAPL", "MSFT"),
+        {
+            ("AAPL", MONDAY): _bar("AAPL"),
+            ("MSFT", MONDAY): _bar("MSFT"),
+        },
+        (),
+        FakePriceSource().adjusted,
+        governed_recoveries={
+            "MSFT": _recovery_binding("MSFT"),
+            "AAPL": _recovery_binding("AAPL"),
+        },
+        governed_failure_map={"MSFT": "invalid MSFT/2026-08-03"},
+        governed_recovery_summaries=(msft_summary, aapl_summary),
+    )
+
+    scoped = shared.for_tickers(("AAPL",))
+
+    assert tuple(shared.governed_recoveries) == ("AAPL", "MSFT")
+    assert scoped.governed_recoveries == {"AAPL": _recovery_binding("AAPL")}
+    assert scoped.governed_failure_map == {}
+    assert scoped.governed_recovery_summaries == (aapl_summary,)
+    assert shared.governed_recovery_summaries[0]["ticker"] == "AAPL"
+    with pytest.raises(TypeError):
+        shared.governed_recoveries["AAPL"] = _recovery_binding("MSFT")
+    with pytest.raises(TypeError):
+        shared.governed_failure_map["AAPL"] = "invalid AAPL/2026-08-03"
+
+
+def test_fetch_input_bundle_uses_governed_coordinator_for_p0_tickers():
+    source = FakePriceSource({("AAPL", MONDAY): _bar("AAPL")})
+    binding = _recovery_binding("AAPL")
+    resolved = GovernedInputResolution(
+        bars={"AAPL": _bar("AAPL")},
+        recovery_bindings={"AAPL": binding},
+        recovery_summaries=(
+            {
+                "ticker": "AAPL",
+                "session": MONDAY.isoformat(),
+                "recovery_id": binding.recovery_id,
+                "contract_version": binding.contract_version,
+                "evidence_digest": binding.evidence_digest,
+                "affected_cohort_ids": ("cohort",),
+            },
+        ),
+        failure_map={},
+    )
+    store = MagicMock()
+
+    with patch(
+        "tradingagents.strategies.orchestration.session_executor.resolve_governed_bars",
+        return_value=resolved,
+    ) as coordinator:
+        bundle = SessionExecutor.fetch_input_bundle(
+            MONDAY,
+            ("AAPL",),
+            source,
+            metric_store=store,
+            epoch_id="epoch",
+            cohort_ids_by_ticker={"AAPL": ("cohort",)},
+            processed_at=PROCESSED,
+            persist=True,
+        )
+
+    coordinator.assert_called_once_with(
+        price_source=source,
+        metric_store=store,
+        epoch_id="epoch",
+        session=MONDAY,
+        tickers=("AAPL",),
+        cohort_ids_by_ticker={"AAPL": ("cohort",)},
+        processed_at=PROCESSED,
+        persist=True,
+    )
+    assert source.raw_requests == []
+    assert bundle.bars == {("AAPL", MONDAY): _bar("AAPL")}
+    assert bundle.governed_recoveries == {"AAPL": binding}
+    assert bundle.governed_recovery_summaries[0]["ticker"] == "AAPL"
+
+
+def test_fetch_input_bundle_normalizes_invalid_benchmark_failure():
+    source = FakePriceSource(
+        {("AAPL", MONDAY): _bar("AAPL")},
+        adjusted={
+            ("SPY", MONDAY): AdjustedClose(
+                "SPY",
+                MONDAY,
+                Decimal("650"),
+                "fixture-adjusted",
+                datetime(2026, 8, 3, 19, tzinfo=UTC),
+            ),
+            ("BIL", MONDAY): Decimal("91"),
+        },
+    )
+
+    with (
+        patch(
+            "tradingagents.strategies.orchestration.session_executor.resolve_governed_bars",
+            return_value=GovernedInputResolution(
+                bars={"AAPL": _bar("AAPL")},
+                recovery_bindings={},
+                recovery_summaries=(),
+                failure_map={},
+            ),
+        ),
+        patch(
+            "tradingagents.strategies.orchestration.session_executor._utc_now",
+            return_value=PROCESSED,
+        ),
+    ):
+        bundle = SessionExecutor.fetch_input_bundle(
+            MONDAY,
+            ("AAPL",),
+            source,
+            metric_store=MagicMock(),
+            epoch_id="epoch",
+            cohort_ids_by_ticker={"AAPL": ("cohort",)},
+            processed_at=PROCESSED,
+            persist=True,
+        )
+
+    assert bundle.governed_failure_map == {"SPY": f"invalid_benchmark SPY/{MONDAY}"}
+
+
+def _fetch_with_post_fetch_clock(
+    source: FakePriceSource,
+    *,
+    processed_at: datetime,
+    post_fetch_now: datetime,
+) -> SessionInputBundle:
+    with (
+        patch(
+            "tradingagents.strategies.orchestration.session_executor.resolve_governed_bars",
+            return_value=GovernedInputResolution(
+                bars={"AAPL": _bar("AAPL")},
+                recovery_bindings={},
+                recovery_summaries=(),
+                failure_map={},
+            ),
+        ),
+        patch(
+            "tradingagents.strategies.orchestration.session_executor._utc_now",
+            return_value=post_fetch_now,
+            create=True,
+        ),
+    ):
+        return SessionExecutor.fetch_input_bundle(
+            MONDAY,
+            ("AAPL",),
+            source,
+            metric_store=MagicMock(),
+            epoch_id="epoch",
+            cohort_ids_by_ticker={"AAPL": ("cohort",)},
+            processed_at=processed_at,
+            persist=True,
+        )
+
+
+def test_benchmark_fetched_after_processed_at_uses_post_fetch_clock():
+    fetched_at = PROCESSED.replace(second=1)
+    source = FakePriceSource(
+        adjusted={
+            ("SPY", MONDAY): AdjustedClose(
+                "SPY", MONDAY, Decimal("650"), "fixture-adjusted", fetched_at
+            ),
+            ("BIL", MONDAY): AdjustedClose(
+                "BIL", MONDAY, Decimal("91"), "fixture-adjusted", fetched_at
+            ),
+        }
+    )
+
+    bundle = _fetch_with_post_fetch_clock(
+        source,
+        processed_at=PROCESSED,
+        post_fetch_now=PROCESSED.replace(second=2),
+    )
+
+    assert bundle.governed_failure_map == {}
+
+
+@pytest.mark.parametrize(
+    ("age", "invalid"),
+    [
+        (timedelta(hours=24), False),
+        (timedelta(hours=24, microseconds=1), True),
+    ],
+)
+def test_benchmark_freshness_boundary_uses_post_fetch_clock(age, invalid):
+    post_fetch_now = datetime(2026, 8, 4, 22, tzinfo=UTC)
+    spy_fetched_at = post_fetch_now - age
+    source = FakePriceSource(
+        adjusted={
+            ("SPY", MONDAY): AdjustedClose(
+                "SPY", MONDAY, Decimal("650"), "fixture-adjusted", spy_fetched_at
+            ),
+            ("BIL", MONDAY): AdjustedClose(
+                "BIL",
+                MONDAY,
+                Decimal("91"),
+                "fixture-adjusted",
+                post_fetch_now,
+            ),
+        }
+    )
+
+    bundle = _fetch_with_post_fetch_clock(
+        source,
+        processed_at=PROCESSED,
+        post_fetch_now=post_fetch_now,
+    )
+
+    assert ("SPY" in bundle.governed_failure_map) is invalid
+
+
+@pytest.mark.parametrize(
+    ("offset", "invalid"),
+    [(timedelta(0), False), (timedelta(microseconds=-1), True)],
+)
+def test_benchmark_post_close_boundary(offset, invalid):
+    fetched_at = session_close(MONDAY) + offset
+    source = FakePriceSource(
+        adjusted={
+            ("SPY", MONDAY): AdjustedClose(
+                "SPY", MONDAY, Decimal("650"), "fixture-adjusted", fetched_at
+            ),
+            ("BIL", MONDAY): Decimal("91"),
+        }
+    )
+
+    bundle = _fetch_with_post_fetch_clock(
+        source,
+        processed_at=PROCESSED,
+        post_fetch_now=PROCESSED.replace(second=2),
+    )
+
+    assert ("SPY" in bundle.governed_failure_map) is invalid
+
+
+def test_benchmark_future_relative_to_post_fetch_clock_is_invalid():
+    post_fetch_now = PROCESSED.replace(second=2)
+    source = FakePriceSource(
+        adjusted={
+            ("SPY", MONDAY): AdjustedClose(
+                "SPY",
+                MONDAY,
+                Decimal("650"),
+                "fixture-adjusted",
+                post_fetch_now.replace(second=3),
+            ),
+            ("BIL", MONDAY): Decimal("91"),
+        }
+    )
+
+    bundle = _fetch_with_post_fetch_clock(
+        source,
+        processed_at=PROCESSED,
+        post_fetch_now=post_fetch_now,
+    )
+
+    assert bundle.governed_failure_map == {"SPY": f"invalid_benchmark SPY/{MONDAY}"}
+
+
+@pytest.mark.parametrize(
+    "governance_kwargs",
+    [
+        {"epoch_id": "epoch"},
+        {"metric_store": MagicMock()},
+        {
+            "epoch_id": "epoch",
+            "cohort_ids_by_ticker": {"AAPL": ("cohort",)},
+        },
+        {
+            "epoch_id": "epoch",
+            "cohort_ids_by_ticker": {"AAPL": ("cohort",)},
+            "processed_at": PROCESSED,
+            "metric_store": None,
+            "persist": True,
+        },
+    ],
+)
+def test_fetch_input_bundle_rejects_partial_governance_context(governance_kwargs):
+    source = FakePriceSource({("AAPL", MONDAY): _bar("AAPL")})
+
+    with pytest.raises(ValueError, match="governance context"):
+        SessionExecutor.fetch_input_bundle(
+            MONDAY,
+            ("AAPL",),
+            source,
+            **governance_kwargs,
+        )
+
+
+def test_probe_fetch_allows_complete_context_without_metric_store():
+    source = FakePriceSource({("AAPL", MONDAY): _bar("AAPL")})
+    with patch(
+        "tradingagents.strategies.orchestration.session_executor.resolve_governed_bars",
+        return_value=GovernedInputResolution(
+            bars={"AAPL": _bar("AAPL")},
+            recovery_bindings={},
+            recovery_summaries=(),
+            failure_map={},
+        ),
+    ) as coordinator:
+        SessionExecutor.fetch_input_bundle(
+            MONDAY,
+            ("AAPL",),
+            source,
+            metric_store=None,
+            epoch_id="epoch",
+            cohort_ids_by_ticker={"AAPL": ("cohort",)},
+            processed_at=PROCESSED,
+            persist=False,
+        )
+
+    assert coordinator.call_args.kwargs["metric_store"] is None
+    assert coordinator.call_args.kwargs["persist"] is False
+
+
+def _governed_context_documents(tmp_path, binding: GovernedRecoveryBinding):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    ledger = _ledger(tmp_path)
+    try:
+        executor = SessionExecutor(ledger, _config())
+        benchmarks = {
+            symbol: adjusted
+            for (symbol, session), adjusted in FakePriceSource().adjusted.items()
+            if session == MONDAY
+        }
+        return executor._execution_context_documents(
+            MONDAY,
+            ("AAPL",),
+            {"AAPL": _bar("AAPL")},
+            (),
+            benchmarks,
+            {},
+            {"AAPL": binding},
+        )
+    finally:
+        ledger.close()
+
+
+def test_execution_context_binds_recovery_identity_in_market_and_provenance(
+    tmp_path,
+):
+    binding = _recovery_binding("AAPL")
+
+    market, _, _, provenance = _governed_context_documents(tmp_path, binding)
+
+    expected = {
+        "recovery_id": binding.recovery_id,
+        "contract_version": binding.contract_version,
+        "evidence_digest": binding.evidence_digest,
+    }
+    assert market["governed_recoveries"] == {"AAPL": expected}
+    assert provenance["governed_recoveries"] == {"AAPL": expected}
+
+
+def test_execution_context_binds_recovered_benchmark_raw_bar(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    ledger = _ledger(tmp_path)
+    binding = _recovery_binding("SPY")
+    try:
+        executor = SessionExecutor(ledger, _config())
+        benchmark_raw = MarketBar(
+            **{
+                **_bar("SPY").__dict__,
+                "source": "yfinance-60m-reconstruction",
+            }
+        )
+        adjusted = FakePriceSource().adjusted
+
+        market, _, _, provenance = executor._execution_context_documents(
+            MONDAY,
+            ("AAPL",),
+            {"AAPL": _bar("AAPL"), "SPY": benchmark_raw},
+            (),
+            {
+                symbol: value
+                for (symbol, session), value in adjusted.items()
+                if session == MONDAY
+            },
+            {},
+            {"SPY": binding},
+        )
+
+        assert market["governed_recoveries"] == {
+            "SPY": {
+                "recovery_id": binding.recovery_id,
+                "contract_version": binding.contract_version,
+                "evidence_digest": binding.evidence_digest,
+            }
+        }
+        assert provenance["governed_recoveries"] == market["governed_recoveries"]
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "changed"),
+    [
+        ("recovery_id", "other-recovery"),
+        ("contract_version", "yfinance-60m-v2"),
+        ("evidence_digest", "other-digest"),
+    ],
+)
+def test_each_recovery_binding_field_changes_market_and_provenance_digests(
+    tmp_path, field_name, changed
+):
+    original = _recovery_binding("AAPL")
+    replacement = GovernedRecoveryBinding(**{**original.__dict__, field_name: changed})
+
+    original_market, _, _, original_provenance = _governed_context_documents(
+        tmp_path / "original", original
+    )
+    changed_market, _, _, changed_provenance = _governed_context_documents(
+        tmp_path / "changed", replacement
+    )
+
+    assert stable_id("session_market_inputs", original_market) != stable_id(
+        "session_market_inputs", changed_market
+    )
+    assert stable_id("session_input_provenance", original_provenance) != stable_id(
+        "session_input_provenance", changed_provenance
+    )
+
+
+def _bind_partial_governed_session(tmp_path):
+    ledger = _ledger(tmp_path)
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = _governed_record()
+    store.save_governed_bar_recovery(record)
+    intent = _intent(ledger, "ESS", "buy", MONDAY, 1)
+    bundle = SessionInputBundle(
+        MONDAY,
+        ("ESS",),
+        {("ESS", MONDAY): _record_bar(record)},
+        (),
+        FakePriceSource().adjusted,
+        governed_recoveries={"ESS": _record_binding(record)},
+    )
+
+    def crash_after_commit(phase):
+        if phase == "validate_market_data":
+            raise RuntimeError("partial crash")
+
+    with pytest.raises(RuntimeError, match="partial crash"):
+        SessionExecutor(
+            ledger,
+            _config(),
+            metric_store=store,
+            after_phase_commit=crash_after_commit,
+        ).execute_open_and_mark(MONDAY, "epoch", bundle, {}, PROCESSED)
+    return ledger, store, record, intent
+
+
+def _replay_mutation_state(ledger, store_path, intent_id):
+    with sqlite3.connect(store_path) as connection:
+        outcomes = connection.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0]
+    return {
+        "intent_status": ledger.intent(intent_id).status,
+        "invalid_reason": ledger.session_invalid_reason(MONDAY),
+        "phases": ledger.connection.execute(
+            "SELECT COUNT(*) FROM session_phases"
+        ).fetchone()[0],
+        "fills": ledger.connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0],
+        "marks": ledger.connection.execute("SELECT COUNT(*) FROM marks").fetchone()[0],
+        "snapshots": ledger.connection.execute(
+            "SELECT COUNT(*) FROM account_snapshots"
+        ).fetchone()[0],
+        "session_runs": ledger.connection.execute(
+            "SELECT COUNT(*) FROM session_runs"
+        ).fetchone()[0],
+        "outcomes": outcomes,
+    }
+
+
+def _bind_complete_governed_session(tmp_path):
+    ledger = _ledger(tmp_path)
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = _governed_record()
+    store.save_governed_bar_recovery(record)
+    intent = _intent(ledger, "ESS", "buy", MONDAY, 1)
+    result = SessionExecutor(
+        ledger, _config(), metric_store=store
+    ).execute_open_and_mark(
+        MONDAY,
+        "epoch",
+        SessionInputBundle(
+            MONDAY,
+            ("ESS",),
+            {("ESS", MONDAY): _record_bar(record)},
+            (),
+            FakePriceSource().adjusted,
+            governed_recoveries={"ESS": _record_binding(record)},
+        ),
+        {},
+        PROCESSED,
+    )
+    assert result.valid
+    return ledger, store, record, intent
+
+
+def test_governed_partial_resume_reuses_intact_record_without_provider_call(
+    tmp_path,
+):
+    ledger, store, record, _ = _bind_partial_governed_session(tmp_path)
+    provider = MagicMock()
+    try:
+        executor = SessionExecutor(ledger, _config(), metric_store=store)
+        persisted = executor.persisted_input_bundle(MONDAY)
+        assert persisted.governed_recovery_summaries == (
+            {
+                "ticker": record.ticker,
+                "session": record.session.isoformat(),
+                "recovery_id": record.recovery_id,
+                "contract_version": record.contract_version,
+                "evidence_digest": record.evidence_digest,
+                "affected_cohort_ids": record.affected_cohort_ids,
+            },
+        )
+        result = executor.execute_open_and_mark(
+            MONDAY, "epoch", provider, {}, PROCESSED
+        )
+
+        assert result.valid
+        assert provider.mock_calls == []
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["delete", "payload", "digest", "recovery_id", "contract"],
+)
+def test_governed_resume_rejects_broken_record_before_persisted_phase(tmp_path, tamper):
+    case = tmp_path / tamper
+    case.mkdir()
+    ledger, store, record, intent = _bind_partial_governed_session(case)
+    provider = MagicMock()
+    db_path = case / "metrics.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        if tamper == "delete":
+            connection.execute(
+                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                (record.recovery_id,),
+            )
+        elif tamper == "payload":
+            connection.execute(
+                "UPDATE governed_bar_recoveries SET payload_json = payload_json || ' '",
+            )
+        elif tamper == "digest":
+            connection.execute(
+                "UPDATE governed_bar_recoveries SET evidence_digest = 'sha256:changed'",
+            )
+        elif tamper == "recovery_id":
+            connection.execute(
+                "UPDATE governed_bar_recoveries SET recovery_id = 'changed-id'",
+            )
+        else:
+            connection.execute(
+                "UPDATE governed_bar_recoveries SET contract_version = 'yfinance-60m-v0'",
+            )
+    try:
+        before = _replay_mutation_state(ledger, db_path, intent.intent_id)
+
+        result = SessionExecutor(
+            ledger, _config(), metric_store=store
+        ).execute_open_and_mark(MONDAY, "epoch", provider, {}, PROCESSED)
+
+        assert not result.valid
+        assert "execution context conflict" in result.invalid_reason
+        assert provider.mock_calls == []
+        assert _replay_mutation_state(ledger, db_path, intent.intent_id) == before
+    finally:
+        ledger.close()
+
+
+def test_complete_governed_replay_record_deletion_is_read_only(tmp_path):
+    ledger, store, record, intent = _bind_complete_governed_session(tmp_path)
+    store_path = tmp_path / "metrics.sqlite3"
+    provider = MagicMock()
+    try:
+        before = _replay_mutation_state(ledger, store_path, intent.intent_id)
+        with sqlite3.connect(store_path) as connection:
+            connection.execute(
+                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                (record.recovery_id,),
+            )
+
+        result = SessionExecutor(
+            ledger, _config(), metric_store=store
+        ).execute_open_and_mark(MONDAY, "epoch", provider, {}, PROCESSED)
+
+        assert not result.valid
+        assert "execution context conflict" in result.invalid_reason
+        assert provider.mock_calls == []
+        assert _replay_mutation_state(ledger, store_path, intent.intent_id) == before
+    finally:
+        ledger.close()
+
+
+def test_direct_execution_does_not_infer_governed_cohort_membership(tmp_path):
+    class GovernedCapableSource(FakePriceSource):
+        def __init__(self):
+            super().__init__({("AAPL", MONDAY): _bar("AAPL")})
+            self.governed_calls = []
+
+        def resolve_governed_daily_bars(self, *args, **kwargs):
+            self.governed_calls.append((args, kwargs))
+            raise AssertionError("direct execution must not invoke governed resolution")
+
+    ledger = _ledger(tmp_path)
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    source = GovernedCapableSource()
+    try:
+        _intent(ledger, "AAPL", "buy", MONDAY, 1)
+
+        result = SessionExecutor(
+            ledger, _config(), metric_store=store
+        ).execute_open_and_mark(MONDAY, "epoch", source, {}, PROCESSED)
+
+        assert result.valid
+        assert source.governed_calls == []
+        assert source.raw_requests == [(("AAPL",), MONDAY, MONDAY, False)]
+        assert (
+            store.load_governed_bar_recovery(
+                epoch_id="epoch", session=MONDAY, ticker="AAPL"
+            )
+            is None
+        )
+    finally:
+        ledger.close()
+
+
+def test_governed_failure_map_rejects_before_overdue_intent_cancellation(tmp_path):
+    ledger = _ledger(tmp_path)
+    store_path = tmp_path / "metrics.sqlite3"
+    store = MetricStore(store_path)
+    try:
+        overdue = _intent(ledger, "ESS", "buy", FRIDAY, 1)
+        bundle = SessionInputBundle(
+            MONDAY,
+            ("ESS",),
+            {},
+            (),
+            FakePriceSource().adjusted,
+            governed_failure_map={"ESS": f"invalid ESS/{MONDAY}"},
+        )
+
+        result = SessionExecutor(
+            ledger, _config(), metric_store=store
+        ).execute_open_and_mark(MONDAY, "epoch", bundle, {}, PROCESSED)
+
+        assert not result.valid
+        assert f"invalid ESS/{MONDAY}" in result.invalid_reason
+        assert ledger.intent(overdue.intent_id).status == "pending"
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+        )
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 0
+        )
+        with sqlite3.connect(store_path) as connection:
+            assert (
+                connection.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0] == 0
+            )
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM session_phases").fetchone()[
+                0
+            ]
+            == 0
+        )
+    finally:
+        ledger.close()
+
+
+def test_reconstructed_bar_without_recovery_binding_fails_before_phases(tmp_path):
+    ledger = _ledger(tmp_path)
+    try:
+        intent = _intent(ledger, "ESS", "buy", MONDAY, 1)
+        record = _governed_record()
+        bundle = SessionInputBundle(
+            MONDAY,
+            ("ESS",),
+            {("ESS", MONDAY): _record_bar(record)},
+            (),
+            FakePriceSource().adjusted,
+        )
+
+        result = SessionExecutor(ledger, _config()).execute_open_and_mark(
+            MONDAY, "epoch", bundle, {}, PROCESSED
+        )
+
+        assert not result.valid
+        assert "governed recovery evidence conflict" in result.invalid_reason
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM session_phases").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            ledger.connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+        )
+        assert ledger.intent(intent.intent_id).status == "cancelled"
+    finally:
+        ledger.close()
 
 
 def _signal(ticker, reference_session, *, strategy="strategy", direction="long"):
@@ -2439,17 +3253,15 @@ def test_fresh_policy_staging_requires_explicit_volatility_evidence(
             call["annualized_volatility_evidence"] = None
         with pytest.raises(ValueError, match="annualized volatility evidence"):
             engine.screen_and_stage(**call)
-        assert ledger.read_policy_session_context(
-            FRIDAY, binding_kind="staging"
-        ) is None
+        assert (
+            ledger.read_policy_session_context(FRIDAY, binding_kind="staging") is None
+        )
     finally:
         ledger.close()
 
 
 @pytest.mark.parametrize("missing", ["current", "pending", "candidate"])
-def test_fresh_policy_staging_requires_complete_volatility_evidence(
-    tmp_path, missing
-):
+def test_fresh_policy_staging_requires_complete_volatility_evidence(tmp_path, missing):
     ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
     held = {
         "ticker": "HELD",
@@ -2482,9 +3294,9 @@ def test_fresh_policy_staging_requires_complete_volatility_evidence(
             pytest.raises(ValueError, match="annualized volatility evidence"),
         ):
             engine.screen_and_stage(**call)
-        assert ledger.read_policy_session_context(
-            FRIDAY, binding_kind="staging"
-        ) is None
+        assert (
+            ledger.read_policy_session_context(FRIDAY, binding_kind="staging") is None
+        )
     finally:
         ledger.close()
 
@@ -2497,9 +3309,9 @@ def test_short_cache_cannot_fabricate_floor_when_staging_evidence_is_absent(
     try:
         with pytest.raises(ValueError, match="annualized volatility evidence"):
             engine.screen_and_stage(**call)
-        assert ledger.read_policy_session_context(
-            FRIDAY, binding_kind="staging"
-        ) is None
+        assert (
+            ledger.read_policy_session_context(FRIDAY, binding_kind="staging") is None
+        )
     finally:
         ledger.close()
 
@@ -2637,9 +3449,10 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         decisions = ledger.read_policy_candidate_decisions()
         assert len(decisions) == 1
         assert decisions[0]["approved_weight"] == pytest.approx(0.03)
-        assert ledger.read_policy_session_context(
-            FRIDAY, binding_kind="staging"
-        ) is not None
+        assert (
+            ledger.read_policy_session_context(FRIDAY, binding_kind="staging")
+            is not None
+        )
 
         replay_engine = MultiStrategyEngine(
             config=deepcopy(config),
@@ -2718,9 +3531,10 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         )
         assert monday.valid
         assert ledger.intent(result["intents_staged"][0]).status == "filled"
-        assert ledger.read_policy_session_context(
-            MONDAY, binding_kind="execution"
-        ) is not None
+        assert (
+            ledger.read_policy_session_context(MONDAY, binding_kind="execution")
+            is not None
+        )
     finally:
         ledger.close()
 

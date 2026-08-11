@@ -111,6 +111,7 @@ def _critical_gap(status: str = "pending") -> CriticalGapMarker:
             "cohort-b": "ledger_recovery_binding_b",
         },
         detail_status="ready",
+        governed_failure_map={"AAPL": "missing AAPL/2026-08-10"},
     )
 
 
@@ -121,6 +122,38 @@ def _minimal_critical_gap() -> CriticalGapMarker:
         detail_status="minimal",
         corporate_action_rejections={},
     )
+
+
+def test_critical_gap_governed_failure_map_round_trips_and_rejects_noncanonical(
+    tmp_path,
+) -> None:
+    path = tmp_path / "metrics_v2.sqlite3"
+    store = MetricStore(path)
+    minimal = _minimal_critical_gap()
+
+    store.begin_critical_gap(minimal)
+    assert MetricStore(path).pending_critical_gap().governed_failure_map == {
+        "AAPL": "missing AAPL/2026-08-10"
+    }
+    with pytest.raises(ValueError, match="unequal blocker"):
+        store.attach_critical_gap_details(
+            replace(
+                _critical_gap(),
+                governed_failure_map={"MSFT": "invalid MSFT/2026-08-10"},
+            )
+        )
+
+    for index, invalid in enumerate(
+        (
+            {"AAPL": "provider secret token"},
+            {"AAPL": "missing AAPL/2026-08-11"},
+            {"aapl": "missing aapl/2026-08-10"},
+        )
+    ):
+        with pytest.raises(ValueError):
+            MetricStore(tmp_path / f"invalid-{index}.sqlite3").begin_critical_gap(
+                replace(minimal, governed_failure_map=invalid)
+            )
 
 
 def test_identical_context_reuses_open_epoch_across_later_sessions(tmp_path) -> None:
@@ -269,6 +302,7 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
             "candidate_bar_recoveries",
             "candidate_signal_identity_bindings",
             "critical_gap_markers",
+            "governed_bar_recoveries",
             "metric_epochs",
             "outcomes",
             "strategy_health",

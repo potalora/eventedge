@@ -28,6 +28,12 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Mapping
 
+# Direct worktree invocations must load the code beside this script rather than
+# an editable install that may still point at the main checkout.
+_SCRIPT_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _SCRIPT_REPO_ROOT != sys.path[0]:
+    sys.path.insert(0, _SCRIPT_REPO_ROOT)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -41,6 +47,23 @@ _PROMOTION_HEADLINE_BOOKS = tuple(
 
 class PromotionAdvisoryUnavailable(RuntimeError):
     """Authoritative inputs do not support a fail-closed promotion decision."""
+
+
+def _exit_runtime_lock_error(error: Exception) -> None:
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+    print(
+        json.dumps(
+            {
+                "success": False,
+                "busy": isinstance(error, RuntimeLockBusy),
+                "error": str(error)[:4_096],
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 def _read_generation_manifest(repo: Path) -> dict[str, Mapping[str, object]]:
@@ -348,6 +371,12 @@ def main():
         help="No-write integrity check (fetch -> screen -> staging gates) for all active generations",
     )
     p_preflight.add_argument("--date", default=None, help="Trading date (YYYY-MM-DD)")
+    p_preflight.add_argument(
+        "--preflight-mode",
+        choices=("all", "screen", "governed"),
+        default="all",
+        help="Preflight checks to run (default: all)",
+    )
 
     # run-learning
     sub.add_parser("run-learning", help="Refuse retired production learning")
@@ -454,9 +483,16 @@ def main():
     from tradingagents.strategies.orchestration.generation_manager import (
         GenerationManager,
     )
+    from tradingagents.strategies.orchestration.runtime_lock import (
+        RuntimeLockBusy,
+        RuntimeLockInvalid,
+    )
 
     repo = _repo_root()
-    manager = GenerationManager(repo)
+    try:
+        manager = GenerationManager(repo)
+    except RuntimeLockInvalid as error:
+        _exit_runtime_lock_error(error)
 
     if args.command == "start":
         gen = manager.start_generation(args.description)
@@ -480,7 +516,10 @@ def main():
         trading_date = trading_session.isoformat()
         if not args.date:
             logger.info("Using XNYS session: %s", trading_date)
-        results = manager.run_daily(trading_date)
+        try:
+            results = manager.run_daily(trading_date)
+        except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+            _exit_runtime_lock_error(error)
         for gen_id, result in results.items():
             status = (
                 "OK"
@@ -512,9 +551,14 @@ def main():
         trading_date = trading_session.isoformat()
         if not args.date:
             logger.info("Using XNYS session: %s", trading_date)
-        results = manager.run_preflight(trading_date)
+        try:
+            results = manager.run_preflight(trading_date, mode=args.preflight_mode)
+        except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+            _exit_runtime_lock_error(error)
         if not results:
             print("No active generations to preflight.")
+            if args.preflight_mode in {"all", "governed"}:
+                raise SystemExit(1)
             return
         for gen_id, result in results.items():
             status = (

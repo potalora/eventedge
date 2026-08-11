@@ -24,6 +24,17 @@ def test_black_friday_close_is_early() -> None:
     )
 
 
+def test_session_open_covers_regular_and_early_close_sessions() -> None:
+    calendar = XNYSCalendar()
+
+    assert calendar.session_open(date(2026, 8, 10)) == datetime(
+        2026, 8, 10, 13, 30, tzinfo=UTC
+    )
+    assert calendar.session_open(date(2026, 11, 27)) == datetime(
+        2026, 11, 27, 14, 30, tzinfo=UTC
+    )
+
+
 def test_held_session_rejects_nonpositive_window() -> None:
     with pytest.raises(ValueError, match="holding_sessions must be positive"):
         XNYSCalendar().held_session(date(2026, 1, 16), 0)
