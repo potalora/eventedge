@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import MappingProxyType
@@ -246,6 +247,20 @@ class TestGovernedPreflight:
             failure_map={},
         )
 
+    @staticmethod
+    def _freeze_preflight_completion(monkeypatch, completed_at):
+        """Keep timestamp-sensitive preflight tests deterministic."""
+        import tradingagents.strategies.orchestration.preflight as preflight
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return completed_at.replace(tzinfo=None)
+                return completed_at.astimezone(tz)
+
+        monkeypatch.setattr(preflight, "datetime", FrozenDatetime)
+
     def test_preclose_governed_probe_is_not_ready_without_provider_call(
         self, tmp_path, monkeypatch
     ):
@@ -305,7 +320,9 @@ class TestGovernedPreflight:
         assert default_report["governed_probe_status"] == "not_ready"
         price_source_module.YFinancePriceSource.assert_not_called()
 
-    def test_after_close_uses_shared_resolver_without_persistence(self, tmp_path):
+    def test_after_close_uses_shared_resolver_without_persistence(
+        self, tmp_path, monkeypatch
+    ):
         from tradingagents.strategies.metrics.models import (
             GOVERNED_BAR_RECOVERY_CONTRACT,
         )
@@ -347,6 +364,7 @@ class TestGovernedPreflight:
         price_source = MagicMock()
         engine = MagicMock()
         processed_at = datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
+        self._freeze_preflight_completion(monkeypatch, processed_at)
         config = {"autoresearch": {"state_dir": str(tmp_path / "state")}}
 
         report = run_preflight(
@@ -379,6 +397,48 @@ class TestGovernedPreflight:
         assert kwargs["tickers"] == ("BIL", "SPY")
         assert kwargs["cohort_ids_by_ticker"] == snapshot.cohort_ids_by_ticker
         assert engine.mock_calls == []
+
+    def test_fresh_bar_fetched_after_probe_start_is_accepted(self, tmp_path, monkeypatch):
+        """The validation boundary is the end of retrieval, not its start.
+
+        A real provider stamps the bar when its response arrives, which is
+        necessarily later than the `processed_at` passed into the resolver.
+        """
+        from tradingagents.strategies.orchestration.governed_market_data import (
+            GovernedInputResolution,
+        )
+        from tradingagents.strategies.orchestration.preflight import run_preflight
+
+        probe_started_at = datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
+        completed_at = probe_started_at + timedelta(milliseconds=1)
+        self._freeze_preflight_completion(monkeypatch, completed_at)
+        resolution = self._successful_resolution()
+        fresh_bars = {
+            ticker: replace(bar, fetched_at=completed_at)
+            for ticker, bar in resolution.bars.items()
+        }
+        resolver = MagicMock(
+            return_value=GovernedInputResolution(
+                bars=fresh_bars,
+                recovery_bindings=resolution.recovery_bindings,
+                recovery_summaries=resolution.recovery_summaries,
+                failure_map=resolution.failure_map,
+            )
+        )
+
+        report = run_preflight(
+            {"autoresearch": {"state_dir": str(tmp_path / "state")}},
+            "2026-08-10",
+            mode="governed",
+            price_source=MagicMock(),
+            processed_at=probe_started_at,
+            state_context_factory=_state_context_factory(self._snapshot(tmp_path)),
+            governed_resolver=resolver,
+        )
+
+        assert report["ok"] is True
+        assert report["governed_probe_status"] == "ready"
+        assert report["governed_failure_map"] == {}
 
     def test_governed_failure_map_is_exact_and_marks_report_failed(self, tmp_path):
         from tradingagents.strategies.orchestration.governed_market_data import (
@@ -625,6 +685,9 @@ class TestGovernedPreflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
         config, engine = _make_engine(tmp_path)
+        self._freeze_preflight_completion(
+            monkeypatch, datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
+        )
         monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
         snapshot = self._snapshot(tmp_path)
         report = run_preflight(
@@ -691,6 +754,9 @@ class TestGovernedPreflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
         config, engine = _make_engine(tmp_path)
+        self._freeze_preflight_completion(
+            monkeypatch, datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
+        )
         monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
         broken = MagicMock()
         broken.name = "broken_strategy"
