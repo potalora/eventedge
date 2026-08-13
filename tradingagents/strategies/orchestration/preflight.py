@@ -306,11 +306,15 @@ def _governed_snapshot_report(
             processed_at=now,
             persist=False,
         )
+        # Provider evidence is timestamped when retrieval completes, not when
+        # the probe started. Validate it against the completion boundary so a
+        # genuinely fresh response is not falsely classified as future data.
+        validated_at = max(now, datetime.now(timezone.utc))
         recoveries, failure_map = _validate_governed_resolution(
             resolution,
             snapshot=snapshot,
             session=session,
-            processed_at=now,
+            processed_at=validated_at,
         )
     except GovernedMarketDataError as error:
         recoveries = []
