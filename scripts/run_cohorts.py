@@ -132,6 +132,8 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
     Execution failures retain exit status 1; degraded runs use 2.
     """
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        aggregate_candidate_volatility_failures,
+        aggregate_failure_reasons,
         aggregate_governed_reporting,
         count_degraded_cohorts,
         count_failed_cohorts,
@@ -146,10 +148,25 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
             for ticker in result[name].get("candidate_bar_quarantines", [])
         }
     )
+    volatility_quarantined_tickers = sorted(
+        {
+            str(ticker)
+            for name in degraded
+            for ticker in result[name].get(
+                "candidate_volatility_quarantines", []
+            )
+        }
+    )
+    failure_reasons = aggregate_failure_reasons(result)
+    volatility_failures = aggregate_candidate_volatility_failures(result)
     recoveries, _ = aggregate_governed_reporting(result)
     recovered_tickers = sorted({str(summary["ticker"]) for summary in recoveries})
     if n_failed:
         message = f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
+        if failure_reasons:
+            message += "; failure reasons: " + "; ".join(
+                f"{count}x {reason}" for reason, count in failure_reasons.items()
+            )
         if n_degraded:
             message += (
                 "; DEGRADED: "
@@ -158,6 +175,15 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
             )
             if quarantined_tickers:
                 message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
+            if volatility_quarantined_tickers:
+                message += "; volatility-quarantined tickers: " + ", ".join(
+                    volatility_quarantined_tickers
+                )
+                if volatility_failures:
+                    message += "; candidate volatility details: " + "; ".join(
+                        f"{ticker}: {reason}"
+                        for ticker, reason in volatility_failures.items()
+                    )
         return 1, message
 
     if n_degraded:
@@ -168,6 +194,15 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
         )
         if quarantined_tickers:
             message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
+        if volatility_quarantined_tickers:
+            message += "; volatility-quarantined tickers: " + ", ".join(
+                volatility_quarantined_tickers
+            )
+            if volatility_failures:
+                message += "; candidate volatility details: " + "; ".join(
+                    f"{ticker}: {reason}"
+                    for ticker, reason in volatility_failures.items()
+                )
         if recovered_tickers:
             message += "; recovered tickers: " + ", ".join(recovered_tickers)
         return 2, message

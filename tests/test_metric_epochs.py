@@ -301,6 +301,7 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
         assert tables == {
             "candidate_bar_recoveries",
             "candidate_signal_identity_bindings",
+            "candidate_volatility_quarantines",
             "critical_gap_markers",
             "governed_bar_recoveries",
             "metric_epochs",

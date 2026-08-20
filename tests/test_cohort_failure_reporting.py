@@ -18,6 +18,7 @@ import pytest
 from scripts import run_cohorts
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
+    aggregate_failure_reasons,
     aggregate_governed_reporting,
     count_degraded_cohorts,
     count_failed_cohorts,
@@ -91,6 +92,51 @@ def test_count_degraded_cohorts_is_distinct_from_execution_failures():
 
     assert count_failed_cohorts(results) == (0, 2, [])
     assert count_degraded_cohorts(results) == (1, 2, ["candidate_quarantined"])
+
+
+def test_candidate_volatility_quarantine_is_distinct_and_actionable():
+    results = {
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": [],
+            "candidate_volatility_quarantines": ["ANTA"],
+            "candidate_volatility_failure_map": {
+                "ANTA": "missing expected XNYS session 2026-08-17"
+            },
+        }
+    }
+
+    exit_code, message = run_cohorts._cohort_run_exit_status(results)
+
+    assert exit_code == 2
+    assert "volatility-quarantined tickers: ANTA" in message
+    assert (
+        "candidate volatility details: ANTA: missing expected XNYS session 2026-08-17"
+        in message
+    )
+
+
+def test_shared_failure_reason_is_retained_in_operator_summary():
+    reason = (
+        "shared staging volatility evidence failed: missing valid 60-session "
+        "volatility evidence for ANTA"
+    )
+    results = {
+        f"c{index}": {
+            "error": True,
+            "execution_valid": True,
+            "invalid_reason": reason,
+        }
+        for index in range(16)
+    }
+
+    assert aggregate_failure_reasons(results) == {reason: 16}
+    exit_code, message = run_cohorts._cohort_run_exit_status(results)
+    assert exit_code == 1
+    assert f"failure reasons: 16x {reason}" in message
 
 
 def test_governed_reporting_is_deduplicated_sorted_and_bounded():
@@ -450,6 +496,52 @@ def test_degraded_worker_result_preserves_execution_validity(tmp_path):
     assert "1/1 cohorts degraded" in result["error"]
 
 
+def test_degraded_worker_result_preserves_volatility_quarantine(tmp_path):
+    results = {
+        "candidate_quarantined": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "candidate_bar_quarantines": [],
+            "candidate_volatility_quarantines": ["ANTA"],
+            "candidate_volatility_failure_map": {
+                "ANTA": "missing expected XNYS session 2026-08-17"
+            },
+        }
+    }
+    stdout = "done\n" + json.dumps(results, indent=2) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "DEGRADED"))
+
+    assert result["candidate_volatility_quarantines"] == ["ANTA"]
+    assert result["candidate_volatility_failure_map"] == {
+        "ANTA": "missing expected XNYS session 2026-08-17"
+    }
+    assert "volatility-quarantined tickers: ANTA" in result["error"]
+    assert "missing expected XNYS session 2026-08-17" in result["error"]
+
+
+def test_failed_worker_result_preserves_aggregated_reason(tmp_path):
+    reason = (
+        "shared staging volatility evidence failed: missing valid 60-session "
+        "volatility evidence for ANTA"
+    )
+    results = {
+        f"cohort-{index}": {
+            "error": True,
+            "execution_valid": True,
+            "invalid_reason": reason,
+        }
+        for index in range(16)
+    }
+    stdout = "done\n" + json.dumps(results, indent=2) + "\n"
+
+    result = _run_with_proc(tmp_path, _FakeProc(1, stdout, "ERROR"))
+
+    assert result["failure_reasons"] == {reason: 16}
+    assert f"failure reasons: 16x {reason}" in result["error"]
+
+
 def test_generation_status_labels_governed_recovery_without_candidate_quarantine(
     tmp_path,
 ):
@@ -493,6 +585,10 @@ def test_generation_status_labels_mixed_candidate_and_governed_degradation(tmp_p
             "degraded": True,
             "execution_valid": True,
             "candidate_bar_quarantines": ["ALX"],
+            "candidate_volatility_quarantines": ["ANTA"],
+            "candidate_volatility_failure_map": {
+                "ANTA": "missing expected XNYS session 2026-08-17"
+            },
             "governed_bar_recoveries": [summary],
         }
     }
@@ -501,6 +597,7 @@ def test_generation_status_labels_mixed_candidate_and_governed_degradation(tmp_p
     result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "degraded"))
 
     assert "candidate data quarantined; governed bar recovery" in result["error"]
+    assert "candidate volatility details: ANTA:" in result["error"]
 
 
 def test_failed_worker_result_preserves_simultaneous_degradation(tmp_path):

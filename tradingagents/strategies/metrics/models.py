@@ -134,6 +134,19 @@ class CandidateBarRecoveryRecord:
     signal_identities: tuple[dict[str, str], ...]
 
 
+@dataclass(frozen=True)
+class CandidateVolatilityQuarantineRecord:
+    """Immutable session-scoped evidence for unusable candidate volatility."""
+
+    quarantine_id: str
+    epoch_id: str
+    session: date
+    ticker: str
+    lookback_sessions: int
+    attempt_errors: tuple[str, ...]
+    signal_identities: tuple[dict[str, str], ...]
+
+
 def _canonical_timestamp(value: object) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:

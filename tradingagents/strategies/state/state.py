@@ -274,6 +274,7 @@ class StateManager:
         execution_valid: bool | None = None,
         staging_valid: bool | None = None,
         candidate_bar_quarantines: tuple[str, ...] = (),
+        candidate_volatility_quarantines: tuple[str, ...] = (),
     ) -> None:
         """Save one idempotent post-resolution regime observation."""
         snapshot = dict(regime)
@@ -289,7 +290,13 @@ class StateManager:
             ):
                 raise ValueError("regime snapshot governance metadata is incomplete")
             quarantines = sorted(set(candidate_bar_quarantines))
-            if any(not ticker or ticker != ticker.upper() for ticker in quarantines):
+            volatility_quarantines = sorted(
+                set(candidate_volatility_quarantines)
+            )
+            if any(
+                not ticker or ticker != ticker.upper()
+                for ticker in quarantines + volatility_quarantines
+            ):
                 raise ValueError("regime snapshot candidate quarantine is invalid")
             snapshot.update(
                 {
@@ -300,6 +307,7 @@ class StateManager:
                     "execution_valid": execution_valid,
                     "staging_valid": staging_valid,
                     "candidate_bar_quarantines": quarantines,
+                    "candidate_volatility_quarantines": volatility_quarantines,
                 }
             )
         snapshots = _load_json(self._regime_snapshots_path, [])

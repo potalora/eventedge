@@ -16,7 +16,10 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import (
 )
 from tradingagents.strategies.orchestration.session_executor import SessionInputBundle
 from tradingagents.strategies.orchestration.trading_calendar import previous_session
-from tradingagents.strategies.trading.portfolio_policy import annualized_volatility
+from tradingagents.strategies.trading.portfolio_policy import (
+    annualized_volatility,
+    build_annualized_volatility_evidence,
+)
 
 
 SESSION = date(2026, 7, 31)
@@ -110,7 +113,12 @@ def _position(ticker: str, *, pending: bool = False) -> dict[str, object]:
 
 
 def _run_staging_matrix(
-    tmp_path, monkeypatch, histories, *, refetch_histories=None
+    tmp_path,
+    monkeypatch,
+    histories,
+    *,
+    refetch_histories=None,
+    candidate_tickers=("CANDIDATE",),
 ):
     config = deepcopy(DEFAULT_CONFIG)
     config["autoresearch"]["state_dir"] = str(tmp_path)
@@ -140,24 +148,27 @@ def _run_staging_matrix(
         )
 
     monkeypatch.setattr(first_engine, "_fetch_missing_prices", fetch_missing_prices)
-    signal = {
-        "ticker": "CANDIDATE",
-        "direction": "long",
-        "score": 2.0,
-        "strategy": "fixture_strategy",
-        "event_key": "event-candidate",
-        "source_event_keys": ("source-candidate",),
-        "strategy_tags": ("fixture_strategy",),
-        "risk_tags": ("event:candidate",),
-        "metadata": {
-            "event_key": "event-candidate",
-            "observed_at": "2026-07-31T19:30:00+00:00",
-        },
-    }
+    signals = [
+        {
+            "ticker": ticker,
+            "direction": "long",
+            "score": 2.0,
+            "strategy": "fixture_strategy",
+            "event_key": f"event-{ticker.lower()}",
+            "source_event_keys": (f"source-{ticker.lower()}",),
+            "strategy_tags": ("fixture_strategy",),
+            "risk_tags": (f"event:{ticker.lower()}",),
+            "metadata": {
+                "event_key": f"event-{ticker.lower()}",
+                "observed_at": "2026-07-31T19:30:00+00:00",
+            },
+        }
+        for ticker in candidate_tickers
+    ]
     monkeypatch.setattr(
         orchestrator,
         "_screen_for_horizon",
-        lambda _data, _trading_date, _horizon: ([signal], {}, []),
+        lambda _data, _trading_date, _horizon: (signals, {}, []),
     )
     monkeypatch.setattr(
         orchestrator, "_persist_horizon_health", lambda *_args, **_kwargs: True
@@ -166,23 +177,32 @@ def _run_staging_matrix(
         orchestrator,
         "_fetch_openbb_enrichment",
         lambda _signals: {
-            "profiles": {ticker: {"sector": "Industrials"} for ticker in TICKERS}
+            "profiles": {
+                ticker: {"sector": "Industrials"}
+                for ticker in {*TICKERS, *candidate_tickers}
+            }
         },
     )
-    reference_bar = MarketBar(
-        ticker="CANDIDATE",
-        session=SESSION,
-        open=Decimal("100"),
-        high=Decimal("101"),
-        low=Decimal("99"),
-        close=Decimal("100"),
-        source="fixture",
-        fetched_at=datetime(2026, 7, 31, 20, tzinfo=timezone.utc),
-        adjusted=False,
-    )
+
+    def reference_bars(_source, tickers, session, *_args, **_kwargs):
+        return {
+            ticker: MarketBar(
+                ticker=ticker,
+                session=session,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                source="fixture",
+                fetched_at=datetime(2026, 7, 31, 20, tzinfo=timezone.utc),
+                adjusted=False,
+            )
+            for ticker in tickers
+        }
+
     monkeypatch.setattr(
         "tradingagents.strategies.orchestration.session_executor.ensure_reference_bars",
-        lambda *_args, **_kwargs: {"CANDIDATE": reference_bar},
+        reference_bars,
     )
 
     for cohort in orchestrator.cohorts:
@@ -249,7 +269,10 @@ def test_all_16_cohorts_bind_the_same_shared_60_session_volatility(
         for ticker, frame in histories.items()
     }
     orchestrator, results, missing_fetch_calls = _run_staging_matrix(
-        tmp_path, monkeypatch, histories
+        tmp_path,
+        monkeypatch,
+        histories,
+        candidate_tickers=("CANDIDATE", "PENDING"),
     )
 
     try:
@@ -276,7 +299,10 @@ def test_missing_required_measured_volatility_fails_closed(
         "CANDIDATE": _history(0.033),
     }
     orchestrator, results, missing_fetch_calls = _run_staging_matrix(
-        tmp_path, monkeypatch, histories
+        tmp_path,
+        monkeypatch,
+        histories,
+        candidate_tickers=("CANDIDATE", "PENDING"),
     )
 
     try:
@@ -290,12 +316,100 @@ def test_missing_required_measured_volatility_fails_closed(
             for result in results.values()
         )
         assert all(
+            result["candidate_volatility_quarantines"] == []
+            for result in results.values()
+        )
+        assert all(
             cohort["ledger"].read_policy_session_context(SESSION) is None
             for cohort in orchestrator.cohorts
         )
     finally:
         for cohort in orchestrator.cohorts:
             cohort["ledger"].close()
+
+
+def test_missing_candidate_volatility_is_quarantined_without_cascading(
+    tmp_path, monkeypatch
+) -> None:
+    histories = {
+        "OPEN": _history(0.021),
+        "PENDING": _history(0.027),
+        "CANDIDATE": _history(0.033),
+    }
+    orchestrator, results, missing_fetch_calls = _run_staging_matrix(
+        tmp_path,
+        monkeypatch,
+        histories,
+        candidate_tickers=("CANDIDATE", "SHORT"),
+    )
+
+    try:
+        assert missing_fetch_calls[0][0] == ("SHORT",)
+        assert len(results) == 16
+        assert all(not result["error"] for result in results.values())
+        assert all(result["degraded"] for result in results.values())
+        assert all(result["execution_valid"] for result in results.values())
+        assert all(not result["staging_valid"] for result in results.values())
+        assert all(
+            result["candidate_bar_quarantines"] == []
+            and result["candidate_volatility_quarantines"] == ["SHORT"]
+            and result["candidate_volatility_failure_map"]["SHORT"].startswith(
+                "missing valid 60-session volatility evidence"
+            )
+            for result in results.values()
+        )
+        assert all(
+            {signal["ticker"] for signal in result["signals"]} == {"CANDIDATE"}
+            for result in results.values()
+        )
+        records = orchestrator._metric_store.read_candidate_volatility_quarantines(
+            orchestrator._epoch_id, SESSION
+        )
+        assert len(records) == 1
+        assert records[0].ticker == "SHORT"
+        assert records[0].lookback_sessions == 60
+        assert len(records[0].attempt_errors) == 2
+        assert all("SHORT" in error for error in records[0].attempt_errors)
+        assert records[0].signal_identities == (
+            {"event_key": "event-short", "strategy": "fixture_strategy"},
+        )
+        regime = orchestrator.cohorts[0]["engine"].state.load_latest_regime()
+        assert regime is not None
+        assert regime["candidate_volatility_quarantines"] == ["SHORT"]
+        assert regime["execution_valid"] is True
+        assert regime["staging_valid"] is False
+
+        calls_before_replay = list(missing_fetch_calls)
+        replay = orchestrator.run_daily(SESSION.isoformat())
+        assert missing_fetch_calls == calls_before_replay
+        assert all(
+            result["candidate_volatility_quarantines"] == ["SHORT"]
+            for result in replay.values()
+        )
+    finally:
+        for cohort in orchestrator.cohorts:
+            cohort["ledger"].close()
+
+
+def test_volatility_sequence_error_identifies_missing_session() -> None:
+    history = _history(0.027)
+    expected = _xnys_sessions(previous_session(SESSION), 61)
+    missing = expected[-30]
+    history = history.drop(pd.Timestamp(missing))
+
+    with pytest.raises(ValueError) as raised:
+        build_annualized_volatility_evidence(
+            {"ANTA": history},
+            ("ANTA",),
+            lookback_sessions=60,
+            floor=0.15,
+            expected_sessions=expected,
+        )
+
+    assert "invalid volatility session sequence for ANTA" in str(raised.value)
+    assert f"missing expected XNYS session(s): {missing.isoformat()}" in str(
+        raised.value
+    )
 
 
 def test_shared_measured_volatility_rotates_policy_document_version() -> None:

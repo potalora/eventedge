@@ -347,10 +347,24 @@ def build_annualized_volatility_evidence(
                 f"invalid volatility session sequence for {ticker}: "
                 "sessions must be strictly increasing and unique"
             )
-        if actual_sessions[-len(expected) :] != expected:
+        actual_window = actual_sessions[-len(expected) :]
+        if actual_window != expected:
+            missing = sorted(set(expected) - set(actual_sessions))
+            unexpected = sorted(set(actual_window) - set(expected))
+            details: list[str] = []
+            if missing:
+                details.append(
+                    "missing expected XNYS session(s): "
+                    + ", ".join(session.isoformat() for session in missing)
+                )
+            if unexpected:
+                details.append(
+                    "unexpected suffix session(s): "
+                    + ", ".join(session.isoformat() for session in unexpected)
+                )
             raise ValueError(
                 f"invalid volatility session sequence for {ticker}: "
-                "sessions do not match the expected XNYS window"
+                + "; ".join(details or ["sessions are out of expected order"])
             )
         window = pd.to_numeric(closes, errors="coerce").tail(len(expected))
         values = tuple(float(value) for value in window)

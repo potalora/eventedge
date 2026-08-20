@@ -16,6 +16,7 @@ from .calendar import XNYSCalendar
 from .models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
+    CandidateVolatilityQuarantineRecord,
     CriticalGapMarker,
     GOVERNED_BAR_RECOVERY_CONTRACT,
     GovernedBarRecoveryRecord,
@@ -53,6 +54,14 @@ CREATE TABLE IF NOT EXISTS candidate_bar_recoveries (
   session TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS candidate_volatility_quarantines (
+  quarantine_id TEXT PRIMARY KEY,
+  epoch_id TEXT NOT NULL,
+  session TEXT NOT NULL,
+  ticker TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE (epoch_id, session, ticker)
+);
 CREATE TABLE IF NOT EXISTS governed_bar_recoveries (
   recovery_id TEXT PRIMARY KEY,
   contract_version TEXT NOT NULL,
@@ -72,6 +81,8 @@ CREATE TABLE IF NOT EXISTS candidate_signal_identity_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_candidate_bar_recoveries_epoch_session
   ON candidate_bar_recoveries(epoch_id, session);
+CREATE INDEX IF NOT EXISTS idx_candidate_volatility_quarantines_epoch_session
+  ON candidate_volatility_quarantines(epoch_id, session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_signal_identity_scope
   ON candidate_signal_identity_bindings(epoch_id, session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_gap_pending
@@ -97,6 +108,8 @@ _MAX_CANDIDATE_RECOVERY_TEXT = 256
 _MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT = 128
 _MAX_CANDIDATE_RECOVERY_ATTEMPTS = 2
 _MAX_CANDIDATE_RECOVERY_SIGNALS = 64
+_MAX_CANDIDATE_VOLATILITY_ERROR_TEXT = 4_096
+_MAX_CANDIDATE_VOLATILITY_ATTEMPTS = 2
 _MAX_CANDIDATE_SIGNAL_IDENTITIES = 4_096
 _MAX_GOVERNED_RECOVERY_TEXT = 4_096
 _MAX_GOVERNED_RECOVERY_ROWS = 7
@@ -132,6 +145,7 @@ class MetricStore:
         self._read_only = False
         self._immutable = False
         self._has_candidate_bar_recoveries = True
+        self._has_candidate_volatility_quarantines = True
         self._has_candidate_signal_identity_bindings = True
         self._has_governed_bar_recoveries = True
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +181,9 @@ class MetricStore:
         if not required <= tables:
             raise ValueError("existing metric store schema is incomplete")
         store._has_candidate_bar_recoveries = "candidate_bar_recoveries" in tables
+        store._has_candidate_volatility_quarantines = (
+            "candidate_volatility_quarantines" in tables
+        )
         store._has_candidate_signal_identity_bindings = (
             "candidate_signal_identity_bindings" in tables
         )
@@ -258,6 +275,18 @@ class MetricStore:
             dict(identity) for identity in data["signal_identities"]
         )
         return CandidateBarRecoveryRecord(**data)
+
+    @staticmethod
+    def _candidate_volatility_quarantine(
+        payload: str,
+    ) -> CandidateVolatilityQuarantineRecord:
+        data = json.loads(payload)
+        data["session"] = date.fromisoformat(data["session"])
+        data["attempt_errors"] = tuple(data["attempt_errors"])
+        data["signal_identities"] = tuple(
+            dict(identity) for identity in data["signal_identities"]
+        )
+        return CandidateVolatilityQuarantineRecord(**data)
 
     @staticmethod
     def _candidate_signal_identity_binding(
@@ -547,6 +576,50 @@ class MetricStore:
             )
         if canonical != sorted(set(canonical)):
             raise ValueError("candidate signal identity binding is not canonical")
+
+    def _validate_candidate_volatility_quarantine(
+        self, record: CandidateVolatilityQuarantineRecord
+    ) -> None:
+        for value in (record.quarantine_id, record.epoch_id):
+            if not self._bounded_candidate_recovery_text(value):
+                raise ValueError("candidate volatility quarantine identifier is invalid")
+        if not self._calendar.is_session(record.session):
+            raise ValueError(f"{record.session} is not an XNYS session")
+        if (
+            not self._bounded_candidate_recovery_text(record.ticker)
+            or record.ticker != record.ticker.upper()
+        ):
+            raise ValueError("candidate volatility quarantine ticker is invalid")
+        if (
+            type(record.lookback_sessions) is not int
+            or not 1 <= record.lookback_sessions <= 10_000
+        ):
+            raise ValueError("candidate volatility quarantine lookback is invalid")
+        if not 1 <= len(record.attempt_errors) <= _MAX_CANDIDATE_VOLATILITY_ATTEMPTS:
+            raise ValueError("candidate volatility quarantine attempt count is invalid")
+        if any(
+            not isinstance(error, str)
+            or not error.strip()
+            or len(error) > _MAX_CANDIDATE_VOLATILITY_ERROR_TEXT
+            for error in record.attempt_errors
+        ):
+            raise ValueError("candidate volatility quarantine error is invalid")
+        if len(record.signal_identities) > _MAX_CANDIDATE_RECOVERY_SIGNALS:
+            raise ValueError(
+                "candidate volatility quarantine signal identity count exceeds bound"
+            )
+        for identity in record.signal_identities:
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != _CANDIDATE_SIGNAL_IDENTITY_KEYS
+                or not all(
+                    self._bounded_candidate_recovery_text(value)
+                    for value in identity.values()
+                )
+            ):
+                raise ValueError(
+                    "candidate volatility quarantine signal identity is invalid"
+                )
 
     @staticmethod
     def _bounded_governed_recovery_text(value: object) -> bool:
@@ -1239,6 +1312,33 @@ class MetricStore:
                 ),
             )
 
+    def save_candidate_volatility_quarantine(
+        self, record: CandidateVolatilityQuarantineRecord
+    ) -> None:
+        self._validate_candidate_volatility_quarantine(record)
+        payload = self._json(record)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_immutable(
+                connection,
+                table="candidate_volatility_quarantines",
+                id_column="quarantine_id",
+                record_id=record.quarantine_id,
+                payload=payload,
+                values=(
+                    record.quarantine_id,
+                    record.epoch_id,
+                    record.session.isoformat(),
+                    record.ticker,
+                    payload,
+                ),
+                insert_sql=(
+                    "INSERT INTO candidate_volatility_quarantines "
+                    "(quarantine_id, epoch_id, session, ticker, payload_json) "
+                    "VALUES (?, ?, ?, ?, ?)"
+                ),
+            )
+
     def save_governed_bar_recovery(self, record: GovernedBarRecoveryRecord) -> None:
         self._validate_governed_bar_recovery(record)
         payload = record.canonical_payload()
@@ -1375,6 +1475,36 @@ class MetricStore:
                 (*values, limit),
             ).fetchall()
         return tuple(self._candidate_bar_recovery(row[0]) for row in rows)
+
+    def read_candidate_volatility_quarantines(
+        self,
+        epoch_id: str,
+        session: date | None = None,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[CandidateVolatilityQuarantineRecord, ...]:
+        self._validate_limit(limit)
+        if not self._has_candidate_volatility_quarantines:
+            return ()
+        clauses = ["epoch_id = ?"]
+        values: list[object] = [epoch_id]
+        if session is not None:
+            clauses.append("session = ?")
+            values.append(session.isoformat())
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT payload_json
+                FROM candidate_volatility_quarantines
+                WHERE {" AND ".join(clauses)}
+                ORDER BY session, ticker, quarantine_id
+                LIMIT ?
+                """,
+                (*values, limit),
+            ).fetchall()
+        return tuple(
+            self._candidate_volatility_quarantine(row[0]) for row in rows
+        )
 
     def read_candidate_bar_recovery_window(
         self,

@@ -34,6 +34,8 @@ _GOVERNED_FAILURE_KINDS = frozenset(
 )
 _MARKET_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9.^_-]{0,31}")
 _COHORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_MAX_FAILURE_REASONS = 8
+_MAX_FAILURE_REASON_TEXT = 512
 
 
 def aggregate_governed_reporting(
@@ -336,6 +338,48 @@ def count_degraded_cohorts(results: dict) -> tuple[int, int, list[str]]:
         and result.get("execution_valid") is True
     )
     return len(degraded), len(results), degraded
+
+
+def aggregate_failure_reasons(results: dict) -> dict[str, int]:
+    """Return bounded, normalized cohort failure reasons with occurrence counts."""
+    counts: dict[str, int] = {}
+    for name in sorted(key for key in results if isinstance(key, str)):
+        result = results[name]
+        if not isinstance(result, dict) or not result.get("error"):
+            continue
+        raw_reason = result.get("invalid_reason")
+        if not isinstance(raw_reason, str):
+            continue
+        reason = " ".join(raw_reason.split())[:_MAX_FAILURE_REASON_TEXT]
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return dict(ordered[:_MAX_FAILURE_REASONS])
+
+
+def aggregate_candidate_volatility_failures(results: dict) -> dict[str, str]:
+    """Return bounded candidate-volatility failure detail for operator alerts."""
+    failures: dict[str, str] = {}
+    for name in sorted(key for key in results if isinstance(key, str)):
+        result = results[name]
+        if not isinstance(result, dict):
+            continue
+        raw_failures = result.get("candidate_volatility_failure_map")
+        if not isinstance(raw_failures, dict):
+            continue
+        for raw_ticker in sorted(raw_failures, key=lambda value: str(value)):
+            raw_reason = raw_failures[raw_ticker]
+            ticker = str(raw_ticker).strip().upper()
+            if not _MARKET_TICKER_RE.fullmatch(ticker) or not isinstance(
+                raw_reason, str
+            ):
+                continue
+            reason = " ".join(raw_reason.split())[:_MAX_FAILURE_REASON_TEXT]
+            if reason and ticker not in failures:
+                failures[ticker] = reason
+            if len(failures) >= _MAX_FAILURE_REASONS:
+                return failures
+    return failures
 
 
 # ---------------------------------------------------------------------------
@@ -1206,6 +1250,21 @@ class CohortOrchestrator:
             )
             if record.outcome == "quarantined"
         )
+        stored_candidate_volatility_quarantines = (
+            self._metric_store.read_candidate_volatility_quarantines(
+                self._epoch_id, session
+            )
+        )
+        session_candidate_volatility_quarantines = sorted(
+            record.ticker for record in stored_candidate_volatility_quarantines
+        )
+        candidate_volatility_quarantines = set(
+            session_candidate_volatility_quarantines
+        )
+        candidate_volatility_failure_map = {
+            record.ticker: record.attempt_errors[-1]
+            for record in stored_candidate_volatility_quarantines
+        }
         if metric_epoch.status == "invalid":
             for cohort in self.cohorts:
                 reason = cohort["ledger"].session_invalid_reason(session)
@@ -1222,6 +1281,22 @@ class CohortOrchestrator:
         governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = {}
 
         def finalize_results() -> dict[str, Any]:
+            volatility_quarantines = sorted(candidate_volatility_quarantines)
+            if volatility_quarantines:
+                for result in results.values():
+                    if not isinstance(result, dict):
+                        continue
+                    result.setdefault(
+                        "candidate_volatility_quarantines",
+                        volatility_quarantines,
+                    )
+                    result.setdefault(
+                        "candidate_volatility_failure_map",
+                        {
+                            ticker: candidate_volatility_failure_map[ticker]
+                            for ticker in volatility_quarantines
+                        },
+                    )
             for name, summaries in governed_summaries_by_cohort.items():
                 result = results.get(name)
                 if not summaries or not isinstance(result, dict):
@@ -1311,11 +1386,23 @@ class CohortOrchestrator:
                     "replayed": True,
                     "error": False,
                     "degraded": bool(
-                        session_candidate_quarantines or governed_summaries
+                        session_candidate_quarantines
+                        or session_candidate_volatility_quarantines
+                        or governed_summaries
                     ),
                     "execution_valid": True,
-                    "staging_valid": not session_candidate_quarantines,
+                    "staging_valid": not (
+                        session_candidate_quarantines
+                        or session_candidate_volatility_quarantines
+                    ),
                     "candidate_bar_quarantines": session_candidate_quarantines,
+                    "candidate_volatility_quarantines": (
+                        session_candidate_volatility_quarantines
+                    ),
+                    "candidate_volatility_failure_map": {
+                        ticker: candidate_volatility_failure_map[ticker]
+                        for ticker in session_candidate_volatility_quarantines
+                    },
                     "governed_bar_recoveries": governed_summaries,
                     "governed_failure_map": {},
                 }
@@ -2008,35 +2095,24 @@ class CohortOrchestrator:
             ]
 
         candidate_bar_quarantines = sorted(quarantined_tickers)
-        staging_valid = not candidate_bar_quarantines
-        for horizon, (_signals, regime, _health) in horizon_signals.items():
-            first_engine.state.save_regime_snapshot(
-                regime,
-                session=session,
-                epoch_id=self._epoch_id,
-                horizon=horizon,
-                execution_valid=True,
-                staging_valid=staging_valid,
-                candidate_bar_quarantines=tuple(candidate_bar_quarantines),
-            )
-
         shared_volatility_evidence = None
         policy_settings = self._base_config.get("autoresearch", {}).get(
             "portfolio_policy"
         )
         if isinstance(policy_settings, dict):
-            governed_tickers = {
+            candidate_tickers = {
                 str(signal.get("ticker", "")).strip().upper()
                 for signal in all_signals
                 if str(signal.get("ticker", "")).strip()
             }
+            governed_policy_tickers: set[str] = set()
             try:
                 for cohort in valid_cohorts:
-                    governed_tickers.update(
+                    governed_policy_tickers.update(
                         str(row["ticker"]).strip().upper()
                         for row in cohort["ledger"].policy_open_lot_projection(session)
                     )
-                    governed_tickers.update(
+                    governed_policy_tickers.update(
                         str(row["ticker"]).strip().upper()
                         for row in cohort["ledger"].policy_pending_entry_projection()
                     )
@@ -2059,8 +2135,11 @@ class CohortOrchestrator:
                 expected_volatility_sessions = tuple(
                     reversed(expected_sessions_descending)
                 )
+                candidate_tickers -= candidate_volatility_quarantines
+                required_tickers = governed_policy_tickers | candidate_tickers
                 histories_to_refetch: list[str] = []
-                for ticker in sorted(governed_tickers):
+                initial_errors: dict[str, str] = {}
+                for ticker in sorted(required_tickers):
                     try:
                         build_annualized_volatility_evidence(
                             first_engine._price_cache,
@@ -2069,8 +2148,9 @@ class CohortOrchestrator:
                             floor=volatility_floor,
                             expected_sessions=expected_volatility_sessions,
                         )
-                    except (TypeError, ValueError, OverflowError):
+                    except (TypeError, ValueError, OverflowError) as error:
                         histories_to_refetch.append(ticker)
+                        initial_errors[ticker] = str(error)
                 if histories_to_refetch:
                     volatility_buffer_days = max(120, 2 * volatility_lookback_sessions)
                     volatility_start = (
@@ -2086,23 +2166,137 @@ class CohortOrchestrator:
 
                 shared_volatility_evidence = build_annualized_volatility_evidence(
                     first_engine._price_cache,
-                    governed_tickers,
+                    governed_policy_tickers,
                     lookback_sessions=volatility_lookback_sessions,
                     floor=volatility_floor,
                     expected_sessions=expected_volatility_sessions,
                 )
+                candidate_only_volatility_tickers = (
+                    candidate_tickers - governed_policy_tickers
+                )
+                from tradingagents.strategies.execution.ids import stable_id
+                from tradingagents.strategies.metrics.models import (
+                    CandidateVolatilityQuarantineRecord,
+                )
+
+                for ticker in sorted(candidate_only_volatility_tickers):
+                    try:
+                        evidence = build_annualized_volatility_evidence(
+                            first_engine._price_cache,
+                            (ticker,),
+                            lookback_sessions=volatility_lookback_sessions,
+                            floor=volatility_floor,
+                            expected_sessions=expected_volatility_sessions,
+                        )
+                    except (TypeError, ValueError, OverflowError) as error:
+                        attempt_errors = tuple(
+                            [initial_errors[ticker], str(error)]
+                            if ticker in initial_errors
+                            else [str(error)]
+                        )
+                        identities = _candidate_signal_identity_pairs(
+                            all_signals, ticker, session
+                        )
+                        self._metric_store.save_candidate_volatility_quarantine(
+                            CandidateVolatilityQuarantineRecord(
+                                quarantine_id=stable_id(
+                                    "candidate_volatility_quarantine",
+                                    self._epoch_id,
+                                    session,
+                                    ticker,
+                                ),
+                                epoch_id=self._epoch_id,
+                                session=session,
+                                ticker=ticker,
+                                lookback_sessions=volatility_lookback_sessions,
+                                attempt_errors=attempt_errors,
+                                signal_identities=tuple(
+                                    {
+                                        "event_key": event_key,
+                                        "strategy": strategy,
+                                    }
+                                    for event_key, strategy in identities
+                                ),
+                            )
+                        )
+                        candidate_volatility_quarantines.add(ticker)
+                        candidate_volatility_failure_map[ticker] = str(error)
+                    else:
+                        shared_volatility_evidence.update(evidence)
+
+                overlapping_candidate_evidence = (
+                    candidate_tickers & governed_policy_tickers
+                )
+                if overlapping_candidate_evidence:
+                    shared_volatility_evidence.update(
+                        build_annualized_volatility_evidence(
+                            first_engine._price_cache,
+                            overlapping_candidate_evidence,
+                            lookback_sessions=volatility_lookback_sessions,
+                            floor=volatility_floor,
+                            expected_sessions=expected_volatility_sessions,
+                        )
+                    )
             except Exception as error:
                 reason = f"shared staging volatility evidence failed: {error}"
                 for cohort in valid_cohorts:
                     results[cohort["config"].name] = {
                         "error": True,
                         "invalid_reason": reason,
-                        "degraded": bool(candidate_bar_quarantines),
+                        "degraded": bool(
+                            candidate_bar_quarantines
+                            or candidate_volatility_quarantines
+                        ),
                         "execution_valid": True,
                         "staging_valid": False,
                         "candidate_bar_quarantines": candidate_bar_quarantines,
+                        "candidate_volatility_quarantines": sorted(
+                            candidate_volatility_quarantines
+                        ),
                     }
                 return finalize_results()
+
+        if candidate_volatility_quarantines:
+            horizon_signals = {
+                horizon: (
+                    [
+                        signal
+                        for signal in signals
+                        if str(signal.get("ticker", "")).strip().upper()
+                        not in candidate_volatility_quarantines
+                    ],
+                    regime,
+                    health,
+                )
+                for horizon, (signals, regime, health) in horizon_signals.items()
+            }
+            all_signals = [
+                signal
+                for signals, _, _ in horizon_signals.values()
+                for signal in signals
+            ]
+            for ticker in candidate_volatility_quarantines:
+                candidate_reference_bars.pop(ticker, None)
+
+        candidate_volatility_quarantine_list = sorted(
+            candidate_volatility_quarantines
+        )
+        staging_valid = not (
+            candidate_bar_quarantines or candidate_volatility_quarantine_list
+        )
+        for horizon, (_signals, regime, _health) in horizon_signals.items():
+            first_engine.state.save_regime_snapshot(
+                regime,
+                session=session,
+                epoch_id=self._epoch_id,
+                horizon=horizon,
+                execution_valid=True,
+                staging_valid=staging_valid,
+                candidate_bar_quarantines=tuple(candidate_bar_quarantines),
+                candidate_volatility_quarantines=tuple(
+                    candidate_volatility_quarantine_list
+                ),
+            )
 
         enrichment = self._fetch_openbb_enrichment(all_signals)
         shared_data["_execution_reference_bars"] = {
@@ -2135,11 +2329,16 @@ class CohortOrchestrator:
                 staged["error"] = False
                 governed_summaries = governed_summaries_by_cohort.get(name, [])
                 staged["degraded"] = bool(
-                    candidate_bar_quarantines or governed_summaries
+                    candidate_bar_quarantines
+                    or candidate_volatility_quarantine_list
+                    or governed_summaries
                 )
                 staged["execution_valid"] = True
                 staged["staging_valid"] = staging_valid
                 staged["candidate_bar_quarantines"] = candidate_bar_quarantines
+                staged["candidate_volatility_quarantines"] = (
+                    candidate_volatility_quarantine_list
+                )
                 staged["governed_bar_recoveries"] = governed_summaries
                 staged["governed_failure_map"] = {}
                 results[name] = staged
@@ -2148,10 +2347,16 @@ class CohortOrchestrator:
                 results[name] = {
                     "error": True,
                     "invalid_reason": str(error),
-                    "degraded": bool(candidate_bar_quarantines),
+                    "degraded": bool(
+                        candidate_bar_quarantines
+                        or candidate_volatility_quarantine_list
+                    ),
                     "execution_valid": True,
                     "staging_valid": False,
                     "candidate_bar_quarantines": candidate_bar_quarantines,
+                    "candidate_volatility_quarantines": (
+                        candidate_volatility_quarantine_list
+                    ),
                     "governed_bar_recoveries": governed_summaries_by_cohort.get(
                         name, []
                     ),

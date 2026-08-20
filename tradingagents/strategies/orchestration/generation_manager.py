@@ -558,6 +558,29 @@ class GenerationManager:
                         if "candidate_bar_quarantines" in result
                         else {}
                     ),
+                    **(
+                        {
+                            "candidate_volatility_quarantines": result[
+                                "candidate_volatility_quarantines"
+                            ]
+                        }
+                        if "candidate_volatility_quarantines" in result
+                        else {}
+                    ),
+                    **(
+                        {"failure_reasons": result["failure_reasons"]}
+                        if result.get("failure_reasons")
+                        else {}
+                    ),
+                    **(
+                        {
+                            "candidate_volatility_failure_map": result[
+                                "candidate_volatility_failure_map"
+                            ]
+                        }
+                        if result.get("candidate_volatility_failure_map")
+                        else {}
+                    ),
                     **({"error": result["error"]} if "error" in result else {}),
                 }
                 recoveries = _canonical_recoveries(
@@ -804,6 +827,8 @@ class GenerationManager:
             cohort_results = _extract_cohort_results(proc.stdout)
             if cohort_results is not None:
                 from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                    aggregate_candidate_volatility_failures,
+                    aggregate_failure_reasons,
                     aggregate_governed_reporting,
                     count_degraded_cohorts,
                     count_failed_cohorts,
@@ -824,10 +849,25 @@ class GenerationManager:
                         )
                     }
                 )
+                volatility_quarantined_tickers = sorted(
+                    {
+                        str(ticker)
+                        for name in degraded
+                        for ticker in cohort_results[name].get(
+                            "candidate_volatility_quarantines", []
+                        )
+                    }
+                )
+                failure_reasons = aggregate_failure_reasons(cohort_results)
+                volatility_failures = aggregate_candidate_volatility_failures(
+                    cohort_results
+                )
                 governed_recoveries, governed_failures = aggregate_governed_reporting(
                     cohort_results
                 )
-                if governed_recoveries and quarantined_tickers:
+                if governed_recoveries and (
+                    quarantined_tickers or volatility_quarantined_tickers
+                ):
                     degradation_label = (
                         "candidate data quarantined; governed bar recovery"
                     )
@@ -837,6 +877,11 @@ class GenerationManager:
                     degradation_label = "candidate data quarantined"
                 if n_failed:
                     msg = f"{n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
+                    if failure_reasons:
+                        msg += "; failure reasons: " + "; ".join(
+                            f"{count}x {reason}"
+                            for reason, count in failure_reasons.items()
+                        )
                     if n_degraded:
                         msg += (
                             f"; {n_degraded}/{n_total} cohorts degraded "
@@ -846,18 +891,34 @@ class GenerationManager:
                             msg += "; quarantined tickers: " + ", ".join(
                                 quarantined_tickers
                             )
+                        if volatility_quarantined_tickers:
+                            msg += "; volatility-quarantined tickers: " + ", ".join(
+                                volatility_quarantined_tickers
+                            )
+                            if volatility_failures:
+                                msg += "; candidate volatility details: " + "; ".join(
+                                    f"{ticker}: {reason}"
+                                    for ticker, reason in volatility_failures.items()
+                                )
                     logger.error("Generation %s: %s", gen_data["gen_id"], msg)
                     failure = {
                         "success": False,
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
                         "execution_valid": execution_valid,
+                        "failure_reasons": failure_reasons,
                     }
                     if n_degraded:
                         failure.update(
                             {
                                 "degraded": True,
                                 "candidate_bar_quarantines": quarantined_tickers,
+                                "candidate_volatility_quarantines": (
+                                    volatility_quarantined_tickers
+                                ),
+                                "candidate_volatility_failure_map": (
+                                    volatility_failures
+                                ),
                             }
                         )
                     if governed_recoveries:
@@ -875,12 +936,25 @@ class GenerationManager:
                         msg += "; quarantined tickers: " + ", ".join(
                             quarantined_tickers
                         )
+                    if volatility_quarantined_tickers:
+                        msg += "; volatility-quarantined tickers: " + ", ".join(
+                            volatility_quarantined_tickers
+                        )
+                        if volatility_failures:
+                            msg += "; candidate volatility details: " + "; ".join(
+                                f"{ticker}: {reason}"
+                                for ticker, reason in volatility_failures.items()
+                            )
                     logger.warning("Generation %s: %s", gen_data["gen_id"], msg)
                     degraded_result = {
                         "success": False,
                         "degraded": True,
                         "execution_valid": execution_valid,
                         "candidate_bar_quarantines": quarantined_tickers,
+                        "candidate_volatility_quarantines": (
+                            volatility_quarantined_tickers
+                        ),
+                        "candidate_volatility_failure_map": volatility_failures,
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
                     }

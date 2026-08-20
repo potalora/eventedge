@@ -10,6 +10,7 @@ import pytest
 from tradingagents.strategies.metrics.models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
+    CandidateVolatilityQuarantineRecord,
     GOVERNED_BAR_RECOVERY_CONTRACT,
     GovernedBarRecoveryRecord,
     METRIC_SCHEMA_VERSION,
@@ -764,6 +765,36 @@ def test_one_attempt_accepted_candidate_round_trips(tmp_path) -> None:
     assert store.read_candidate_bar_recoveries("epoch-1") == (record,)
 
 
+def test_candidate_volatility_quarantine_round_trips_immutably(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    record = CandidateVolatilityQuarantineRecord(
+        quarantine_id="candidate-volatility-epoch-1-2026-08-03-ALX",
+        epoch_id="epoch-1",
+        session=date(2026, 8, 3),
+        ticker="ALX",
+        lookback_sessions=60,
+        attempt_errors=(
+            "missing valid 60-session volatility evidence for ALX",
+            "invalid volatility session sequence for ALX: missing expected XNYS "
+            "session(s): 2026-07-31",
+        ),
+        signal_identities=(
+            {"event_key": "event-alx-1", "strategy": "earnings_call"},
+        ),
+    )
+
+    store.save_candidate_volatility_quarantine(record)
+    store.save_candidate_volatility_quarantine(record)
+
+    assert store.read_candidate_volatility_quarantines(
+        "epoch-1", date(2026, 8, 3)
+    ) == (record,)
+    with pytest.raises(ValueError, match="unequal payload"):
+        store.save_candidate_volatility_quarantine(
+            replace(record, attempt_errors=record.attempt_errors[:1])
+        )
+
+
 def test_candidate_signal_identity_binding_round_trips_immutably(tmp_path) -> None:
     store = MetricStore(tmp_path / "metrics.sqlite3")
     binding = CandidateSignalIdentityBinding(
@@ -850,6 +881,7 @@ def test_legacy_read_only_store_has_no_candidate_bar_recoveries(tmp_path) -> Non
 
     assert store.read_only
     assert store.read_candidate_bar_recoveries("legacy-epoch") == ()
+    assert store.read_candidate_volatility_quarantines("legacy-epoch") == ()
     assert (
         store.read_candidate_signal_identity_binding(
             "legacy-epoch", date(2026, 8, 3)

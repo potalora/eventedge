@@ -622,6 +622,13 @@ class TestGenerationDailyRun:
                 "degraded": True,
                 "execution_valid": False,
                 "candidate_bar_quarantines": ["ALX"],
+                "candidate_volatility_quarantines": ["ANTA"],
+                "candidate_volatility_failure_map": {
+                    "ANTA": "missing expected XNYS session 2026-03-27"
+                },
+                "failure_reasons": {
+                    "shared staging volatility evidence failed: missing OPEN": 1
+                },
                 "elapsed_s": 2.1,
                 "error": "1/2 cohorts failed; 1/2 cohorts degraded",
             }
@@ -634,6 +641,13 @@ class TestGenerationDailyRun:
         assert entry["degraded"] is True
         assert entry["execution_valid"] is False
         assert entry["candidate_bar_quarantines"] == ["ALX"]
+        assert entry["candidate_volatility_quarantines"] == ["ANTA"]
+        assert entry["candidate_volatility_failure_map"] == {
+            "ANTA": "missing expected XNYS session 2026-03-27"
+        }
+        assert entry["failure_reasons"] == {
+            "shared staging volatility evidence failed: missing OPEN": 1
+        }
 
     def test_subprocess_result_fails_when_any_cohort_is_invalid(
         self, git_repo, manager
