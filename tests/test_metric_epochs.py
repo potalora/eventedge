@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -22,6 +22,7 @@ from tradingagents.strategies.metrics.models import (
     StrategyHealthRecord,
 )
 from tradingagents.strategies.metrics.store import MetricStore
+from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
 
 
 def _context(**changes: str) -> EpochContext:
@@ -122,6 +123,35 @@ def _minimal_critical_gap() -> CriticalGapMarker:
         detail_status="minimal",
         corporate_action_rejections={},
     )
+
+
+def test_candidate_input_issue_does_not_change_epoch_selection(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics_v2.sqlite3")
+    manager = EpochManager(store)
+    epoch = manager.ensure_epoch(_context(), date(2026, 8, 3))
+    issue = CandidateInputIssue.create(
+        issue_id="candidate-input-issue-alx-reference-bar",
+        epoch_id=epoch.epoch_id,
+        session=date(2026, 8, 3),
+        dependency_kind="reference_bar",
+        reason_code="missing_data",
+        ticker="ALX",
+        source="yfinance",
+        fetched_at=datetime(2026, 8, 3, 20, 1, tzinfo=UTC),
+        requested_history_digest="sha256:" + "a" * 64,
+        returned_history_digest="sha256:" + "b" * 64,
+        expected_sessions=(date(2026, 8, 3),),
+        observed_sessions=(),
+        retryable=True,
+        affected_signal_identities=(
+            {"event_key": "event-alx", "strategy": "litigation"},
+        ),
+        affected_cohorts=("horizon_30d_size_5k",),
+    )
+
+    store.save_candidate_input_issue(issue)
+
+    assert manager.ensure_epoch(_context(), date(2026, 8, 4)) == epoch
 
 
 def test_critical_gap_governed_failure_map_round_trips_and_rejects_noncanonical(
@@ -300,6 +330,7 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
         assert tables == {
             "candidate_bar_recoveries",
+            "candidate_input_issues",
             "candidate_signal_identity_bindings",
             "critical_gap_markers",
             "governed_bar_recoveries",

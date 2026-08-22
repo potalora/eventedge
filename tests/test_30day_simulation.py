@@ -1445,10 +1445,7 @@ class TestIdempotencyDoubleRun:
         epoch = store.load_epoch(epoch_id)
         assert result["cohort_0"] == {
             "error": True,
-            "invalid_reason": (
-                "candidate reference-bar validation failed: "
-                "deterministic candidate reference gap"
-            ),
+            "invalid_reason": "candidate reference-bar validation failed",
             "degraded": True,
             "execution_valid": True,
             "staging_valid": False,
@@ -2952,7 +2949,6 @@ class TestIdempotencyDoubleRun:
             patch(
                 "tradingagents.strategies.orchestration.session_executor.ensure_reference_bars",
                 return_value={
-                    "AAPL": bundle.bars[("AAPL", session)],
                     "MSFT": MarketBar(
                         **{
                             **bundle.bars[("AAPL", session)].__dict__,

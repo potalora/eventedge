@@ -124,19 +124,23 @@ def _preflight_exit_status(
     )
 
 
-def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
+def _cohort_run_exit_status(
+    result: dict, *, trading_date: str | None = None
+) -> tuple[int, str]:
     """Return the alerting exit outcome for cohort execution results.
 
     Candidate-data quarantine is a distinct degraded outcome: its cohort
     execution is valid, but its performance must not be reported as a clean run.
-    Execution failures retain exit status 1; degraded runs use 2.
+    Execution failures retain exit status 1; completed degraded runs use 0.
     """
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        aggregate_candidate_input_issues,
         aggregate_governed_reporting,
         count_degraded_cohorts,
         count_failed_cohorts,
     )
 
+    aggregate_candidate_input_issues(result, trading_date)
     n_failed, n_total, failed = count_failed_cohorts(result)
     n_degraded, _, degraded = count_degraded_cohorts(result)
     quarantined_tickers = sorted(
@@ -170,7 +174,7 @@ def _cohort_run_exit_status(result: dict) -> tuple[int, str]:
             message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
         if recovered_tickers:
             message += "; recovered tickers: " + ", ".join(recovered_tickers)
-        return 2, message
+        return 0, message
     return 0, ""
 
 
@@ -431,35 +435,30 @@ def main():
     except (RuntimeLockBusy, RuntimeLockInvalid) as error:
         _exit_runtime_lock_error(error)
 
-    print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
     from tradingagents.strategies.orchestration.run_outcome import (
         DAILY_RESULT_PREFIX,
         DAILY_RESULT_WIRE_VERSION,
     )
 
+    # Surface execution failures and alertable degradation distinctly. A
+    # completed degraded run exits zero but remains non-clean in its wire data.
+    try:
+        exit_code, message = _cohort_run_exit_status(
+            result, trading_date=trading_date
+        )
+    except Exception:
+        print("ERROR: invalid cohort reporting payload", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
     envelope = {
         "wire_version": DAILY_RESULT_WIRE_VERSION,
         "cohort_results": result,
     }
     print(DAILY_RESULT_PREFIX + json.dumps(envelope, default=str))
-
-    # Surface both execution failures and candidate-data quarantine via distinct
-    # nonzero outcomes.  Quarantine keeps P0 execution valid but must never be
-    # recorded as a clean performance run.
-    try:
-        exit_code, message = _cohort_run_exit_status(result)
-    except Exception:
-        failed = [
-            k for k, v in result.items() if isinstance(v, dict) and v.get("error")
-        ]
-        exit_code = 1 if failed else 0
-        message = (
-            f"ERROR: {len(failed)}/{len(result)} cohorts failed: {', '.join(failed)}"
-            if failed
-            else ""
-        )
-    if exit_code:
+    if message:
         print(message, file=sys.stderr)
+    if exit_code:
         sys.exit(exit_code)
 
 

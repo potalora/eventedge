@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
 import sqlite3
 
 import pytest
 
+import tradingagents.strategies.metrics.store as metrics_store_module
 from tradingagents.strategies.metrics.models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
@@ -15,6 +17,7 @@ from tradingagents.strategies.metrics.models import (
     METRIC_SCHEMA_VERSION,
 )
 from tradingagents.strategies.metrics.store import MetricStore
+from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
 
 
 ESS_60M_ROWS = (
@@ -171,6 +174,241 @@ def _legacy_schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE critical_gap_markers (marker_id TEXT PRIMARY KEY, status TEXT NOT NULL, gap_session TEXT NOT NULL, payload_json TEXT NOT NULL);
         """
     )
+
+
+_ISSUE_DIGEST = "sha256:" + "a" * 64
+_ISSUE_RETURNED_DIGEST = "sha256:" + "b" * 64
+
+
+def _candidate_input_issue(
+    issue_id: str = "candidate-input-issue-alx-reference-bar",
+    *,
+    epoch_id: str = "epoch-1",
+    session: date = date(2026, 8, 3),
+    dependency_kind: str = "reference_bar",
+    ticker: str = "ALX",
+    reason_code: str = "invalid_data",
+) -> CandidateInputIssue:
+    return CandidateInputIssue.create(
+        issue_id=issue_id,
+        epoch_id=epoch_id,
+        session=session,
+        dependency_kind=dependency_kind,
+        reason_code=reason_code,
+        ticker=ticker,
+        source="yfinance",
+        fetched_at=datetime(2026, 8, 3, 20, 1, tzinfo=UTC),
+        requested_history_digest=_ISSUE_DIGEST,
+        returned_history_digest=_ISSUE_RETURNED_DIGEST,
+        expected_sessions=(date(2026, 7, 31), session),
+        observed_sessions=(date(2026, 7, 31),),
+        retryable=True,
+        affected_signal_identities=(
+            {"event_key": f"event-{ticker.lower()}", "strategy": "litigation"},
+        ),
+        affected_cohorts=("horizon_30d_size_5k",),
+    )
+
+
+def test_candidate_input_issue_table_has_primary_key_and_unique_scope(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+
+    with sqlite3.connect(store.path) as connection:
+        columns = connection.execute(
+            "PRAGMA table_info(candidate_input_issues)"
+        ).fetchall()
+        indexes = connection.execute(
+            "PRAGMA index_list(candidate_input_issues)"
+        ).fetchall()
+        unique_index_columns = [
+                [
+                    row[2]
+                    for row in connection.execute(
+                        f"PRAGMA index_info({index[1]})"
+                    ).fetchall()
+                ]
+            for index in indexes
+            if index[2]
+        ]
+
+    assert {column[1] for column in columns if column[5]} == {"issue_id"}
+    assert any(
+        columns == ["epoch_id", "session", "dependency_kind", "ticker"]
+        for columns in unique_index_columns
+    )
+
+
+def test_candidate_input_issues_are_immutable_by_id_and_scope(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    store.save_candidate_input_issue(issue)
+    store.save_candidate_input_issue(issue)
+
+    assert store.load_candidate_input_issue(
+        epoch_id="epoch-1",
+        session=date(2026, 8, 3),
+        dependency_kind="reference_bar",
+        ticker="alx",
+    ) == issue
+    assert store.load_candidate_input_issue_by_id(issue.issue_id) == issue
+
+    with pytest.raises(ValueError, match="scope has unequal replay evidence"):
+        store.save_candidate_input_issue(
+            _candidate_input_issue(
+                "candidate-input-issue-alx-reference-bar-changed",
+                reason_code="missing_data",
+            )
+        )
+    with pytest.raises(ValueError, match="issue_id.*unequal replay evidence"):
+        store.save_candidate_input_issue(
+            _candidate_input_issue(issue.issue_id, ticker="MSFT")
+        )
+
+
+def test_candidate_input_issue_rejects_same_id_with_different_timestamp_encoding(
+    tmp_path,
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    store.save_candidate_input_issue(issue)
+
+    with pytest.raises(ValueError, match="issue_id.*unequal replay evidence"):
+        store.save_candidate_input_issue(
+            replace(
+                issue,
+                fetched_at=datetime(
+                    2026, 8, 3, 21, 1, tzinfo=timezone(timedelta(hours=1))
+                ),
+            )
+        )
+
+
+def test_candidate_input_issue_read_revalidates_stored_payload(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    store.save_candidate_input_issue(issue)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE candidate_input_issues SET payload_json = ? WHERE issue_id = ?",
+            ('{"issue_id":"tampered"}', issue.issue_id),
+        )
+
+    with pytest.raises(ValueError, match="payload"):
+        store.load_candidate_input_issue_by_id(issue.issue_id)
+
+
+@pytest.mark.parametrize("out_of_range", ["0001-01-01", "9999-12-31"])
+def test_candidate_input_issue_read_rejects_out_of_range_session_dates(
+    tmp_path, out_of_range: str
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    store.save_candidate_input_issue(issue)
+    payload = json.loads(issue.canonical_payload())
+    payload["observed_sessions"] = [out_of_range]
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE candidate_input_issues SET payload_json = ? WHERE issue_id = ?",
+            (
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                issue.issue_id,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="payload is invalid"):
+        store.load_candidate_input_issue_by_id(issue.issue_id)
+
+
+def test_candidate_input_issue_read_rejects_oversized_payload_before_json_parse(
+    tmp_path, monkeypatch
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    store.save_candidate_input_issue(issue)
+    monkeypatch.setattr(
+        metrics_store_module, "_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES", 1_000
+    )
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE candidate_input_issues SET payload_json = ? WHERE issue_id = ?",
+            (
+                " " * (metrics_store_module._MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES + 1),
+                issue.issue_id,
+            ),
+        )
+
+    with pytest.raises(ValueError, match="payload exceeds byte bound"):
+        store.load_candidate_input_issue_by_id(issue.issue_id)
+
+
+def test_candidate_input_issue_read_rejects_deeply_nested_payload(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    store.save_candidate_input_issue(issue)
+    deeply_nested = '{"issue_id":' + "[" * 2_000 + "]" * 2_000 + "}"
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE candidate_input_issues SET payload_json = ? WHERE issue_id = ?",
+            (deeply_nested, issue.issue_id),
+        )
+
+    with pytest.raises(ValueError, match="payload is invalid"):
+        store.load_candidate_input_issue_by_id(issue.issue_id)
+
+
+def test_candidate_input_issue_save_rejects_oversized_payload_before_insert(
+    tmp_path, monkeypatch
+) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    issue = _candidate_input_issue()
+    monkeypatch.setattr(
+        metrics_store_module, "_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES", 1
+    )
+
+    with pytest.raises(ValueError, match="payload exceeds byte bound"):
+        store.save_candidate_input_issue(issue)
+
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM candidate_input_issues"
+        ).fetchone()[0] == 0
+
+
+def test_candidate_input_issue_reads_are_bounded_and_deterministic(tmp_path) -> None:
+    store = MetricStore(tmp_path / "metrics.sqlite3")
+    later = _candidate_input_issue(
+        "issue-z", session=date(2026, 8, 4), ticker="ZKH"
+    )
+    first = _candidate_input_issue("issue-a", ticker="AAPL")
+    other_epoch = _candidate_input_issue("issue-other", epoch_id="epoch-2", ticker="NCL")
+    for issue in (later, first, other_epoch):
+        store.save_candidate_input_issue(issue)
+
+    assert store.read_candidate_input_issues("epoch-1", limit=1) == (first,)
+    assert store.read_candidate_input_issues("epoch-1") == (first, later)
+    assert store.read_candidate_input_issues(
+        "epoch-1", session=date(2026, 8, 3)
+    ) == (first,)
+
+
+def test_legacy_read_only_store_has_no_candidate_input_issues(tmp_path) -> None:
+    path = tmp_path / "legacy-metrics.sqlite3"
+    with sqlite3.connect(path) as connection:
+        _legacy_schema(connection)
+
+    store = MetricStore.open_existing(path)
+
+    assert store.read_candidate_input_issues("legacy-epoch") == ()
+    assert (
+        store.load_candidate_input_issue(
+            epoch_id="legacy-epoch",
+            session=date(2026, 8, 3),
+            dependency_kind="reference_bar",
+            ticker="ALX",
+        )
+        is None
+    )
+    assert store.load_candidate_input_issue_by_id("missing") is None
 
 
 def test_governed_bar_recovery_round_trips_immutably(tmp_path) -> None:
