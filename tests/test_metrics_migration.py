@@ -221,8 +221,23 @@ def test_generation_subprocess_env_includes_exact_generation_metadata(
     captured: dict = {}
 
     def capture_run(*args, **kwargs):
+        from tradingagents.strategies.orchestration.cohort_orchestrator import (
+            build_default_cohorts,
+        )
+
         captured.update(kwargs)
-        return MagicMock(returncode=0, stdout="", stderr="")
+        cohort_results = {
+            cohort.name: {
+                "error": False,
+                "degraded": False,
+                "execution_valid": True,
+                "staging_valid": True,
+            }
+            for cohort in build_default_cohorts({})
+        }
+        envelope = {"wire_version": 1, "cohort_results": cohort_results}
+        stdout = "EVENTEDGE_DAILY_RESULT_V1=" + json.dumps(envelope) + "\n"
+        return MagicMock(returncode=0, stdout=stdout, stderr="")
 
     gen_data = {
         "gen_id": "gen_004",

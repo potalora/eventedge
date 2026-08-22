@@ -16,7 +16,7 @@ def _write_executable(path: Path, source: str) -> None:
 
 
 def _shell_environment(
-    tmp_path: Path, *, screen_rc: int = 0, governed_rc: int = 0
+    tmp_path: Path, *, screen_rc: int = 0, governed_rc: int = 0, daily_rc: int = 0
 ) -> tuple[dict[str, str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -60,7 +60,7 @@ exec "$@"
             "CALLS_FILE": str(calls),
             "SCREEN_RC": str(screen_rc),
             "GOVERNED_RC": str(governed_rc),
-            "DAILY_RC": "0",
+            "DAILY_RC": str(daily_rc),
         }
     )
     return env, calls
@@ -125,6 +125,22 @@ def test_governed_ready_with_recovery_invokes_daily_exactly_once(tmp_path: Path)
         True,
         True,
     ]
+
+
+def test_daily_failure_propagates_nonzero(tmp_path: Path) -> None:
+    env, calls_path = _shell_environment(tmp_path, daily_rc=1)
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "daily_trading.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    calls = _calls(calls_path)
+    assert len(calls) == 3
+    assert "run-daily --date 2026-08-06" in calls[2]
 
 
 def test_midday_preflight_is_explicitly_screen_only(tmp_path: Path) -> None:

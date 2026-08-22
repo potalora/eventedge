@@ -432,7 +432,16 @@ def main():
         _exit_runtime_lock_error(error)
 
     print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
-    print(json.dumps(result, indent=2, default=str))
+    from tradingagents.strategies.orchestration.run_outcome import (
+        DAILY_RESULT_PREFIX,
+        DAILY_RESULT_WIRE_VERSION,
+    )
+
+    envelope = {
+        "wire_version": DAILY_RESULT_WIRE_VERSION,
+        "cohort_results": result,
+    }
+    print(DAILY_RESULT_PREFIX + json.dumps(envelope, default=str))
 
     # Surface both execution failures and candidate-data quarantine via distinct
     # nonzero outcomes.  Quarantine keeps P0 execution valid but must never be

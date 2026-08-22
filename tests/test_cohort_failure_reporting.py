@@ -19,6 +19,7 @@ from scripts import run_cohorts
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
     aggregate_governed_reporting,
+    build_default_cohorts,
     count_degraded_cohorts,
     count_failed_cohorts,
 )
@@ -311,6 +312,14 @@ def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys
     captured = capsys.readouterr()
     assert raised.value.code == 2
     assert "DEGRADED: 1/1 cohorts" in captured.err
+    wire_lines = [
+        line for line in captured.out.splitlines() if line.startswith(_DAILY_RESULT_PREFIX)
+    ]
+    assert len(wire_lines) == 1
+    assert json.loads(wire_lines[0].removeprefix(_DAILY_RESULT_PREFIX)) == {
+        "wire_version": _DAILY_RESULT_WIRE_VERSION,
+        "cohort_results": result,
+    }
 
 
 # --- _extract_cohort_results (parse run_cohorts.py stdout) ---
@@ -322,7 +331,13 @@ def test_extract_cohort_results_from_mixed_stdout():
         "2026-06-01 10:00 INFO Registered data source: yfinance\n"
         "Selected: disaggregated_fut\n"
         "\nDaily trading completed for 2026-06-01 in 560.8s\n"
-        + json.dumps(results, indent=2, default=str)
+        + _DAILY_RESULT_PREFIX
+        + json.dumps(
+            {
+                "wire_version": _DAILY_RESULT_WIRE_VERSION,
+                "cohort_results": results,
+            }
+        )
         + "\n"
     )
     extracted = _extract_cohort_results(stdout)
@@ -333,6 +348,19 @@ def test_extract_cohort_results_from_mixed_stdout():
 def test_extract_cohort_results_garbage_returns_none():
     assert _extract_cohort_results("no json here\njust logs\n") is None
     assert _extract_cohort_results("") is None
+
+
+def test_daily_worker_wire_constants_are_exact_and_shared():
+    from tradingagents.strategies.orchestration import run_outcome
+
+    assert getattr(run_outcome, "DAILY_RESULT_PREFIX", None) == _DAILY_RESULT_PREFIX
+    assert (
+        getattr(run_outcome, "DAILY_RESULT_WIRE_VERSION", None)
+        == _DAILY_RESULT_WIRE_VERSION
+    )
+    assert getattr(run_outcome, "DAILY_RESULT_ENVELOPE_KEYS", None) == frozenset(
+        {"wire_version", "cohort_results"}
+    )
 
 
 def test_reset_refuses_before_constructing_ledger_orchestrator(monkeypatch, capsys):
@@ -382,6 +410,44 @@ class _FakeProc:
         self.stderr = stderr
 
 
+_DAILY_COHORT_NAMES = tuple(cohort.name for cohort in build_default_cohorts({}))
+_DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V1="
+_DAILY_RESULT_WIRE_VERSION = 1
+
+
+def _clean_daily_results():
+    return {
+        name: {
+            "error": False,
+            "degraded": False,
+            "execution_valid": True,
+            "staging_valid": True,
+        }
+        for name in _DAILY_COHORT_NAMES
+    }
+
+
+def _daily_results(payload_kind):
+    results = _clean_daily_results()
+    if payload_kind == "degraded":
+        results[_DAILY_COHORT_NAMES[0]].update(
+            {
+                "degraded": True,
+                "staging_valid": False,
+                "candidate_bar_quarantines": ["ALX"],
+            }
+        )
+    return results
+
+
+def _worker_stdout(results, *, envelope=None):
+    payload = envelope or {
+        "wire_version": _DAILY_RESULT_WIRE_VERSION,
+        "cohort_results": results,
+    }
+    return "done\n" + _DAILY_RESULT_PREFIX + json.dumps(payload) + "\n"
+
+
 def _run_with_proc(tmp_path, proc):
     mgr = GenerationManager.__new__(GenerationManager)  # bypass __init__
     mgr._venv_python = "python"
@@ -402,52 +468,43 @@ def _run_with_proc(tmp_path, proc):
 
 
 def test_rc0_but_all_cohorts_failed_is_marked_failed(tmp_path):
-    results = {f"c{i}": {"error": True} for i in range(16)}
-    stdout = (
-        "Daily trading completed for 2026-06-01 in 560.8s\n"
-        + json.dumps(results, indent=2, default=str)
-        + "\n"
-    )
+    results = {name: {"error": True} for name in _DAILY_COHORT_NAMES}
+    stdout = _worker_stdout(results)
     result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
     assert result["success"] is False
+    assert result["outcome"] == "failed"
     assert "16/16 cohorts failed" in result["error"]
 
 
 def test_rc0_partial_failure_is_marked_failed(tmp_path):
-    results = {
-        "c0": {"error": True},
-        "c1": {"signals": [], "trades_opened": []},
-    }
-    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+    results = _clean_daily_results()
+    results[_DAILY_COHORT_NAMES[0]] = {"error": True}
+    stdout = _worker_stdout(results)
     result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
     assert result["success"] is False
-    assert "1/2 cohorts failed" in result["error"]
+    assert result["outcome"] == "failed"
+    assert "1/16 cohorts failed" in result["error"]
 
 
 def test_rc0_all_success_stays_success(tmp_path):
-    results = {f"c{i}": {"signals": [], "trades_opened": []} for i in range(16)}
-    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+    results = _clean_daily_results()
+    stdout = _worker_stdout(results)
     result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
     assert result["success"] is True
+    assert result["outcome"] == "clean"
 
 
 def test_degraded_worker_result_preserves_execution_validity(tmp_path):
-    results = {
-        "candidate_quarantined": {
-            "error": False,
-            "degraded": True,
-            "execution_valid": True,
-            "candidate_bar_quarantines": ["ALX"],
-        }
-    }
-    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+    results = _daily_results("degraded")
+    stdout = _worker_stdout(results)
 
     result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "DEGRADED: candidate data"))
 
     assert result["success"] is False
+    assert result["outcome"] == "degraded"
     assert result["degraded"] is True
     assert result["execution_valid"] is True
-    assert "1/1 cohorts degraded" in result["error"]
+    assert "1/16 cohorts degraded" in result["error"]
 
 
 def test_generation_status_labels_governed_recovery_without_candidate_quarantine(
@@ -459,18 +516,13 @@ def test_generation_status_labels_governed_recovery_without_candidate_quarantine
         "recovery_id": "governed_bar_recovery:" + "b" * 64,
         "contract_version": "yfinance-60m-v1",
         "evidence_digest": "sha256:" + "a" * 64,
-        "affected_cohort_ids": ["cohort-a"],
+        "affected_cohort_ids": [_DAILY_COHORT_NAMES[0]],
     }
-    results = {
-        "cohort-a": {
-            "error": False,
-            "degraded": True,
-            "execution_valid": True,
-            "candidate_bar_quarantines": [],
-            "governed_bar_recoveries": [summary],
-        }
-    }
-    stdout = "done\n" + json.dumps(results, indent=2) + "\n"
+    results = _daily_results("degraded")
+    results[_DAILY_COHORT_NAMES[0]].update(
+        {"candidate_bar_quarantines": [], "governed_bar_recoveries": [summary]}
+    )
+    stdout = _worker_stdout(results)
 
     result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "degraded"))
 
@@ -485,18 +537,11 @@ def test_generation_status_labels_mixed_candidate_and_governed_degradation(tmp_p
         "recovery_id": "governed_bar_recovery:" + "b" * 64,
         "contract_version": "yfinance-60m-v1",
         "evidence_digest": "sha256:" + "a" * 64,
-        "affected_cohort_ids": ["cohort-a"],
+        "affected_cohort_ids": [_DAILY_COHORT_NAMES[0]],
     }
-    results = {
-        "cohort-a": {
-            "error": False,
-            "degraded": True,
-            "execution_valid": True,
-            "candidate_bar_quarantines": ["ALX"],
-            "governed_bar_recoveries": [summary],
-        }
-    }
-    stdout = "done\n" + json.dumps(results, indent=2) + "\n"
+    results = _daily_results("degraded")
+    results[_DAILY_COHORT_NAMES[0]]["governed_bar_recoveries"] = [summary]
+    stdout = _worker_stdout(results)
 
     result = _run_with_proc(tmp_path, _FakeProc(2, stdout, "degraded"))
 
@@ -504,53 +549,228 @@ def test_generation_status_labels_mixed_candidate_and_governed_degradation(tmp_p
 
 
 def test_failed_worker_result_preserves_simultaneous_degradation(tmp_path):
-    results = {
-        "execution_failed": {
-            "error": True,
-            "execution_valid": False,
-            "invalid_reason": "missing governed mark",
-        },
-        "candidate_quarantined": {
-            "error": False,
-            "degraded": True,
-            "execution_valid": True,
-            "candidate_bar_quarantines": ["ALX"],
-        },
+    results = _clean_daily_results()
+    results[_DAILY_COHORT_NAMES[0]] = {
+        "error": True,
+        "execution_valid": False,
+        "invalid_reason": "missing governed mark",
     }
-    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+    results[_DAILY_COHORT_NAMES[1]].update(
+        {
+            "degraded": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": ["ALX"],
+        }
+    )
+    stdout = _worker_stdout(results)
 
     result = _run_with_proc(tmp_path, _FakeProc(1, stdout, "ERROR and DEGRADED"))
 
     assert result["success"] is False
+    assert result["outcome"] == "failed"
     assert result["degraded"] is True
     assert result["execution_valid"] is False
     assert result["candidate_bar_quarantines"] == ["ALX"]
-    assert "1/2 cohorts failed" in result["error"]
-    assert "1/2 cohorts degraded" in result["error"]
+    assert "1/16 cohorts failed" in result["error"]
+    assert "1/16 cohorts degraded" in result["error"]
 
 
 def test_failed_worker_result_preserves_same_cohort_degradation(tmp_path):
-    results = {
-        "candidate_replay_conflict": {
-            "error": True,
-            "degraded": True,
-            "execution_valid": True,
-            "candidate_bar_quarantines": ["ALX"],
-            "invalid_reason": "deterministic candidate replay identity conflict",
-        }
+    results = _clean_daily_results()
+    results[_DAILY_COHORT_NAMES[0]] = {
+        "error": True,
+        "degraded": True,
+        "execution_valid": True,
+        "staging_valid": False,
+        "candidate_bar_quarantines": ["ALX"],
+        "invalid_reason": "deterministic candidate replay identity conflict",
     }
-    stdout = "done\n" + json.dumps(results, indent=2, default=str) + "\n"
+    stdout = _worker_stdout(results)
 
     result = _run_with_proc(tmp_path, _FakeProc(1, stdout, "ERROR and DEGRADED"))
 
     assert result["success"] is False
+    assert result["outcome"] == "failed"
     assert result["degraded"] is True
     assert result["execution_valid"] is True
     assert result["candidate_bar_quarantines"] == ["ALX"]
-    assert "1/1 cohorts failed" in result["error"]
-    assert "1/1 cohorts degraded" in result["error"]
+    assert "1/16 cohorts failed" in result["error"]
+    assert "1/16 cohorts degraded" in result["error"]
 
 
 def test_nonzero_rc_still_failed(tmp_path):
     result = _run_with_proc(tmp_path, _FakeProc(1, "boom\n", "traceback\n"))
+    assert result["success"] is False
+    assert result["outcome"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "payload_kind", "expected"),
+    (
+        (0, "clean", "clean"),
+        (0, "degraded", "degraded"),
+        (2, "degraded", "degraded"),
+        (1, "degraded", "failed"),
+        (2, "clean", "failed"),
+        (1, "clean", "failed"),
+    ),
+)
+def test_worker_return_code_and_payload_must_agree(
+    tmp_path, returncode, payload_kind, expected
+):
+    stdout = _worker_stdout(_daily_results(payload_kind))
+    result = _run_with_proc(tmp_path, _FakeProc(returncode, stdout))
+    assert result["outcome"] == expected
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    (
+        "empty",
+        "unknown_cohort",
+        "missing_cohort",
+        "non_mapping",
+        "missing_error",
+        "non_boolean_error",
+        "missing_degraded",
+        "missing_execution_valid",
+        "missing_staging_valid",
+        "non_boolean_degraded",
+        "non_boolean_optional_error_lifecycle",
+    ),
+)
+def test_rc0_rejects_invalid_daily_worker_schema(tmp_path, invalid_kind):
+    results = _clean_daily_results()
+    first = _DAILY_COHORT_NAMES[0]
+    if invalid_kind == "empty":
+        results = {}
+    elif invalid_kind == "unknown_cohort":
+        results["unknown_cohort"] = results.pop(first)
+    elif invalid_kind == "missing_cohort":
+        results.pop(first)
+    elif invalid_kind == "non_mapping":
+        results[first] = "not a mapping"
+    elif invalid_kind == "missing_error":
+        results[first].pop("error")
+    elif invalid_kind == "non_boolean_error":
+        results[first]["error"] = 0
+    elif invalid_kind == "missing_degraded":
+        results[first].pop("degraded")
+    elif invalid_kind == "missing_execution_valid":
+        results[first].pop("execution_valid")
+    elif invalid_kind == "missing_staging_valid":
+        results[first].pop("staging_valid")
+    elif invalid_kind == "non_boolean_degraded":
+        results[first]["degraded"] = "false"
+    elif invalid_kind == "non_boolean_optional_error_lifecycle":
+        results[first] = {"error": True, "execution_valid": 1}
+
+    stdout = _worker_stdout(results)
+    result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
+    assert result["outcome"] == "failed"
+    assert result["success"] is False
+    assert result["error"] == "invalid daily worker result"
+
+
+def test_rc0_rejects_unrelated_trailing_json(tmp_path):
+    stdout = _worker_stdout(_clean_daily_results()) + json.dumps({"unrelated": True})
+    result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
+    assert result["outcome"] == "failed"
+    assert result["success"] is False
+
+
+def test_rc0_rejects_trailing_valid_looking_decoy(tmp_path):
+    decoy = {
+        "wire_version": _DAILY_RESULT_WIRE_VERSION,
+        "cohort_results": _clean_daily_results(),
+    }
+    stdout = _worker_stdout(_clean_daily_results()) + json.dumps(decoy) + "\n"
+    result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
+    assert result["outcome"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        json.dumps(_clean_daily_results()),
+        "done\n",
+        _DAILY_RESULT_PREFIX + "not-json\n",
+        _worker_stdout(
+            _clean_daily_results(),
+            envelope={
+                "wire_version": 2,
+                "cohort_results": _clean_daily_results(),
+            },
+        ),
+        _worker_stdout(
+            _clean_daily_results(),
+            envelope={"cohort_results": _clean_daily_results()},
+        ),
+        _worker_stdout(
+            _clean_daily_results(),
+            envelope={
+                "wire_version": _DAILY_RESULT_WIRE_VERSION,
+                "cohort_results": _clean_daily_results(),
+                "extra": True,
+            },
+        ),
+        _worker_stdout(
+            _clean_daily_results(),
+            envelope={"wire_version": _DAILY_RESULT_WIRE_VERSION},
+        ),
+        _worker_stdout(_clean_daily_results())
+        + _DAILY_RESULT_PREFIX
+        + json.dumps(
+            {
+                "wire_version": _DAILY_RESULT_WIRE_VERSION,
+                "cohort_results": _clean_daily_results(),
+            }
+        )
+        + "\n",
+    ),
+)
+def test_rc0_rejects_invalid_daily_worker_envelope(tmp_path, stdout):
+    result = _run_with_proc(tmp_path, _FakeProc(0, stdout))
+    assert result["outcome"] == "failed"
+    assert result["success"] is False
+
+
+@pytest.mark.parametrize(
+    "failure_marker",
+    (
+        {"valid": False},
+        {"invalid_reason": "governed lifecycle invalid"},
+    ),
+)
+def test_legacy_failure_markers_force_failed_outcome(tmp_path, failure_marker):
+    results = _clean_daily_results()
+    results[_DAILY_COHORT_NAMES[0]].update(failure_marker)
+    result = _run_with_proc(tmp_path, _FakeProc(0, _worker_stdout(results)))
+    assert result["outcome"] == "failed"
+
+
+def test_error_cohort_cannot_claim_valid_staging(tmp_path):
+    results = _clean_daily_results()
+    results[_DAILY_COHORT_NAMES[0]] = {"error": True, "staging_valid": True}
+    result = _run_with_proc(tmp_path, _FakeProc(0, _worker_stdout(results)))
+    assert result["outcome"] == "failed"
+    assert result["error"] == "invalid daily worker result"
+
+
+def test_worker_exception_is_failed(tmp_path):
+    mgr = GenerationManager.__new__(GenerationManager)
+    mgr._venv_python = "python"
+    gen_data = {
+        "gen_id": "gen_001",
+        "git_commit": "synthetic-commit-gen-001",
+        "state_dir": str(tmp_path / "state"),
+        "worktree_path": str(tmp_path / "wt"),
+    }
+    with patch(
+        "tradingagents.strategies.orchestration.generation_manager.subprocess.run",
+        side_effect=RuntimeError("worker launch failed"),
+    ):
+        result = mgr._run_cohorts_subprocess(gen_data, ["--date", "2026-06-01"])
+
+    assert result["outcome"] == "failed"
     assert result["success"] is False
