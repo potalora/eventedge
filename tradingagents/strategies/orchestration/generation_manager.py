@@ -66,6 +66,80 @@ _GOVERNED_PROBE_STATUSES = frozenset(
 )
 
 
+def _normalize_daily_candidate_issues(
+    result: dict, trading_date: str
+) -> dict:
+    """Canonicalize run-level candidate issues, failing closed on mismatch."""
+    if "candidate_input_issues" not in result:
+        return result
+    from tradingagents.strategies.orchestration.daily_pipeline import (
+        canonical_candidate_input_issue_summaries,
+    )
+
+    try:
+        candidate_issues = canonical_candidate_input_issue_summaries(
+            result["candidate_input_issues"], trading_date
+        )
+    except ValueError:
+        return {
+            "outcome": RunOutcome.FAILED.value,
+            "success": False,
+            "elapsed_s": result.get("elapsed_s", 0.0),
+            "error": "invalid candidate input issue summary",
+        }
+    outcome = result.get("outcome")
+    consistent = result.get("success") is False and (
+        (
+            outcome == RunOutcome.DEGRADED.value
+            and result.get("degraded") is True
+            and result.get("execution_valid") is True
+        )
+        or (
+            outcome == RunOutcome.FAILED.value
+            and ("degraded" not in result or result.get("degraded") is True)
+        )
+    )
+    if not consistent:
+        return {
+            "outcome": RunOutcome.FAILED.value,
+            "success": False,
+            "elapsed_s": result.get("elapsed_s", 0.0),
+            "error": "invalid candidate input issue summary",
+        }
+    normalized = dict(result)
+    normalized["candidate_input_issues"] = candidate_issues
+    return normalized
+
+
+def _daily_history_entry(result: dict, trading_date: str) -> dict:
+    """Build the bounded manifest history projection for one daily result."""
+    history_entry = {
+        "date": trading_date,
+        "action": "daily",
+        "outcome": result["outcome"],
+        "success": result["success"],
+        "elapsed_s": result["elapsed_s"],
+    }
+    if result.get("degraded"):
+        history_entry["degraded"] = True
+    for key in ("execution_valid", "candidate_bar_quarantines", "error"):
+        if key in result:
+            history_entry[key] = result[key]
+    recoveries = _canonical_recoveries(
+        result.get("governed_bar_recoveries"), trading_date, strict=False
+    )
+    if recoveries:
+        history_entry["governed_bar_recoveries"] = recoveries
+    failure_map = _canonical_failure_map(
+        result.get("governed_failure_map"), trading_date, strict=False
+    )
+    if failure_map:
+        history_entry["governed_failure_map"] = failure_map
+    if result.get("candidate_input_issues"):
+        history_entry["candidate_input_issues"] = result["candidate_input_issues"]
+    return history_entry
+
+
 def _extract_cohort_results(stdout: str) -> dict | None:
     """Extract one final, versioned daily-result envelope from worker stdout."""
     if not stdout:
@@ -615,90 +689,9 @@ class GenerationManager:
                     ["--date", trading_date],
                     inherited_lock=lock,
                 )
-                if "candidate_input_issues" in result:
-                    from tradingagents.strategies.orchestration.cohort_orchestrator import (
-                        canonical_candidate_input_issue_summaries,
-                    )
-
-                    try:
-                        candidate_issues = canonical_candidate_input_issue_summaries(
-                            result["candidate_input_issues"], trading_date
-                        )
-                    except ValueError:
-                        result = {
-                            "outcome": RunOutcome.FAILED.value,
-                            "success": False,
-                            "elapsed_s": result.get("elapsed_s", 0.0),
-                            "error": "invalid candidate input issue summary",
-                        }
-                    else:
-                        outcome = result.get("outcome")
-                        consistent = result.get("success") is False and (
-                            (
-                                outcome == RunOutcome.DEGRADED.value
-                                and result.get("degraded") is True
-                                and result.get("execution_valid") is True
-                            )
-                            or (
-                                outcome == RunOutcome.FAILED.value
-                                and (
-                                    "degraded" not in result
-                                    or result.get("degraded") is True
-                                )
-                            )
-                        )
-                        if not consistent:
-                            result = {
-                                "outcome": RunOutcome.FAILED.value,
-                                "success": False,
-                                "elapsed_s": result.get("elapsed_s", 0.0),
-                                "error": "invalid candidate input issue summary",
-                            }
-                        else:
-                            result = dict(result)
-                            result["candidate_input_issues"] = candidate_issues
+                result = _normalize_daily_candidate_issues(result, trading_date)
                 results[gen_id] = result
-                history_entry = {
-                    "date": trading_date,
-                    "action": "daily",
-                    "outcome": result["outcome"],
-                    "success": result["success"],
-                    "elapsed_s": result["elapsed_s"],
-                    **({"degraded": True} if result.get("degraded") else {}),
-                    **(
-                        {"execution_valid": result["execution_valid"]}
-                        if "execution_valid" in result
-                        else {}
-                    ),
-                    **(
-                        {
-                            "candidate_bar_quarantines": result[
-                                "candidate_bar_quarantines"
-                            ]
-                        }
-                        if "candidate_bar_quarantines" in result
-                        else {}
-                    ),
-                    **({"error": result["error"]} if "error" in result else {}),
-                }
-                recoveries = _canonical_recoveries(
-                    result.get("governed_bar_recoveries"),
-                    trading_date,
-                    strict=False,
-                )
-                if recoveries:
-                    history_entry["governed_bar_recoveries"] = recoveries
-                failure_map = _canonical_failure_map(
-                    result.get("governed_failure_map"),
-                    trading_date,
-                    strict=False,
-                )
-                if failure_map:
-                    history_entry["governed_failure_map"] = failure_map
-                if result.get("candidate_input_issues"):
-                    history_entry["candidate_input_issues"] = result[
-                        "candidate_input_issues"
-                    ]
+                history_entry = _daily_history_entry(result, trading_date)
                 gen_data["run_history"].append(history_entry)
                 gen_data["run_history"] = gen_data["run_history"][-_MAX_RUN_HISTORY:]
 
