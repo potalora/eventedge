@@ -20,6 +20,12 @@ from datetime import date, datetime
 from pathlib import Path
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
+from tradingagents.strategies.orchestration.run_outcome import (
+    DAILY_RESULT_ENVELOPE_KEYS,
+    DAILY_RESULT_PREFIX,
+    DAILY_RESULT_WIRE_VERSION,
+    RunOutcome,
+)
 from tradingagents.strategies.orchestration.runtime_lock import (
     canonical_runtime_lock_path,
 )
@@ -61,14 +67,70 @@ _GOVERNED_PROBE_STATUSES = frozenset(
 
 
 def _extract_cohort_results(stdout: str) -> dict | None:
-    """Extract the trailing top-level JSON results object that run_cohorts.py
-    prints (``json.dumps(result, indent=2)``) from its mixed stdout.
+    """Extract one final, versioned daily-result envelope from worker stdout."""
+    if not stdout:
+        return None
+    lines = stdout.splitlines()
+    marked = [
+        (index, line)
+        for index, line in enumerate(lines)
+        if line.startswith(DAILY_RESULT_PREFIX)
+    ]
+    if len(marked) != 1:
+        return None
+    index, line = marked[0]
+    last_nonempty = next(
+        (i for i in range(len(lines) - 1, -1, -1) if lines[i].strip()), None
+    )
+    if index != last_nonempty:
+        return None
+    try:
+        envelope = json.loads(line.removeprefix(DAILY_RESULT_PREFIX))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(envelope, dict) or set(envelope) != DAILY_RESULT_ENVELOPE_KEYS:
+        return None
+    if (
+        type(envelope["wire_version"]) is not int
+        or envelope["wire_version"] != DAILY_RESULT_WIRE_VERSION
+        or not isinstance(envelope["cohort_results"], dict)
+    ):
+        return None
+    return envelope["cohort_results"]
 
-    Lets the parent detect both cohort execution failures and candidate-data
-    quarantine, including from a frozen worktree whose runner exits 0. Returns
-    None when no top-level object is parseable, in which case callers fall back
-    to the exit code alone.
-    """
+
+def _valid_daily_cohort_results(cohort_results: dict) -> bool:
+    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        build_default_cohorts,
+    )
+
+    expected = {cohort.name for cohort in build_default_cohorts({})}
+    if set(cohort_results) != expected:
+        return False
+    lifecycle_fields = ("degraded", "execution_valid", "staging_valid")
+    for result in cohort_results.values():
+        if not isinstance(result, dict) or type(result.get("error")) is not bool:
+            return False
+        if result["error"]:
+            if any(
+                field in result and type(result[field]) is not bool
+                for field in lifecycle_fields
+            ):
+                return False
+            if result.get("staging_valid") is True:
+                return False
+            continue
+        if any(type(result.get(field)) is not bool for field in lifecycle_fields):
+            return False
+        if result["execution_valid"] is not True:
+            return False
+        if result["degraded"] is False and result["staging_valid"] is not True:
+            return False
+    return True
+
+
+def _extract_preflight_report(stdout: str) -> dict | None:
+    """Extract preflight JSON independently from daily cohort result parsing."""
     if not stdout:
         return None
     lines = stdout.splitlines()
@@ -85,11 +147,6 @@ def _extract_cohort_results(stdout: str) -> dict | None:
     except (json.JSONDecodeError, ValueError):
         return None
     return obj if isinstance(obj, dict) else None
-
-
-def _extract_preflight_report(stdout: str) -> dict | None:
-    """Extract preflight JSON independently from daily cohort result parsing."""
-    return _extract_cohort_results(stdout)
 
 
 def _fixed_digest(value: object, prefix: str) -> bool:
@@ -514,7 +571,8 @@ class GenerationManager:
         AUTORESEARCH_STATE_DIR and PYTHONPATH set for isolation.
 
         Returns:
-            {gen_id: {"success": bool, "elapsed_s": float, "error"?: str}}
+            {gen_id: {"outcome": "clean" | "degraded" | "failed",
+                      "success": bool, "elapsed_s": float, "error"?: str}}
         """
         if not trading_date:
             trading_date = datetime.now().strftime("%Y-%m-%d")
@@ -541,6 +599,7 @@ class GenerationManager:
                 history_entry = {
                     "date": trading_date,
                     "action": "daily",
+                    "outcome": result["outcome"],
                     "success": result["success"],
                     "elapsed_s": result["elapsed_s"],
                     **({"degraded": True} if result.get("degraded") else {}),
@@ -739,7 +798,8 @@ class GenerationManager:
         """Run scripts/run_cohorts.py in a generation's worktree.
 
         Sets AUTORESEARCH_STATE_DIR and PYTHONPATH for isolation.
-        Returns {"success": bool, "elapsed_s": float, "error"?: str}.
+        Daily results include a canonical ``outcome``. Preflight results retain
+        their independent outcome-free report contract.
         """
         env = os.environ.copy()
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
@@ -798,10 +858,23 @@ class GenerationManager:
                 )
 
             # The printed cohort results are authoritative for the distinction
-            # between execution failure and candidate-data quarantine.  Parse
-            # them before interpreting the worker's nonzero alert exit code so
-            # old frozen runners (which may exit zero) retain the same status.
+            # between execution failure and candidate-data quarantine. Parse
+            # and validate the versioned worker wire before interpreting its
+            # alert exit code; unmarked or contradictory output fails closed.
             cohort_results = _extract_cohort_results(proc.stdout)
+            if cohort_results is None or not _valid_daily_cohort_results(
+                cohort_results
+            ):
+                logger.error(
+                    "Generation %s returned an invalid daily worker result",
+                    gen_data["gen_id"],
+                )
+                return {
+                    "outcome": RunOutcome.FAILED.value,
+                    "success": False,
+                    "elapsed_s": round(elapsed, 2),
+                    "error": "invalid daily worker result",
+                }
             if cohort_results is not None:
                 from tradingagents.strategies.orchestration.cohort_orchestrator import (
                     aggregate_governed_reporting,
@@ -848,6 +921,7 @@ class GenerationManager:
                             )
                     logger.error("Generation %s: %s", gen_data["gen_id"], msg)
                     failure = {
+                        "outcome": RunOutcome.FAILED.value,
                         "success": False,
                         "elapsed_s": round(elapsed, 2),
                         "error": msg,
@@ -877,6 +951,11 @@ class GenerationManager:
                         )
                     logger.warning("Generation %s: %s", gen_data["gen_id"], msg)
                     degraded_result = {
+                        "outcome": (
+                            RunOutcome.DEGRADED.value
+                            if proc.returncode in {0, 2}
+                            else RunOutcome.FAILED.value
+                        ),
                         "success": False,
                         "degraded": True,
                         "execution_valid": execution_valid,
@@ -902,6 +981,7 @@ class GenerationManager:
                     error_msg[:200],
                 )
                 return {
+                    "outcome": RunOutcome.FAILED.value,
                     "success": False,
                     "elapsed_s": round(elapsed, 2),
                     "error": error_msg,
@@ -912,7 +992,11 @@ class GenerationManager:
                 gen_data["gen_id"],
                 elapsed,
             )
-            return {"success": True, "elapsed_s": round(elapsed, 2)}
+            return {
+                "outcome": RunOutcome.CLEAN.value,
+                "success": True,
+                "elapsed_s": round(elapsed, 2),
+            }
 
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - start
@@ -920,6 +1004,7 @@ class GenerationManager:
                 "Generation %s timed out after %.0fs", gen_data["gen_id"], elapsed
             )
             return {
+                "outcome": RunOutcome.FAILED.value,
                 "success": False,
                 "elapsed_s": round(elapsed, 2),
                 "error": f"Timed out after {_GENERATION_TIMEOUT_S}s",
@@ -928,6 +1013,7 @@ class GenerationManager:
             elapsed = time.monotonic() - start
             logger.error("Generation %s error: %s", gen_data["gen_id"], e)
             return {
+                "outcome": RunOutcome.FAILED.value,
                 "success": False,
                 "elapsed_s": round(elapsed, 2),
                 "error": str(e),

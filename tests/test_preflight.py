@@ -862,6 +862,7 @@ class TestGenerationManagerPreflight:
         results = manager.run_preflight("2026-08-06")
 
         assert results["gen_004"]["success"] is True
+        assert "outcome" not in results["gen_004"]
         assert "unsupported" not in results["gen_004"]
         assert manifest["generations"][0]["run_history"] == []
         assert saved == {}
@@ -1020,6 +1021,7 @@ class TestGenerationManagerPreflight:
         )
 
         assert result["success"] is expected_success
+        assert "outcome" not in result
         assert result["governed_probe_status"] == status
         assert result["governed_bar_recoveries"] == (
             [recovery] if has_recovery else []

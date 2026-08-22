@@ -102,6 +102,30 @@ def _init_empty_git_repo(path: Path) -> None:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
 
 
+_DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V1="
+
+
+def _valid_daily_results():
+    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        build_default_cohorts,
+    )
+
+    return {
+        cohort.name: {
+            "error": False,
+            "degraded": False,
+            "execution_valid": True,
+            "staging_valid": True,
+        }
+        for cohort in build_default_cohorts({})
+    }
+
+
+def _valid_daily_stdout(*, log_line=""):
+    envelope = {"wire_version": 1, "cohort_results": _valid_daily_results()}
+    return f"{log_line}{_DAILY_RESULT_PREFIX}{json.dumps(envelope)}\n"
+
+
 # ------------------------------------------------------------------
 # TestGenerationStart
 # ------------------------------------------------------------------
@@ -329,7 +353,7 @@ class TestGenerationDailyRun:
                 with runtime_lock(manager._runtime_lock_path, exclusive=False):
                     raise AssertionError("unreachable")
             observed.append("child")
-            return {"success": True, "elapsed_s": 1.0}
+            return {"outcome": "clean", "success": True, "elapsed_s": 1.0}
 
         original_save = manager._save_manifest
 
@@ -371,7 +395,9 @@ class TestGenerationDailyRun:
 
         def capture_run(*args, **kwargs):
             captured.update(kwargs)
-            return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(
+                returncode=0, stdout=_valid_daily_stdout(), stderr=""
+            )
 
         gen_data = {
             "gen_id": info.gen_id,
@@ -396,7 +422,11 @@ class TestGenerationDailyRun:
 
         # Now mock only the _run_cohorts_subprocess internal method
         with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
-            mock_rcs.return_value = {"success": True, "elapsed_s": 1.5}
+            mock_rcs.return_value = {
+                "outcome": "clean",
+                "success": True,
+                "elapsed_s": 1.5,
+            }
 
             results = manager.run_daily("2026-03-31")
 
@@ -425,7 +455,7 @@ class TestGenerationDailyRun:
             captured_calls.append((cmd, kwargs))
             mock_result = MagicMock()
             mock_result.returncode = 0
-            mock_result.stdout = ""
+            mock_result.stdout = _valid_daily_stdout()
             mock_result.stderr = ""
             return mock_result
 
@@ -453,7 +483,11 @@ class TestGenerationDailyRun:
         manager.start_generation("history test")
 
         with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
-            mock_rcs.return_value = {"success": True, "elapsed_s": 2.1}
+            mock_rcs.return_value = {
+                "outcome": "clean",
+                "success": True,
+                "elapsed_s": 2.1,
+            }
             manager.run_daily("2026-03-31")
 
         gen = manager.get_generation("gen_001")
@@ -461,6 +495,7 @@ class TestGenerationDailyRun:
         assert len(gen.run_history) == 1
         entry = gen.run_history[0]
         assert entry["date"] == "2026-03-31"
+        assert entry["outcome"] == "clean"
         assert entry["success"] is True
         assert "elapsed_s" in entry
 
@@ -470,6 +505,7 @@ class TestGenerationDailyRun:
 
         with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
             mock_rcs.return_value = {
+                "outcome": "degraded",
                 "success": False,
                 "degraded": True,
                 "execution_valid": True,
@@ -481,9 +517,25 @@ class TestGenerationDailyRun:
         gen = manager.get_generation("gen_001")
         assert gen is not None
         entry = gen.run_history[0]
+        assert entry["outcome"] == "degraded"
         assert entry["success"] is False
         assert entry["degraded"] is True
         assert entry["execution_valid"] is True
+
+    def test_run_daily_persists_failed_outcome(self, git_repo, manager):
+        manager.start_generation("failed history test")
+        with patch.object(manager, "_run_cohorts_subprocess") as run:
+            run.return_value = {
+                "outcome": "failed",
+                "success": False,
+                "execution_valid": False,
+                "elapsed_s": 0.5,
+                "error": "governed input invalid",
+            }
+            manager.run_daily("2026-03-31")
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["outcome"] == "failed"
+        assert entry["success"] is False
 
     def test_run_daily_records_governed_recovery_and_failure_history(
         self, git_repo, manager
@@ -499,6 +551,7 @@ class TestGenerationDailyRun:
         }
         with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
             mock_rcs.return_value = {
+                "outcome": "degraded",
                 "success": False,
                 "degraded": True,
                 "execution_valid": True,
@@ -533,6 +586,7 @@ class TestGenerationDailyRun:
         with patch.object(manager, "_run_cohorts_subprocess") as run_child:
             run_child.side_effect = (
                 {
+                    "outcome": "degraded",
                     "success": False,
                     "degraded": True,
                     "execution_valid": True,
@@ -544,6 +598,7 @@ class TestGenerationDailyRun:
                     "elapsed_s": 1.0,
                 },
                 {
+                    "outcome": "failed",
                     "success": False,
                     "governed_bar_recoveries": [
                         {"ticker": "RAW", "provider_secret": "do-not-persist"}
@@ -588,6 +643,7 @@ class TestGenerationDailyRun:
         conflicted = summary("ESS", "b", ["cohort-a"])
         with patch.object(manager, "_run_cohorts_subprocess") as run_child:
             run_child.return_value = {
+                "outcome": "clean",
                 "success": True,
                 "elapsed_s": 1.0,
                 "governed_bar_recoveries": [
@@ -618,6 +674,7 @@ class TestGenerationDailyRun:
 
         with patch.object(manager, "_run_cohorts_subprocess") as mock_rcs:
             mock_rcs.return_value = {
+                "outcome": "failed",
                 "success": False,
                 "degraded": True,
                 "execution_valid": False,
@@ -630,6 +687,7 @@ class TestGenerationDailyRun:
         gen = manager.get_generation("gen_001")
         assert gen is not None
         entry = gen.run_history[0]
+        assert entry["outcome"] == "failed"
         assert entry["success"] is False
         assert entry["degraded"] is True
         assert entry["execution_valid"] is False
@@ -642,18 +700,17 @@ class TestGenerationDailyRun:
         info = manager.start_generation("invalid cohort")
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
+        cohort_results = _valid_daily_results()
+        cohort_results["horizon_30d_size_5k"].update(
+            {"valid": False, "invalid_reason": "missing required mark"}
+        )
         process = MagicMock(
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "horizon_30d_size_5k": {
-                        "error": False,
-                        "valid": False,
-                        "invalid_reason": "missing required mark",
-                    },
-                    "horizon_30d_size_10k": {"error": False, "valid": True},
-                },
-                indent=2,
+            stdout=(
+                _DAILY_RESULT_PREFIX
+                + json.dumps(
+                    {"wire_version": 1, "cohort_results": cohort_results}
+                )
             ),
             stderr="",
         )
@@ -676,20 +733,22 @@ class TestGenerationDailyRun:
         info = manager.start_generation("candidate provider failure")
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
+        cohort_results = _valid_daily_results()
+        cohort_results["horizon_30d_size_5k"] = {
+            "error": True,
+            "invalid_reason": "candidate provider failed",
+            "degraded": False,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_bar_quarantines": [],
+        }
         process = MagicMock(
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "horizon_30d_size_5k": {
-                        "error": True,
-                        "invalid_reason": "candidate provider failed",
-                        "degraded": False,
-                        "execution_valid": True,
-                        "staging_valid": False,
-                        "candidate_bar_quarantines": [],
-                    },
-                },
-                indent=2,
+            stdout=(
+                _DAILY_RESULT_PREFIX
+                + json.dumps(
+                    {"wire_version": 1, "cohort_results": cohort_results}
+                )
             ),
             stderr="",
         )
@@ -697,6 +756,7 @@ class TestGenerationDailyRun:
             results = manager.run_daily("2026-03-31")
 
         result = results[info.gen_id]
+        assert result["outcome"] == "failed"
         assert result["success"] is False
         assert result["execution_valid"] is True
         entry = manager.get_generation(info.gen_id).run_history[0]
@@ -775,8 +835,13 @@ class TestFailureIsolation:
         def side_effect(gen_data, extra_args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
-                return {"success": False, "elapsed_s": 0.5, "error": "simulated"}
-            return {"success": True, "elapsed_s": 1.0}
+                return {
+                    "outcome": "failed",
+                    "success": False,
+                    "elapsed_s": 0.5,
+                    "error": "simulated",
+                }
+            return {"outcome": "clean", "success": True, "elapsed_s": 1.0}
 
         with patch.object(manager, "_run_cohorts_subprocess", side_effect=side_effect):
             results = manager.run_daily("2026-03-31")
@@ -952,7 +1017,9 @@ class TestRunLogPersistence:
 
         class _Proc:
             returncode = 0
-            stdout = "Regulations.gov fetch: 20 proposed rules"
+            stdout = _valid_daily_stdout(
+                log_line="Regulations.gov fetch: 20 proposed rules\n"
+            )
             stderr = ""
 
         monkeypatch.setattr(gm.subprocess, "run", lambda *a, **k: _Proc())

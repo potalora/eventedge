@@ -4,6 +4,11 @@ from enum import Enum
 from typing import Mapping
 
 
+DAILY_RESULT_WIRE_VERSION = 1
+DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V1="
+DAILY_RESULT_ENVELOPE_KEYS = frozenset({"wire_version", "cohort_results"})
+
+
 class RunOutcome(str, Enum):
     CLEAN = "clean"
     DEGRADED = "degraded"
