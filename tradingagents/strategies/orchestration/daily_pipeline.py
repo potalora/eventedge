@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
-from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from dataclasses import asdict, dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
-from tradingagents.strategies.orchestration.trading_calendar import is_session
+from tradingagents.strategies.orchestration.trading_calendar import (
+    is_session,
+    previous_session,
+    session_close,
+)
+
+logger = logging.getLogger(__name__)
 
 _MAX_GOVERNED_REPORT_ITEMS = 256
 _MAX_GOVERNED_REPORT_COHORTS = 64
@@ -48,12 +55,13 @@ _EPOCH_ID_RE = re.compile(
 
 
 @dataclass
-class DailyFinalizationState:
-    """Mutable per-run state required by the daily result finalizer."""
-
-    metric_store: Any
-    epoch_id: str | None
+class DailyRunState:
+    owner: Any
+    trading_date: str
     session: date
+    processed_at: datetime
+    epoch_id: str | None = None
+    results: dict[str, Any] = field(default_factory=dict)
     candidate_issue_references: list[dict[str, object]] = field(default_factory=list)
     candidate_issues_hydrated: bool = False
     candidate_bar_quarantine_suppressions: set[str] = field(default_factory=set)
@@ -61,6 +69,90 @@ class DailyFinalizationState:
     governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = field(
         default_factory=dict
     )
+    completed: list[dict[str, Any]] = field(default_factory=list)
+    stage_only: list[dict[str, Any]] = field(default_factory=list)
+    execution_needed: list[dict[str, Any]] = field(default_factory=list)
+    valid: list[dict[str, Any]] = field(default_factory=list)
+    fresh: list[dict[str, Any]] = field(default_factory=list)
+    stored: list[dict[str, Any]] = field(default_factory=list)
+    persisted: dict[str, Any] = field(default_factory=dict)
+    persisted_borrow: dict[str, dict[str, Decimal | None]] = field(
+        default_factory=dict
+    )
+    cohort_scopes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    bundle: Any = None
+    first_engine: Any = None
+    shared_data: dict[str, Any] = field(default_factory=dict)
+    horizon_signals: dict[str, tuple[list[dict], dict, list[Any]]] = field(
+        default_factory=dict
+    )
+    governed_reference_bars: dict[str, Any] = field(default_factory=dict)
+    candidate_reference_bars: dict[str, Any] = field(default_factory=dict)
+    issue_identity_scope: tuple[dict[str, str], ...] = ()
+    session_candidate_quarantines: list[str] = field(default_factory=list)
+    existing_quarantines: list[str] = field(default_factory=list)
+    quarantined_tickers: set[str] = field(default_factory=set)
+    volatility_quarantines: set[str] = field(default_factory=set)
+    candidate_bar_quarantines: list[str] = field(default_factory=list)
+    shared_volatility_evidence: dict[str, Any] | None = None
+
+    def finalize(self, finalized: dict[str, Any] | None = None) -> dict[str, Any]:
+        return finalize_daily_results(
+            self, self.results if finalized is None else finalized
+        )
+
+    def critical_gap(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self.finalize(
+            self.owner._stop_for_critical_market_data_gap(*args, **kwargs)
+        )
+
+    def fail_candidates(
+        self,
+        reason: str,
+        *,
+        degraded: bool = False,
+        quarantines: object = None,
+    ) -> dict[str, Any]:
+        assign_failures(
+            self.results,
+            self.valid,
+            reason,
+            degraded=degraded,
+            execution_valid=True,
+            staging_valid=False,
+            candidate_bar_quarantines=(
+                self.existing_quarantines if quarantines is None else quarantines
+            ),
+        )
+        return self.finalize()
+
+    def fail_candidate_classification(
+        self, conflicts: list[str]
+    ) -> dict[str, Any]:
+        governed = set(self.governed_reference_bars)
+        self.candidate_bar_quarantine_suppressions.update(governed)
+        safe = sorted(
+            ticker
+            for ticker in set(self.existing_quarantines) | self.quarantined_tickers
+            if ticker not in governed
+        )
+        for result in self.results.values():
+            if isinstance(result, dict):
+                result["candidate_bar_quarantines"] = [
+                    ticker
+                    for ticker in result.get("candidate_bar_quarantines", ())
+                    if ticker not in governed
+                ]
+        assign_failures(
+            self.results,
+            self.valid,
+            _candidate_classification_conflict_reason(conflicts),
+            degraded=bool(safe),
+            execution_valid=True,
+            staging_valid=False,
+            candidate_bar_quarantines=safe,
+        )
+        return self.finalize()
 
 
 def failure_result(reason: str, **optional: object) -> dict[str, Any]:
@@ -101,7 +193,7 @@ def filter_horizon_signals(
 
 
 def finalize_daily_results(
-    state: DailyFinalizationState,
+    state: DailyRunState,
     finalized: dict[str, Any],
 ) -> dict[str, Any]:
     """Apply the daily run's canonical result finalization semantics."""
@@ -113,7 +205,7 @@ def finalize_daily_results(
             not in state.candidate_issue_reference_suppressions
         }
         if state.epoch_id is not None:
-            issues = state.metric_store.read_candidate_input_issues(
+            issues = state.owner._metric_store.read_candidate_input_issues(
                 state.epoch_id, state.session
             )
             for issue in issues:
@@ -994,6 +1086,1135 @@ def _candidate_identity_conflict_tickers(
     current_only = canonical(current) - canonical(stored)
     differences = current_only or (canonical(stored) - canonical(current))
     return sorted({identity[1] for identity in differences})
+
+
+def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
+    """Partition complete replay, stage-only, stored-resume, and fresh work."""
+    from tradingagents.strategies.orchestration.session_executor import PHASES
+
+    owner, session = state.owner, state.session
+    state.session_candidate_quarantines = sorted(
+        record.ticker
+        for record in owner._metric_store.read_candidate_bar_recoveries(
+            state.epoch_id, session
+        )
+        if record.outcome == "quarantined"
+    )
+    complete_replays: dict[str, Any] = {}
+    for cohort in owner.cohorts:
+        name, ledger = cohort["config"].name, cohort["ledger"]
+        invalid_reason = ledger.session_invalid_reason(session)
+        if invalid_reason:
+            state.results[name] = failure_result(invalid_reason)
+            continue
+        snapshots = ledger.read_snapshots(
+            session, session, epoch_id=state.epoch_id, valid_only=True
+        )
+        horizon = cohort["config"].horizon
+        policy_id = str(
+            cohort["engine"].ar_config.get("paper_ledger", {}).get(
+                "policy_id", f"foundation-{horizon}"
+            )
+        )
+        phases_complete = all(
+            ledger.phase_completed(session, phase) for phase in PHASES
+        )
+        staging_complete = ledger.staging_completed(
+            session, state.epoch_id, policy_id
+        )
+        if len(snapshots) == 1 and phases_complete:
+            try:
+                cohort["executor"].validate_bound_context(session, state.epoch_id)
+                persisted = cohort["executor"].persisted_input_bundle(session)
+                state.governed_summaries_by_cohort[name] = [
+                    dict(summary) for summary in persisted.governed_recovery_summaries
+                ]
+            except Exception as error:
+                state.results[name] = failure_result(str(error))
+                return state.critical_gap(
+                    session,
+                    state.processed_at,
+                    state.results,
+                    {},
+                    str(error),
+                    original_error=error,
+                )
+        if len(snapshots) == 1 and phases_complete and staging_complete:
+            state.completed.append(cohort)
+            summaries = state.governed_summaries_by_cohort.get(name, [])
+            fills = ledger.read_fills(session, session)
+            complete_replays[name] = {
+                "signals": [
+                    signal.__dict__
+                    for signal in ledger.read_signals(
+                        session,
+                        session,
+                        epoch_id=state.epoch_id,
+                        policy_id=policy_id,
+                    )
+                ],
+                "recommendations": [],
+                "intents_staged": [],
+                "cutoff_late": [],
+                "regime": {},
+                "account": snapshots[0].__dict__,
+                "trades_opened": [
+                    fill.fill_id for fill in fills if fill.side in {"buy", "short"}
+                ],
+                "trades_closed": [
+                    fill.fill_id for fill in fills if fill.side in {"sell", "cover"}
+                ],
+                "replayed": True,
+                "error": False,
+                "degraded": bool(state.session_candidate_quarantines or summaries),
+                "execution_valid": True,
+                "staging_valid": not state.session_candidate_quarantines,
+                "candidate_bar_quarantines": state.session_candidate_quarantines,
+                "governed_bar_recoveries": summaries,
+                "governed_failure_map": {},
+            }
+        elif len(snapshots) == 1 and phases_complete:
+            cohort["marked_account"] = snapshots[0]
+            state.stage_only.append(cohort)
+        else:
+            state.execution_needed.append(cohort)
+    state.results.update(complete_replays)
+    state.valid.extend(state.stage_only)
+    for cohort in state.execution_needed:
+        name = cohort["config"].name
+        try:
+            context = cohort["ledger"].session_execution_context(session)
+            if context is None:
+                state.fresh.append(cohort)
+                continue
+            persisted = cohort["executor"].persisted_input_bundle(session)
+            state.governed_summaries_by_cohort[name] = [
+                dict(summary) for summary in persisted.governed_recovery_summaries
+            ]
+            state.persisted[name] = persisted
+            state.persisted_borrow[name] = cohort["executor"].persisted_borrow_rates(
+                session
+            )
+            state.stored.append(cohort)
+        except Exception as error:
+            logger.error("Cohort %s stored resume preparation failed", name)
+            state.results[name] = failure_result(str(error))
+            return state.critical_gap(
+                session,
+                state.processed_at,
+                state.results,
+                {},
+                str(error),
+                original_error=error,
+            )
+    return None
+
+
+def _record_due_outcomes(
+    state: DailyRunState, cohorts: Iterable[dict[str, Any]]
+) -> dict[str, Any] | None:
+    for cohort in cohorts:
+        name, executor = cohort["config"].name, cohort["executor"]
+        if not executor.due_outcome_signals(state.session, state.epoch_id):
+            continue
+        try:
+            executor.record_due_outcomes(
+                state.session,
+                state.epoch_id,
+                executor.persisted_input_bundle(state.session).bars,
+            )
+        except Exception as error:
+            state.results[name] = failure_result(str(error))
+            return state.critical_gap(
+                state.session,
+                state.processed_at,
+                state.results,
+                {},
+                str(error),
+                original_error=error,
+            )
+    return None
+
+
+def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
+    """Fetch, validate, and execute the governed session boundary."""
+    from tradingagents.strategies.orchestration.governed_market_data import (
+        GovernedMarketDataError,
+    )
+    from tradingagents.strategies.orchestration.session_executor import (
+        CorporateActionBatchError,
+        SessionExecutor,
+    )
+
+    owner, session = state.owner, state.session
+    if state.fresh:
+        benchmarks: set[str] = set()
+        for cohort in state.fresh:
+            name, executor = cohort["config"].name, cohort["executor"]
+            required = set(executor.required_tickers(session, state.epoch_id))
+            benchmarks.update(executor.benchmark_symbols)
+            state.cohort_scopes[name] = tuple(
+                sorted(required | set(executor.benchmark_symbols))
+            )
+        governed_tickers = tuple(
+            sorted({ticker for scope in state.cohort_scopes.values() for ticker in scope})
+        )
+        memberships: dict[str, set[str]] = {}
+        for cohort in owner.cohorts:
+            name, executor = cohort["config"].name, cohort["executor"]
+            context = cohort["ledger"].session_execution_context(session)
+            required = set(
+                context["required_tickers"]
+                if context is not None
+                else executor.required_tickers(session, state.epoch_id)
+            )
+            for ticker in sorted(
+                (required | set(executor.benchmark_symbols)) & set(governed_tickers)
+            ):
+                memberships.setdefault(ticker, set()).add(name)
+        cohort_ids = {
+            ticker: tuple(sorted(memberships[ticker])) for ticker in governed_tickers
+        }
+        try:
+            state.bundle = SessionExecutor.fetch_input_bundle(
+                session,
+                governed_tickers,
+                owner._price_source,
+                tuple(sorted(benchmarks)),
+                metric_store=owner._metric_store,
+                epoch_id=state.epoch_id,
+                cohort_ids_by_ticker=cohort_ids,
+                processed_at=state.processed_at,
+                persist=True,
+            )
+            if state.bundle.governed_failure_map:
+                raise GovernedMarketDataError(state.bundle.governed_failure_map)
+            SessionExecutor.validate_shared_action_response(
+                state.bundle.actions, state.bundle.tickers, session
+            )
+            state.processed_at = datetime.now(timezone.utc)
+        except GovernedMarketDataError as error:
+            assign_failures(state.results, state.fresh, "critical_market_data_gap")
+            return state.critical_gap(
+                session,
+                state.processed_at,
+                state.results,
+                {},
+                "critical_market_data_gap",
+                governed_failure_map=dict(error.failure_map),
+            )
+        except CorporateActionBatchError as error:
+            corporate_errors = {}
+            reason = "invalid corporate action batch: " + "; ".join(
+                sorted(set(error.errors))
+            )
+            for cohort in state.fresh:
+                name = cohort["config"].name
+                state.results[name] = failure_result(reason)
+                corporate_errors[name] = error
+            return state.critical_gap(
+                session,
+                state.processed_at,
+                state.results,
+                state.bundle.bars if state.bundle is not None else {},
+                "critical_market_data_gap",
+                corporate_action_errors=corporate_errors,
+            )
+        except Exception:
+            reason = "shared session input fetch failed"
+            assign_failures(state.results, state.fresh, reason)
+            return state.critical_gap(
+                session, state.processed_at, state.results, {}, reason
+            )
+
+        for name, scope in state.cohort_scopes.items():
+            scoped = state.bundle.for_tickers(scope)
+            state.governed_summaries_by_cohort[name] = [
+                dict(summary) for summary in scoped.governed_recovery_summaries
+            ]
+        critical_gap = False
+        for cohort in state.fresh:
+            executor = cohort["executor"]
+            if not executor.due_outcome_signals(session, state.epoch_id):
+                continue
+            _, invalid = executor.validated_outcome_bars(
+                session, state.epoch_id, state.bundle.bars, state.processed_at
+            )
+            if invalid:
+                reason = "market data validation failed: " + "; ".join(
+                    f"{ticker} {invalid[ticker]}" for ticker in sorted(invalid)
+                )
+                state.results[cohort["config"].name] = failure_result(reason)
+                critical_gap = True
+        if critical_gap:
+            return state.critical_gap(
+                session,
+                state.processed_at,
+                state.results,
+                state.bundle.bars,
+                "critical_market_data_gap",
+            )
+        preflight_gap, corporate_errors = False, {}
+        for cohort in state.fresh:
+            name, executor = cohort["config"].name, cohort["executor"]
+            governed = tuple(
+                sorted(
+                    set(executor.required_tickers(session, state.epoch_id))
+                    | set(executor.benchmark_symbols)
+                )
+            )
+            try:
+                executor.validate_execution_input_bundle(
+                    session,
+                    state.epoch_id,
+                    state.bundle.for_tickers(governed),
+                    state.processed_at,
+                )
+            except CorporateActionBatchError as error:
+                reason = "invalid corporate action batch: " + "; ".join(
+                    sorted(set(error.errors))
+                )
+                state.results[name], corporate_errors[name] = failure_result(reason), error
+                preflight_gap = True
+            except Exception as error:
+                state.results[name] = failure_result(
+                    f"market data validation failed: {error}"
+                )
+                preflight_gap = True
+        if preflight_gap:
+            return state.critical_gap(
+                session,
+                state.processed_at,
+                state.results,
+                state.bundle.bars,
+                "critical_market_data_gap",
+                corporate_action_errors=corporate_errors,
+            )
+
+    early = _record_due_outcomes(state, state.completed)
+    if early is not None:
+        return early
+    if not state.execution_needed and not state.stage_only:
+        return state.finalize()
+    for cohort in state.stored:
+        name = cohort["config"].name
+        try:
+            lifecycle = cohort["executor"].execute_open_and_mark(
+                session,
+                state.epoch_id,
+                state.persisted[name],
+                state.persisted_borrow[name],
+                state.processed_at,
+            )
+        except Exception as error:
+            logger.error("Cohort %s stored resume failed", name, exc_info=True)
+            state.results[name] = failure_result(str(error))
+            return state.critical_gap(
+                session,
+                state.processed_at,
+                state.results,
+                {},
+                str(error),
+                original_error=error,
+            )
+        if not lifecycle.valid or lifecycle.snapshot is None:
+            state.results[name] = {
+                "error": True,
+                "invalid_reason": lifecycle.invalid_reason,
+            }
+        else:
+            cohort["marked_account"] = lifecycle.snapshot
+            state.valid.append(cohort)
+    execution_bundle_gap = False
+    if state.bundle is not None:
+        for cohort in state.fresh:
+            name = cohort["config"].name
+            try:
+                lifecycle = cohort["executor"].execute_open_and_mark(
+                    session,
+                    state.epoch_id,
+                    state.bundle.for_tickers(state.cohort_scopes[name]),
+                    {},
+                    state.processed_at,
+                )
+            except Exception as error:
+                logger.error("Cohort %s execution failed", name, exc_info=True)
+                state.results[name] = failure_result(str(error))
+                continue
+            if not lifecycle.valid or lifecycle.snapshot is None:
+                state.results[name] = failure_result(lifecycle.invalid_reason)
+                execution_bundle_gap |= lifecycle.invalid_reason.startswith(
+                    "market data validation failed:"
+                )
+            else:
+                cohort["marked_account"] = lifecycle.snapshot
+                state.valid.append(cohort)
+    if execution_bundle_gap:
+        return state.critical_gap(
+            session,
+            state.processed_at,
+            state.results,
+            state.bundle.bars if state.bundle is not None else {},
+            "critical_market_data_gap",
+        )
+    if not state.valid:
+        return state.finalize()
+    return _record_due_outcomes(state, state.valid)
+
+
+def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
+    """Run each required horizon once and merge governed reference bars."""
+    owner, session = state.owner, state.session
+    state.first_engine = owner.cohorts[0]["engine"]
+    lookback_start = (
+        datetime.strptime(state.trading_date, "%Y-%m-%d") - timedelta(days=90)
+    ).strftime("%Y-%m-%d")
+    state.shared_data = state.first_engine._fetch_all_data(
+        lookback_start, state.trading_date
+    )
+    logger.info("Shared data fetched: %s", list(state.shared_data.keys()))
+    for horizon in sorted({cohort["config"].horizon for cohort in state.valid}):
+        signals, regime, health = owner._screen_for_horizon(
+            state.shared_data, state.trading_date, horizon
+        )
+        if not owner._persist_horizon_health(
+            health, session, owner._policy_id_for_horizon(horizon)
+        ):
+            assign_failures(state.results, state.valid, "unclassified_strategy_silence")
+            return state.finalize()
+        state.horizon_signals[horizon] = (signals, regime, health)
+        logger.info("Horizon %s: %d signals", horizon, len(signals))
+    try:
+        for cohort in [*state.valid, *state.completed]:
+            bars = cohort["executor"].validated_execution_reference_bars(
+                session, state.epoch_id
+            )
+            for ticker, bar in bars.items():
+                existing = state.governed_reference_bars.get(ticker)
+                if existing is not None and existing != bar:
+                    raise ValueError(
+                        f"conflicting governed execution bar for {ticker}/{session}"
+                    )
+                state.governed_reference_bars[ticker] = bar
+    except Exception as error:
+        reason = f"governed execution reference-bar validation failed: {error}"
+        governed_cohorts = [*state.completed, *state.valid]
+        assign_failures(
+            state.results,
+            governed_cohorts,
+            reason,
+            degraded=False,
+            execution_valid=False,
+            staging_valid=False,
+            candidate_bar_quarantines=[],
+        )
+        return state.critical_gap(
+            session,
+            state.processed_at,
+            state.results,
+            state.bundle.bars if state.bundle is not None else {},
+            "critical_market_data_gap",
+            original_error=error,
+        )
+    return None
+
+
+def _all_signals(state: DailyRunState) -> list[dict]:
+    return [
+        signal
+        for signals, _, _ in state.horizon_signals.values()
+        for signal in signals
+    ]
+
+
+def _candidate_identity_scope_for_run(
+    state: DailyRunState,
+    signals: list[dict],
+    stored_recoveries: dict[str, Any],
+) -> set[str]:
+    from tradingagents.strategies.execution.ids import stable_id
+    from tradingagents.strategies.metrics.models import CandidateSignalIdentityBinding
+
+    current = _candidate_signal_identity_scope(state.horizon_signals, state.session)
+    binding = state.owner._metric_store.read_candidate_signal_identity_binding(
+        state.epoch_id, state.session
+    )
+    conflicts: set[str] = set()
+    if binding is None:
+        state.issue_identity_scope = current
+        if state.completed or stored_recoveries:
+            conflicts.update(signal["ticker"] for signal in current)
+            conflicts.update(stored_recoveries)
+            if not conflicts:
+                conflicts.add("identity-scope")
+        else:
+            state.owner._metric_store.save_candidate_signal_identity_binding(
+                CandidateSignalIdentityBinding(
+                    binding_id=stable_id(
+                        "candidate_signal_identity_binding",
+                        state.epoch_id,
+                        state.session,
+                    ),
+                    epoch_id=state.epoch_id,
+                    session=state.session,
+                    identities=current,
+                )
+            )
+    else:
+        state.issue_identity_scope = binding.identities
+        unfinished = set(state.horizon_signals)
+        stored = tuple(
+            identity
+            for identity in binding.identities
+            if identity.get("horizon") in unfinished
+        )
+        conflicts.update(_candidate_identity_conflict_tickers(current, stored))
+    return conflicts
+
+
+def _replay_candidate_reference_issues(
+    state: DailyRunState,
+    stored_recoveries: dict[str, Any],
+    immutable_conflicts: bool,
+) -> None:
+    stored_issues = {
+        issue.ticker: issue
+        for issue in state.owner._metric_store.read_candidate_input_issues(
+            state.epoch_id, state.session
+        )
+        if issue.dependency_kind == "reference_bar"
+    }
+    for ticker, record in stored_recoveries.items():
+        stored_issue = stored_issues.pop(ticker, None)
+        if record.outcome != "quarantined":
+            if stored_issue is not None:
+                raise ValueError(
+                    f"candidate reference-bar issue conflicts with resolved {ticker}"
+                )
+            continue
+        expected = _candidate_reference_issue(
+            record,
+            signal_identity_scope=state.issue_identity_scope,
+            cohorts=state.owner.cohorts,
+        )
+        if stored_issue is None:
+            if not immutable_conflicts:
+                state.owner._metric_store.save_candidate_input_issue(expected)
+                state.candidate_issue_references.append(expected.reference())
+        elif stored_issue.canonical_payload() != expected.canonical_payload():
+            raise ValueError(
+                f"candidate reference-bar issue has unequal replay evidence for {ticker}"
+            )
+        else:
+            state.candidate_issue_references.append(expected.reference())
+    if stored_issues:
+        raise ValueError(
+            "candidate reference-bar issue is missing compatibility recovery evidence"
+        )
+
+
+def _restore_candidate_reference_issue_references(
+    state: DailyRunState, stored_recoveries: dict[str, Any]
+) -> None:
+    state.candidate_issue_references[:] = [
+        reference
+        for reference in state.candidate_issue_references
+        if reference["dependency_kind"] != "reference_bar"
+    ]
+    for record in stored_recoveries.values():
+        if record.outcome != "quarantined":
+            continue
+        try:
+            issue = _candidate_reference_issue(
+                record,
+                signal_identity_scope=state.issue_identity_scope,
+                cohorts=state.owner.cohorts,
+            )
+        except Exception:
+            continue
+        state.candidate_issue_references.append(issue.reference())
+
+
+def _accepted_candidate_bar(state: DailyRunState, ticker: str, record: Any) -> Any:
+    from tradingagents.strategies.execution.models import MarketBar
+    from tradingagents.strategies.execution.price_source import validate_required_bars
+
+    evidence = record.attempts[-1]
+    if evidence["validation_error"] is not None or any(
+        evidence[field] is None for field in ("open", "high", "low", "close")
+    ):
+        raise ValueError(f"resolved candidate evidence is incomplete for {ticker}")
+    bar = MarketBar(
+        ticker,
+        state.session,
+        evidence["open"],
+        evidence["high"],
+        evidence["low"],
+        evidence["close"],
+        str(evidence["source"]),
+        evidence["fetched_at"],
+        False,
+    )
+    validate_required_bars(
+        {(ticker, state.session): bar},
+        {ticker},
+        state.session,
+        bar.fetched_at,
+        timedelta.max,
+    )
+    if bar.fetched_at < session_close(state.session):
+        raise ValueError(f"resolved candidate evidence is pre-close for {ticker}")
+    return bar
+
+
+def _resolve_candidate_bars(
+    state: DailyRunState,
+    unresolved: set[str],
+    signals: list[dict],
+) -> list[str] | None:
+    from tradingagents.strategies.execution.price_source import (
+        CandidateBarAttempt,
+        CandidateBarResolution,
+    )
+    from tradingagents.strategies.metrics.models import CandidateBarRecoveryRecord
+    from tradingagents.strategies.orchestration.session_executor import (
+        ensure_reference_bars,
+    )
+
+    if not unresolved:
+        return None
+    max_age = timedelta(
+        hours=float(
+            state.owner._base_config.get("autoresearch", {})
+            .get("paper_ledger", {})
+            .get("bar_max_age_hours", 24)
+        )
+    )
+    resolver = getattr(state.owner._price_source, "resolve_candidate_daily_bars", None)
+    if callable(resolver):
+        resolution = resolver(
+            sorted(unresolved), state.session, state.processed_at, max_age
+        )
+    else:
+        strict = ensure_reference_bars(
+            state.owner._price_source,
+            unresolved,
+            state.session,
+            state.processed_at,
+            max_age,
+        )
+        resolution = CandidateBarResolution(
+            bars={(ticker, state.session): bar for ticker, bar in strict.items()},
+            attempts=tuple(
+                CandidateBarAttempt(
+                    ticker=ticker,
+                    session=state.session,
+                    attempt=1,
+                    source=bar.source,
+                    fetched_at=bar.fetched_at,
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    validation_error=None,
+                )
+                for ticker, bar in sorted(strict.items())
+            ),
+            recovered_tickers=frozenset(),
+            quarantined_tickers=frozenset(),
+        )
+    if any(bar_session != state.session for _, bar_session in resolution.bars):
+        raise ValueError("candidate resolution session mismatch")
+    bars = {ticker for ticker, _ in resolution.bars}
+    recovered, quarantined = (
+        set(resolution.recovered_tickers),
+        set(resolution.quarantined_tickers),
+    )
+    attempt_tickers = {attempt.ticker for attempt in resolution.attempts}
+    scope = bars | recovered | quarantined | attempt_tickers
+    governed_conflicts = sorted(scope & set(state.governed_reference_bars))
+    if governed_conflicts:
+        return governed_conflicts
+    if (
+        scope != unresolved
+        or attempt_tickers != unresolved
+        or bars | quarantined != unresolved
+        or bars & quarantined
+        or recovered & quarantined
+        or not recovered <= bars
+    ):
+        raise ValueError("candidate resolution state is contradictory")
+    attempts_by_ticker = {
+        ticker: tuple(
+            attempt for attempt in resolution.attempts if attempt.ticker == ticker
+        )
+        for ticker in sorted(unresolved)
+    }
+    for ticker, attempts in attempts_by_ticker.items():
+        final = attempts[-1]
+        if ticker in quarantined:
+            if final.validation_error is None:
+                raise ValueError("candidate quarantine has successful final evidence")
+        else:
+            bar = resolution.bars[(ticker, state.session)]
+            if final.validation_error is not None or (
+                bar.ticker,
+                bar.session,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.source,
+                bar.fetched_at,
+            ) != (
+                ticker,
+                state.session,
+                final.open,
+                final.high,
+                final.low,
+                final.close,
+                final.source,
+                final.fetched_at,
+            ):
+                raise ValueError("candidate bar differs from successful final evidence")
+    state.candidate_reference_bars.update(
+        {
+            ticker: bar
+            for (ticker, bar_session), bar in resolution.bars.items()
+            if bar_session == state.session
+        }
+    )
+    state.quarantined_tickers.update(quarantined)
+    for ticker, attempts in attempts_by_ticker.items():
+        serialized_attempts = tuple(asdict(attempt) for attempt in attempts)
+        outcome = (
+            "quarantined"
+            if ticker in quarantined
+            else "recovered" if ticker in recovered else "accepted"
+        )
+        identities = tuple(
+            {"event_key": event_key, "strategy": strategy}
+            for event_key, strategy in _candidate_signal_identity_pairs(
+                signals, ticker, state.session
+            )
+        )
+        recovery = CandidateBarRecoveryRecord(
+            recovery_id=_candidate_bar_recovery_id(
+                epoch_id=state.epoch_id,
+                session=state.session,
+                ticker=ticker,
+                outcome=outcome,
+                attempts=serialized_attempts,
+                signal_identities=identities,
+            ),
+            epoch_id=state.epoch_id,
+            session=state.session,
+            ticker=ticker,
+            outcome=outcome,
+            attempts=serialized_attempts,
+            signal_identities=identities,
+        )
+        state.owner._metric_store.save_candidate_bar_recovery(recovery)
+        if outcome == "quarantined":
+            issue = _candidate_reference_issue(
+                recovery,
+                signal_identity_scope=state.issue_identity_scope,
+                cohorts=state.owner.cohorts,
+            )
+            state.owner._metric_store.save_candidate_input_issue(issue)
+            state.candidate_issue_references.append(issue.reference())
+    return None
+
+
+def run_candidate_reference_validation(
+    state: DailyRunState,
+) -> dict[str, Any] | None:
+    """Replay or resolve candidate reference bars without crossing governed scope."""
+    signals = _all_signals(state)
+    signal_tickers = {
+        str(signal.get("ticker", "")).strip().upper()
+        for signal in signals
+        if str(signal.get("ticker", "")).strip()
+    }
+    candidate_only = signal_tickers - set(state.governed_reference_bars)
+    stored = {
+        record.ticker: record
+        for record in state.owner._metric_store.read_candidate_bar_recoveries(
+            state.epoch_id, state.session
+        )
+    }
+    classification_conflicts = sorted(set(stored) & set(state.governed_reference_bars))
+    recovery_conflicts = sorted(
+        ticker
+        for ticker, record in stored.items()
+        if record.recovery_id
+        != _candidate_bar_recovery_id(
+            epoch_id=record.epoch_id,
+            session=record.session,
+            ticker=record.ticker,
+            outcome=record.outcome,
+            attempts=record.attempts,
+            signal_identities=record.signal_identities,
+        )
+    )
+    state.existing_quarantines = sorted(
+        record.ticker
+        for record in stored.values()
+        if record.outcome == "quarantined"
+        and record.ticker not in state.governed_reference_bars
+    )
+    try:
+        replay_conflicts = _candidate_identity_scope_for_run(state, signals, stored)
+    except Exception as error:
+        return state.fail_candidates(
+            f"candidate identity validation failed: {error}",
+            degraded=bool(state.existing_quarantines),
+        )
+    try:
+        _replay_candidate_reference_issues(
+            state,
+            stored,
+            bool(replay_conflicts or recovery_conflicts or classification_conflicts),
+        )
+    except Exception:
+        _restore_candidate_reference_issue_references(state, stored)
+        return state.fail_candidates(
+            "candidate reference-bar validation failed",
+            degraded=bool(state.existing_quarantines),
+        )
+    if replay_conflicts:
+        return state.fail_candidates(
+            _candidate_replay_conflict_reason(sorted(replay_conflicts)),
+            degraded=bool(state.existing_quarantines),
+        )
+    if recovery_conflicts:
+        return state.fail_candidates(
+            "candidate reference-bar validation failed",
+            degraded=bool(state.existing_quarantines),
+        )
+    if classification_conflicts:
+        return state.fail_candidate_classification(classification_conflicts)
+    existing = {ticker: record for ticker, record in stored.items() if ticker in candidate_only}
+    try:
+        for ticker, record in existing.items():
+            if record.outcome == "quarantined":
+                state.quarantined_tickers.add(ticker)
+            else:
+                state.candidate_reference_bars[ticker] = _accepted_candidate_bar(
+                    state, ticker, record
+                )
+        conflicts = _resolve_candidate_bars(
+            state, candidate_only - set(existing), signals
+        )
+        if conflicts:
+            return state.fail_candidate_classification(conflicts)
+    except Exception:
+        quarantines = sorted(
+            set(state.existing_quarantines) | state.quarantined_tickers
+        )
+        return state.fail_candidates(
+            "candidate reference-bar validation failed",
+            degraded=True,
+            quarantines=quarantines,
+        )
+    if state.quarantined_tickers:
+        state.horizon_signals = filter_horizon_signals(
+            state.horizon_signals, state.quarantined_tickers
+        )
+    state.candidate_bar_quarantines = sorted(
+        set(state.existing_quarantines) | state.quarantined_tickers
+    )
+    return None
+
+
+def _invalid_volatility_histories(
+    engine: Any,
+    tickers: set[str],
+    *,
+    lookback: int,
+    floor: float,
+    expected_sessions: tuple[date, ...],
+) -> list[str]:
+    from tradingagents.strategies.trading.portfolio_policy import (
+        build_annualized_volatility_evidence,
+    )
+
+    invalid = []
+    for ticker in sorted(tickers):
+        try:
+            build_annualized_volatility_evidence(
+                engine._price_cache,
+                (ticker,),
+                lookback_sessions=lookback,
+                floor=floor,
+                expected_sessions=expected_sessions,
+            )
+        except (TypeError, ValueError, OverflowError):
+            invalid.append(ticker)
+    return invalid
+
+
+def run_candidate_volatility_validation(
+    state: DailyRunState,
+) -> dict[str, Any] | None:
+    """Replay or resolve portfolio-policy volatility evidence."""
+    from tradingagents.strategies.trading.portfolio_policy import (
+        build_annualized_volatility_evidence,
+    )
+
+    settings = state.owner._base_config.get("autoresearch", {}).get(
+        "portfolio_policy"
+    )
+    if not isinstance(settings, dict):
+        return None
+    signals = _all_signals(state)
+    candidate_tickers = {
+        str(signal.get("ticker", "")).strip().upper()
+        for signal in signals
+        if str(signal.get("ticker", "")).strip()
+    }
+    governed_tickers = set(state.governed_reference_bars)
+    lookback = int(settings.get("volatility_lookback_sessions", 60))
+    floor = float(settings.get("annualized_volatility_floor", 0.15))
+    descending = [previous_session(state.session)]
+    for _ in range(lookback):
+        descending.append(previous_session(descending[-1]))
+    expected_sessions = tuple(reversed(descending))
+    buffer_days = max(120, 2 * lookback)
+    volatility_start = (
+        datetime.strptime(state.trading_date, "%Y-%m-%d")
+        - timedelta(days=buffer_days)
+    ).date()
+    volatility_start = min(volatility_start, expected_sessions[0]).isoformat()
+    candidate_boundary = False
+    try:
+        for cohort in state.owner.cohorts:
+            governed_tickers.update(
+                str(row["ticker"]).strip().upper()
+                for row in cohort["ledger"].policy_open_lot_projection(state.session)
+            )
+            governed_tickers.update(
+                str(row["ticker"]).strip().upper()
+                for row in cohort["ledger"].policy_pending_entry_projection()
+            )
+        candidate_tickers -= governed_tickers
+        candidate_boundary = True
+        stored_issues = {
+            issue.ticker: issue
+            for issue in state.owner._metric_store.read_candidate_input_issues(
+                state.epoch_id, state.session
+            )
+            if issue.dependency_kind == "volatility_history"
+        }
+        for ticker, stored_issue in sorted(stored_issues.items()):
+            try:
+                identities, cohorts = _candidate_volatility_scope(
+                    ticker,
+                    signal_identity_scope=state.issue_identity_scope,
+                    cohorts=state.owner.cohorts,
+                )
+                valid_replay = (
+                    stored_issue.issue_id == _candidate_volatility_issue_id(stored_issue)
+                    and stored_issue.requested_history_digest
+                    == _volatility_request_digest(ticker, expected_sessions)
+                    and stored_issue.expected_sessions == expected_sessions
+                    and tuple(
+                        dict(identity)
+                        for identity in stored_issue.affected_signal_identities
+                    )
+                    == identities
+                    and stored_issue.affected_cohorts == cohorts
+                    and stored_issue.source == "yfinance"
+                    and stored_issue.retryable is False
+                )
+                if not valid_replay:
+                    raise ValueError(
+                        f"candidate volatility issue has unequal replay evidence for {ticker}"
+                    )
+            except Exception:
+                state.candidate_issue_reference_suppressions.add(
+                    stored_issue.issue_id
+                )
+                raise
+            reference = stored_issue.reference()
+            state.candidate_issue_references.append(reference)
+            if ticker in governed_tickers or ticker not in candidate_tickers:
+                raise ValueError(
+                    f"stored candidate volatility scope conflicts for {ticker}"
+                )
+            state.volatility_quarantines.add(ticker)
+        candidate_boundary = False
+        governed_refetch = _invalid_volatility_histories(
+            state.first_engine,
+            governed_tickers,
+            lookback=lookback,
+            floor=floor,
+            expected_sessions=expected_sessions,
+        )
+        if governed_refetch:
+            try:
+                state.first_engine._fetch_missing_prices(
+                    governed_refetch, volatility_start, state.trading_date
+                )
+            except Exception:
+                raise ValueError("provider_error") from None
+        governed_evidence = build_annualized_volatility_evidence(
+            state.first_engine._price_cache,
+            governed_tickers,
+            lookback_sessions=lookback,
+            floor=floor,
+            expected_sessions=expected_sessions,
+        )
+        candidate_boundary = True
+        unresolved = candidate_tickers - set(stored_issues)
+        candidate_refetch = _invalid_volatility_histories(
+            state.first_engine,
+            unresolved,
+            lookback=lookback,
+            floor=floor,
+            expected_sessions=expected_sessions,
+        )
+        provider_errors: set[str] = set()
+        retry_times: dict[str, datetime] = {}
+        for ticker in candidate_refetch:
+            try:
+                state.first_engine._fetch_missing_prices(
+                    [ticker], volatility_start, state.trading_date
+                )
+            except Exception:
+                provider_errors.add(ticker)
+            retry_times[ticker] = datetime.now(timezone.utc)
+        remaining_invalid = set(
+            _invalid_volatility_histories(
+                state.first_engine,
+                set(candidate_refetch) - provider_errors,
+                lookback=lookback,
+                floor=floor,
+                expected_sessions=expected_sessions,
+            )
+        )
+        for ticker in candidate_refetch:
+            if ticker not in provider_errors and ticker not in remaining_invalid:
+                continue
+            issue = _candidate_volatility_issue(
+                epoch_id=state.epoch_id,
+                session=state.session,
+                ticker=ticker,
+                fetched_at=retry_times[ticker],
+                expected_sessions=expected_sessions,
+                price_cache=state.first_engine._price_cache,
+                signal_identity_scope=state.issue_identity_scope,
+                cohorts=state.owner.cohorts,
+                reason_code="provider_error" if ticker in provider_errors else None,
+            )
+            state.owner._metric_store.save_candidate_input_issue(issue)
+            state.candidate_issue_references.append(issue.reference())
+            state.volatility_quarantines.add(ticker)
+        candidate_evidence = build_annualized_volatility_evidence(
+            state.first_engine._price_cache,
+            candidate_tickers - state.volatility_quarantines,
+            lookback_sessions=lookback,
+            floor=floor,
+            expected_sessions=expected_sessions,
+        )
+        state.shared_volatility_evidence = dict(governed_evidence)
+        state.shared_volatility_evidence.update(candidate_evidence)
+    except Exception as error:
+        reason = (
+            "candidate volatility-history validation failed"
+            if candidate_boundary
+            else f"shared staging volatility evidence failed: {error}"
+        )
+        assign_failures(
+            state.results,
+            state.valid,
+            reason,
+            degraded=bool(state.candidate_bar_quarantines),
+            execution_valid=True,
+            staging_valid=False,
+            candidate_bar_quarantines=state.candidate_bar_quarantines,
+        )
+        return state.finalize()
+    if state.volatility_quarantines:
+        state.horizon_signals = filter_horizon_signals(
+            state.horizon_signals, state.volatility_quarantines
+        )
+        for ticker in state.volatility_quarantines:
+            state.candidate_reference_bars.pop(ticker, None)
+    return None
+
+
+def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
+    """Persist regime snapshots, enrich once, and stage eligible cohorts."""
+    all_signals = _all_signals(state)
+    staging_valid = not (
+        state.candidate_bar_quarantines or state.volatility_quarantines
+    )
+    for horizon, (_, regime, _) in state.horizon_signals.items():
+        state.first_engine.state.save_regime_snapshot(
+            regime,
+            session=state.session,
+            epoch_id=state.epoch_id,
+            horizon=horizon,
+            execution_valid=True,
+            staging_valid=staging_valid,
+            candidate_bar_quarantines=tuple(state.candidate_bar_quarantines),
+        )
+    conflicts = sorted(
+        set(state.governed_reference_bars) & set(state.candidate_reference_bars)
+    )
+    if conflicts:
+        return state.fail_candidate_classification(conflicts)
+    enrichment = state.owner._fetch_openbb_enrichment(all_signals)
+    reference_bars = dict(state.governed_reference_bars)
+    reference_bars.update(state.candidate_reference_bars)
+    state.shared_data["_execution_reference_bars"] = reference_bars
+    for cohort in state.valid:
+        cfg, engine = cohort["config"], cohort["engine"]
+        signals, regime, _ = state.horizon_signals[cfg.horizon]
+        summaries = state.governed_summaries_by_cohort.get(cfg.name, [])
+        try:
+            staged = engine.screen_and_stage(
+                trading_date=state.trading_date,
+                data=state.shared_data,
+                shared_signals=signals,
+                shared_regime=regime,
+                enrichment=enrichment,
+                size_profile=cohort.get("size_profile"),
+                marked_account=cohort["marked_account"],
+                annualized_volatility_evidence=state.shared_volatility_evidence,
+            )
+            fills = cohort["ledger"].read_fills(state.session, state.session)
+            staged.update(
+                trades_opened=[
+                    fill.fill_id for fill in fills if fill.side in {"buy", "short"}
+                ],
+                trades_closed=[
+                    fill.fill_id for fill in fills if fill.side in {"sell", "cover"}
+                ],
+                error=False,
+                degraded=bool(state.candidate_bar_quarantines or summaries),
+                execution_valid=True,
+                staging_valid=staging_valid,
+                candidate_bar_quarantines=state.candidate_bar_quarantines,
+                governed_bar_recoveries=summaries,
+                governed_failure_map={},
+            )
+            state.results[cfg.name] = staged
+        except Exception as error:
+            logger.error("Cohort %s staging failed", cfg.name, exc_info=True)
+            state.results[cfg.name] = failure_result(
+                str(error),
+                degraded=bool(state.candidate_bar_quarantines),
+                execution_valid=True,
+                staging_valid=False,
+                candidate_bar_quarantines=state.candidate_bar_quarantines,
+                governed_bar_recoveries=summaries,
+                governed_failure_map={},
+            )
+    return state.finalize()
+
+
 @dataclass(frozen=True)
 class DailyRunSummary:
     outcome: str
