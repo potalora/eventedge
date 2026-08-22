@@ -134,24 +134,16 @@ def _cohort_run_exit_status(
     Execution failures retain exit status 1; completed degraded runs use 0.
     """
     from tradingagents.strategies.orchestration.daily_pipeline import (
-        aggregate_candidate_input_issues,
-        aggregate_governed_reporting,
-        count_degraded_cohorts,
-        count_failed_cohorts,
+        summarize_cohort_results,
     )
 
-    aggregate_candidate_input_issues(result, trading_date)
-    n_failed, n_total, failed = count_failed_cohorts(result)
-    n_degraded, _, degraded = count_degraded_cohorts(result)
-    quarantined_tickers = sorted(
-        {
-            str(ticker)
-            for name in degraded
-            for ticker in result[name].get("candidate_bar_quarantines", [])
-        }
+    summary = summarize_cohort_results(result, trading_date)
+    n_failed, n_total, failed = len(summary.failed), summary.total, summary.failed
+    n_degraded, degraded = len(summary.degraded), summary.degraded
+    quarantined_tickers = summary.candidate_bar_quarantines
+    recovered_tickers = sorted(
+        {str(recovery["ticker"]) for recovery in summary.governed_bar_recoveries}
     )
-    recoveries, _ = aggregate_governed_reporting(result)
-    recovered_tickers = sorted({str(summary["ticker"]) for summary in recoveries})
     if n_failed:
         message = f"ERROR: {n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
         if n_degraded:

@@ -948,47 +948,22 @@ class GenerationManager:
                 }
             if cohort_results is not None:
                 from tradingagents.strategies.orchestration.daily_pipeline import (
-                    aggregate_candidate_input_issues,
-                    aggregate_governed_reporting,
-                    count_degraded_cohorts,
-                    count_failed_cohorts,
+                    summarize_cohort_results,
                 )
 
-                n_failed, n_total, failed = count_failed_cohorts(cohort_results)
-                n_degraded, _, degraded = count_degraded_cohorts(cohort_results)
-                execution_valid = bool(cohort_results) and all(
-                    isinstance(result, dict) and result.get("execution_valid") is True
-                    for result in cohort_results.values()
+                summary = summarize_cohort_results(cohort_results, daily_trading_date)
+                n_failed = len(summary.failed)
+                n_total = summary.total
+                failed = summary.failed
+                n_degraded, degraded = len(summary.degraded), summary.degraded
+                execution_valid = summary.execution_valid
+                quarantined_tickers = list(summary.candidate_bar_quarantines)
+                governed_recoveries = list(summary.governed_bar_recoveries)
+                governed_failures = summary.governed_failure_map
+                candidate_issues = list(summary.candidate_input_issues)
+                degradation_label = (
+                    summary.degradation_label or "candidate data quarantined"
                 )
-                quarantined_tickers = sorted(
-                    {
-                        str(ticker)
-                        for name in degraded
-                        for ticker in cohort_results[name].get(
-                            "candidate_bar_quarantines", []
-                        )
-                    }
-                )
-                governed_recoveries, governed_failures = aggregate_governed_reporting(
-                    cohort_results
-                )
-                candidate_issues = aggregate_candidate_input_issues(
-                    cohort_results, daily_trading_date
-                )
-                if governed_recoveries and candidate_issues:
-                    degradation_label = (
-                        "candidate input issue; governed bar recovery"
-                    )
-                elif governed_recoveries and quarantined_tickers:
-                    degradation_label = (
-                        "candidate data quarantined; governed bar recovery"
-                    )
-                elif governed_recoveries:
-                    degradation_label = "governed bar recovery"
-                elif candidate_issues:
-                    degradation_label = "candidate input issue"
-                else:
-                    degradation_label = "candidate data quarantined"
                 if n_failed:
                     msg = f"{n_failed}/{n_total} cohorts failed: {', '.join(failed)}"
                     if n_degraded:
