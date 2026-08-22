@@ -121,6 +121,18 @@ def _valid_daily_results():
     }
 
 
+def _candidate_issue_reference(*, affected_cohorts):
+    return {
+        "issue_id": "candidate_input_issue_" + "a" * 32,
+        "epoch_id": "gen_001-2026-08-10-" + "b" * 16,
+        "session": "2026-08-10",
+        "dependency_kind": "reference_bar",
+        "reason_code": "provider_error",
+        "ticker": "UI",
+        "affected_cohorts": affected_cohorts,
+    }
+
+
 def _valid_daily_stdout(*, log_line=""):
     envelope = {"wire_version": 1, "cohort_results": _valid_daily_results()}
     return f"{log_line}{_DAILY_RESULT_PREFIX}{json.dumps(envelope)}\n"
@@ -692,6 +704,167 @@ class TestGenerationDailyRun:
         assert entry["degraded"] is True
         assert entry["execution_valid"] is False
         assert entry["candidate_bar_quarantines"] == ["ALX"]
+
+    def test_daily_history_persists_one_canonical_candidate_issue_summary(
+        self, git_repo, manager
+    ):
+        manager.start_generation("typed candidate issue history")
+        cohorts = sorted(_valid_daily_results())
+        reference = _candidate_issue_reference(affected_cohorts=cohorts)
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "outcome": "degraded",
+                "success": False,
+                "degraded": True,
+                "execution_valid": True,
+                "candidate_input_issues": [reference, dict(reference)],
+                "elapsed_s": 1.0,
+                "error": "candidate input issue",
+            }
+            manager.run_daily("2026-08-10")
+
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["candidate_input_issues"] == [reference]
+
+    def test_daily_history_omits_candidate_issue_field_for_clean_run(
+        self, git_repo, manager
+    ):
+        manager.start_generation("clean candidate issue history")
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "outcome": "clean",
+                "success": True,
+                "elapsed_s": 1.0,
+            }
+            manager.run_daily("2026-08-10")
+
+        assert "candidate_input_issues" not in manager.get_generation(
+            "gen_001"
+        ).run_history[0]
+
+    def test_daily_history_fails_closed_on_malformed_internal_issue_summary(
+        self, git_repo, manager
+    ):
+        manager.start_generation("malformed typed candidate issue history")
+        secret = "provider-secret-do-not-persist"
+        malformed = {
+            **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+            "epoch_id": f"gen_001-2026-08-10-{secret}",
+        }
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "outcome": "degraded",
+                "success": False,
+                "degraded": True,
+                "execution_valid": True,
+                "candidate_input_issues": [malformed],
+                "elapsed_s": 1.0,
+                "error": "candidate input issue",
+            }
+            results = manager.run_daily("2026-08-10")
+
+        assert results["gen_001"]["outcome"] == "failed"
+        assert results["gen_001"]["error"] == "invalid candidate input issue summary"
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["outcome"] == "failed"
+        assert "candidate_input_issues" not in entry
+        assert secret not in json.dumps({"results": results, "entry": entry})
+
+    def test_daily_history_rejects_clean_top_level_outcome_with_candidate_issues(
+        self, git_repo, manager
+    ):
+        manager.start_generation("contradictory typed candidate issue history")
+        reference = _candidate_issue_reference(affected_cohorts=["cohort-a"])
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "outcome": "clean",
+                "success": True,
+                "candidate_input_issues": [reference],
+                "elapsed_s": 1.0,
+            }
+            results = manager.run_daily("2026-08-10")
+
+        assert results["gen_001"] == {
+            "outcome": "failed",
+            "success": False,
+            "elapsed_s": 1.0,
+            "error": "invalid candidate input issue summary",
+        }
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["outcome"] == "failed"
+        assert "candidate_input_issues" not in entry
+
+    def test_daily_history_rejects_degraded_issues_without_valid_execution(
+        self, git_repo, manager
+    ):
+        manager.start_generation("invalid degraded candidate issue history")
+        reference = _candidate_issue_reference(affected_cohorts=["cohort-a"])
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "outcome": "degraded",
+                "success": False,
+                "degraded": True,
+                "execution_valid": False,
+                "candidate_input_issues": [reference],
+                "elapsed_s": 1.0,
+            }
+            results = manager.run_daily("2026-08-10")
+
+        assert results["gen_001"]["outcome"] == "failed"
+        assert results["gen_001"]["error"] == (
+            "invalid candidate input issue summary"
+        )
+        assert "candidate_input_issues" not in manager.get_generation(
+            "gen_001"
+        ).run_history[0]
+
+    def test_all_error_issue_wire_retains_canonical_summary_in_failed_history(
+        self, git_repo, manager
+    ):
+        info = manager.start_generation("all-error candidate issue history")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        cohort_results = _valid_daily_results()
+        cohort_names = sorted(cohort_results)
+        reference = _candidate_issue_reference(affected_cohorts=cohort_names)
+        for cohort_name in cohort_names:
+            cohort_results[cohort_name] = {
+                "error": True,
+                "invalid_reason": "invalid metric epoch",
+                "degraded": True,
+                "execution_valid": False,
+                "staging_valid": False,
+                "candidate_input_issues": [dict(reference)],
+            }
+        process = MagicMock(
+            returncode=1,
+            stdout=(
+                _DAILY_RESULT_PREFIX
+                + json.dumps(
+                    {"wire_version": 1, "cohort_results": cohort_results}
+                )
+                + "\n"
+            ),
+            stderr="ERROR: 16/16 cohorts failed",
+        )
+
+        with patch.object(gm_mod.subprocess, "run", return_value=process):
+            results = manager.run_daily("2026-08-10")
+
+        result = results[info.gen_id]
+        assert result["outcome"] == "failed"
+        assert result["success"] is False
+        assert result["execution_valid"] is False
+        assert "degraded" not in result
+        assert result["candidate_input_issues"] == [reference]
+        entry = manager.get_generation(info.gen_id).run_history[0]
+        assert entry["outcome"] == "failed"
+        assert entry["candidate_input_issues"] == [reference]
 
     def test_subprocess_result_fails_when_any_cohort_is_invalid(
         self, git_repo, manager

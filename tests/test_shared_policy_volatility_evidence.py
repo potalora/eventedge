@@ -981,7 +981,7 @@ def test_invalid_candidate_values_produce_distinct_content_bound_issue_ids(
                 cohort["ledger"].close()
 
 
-@pytest.mark.parametrize("tamper_kind", ("digest", "scope"))
+@pytest.mark.parametrize("tamper_kind", ("digest", "scope", "reason"))
 def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
     tmp_path, monkeypatch, tamper_kind
 ) -> None:
@@ -990,7 +990,7 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
         "PENDING": _history(0.027),
         "UI": pd.DataFrame({"Close": []}, index=pd.DatetimeIndex([])),
     }
-    orchestrator, first, missing_fetch_calls = _run_staging_matrix(
+    orchestrator, _, missing_fetch_calls = _run_staging_matrix(
         tmp_path,
         monkeypatch,
         histories,
@@ -999,7 +999,6 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
     )
 
     try:
-        issue_reference = next(iter(first.values()))["candidate_input_issues"][0]
         with sqlite3.connect(orchestrator._metric_store.path) as connection:
             row = connection.execute(
                 "SELECT issue_id, payload_json FROM candidate_input_issues "
@@ -1008,8 +1007,10 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
             payload = json.loads(row[1])
             if tamper_kind == "digest":
                 payload["returned_history_digest"] = "sha256:" + "0" * 64
-            else:
+            elif tamper_kind == "scope":
                 payload["affected_cohorts"] = payload["affected_cohorts"][:-1]
+            else:
+                payload["reason_code"] = "stale_data"
             connection.execute(
                 "UPDATE candidate_input_issues SET payload_json = ? "
                 "WHERE issue_id = ?",
@@ -1034,7 +1035,7 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
         assert all(
             result["execution_valid"] is True
             and result["staging_valid"] is False
-            and result["candidate_input_issues"] == [issue_reference]
+            and "candidate_input_issues" not in result
             and result["invalid_reason"]
             == "candidate volatility-history validation failed"
             for result in failed

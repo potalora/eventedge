@@ -10,7 +10,10 @@ report was noticed.
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -18,6 +21,7 @@ import pytest
 from scripts import run_cohorts
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
     CohortOrchestrator,
+    aggregate_candidate_input_issues,
     aggregate_governed_reporting,
     build_default_cohorts,
     count_degraded_cohorts,
@@ -27,6 +31,7 @@ from tradingagents.strategies.orchestration.generation_manager import (
     GenerationManager,
     _extract_cohort_results,
 )
+from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
 
 
 # --- count_failed_cohorts (pure) ---
@@ -92,6 +97,414 @@ def test_count_degraded_cohorts_is_distinct_from_execution_failures():
 
     assert count_failed_cohorts(results) == (0, 2, [])
     assert count_degraded_cohorts(results) == (1, 2, ["candidate_quarantined"])
+
+
+def _candidate_issue_reference(*, affected_cohorts):
+    return {
+        "issue_id": "candidate_input_issue_" + "a" * 32,
+        "epoch_id": "gen_001-2026-08-10-" + "b" * 16,
+        "session": "2026-08-10",
+        "dependency_kind": "reference_bar",
+        "reason_code": "provider_error",
+        "ticker": "UI",
+        "affected_cohorts": affected_cohorts,
+    }
+
+
+def _candidate_issue_carrier(*references):
+    return {
+        "degraded": True,
+        "staging_valid": False,
+        "candidate_input_issues": list(references),
+    }
+
+
+def test_candidate_issue_reporting_deduplicates_sixteen_identical_references():
+    cohorts = [f"cohort-{index:02d}" for index in range(16)]
+    reference = _candidate_issue_reference(affected_cohorts=cohorts)
+    results = {
+        cohort: _candidate_issue_carrier(dict(reference)) for cohort in cohorts
+    }
+
+    assert aggregate_candidate_input_issues(results) == [reference]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda reference: {**reference, "dependency_kind": "secret_provider"},
+        lambda reference: {**reference, "reason_code": "retry_exhausted"},
+        lambda reference: {**reference, "ticker": "ui"},
+        lambda reference: {**reference, "session": "08/10/2026"},
+        lambda reference: {
+            **reference,
+            "issue_id": "candidate_input_issue_provider-secret",
+        },
+        lambda reference: {
+            **reference,
+            "epoch_id": "gen_001-2026-08-10-provider-secret",
+        },
+        lambda reference: {
+            **reference,
+            "epoch_id": "gen_001-2026-08-11-" + "b" * 16,
+        },
+        lambda reference: {**reference, "affected_cohorts": ["cohort-b", "cohort-a"]},
+        lambda reference: {**reference, "provider_secret": "do-not-persist"},
+    ),
+)
+def test_candidate_issue_reporting_rejects_malformed_untrusted_references(mutate):
+    cohorts = ["cohort-a", "cohort-b"]
+    reference = _candidate_issue_reference(affected_cohorts=cohorts)
+    malformed = mutate(reference)
+    results = {
+        "cohort-a": _candidate_issue_carrier(malformed),
+        "cohort-b": _candidate_issue_carrier(dict(reference)),
+    }
+
+    with pytest.raises(ValueError, match="candidate input issue reference"):
+        aggregate_candidate_input_issues(results)
+
+
+def test_candidate_issue_reporting_rejects_unequal_duplicate_ids():
+    cohorts = ["cohort-a", "cohort-b"]
+    reference = _candidate_issue_reference(affected_cohorts=cohorts)
+    conflicting = {**reference, "ticker": "ZKH"}
+
+    with pytest.raises(ValueError, match="candidate input issue reference"):
+        aggregate_candidate_input_issues(
+            {
+                "cohort-a": _candidate_issue_carrier(reference),
+                "cohort-b": _candidate_issue_carrier(conflicting),
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "results",
+    (
+        {object(): _candidate_issue_carrier()},
+        {
+            "cohort-a": _candidate_issue_carrier(
+                    {
+                        **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+                        "dependency_kind": [],
+                    }
+                )
+        },
+        {
+            "cohort-a": _candidate_issue_carrier(
+                    {
+                        **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+                        "reason_code": [],
+                    }
+                )
+        },
+        {
+            "cohort-a": _candidate_issue_carrier(
+                    _candidate_issue_reference(affected_cohorts=[["cohort-a"]])
+                )
+        },
+    ),
+)
+def test_candidate_issue_reporting_rejects_nonstring_or_unhashable_fields(results):
+    with pytest.raises(ValueError, match="candidate input issue reference"):
+        aggregate_candidate_input_issues(results)
+
+
+@pytest.mark.parametrize("session", ("2026-08-09", "2026-08-11"))
+def test_candidate_issue_reporting_rejects_weekend_or_wrong_run_session(session):
+    reference = {
+        **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+        "session": session,
+    }
+    with pytest.raises(ValueError, match="candidate input issue reference session"):
+        aggregate_candidate_input_issues(
+            {"cohort-a": _candidate_issue_carrier(reference)},
+            trading_date="2026-08-10",
+        )
+
+
+def test_candidate_issue_reporting_rejects_different_ids_for_one_durable_scope():
+    first = _candidate_issue_reference(affected_cohorts=["cohort-a"])
+    second = {**first, "issue_id": "candidate_input_issue_" + "c" * 32}
+    with pytest.raises(ValueError, match="candidate input issue reference scope"):
+        aggregate_candidate_input_issues(
+            {"cohort-a": _candidate_issue_carrier(first, second)}
+        )
+
+
+def test_candidate_issue_reporting_uses_canonical_store_order():
+    zkh = {
+        **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+        "issue_id": "candidate_input_issue_" + "1" * 32,
+        "ticker": "ZKH",
+    }
+    ui = {
+        **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+        "issue_id": "candidate_input_issue_" + "f" * 32,
+        "ticker": "UI",
+    }
+    assert aggregate_candidate_input_issues(
+        {"cohort-a": _candidate_issue_carrier(zkh, ui)}
+    ) == [ui, zkh]
+
+
+def test_candidate_issue_reporting_rejects_oversized_global_collection():
+    results = {
+        f"cohort-{index:03d}": {
+            "degraded": True,
+            "staging_valid": False,
+            "candidate_input_issues": [
+                {
+                    **_candidate_issue_reference(
+                        affected_cohorts=[f"cohort-{index:03d}"]
+                    ),
+                    "issue_id": f"candidate_input_issue_{index:032x}",
+                }
+            ]
+        }
+        for index in range(257)
+    }
+
+    with pytest.raises(ValueError, match="candidate input issue reference"):
+        aggregate_candidate_input_issues(results)
+
+
+def test_candidate_issue_reporting_omits_clean_and_governed_only_runs():
+    assert aggregate_candidate_input_issues(
+        {
+            "clean": {"degraded": False},
+            "governed": {"governed_bar_recoveries": []},
+        }
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    (
+        {
+            "error": True,
+            "degraded": False,
+            "staging_valid": False,
+        },
+        {
+            "degraded": True,
+            "staging_valid": True,
+        },
+        {
+            "degraded": True,
+            "staging_valid": False,
+            "candidate_input_issues": [],
+        },
+    ),
+)
+def test_candidate_issue_reporting_rejects_invalid_carrier_lifecycle(carrier):
+    if "candidate_input_issues" not in carrier:
+        carrier = {
+            **carrier,
+            "candidate_input_issues": [
+                _candidate_issue_reference(affected_cohorts=["cohort-a"])
+            ],
+        }
+    with pytest.raises(ValueError, match="candidate input issue reference"):
+        aggregate_candidate_input_issues({"cohort-a": carrier})
+
+
+def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
+    session = date(2026, 8, 10)
+    issue = CandidateInputIssue.create(
+        issue_id="candidate_input_issue_" + "a" * 32,
+        epoch_id="gen_001-2026-08-10-" + "b" * 16,
+        session=session,
+        dependency_kind="reference_bar",
+        reason_code="provider_error",
+        ticker="UI",
+        source="yfinance",
+        fetched_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+        requested_history_digest="sha256:" + "c" * 64,
+        returned_history_digest="sha256:" + "d" * 64,
+        expected_sessions=(session,),
+        observed_sessions=(),
+        retryable=False,
+        affected_signal_identities=(),
+        affected_cohorts=("cohort-a",),
+    )
+
+    class Store:
+        def pending_critical_gap(self):
+            return None
+
+        def read_candidate_bar_recoveries(self, epoch_id, exact_session):
+            assert (epoch_id, exact_session) == (issue.epoch_id, session)
+            return []
+
+        def read_candidate_input_issues(self, epoch_id, exact_session):
+            assert (epoch_id, exact_session) == (issue.epoch_id, session)
+            return [issue]
+
+    class Executor:
+        def ensure_metric_epoch(self, context, exact_session):
+            assert exact_session == session
+            return SimpleNamespace(
+                epoch_id=issue.epoch_id,
+                status="invalid",
+                boundary_reason="metric epoch conflict",
+            )
+
+    class Ledger:
+        def session_invalid_reason(self, exact_session):
+            assert exact_session == session
+            return "metric epoch conflict"
+
+    orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
+    orchestrator._metric_store = Store()
+    orchestrator._metric_epoch_context = object()
+    orchestrator._epoch_id = None
+    orchestrator.cohorts = [
+        {
+            "config": SimpleNamespace(name="cohort-a"),
+            "executor": Executor(),
+            "ledger": Ledger(),
+        }
+    ]
+
+    result = orchestrator.run_daily(session.isoformat())["cohort-a"]
+
+    assert result["error"] is True
+    assert result["invalid_reason"] == "metric epoch conflict"
+    assert result["degraded"] is True
+    assert result["execution_valid"] is False
+    assert result["staging_valid"] is False
+    assert result["candidate_bar_quarantines"] == ["UI"]
+    assert result["candidate_input_issues"] == [issue.reference()]
+
+
+def test_pending_gap_exact_session_exit_lazily_hydrates_persisted_candidate_issue():
+    session = date(2026, 8, 10)
+    issue = CandidateInputIssue.create(
+        issue_id="candidate_input_issue_" + "a" * 32,
+        epoch_id="gen_001-2026-08-10-" + "b" * 16,
+        session=session,
+        dependency_kind="reference_bar",
+        reason_code="provider_error",
+        ticker="UI",
+        source="yfinance",
+        fetched_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+        requested_history_digest="sha256:" + "c" * 64,
+        returned_history_digest="sha256:" + "d" * 64,
+        expected_sessions=(session,),
+        observed_sessions=(),
+        retryable=False,
+        affected_signal_identities=(),
+        affected_cohorts=("cohort-a",),
+    )
+    marker = SimpleNamespace(epoch_id=issue.epoch_id, gap_session=session)
+
+    class Store:
+        def pending_critical_gap(self):
+            return marker
+
+        def read_candidate_input_issues(self, epoch_id, exact_session):
+            assert (epoch_id, exact_session) == (issue.epoch_id, session)
+            return [issue]
+
+    orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
+    orchestrator._metric_store = Store()
+    orchestrator._epoch_id = None
+    orchestrator.cohorts = [object()]
+    orchestrator._complete_pending_critical_gap = lambda marker, processed, results: {
+        "cohort-a": {
+            "error": True,
+            "invalid_reason": "critical_market_data_gap",
+            "degraded": False,
+            "execution_valid": False,
+            "staging_valid": False,
+            "candidate_bar_quarantines": [],
+        }
+    }
+
+    result = orchestrator.run_daily(session.isoformat())["cohort-a"]
+
+    assert result["error"] is True
+    assert result["degraded"] is True
+    assert result["execution_valid"] is False
+    assert result["staging_valid"] is False
+    assert result["candidate_bar_quarantines"] == ["UI"]
+    assert result["candidate_input_issues"] == [issue.reference()]
+
+
+def test_reference_issue_tamper_emits_only_reconstructed_safe_scope_without_io(
+    tmp_path,
+):
+    from test_30day_simulation import _authoritative_committee
+    from test_cohort_lifecycle import (
+        _CandidateRecoveryPriceSource,
+        _candidate_lifecycle_orchestrator,
+    )
+    from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+    source = _CandidateRecoveryPriceSource("quarantined")
+    orchestrator, first_session = _candidate_lifecycle_orchestrator(
+        tmp_path, source
+    )
+    session = next_session(first_session)
+    second = orchestrator.cohorts[1]
+    original_stage = second["engine"].screen_and_stage
+    fail_once = True
+
+    def fail_first_stage(*args, **kwargs):
+        nonlocal fail_once
+        if kwargs["trading_date"] == session.isoformat() and fail_once:
+            fail_once = False
+            raise RuntimeError("post-resolution staging failure")
+        return original_stage(*args, **kwargs)
+
+    second["engine"].screen_and_stage = fail_first_stage
+    with patch(
+        "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+        side_effect=_authoritative_committee,
+    ):
+        orchestrator.run_daily(first_session.isoformat())
+        first = orchestrator.run_daily(session.isoformat())
+        expected_reference = first["horizon_3m"]["candidate_input_issues"][0]
+        with sqlite3.connect(orchestrator._metric_store.path) as connection:
+            issue_id, payload_json = connection.execute(
+                "SELECT issue_id, payload_json FROM candidate_input_issues "
+                "WHERE dependency_kind = 'reference_bar'"
+            ).fetchone()
+            payload = json.loads(payload_json)
+            payload["reason_code"] = "stale_data"
+            payload["affected_cohorts"] = ["horizon_3m"]
+            connection.execute(
+                "UPDATE candidate_input_issues SET payload_json = ? "
+                "WHERE issue_id = ?",
+                (
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    issue_id,
+                ),
+            )
+        candidate_calls = len(source.candidate_calls)
+        source.resolve_candidate_daily_bars = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("candidate resolver called after issue scope tamper")
+            )
+        )
+        replay = orchestrator.run_daily(session.isoformat())
+
+    assert len(source.candidate_calls) == candidate_calls
+    assert replay["horizon_3m"]["error"] is True
+    assert replay["horizon_3m"]["invalid_reason"] == (
+        "candidate reference-bar validation failed"
+    )
+    assert all(
+        result["candidate_input_issues"] == [expected_reference]
+        for result in replay.values()
+    )
+    assert expected_reference["reason_code"] == "invalid_data"
+    assert expected_reference["affected_cohorts"] == (
+        "horizon_30d",
+        "horizon_3m",
+    )
 
 
 def test_governed_reporting_is_deduplicated_sorted_and_bounded():
@@ -207,7 +620,7 @@ def test_worker_status_is_degraded_for_successful_governed_recovery():
 
     exit_code, message = run_cohorts._cohort_run_exit_status(result)
 
-    assert exit_code == 2
+    assert exit_code == 0
     assert "recovered tickers: ESS" in message
 
 
@@ -223,7 +636,7 @@ def test_worker_status_is_degraded_for_candidate_quarantine():
 
     exit_code, message = run_cohorts._cohort_run_exit_status(result)
 
-    assert exit_code == 2
+    assert exit_code == 0
     assert "DEGRADED: 1/1 cohorts" in message
 
 
@@ -278,12 +691,17 @@ def test_worker_failure_status_retains_degradation_on_same_cohort():
 
 
 def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys):
+    reference = _candidate_issue_reference(
+        affected_cohorts=["candidate_quarantined"]
+    )
     result = {
         "candidate_quarantined": {
             "error": False,
             "degraded": True,
             "execution_valid": True,
+            "staging_valid": False,
             "candidate_bar_quarantines": ["ALX"],
+            "candidate_input_issues": [reference],
         }
     }
 
@@ -294,7 +712,58 @@ def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys
         def run_daily(self, trading_date):
             return result
 
-    monkeypatch.setattr(sys, "argv", ["run_cohorts.py", "--date", "2026-07-31"])
+    monkeypatch.setattr(sys, "argv", ["run_cohorts.py", "--date", "2026-08-10"])
+    monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
+    monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "synthetic-commit")
+    monkeypatch.setattr(
+        "tradingagents.strategies.orchestration.cohort_orchestrator.build_default_cohorts",
+        lambda config: [],
+    )
+    monkeypatch.setattr(
+        "tradingagents.strategies.orchestration.cohort_orchestrator.CohortOrchestrator",
+        FakeOrchestrator,
+    )
+
+    run_cohorts.main()
+
+    captured = capsys.readouterr()
+    assert "DEGRADED: 1/1 cohorts" in captured.err
+    wire_lines = [
+        line for line in captured.out.splitlines() if line.startswith(_DAILY_RESULT_PREFIX)
+    ]
+    assert len(wire_lines) == 1
+    assert json.loads(wire_lines[0].removeprefix(_DAILY_RESULT_PREFIX)) == {
+        "wire_version": _DAILY_RESULT_WIRE_VERSION,
+        "cohort_results": result,
+    }
+
+
+def test_worker_main_rejects_malformed_issue_before_printing_wire(
+    monkeypatch, capsys
+):
+    result = {
+        "cohort-a": {
+            "error": False,
+            "degraded": True,
+            "execution_valid": True,
+            "staging_valid": False,
+            "candidate_input_issues": [
+                    {
+                        **_candidate_issue_reference(affected_cohorts=["cohort-a"]),
+                        "issue_id": "candidate_input_issue_provider-secret-do-not-print",
+                }
+            ],
+        }
+    }
+
+    class FakeOrchestrator:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run_daily(self, trading_date):
+            return result
+
+    monkeypatch.setattr(sys, "argv", ["run_cohorts.py", "--date", "2026-08-10"])
     monkeypatch.setenv("EVENTEDGE_GENERATION_ID", "gen_001")
     monkeypatch.setenv("EVENTEDGE_GENERATION_COMMIT", "synthetic-commit")
     monkeypatch.setattr(
@@ -310,16 +779,10 @@ def test_worker_main_exits_degraded_for_candidate_quarantine(monkeypatch, capsys
         run_cohorts.main()
 
     captured = capsys.readouterr()
-    assert raised.value.code == 2
-    assert "DEGRADED: 1/1 cohorts" in captured.err
-    wire_lines = [
-        line for line in captured.out.splitlines() if line.startswith(_DAILY_RESULT_PREFIX)
-    ]
-    assert len(wire_lines) == 1
-    assert json.loads(wire_lines[0].removeprefix(_DAILY_RESULT_PREFIX)) == {
-        "wire_version": _DAILY_RESULT_WIRE_VERSION,
-        "cohort_results": result,
-    }
+    assert raised.value.code == 1
+    assert _DAILY_RESULT_PREFIX not in captured.out
+    assert "provider-secret-do-not-print" not in captured.out + captured.err
+    assert "invalid cohort reporting payload" in captured.err
 
 
 # --- _extract_cohort_results (parse run_cohorts.py stdout) ---
@@ -464,7 +927,7 @@ def _run_with_proc(tmp_path, proc):
         ),
         patch.object(GenerationManager, "_write_run_log", lambda self, *a, **k: None),
     ):
-        return mgr._run_cohorts_subprocess(gen_data, ["--date", "2026-06-01"])
+        return mgr._run_cohorts_subprocess(gen_data, ["--date", "2026-08-10"])
 
 
 def test_rc0_but_all_cohorts_failed_is_marked_failed(tmp_path):
@@ -596,6 +1059,68 @@ def test_failed_worker_result_preserves_same_cohort_degradation(tmp_path):
     assert result["candidate_bar_quarantines"] == ["ALX"]
     assert "1/16 cohorts failed" in result["error"]
     assert "1/16 cohorts degraded" in result["error"]
+
+
+def test_issue_only_worker_result_is_degraded_with_one_run_level_summary(tmp_path):
+    results = _clean_daily_results()
+    cohorts = sorted(results)
+    reference = _candidate_issue_reference(affected_cohorts=cohorts)
+    for cohort_result in results.values():
+        cohort_result.update(
+            {
+                "degraded": True,
+                "staging_valid": False,
+                "candidate_input_issues": [dict(reference)],
+            }
+        )
+
+    result = _run_with_proc(tmp_path, _FakeProc(2, _worker_stdout(results)))
+
+    assert result["outcome"] == "degraded"
+    assert result["execution_valid"] is True
+    assert result["candidate_input_issues"] == [reference]
+
+
+def test_candidate_issue_plus_real_failure_remains_failed(tmp_path):
+    results = _clean_daily_results()
+    cohorts = sorted(results)
+    reference = _candidate_issue_reference(affected_cohorts=cohorts)
+    for cohort_result in results.values():
+        cohort_result.update(
+            {
+                "degraded": True,
+                "staging_valid": False,
+                "candidate_input_issues": [dict(reference)],
+            }
+        )
+    results[cohorts[0]].update(
+        {"error": True, "execution_valid": False, "invalid_reason": "real failure"}
+    )
+
+    result = _run_with_proc(tmp_path, _FakeProc(1, _worker_stdout(results)))
+
+    assert result["outcome"] == "failed"
+    assert result["candidate_input_issues"] == [reference]
+
+
+def test_malformed_candidate_issue_wire_fails_closed(tmp_path):
+    results = _clean_daily_results()
+    cohorts = sorted(results)
+    reference = _candidate_issue_reference(affected_cohorts=cohorts)
+    for cohort_result in results.values():
+        cohort_result.update(
+            {
+                "degraded": True,
+                "staging_valid": False,
+                "candidate_input_issues": [dict(reference)],
+            }
+        )
+    results[cohorts[-1]]["candidate_input_issues"][0]["reason_code"] = "unknown"
+
+    result = _run_with_proc(tmp_path, _FakeProc(2, _worker_stdout(results)))
+
+    assert result["outcome"] == "failed"
+    assert result["error"] == "invalid daily worker result"
 
 
 def test_nonzero_rc_still_failed(tmp_path):

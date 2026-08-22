@@ -99,16 +99,30 @@ def _extract_cohort_results(stdout: str) -> dict | None:
     return envelope["cohort_results"]
 
 
-def _valid_daily_cohort_results(cohort_results: dict) -> bool:
+def _valid_daily_cohort_results(
+    cohort_results: dict, trading_date: str | None = None
+) -> bool:
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        aggregate_candidate_input_issues,
         build_default_cohorts,
     )
 
     expected = {cohort.name for cohort in build_default_cohorts({})}
     if set(cohort_results) != expected:
         return False
+    try:
+        candidate_issues = aggregate_candidate_input_issues(
+            cohort_results, trading_date
+        )
+    except ValueError:
+        return False
+    affected_by_issue = {
+        str(cohort)
+        for issue in candidate_issues
+        for cohort in issue["affected_cohorts"]
+    }
     lifecycle_fields = ("degraded", "execution_valid", "staging_valid")
-    for result in cohort_results.values():
+    for cohort_name, result in cohort_results.items():
         if not isinstance(result, dict) or type(result.get("error")) is not bool:
             return False
         if result["error"]:
@@ -125,6 +139,10 @@ def _valid_daily_cohort_results(cohort_results: dict) -> bool:
         if result["execution_valid"] is not True:
             return False
         if result["degraded"] is False and result["staging_valid"] is not True:
+            return False
+        if cohort_name in affected_by_issue and (
+            result["degraded"] is not True or result["staging_valid"] is not False
+        ):
             return False
     return True
 
@@ -595,6 +613,48 @@ class GenerationManager:
                     ["--date", trading_date],
                     inherited_lock=lock,
                 )
+                if "candidate_input_issues" in result:
+                    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                        canonical_candidate_input_issue_summaries,
+                    )
+
+                    try:
+                        candidate_issues = canonical_candidate_input_issue_summaries(
+                            result["candidate_input_issues"], trading_date
+                        )
+                    except ValueError:
+                        result = {
+                            "outcome": RunOutcome.FAILED.value,
+                            "success": False,
+                            "elapsed_s": result.get("elapsed_s", 0.0),
+                            "error": "invalid candidate input issue summary",
+                        }
+                    else:
+                        outcome = result.get("outcome")
+                        consistent = result.get("success") is False and (
+                            (
+                                outcome == RunOutcome.DEGRADED.value
+                                and result.get("degraded") is True
+                                and result.get("execution_valid") is True
+                            )
+                            or (
+                                outcome == RunOutcome.FAILED.value
+                                and (
+                                    "degraded" not in result
+                                    or result.get("degraded") is True
+                                )
+                            )
+                        )
+                        if not consistent:
+                            result = {
+                                "outcome": RunOutcome.FAILED.value,
+                                "success": False,
+                                "elapsed_s": result.get("elapsed_s", 0.0),
+                                "error": "invalid candidate input issue summary",
+                            }
+                        else:
+                            result = dict(result)
+                            result["candidate_input_issues"] = candidate_issues
                 results[gen_id] = result
                 history_entry = {
                     "date": trading_date,
@@ -633,6 +693,10 @@ class GenerationManager:
                 )
                 if failure_map:
                     history_entry["governed_failure_map"] = failure_map
+                if result.get("candidate_input_issues"):
+                    history_entry["candidate_input_issues"] = result[
+                        "candidate_input_issues"
+                    ]
                 gen_data["run_history"].append(history_entry)
                 gen_data["run_history"] = gen_data["run_history"][-_MAX_RUN_HISTORY:]
 
@@ -862,8 +926,13 @@ class GenerationManager:
             # and validate the versioned worker wire before interpreting its
             # alert exit code; unmarked or contradictory output fails closed.
             cohort_results = _extract_cohort_results(proc.stdout)
+            try:
+                date_index = extra_args.index("--date") + 1
+                daily_trading_date = extra_args[date_index]
+            except (ValueError, IndexError):
+                daily_trading_date = ""
             if cohort_results is None or not _valid_daily_cohort_results(
-                cohort_results
+                cohort_results, daily_trading_date
             ):
                 logger.error(
                     "Generation %s returned an invalid daily worker result",
@@ -877,6 +946,7 @@ class GenerationManager:
                 }
             if cohort_results is not None:
                 from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                    aggregate_candidate_input_issues,
                     aggregate_governed_reporting,
                     count_degraded_cohorts,
                     count_failed_cohorts,
@@ -900,12 +970,21 @@ class GenerationManager:
                 governed_recoveries, governed_failures = aggregate_governed_reporting(
                     cohort_results
                 )
-                if governed_recoveries and quarantined_tickers:
+                candidate_issues = aggregate_candidate_input_issues(
+                    cohort_results, daily_trading_date
+                )
+                if governed_recoveries and candidate_issues:
+                    degradation_label = (
+                        "candidate input issue; governed bar recovery"
+                    )
+                elif governed_recoveries and quarantined_tickers:
                     degradation_label = (
                         "candidate data quarantined; governed bar recovery"
                     )
                 elif governed_recoveries:
                     degradation_label = "governed bar recovery"
+                elif candidate_issues:
+                    degradation_label = "candidate input issue"
                 else:
                     degradation_label = "candidate data quarantined"
                 if n_failed:
@@ -938,6 +1017,8 @@ class GenerationManager:
                         failure["governed_bar_recoveries"] = governed_recoveries
                     if governed_failures:
                         failure["governed_failure_map"] = governed_failures
+                    if candidate_issues:
+                        failure["candidate_input_issues"] = candidate_issues
                     return failure
 
                 if n_degraded:
@@ -967,6 +1048,8 @@ class GenerationManager:
                         degraded_result["governed_bar_recoveries"] = governed_recoveries
                     if governed_failures:
                         degraded_result["governed_failure_map"] = governed_failures
+                    if candidate_issues:
+                        degraded_result["candidate_input_issues"] = candidate_issues
                     return degraded_result
 
             if proc.returncode != 0:
