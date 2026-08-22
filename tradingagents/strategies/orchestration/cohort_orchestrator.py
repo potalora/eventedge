@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -408,6 +409,216 @@ def _candidate_reference_issue(
         affected_signal_identities=identities,
         affected_cohorts=affected_cohorts,
     )
+
+
+def _candidate_volatility_scope(
+    ticker: str,
+    *,
+    signal_identity_scope: tuple[dict[str, str], ...],
+    cohorts: list[dict[str, Any]],
+) -> tuple[tuple[dict[str, str], ...], tuple[str, ...]]:
+    """Return the exact signal and cohort scope for one candidate ticker."""
+    identity_pairs = {
+        (identity["event_key"], identity["strategy"])
+        for identity in signal_identity_scope
+        if identity["ticker"] == ticker
+    }
+    identities = tuple(
+        {"event_key": event_key, "strategy": strategy}
+        for event_key, strategy in sorted(identity_pairs)
+    )
+    horizons = {
+        identity["horizon"]
+        for identity in signal_identity_scope
+        if identity["ticker"] == ticker
+    }
+    affected_cohorts = tuple(
+        sorted(
+            {
+                cohort["config"].name
+                for cohort in cohorts
+                if cohort["config"].horizon in horizons
+            }
+        )
+    )
+    if not identities or not affected_cohorts:
+        raise ValueError(f"candidate issue scope is incomplete for {ticker}")
+    return identities, affected_cohorts
+
+
+def _volatility_request_digest(
+    ticker: str, expected_sessions: tuple[date, ...]
+) -> str:
+    return _candidate_issue_digest(
+        {
+            "dependency_kind": "volatility_history",
+            "ticker": ticker,
+            "expected_sessions": expected_sessions,
+        }
+    )
+
+
+def _candidate_volatility_issue_id(issue: Any) -> str:
+    """Bind an issue identifier to its complete durable evidence payload."""
+    from tradingagents.strategies.execution.ids import stable_id
+
+    return stable_id("candidate_input_issue", issue.evidence_fields())
+
+
+def _candidate_volatility_history_evidence(
+    price_cache: dict[str, Any],
+    ticker: str,
+    expected_sessions: tuple[date, ...],
+) -> tuple[str, tuple[date, ...], str]:
+    """Describe invalid cached history without retaining provider text."""
+    import pandas as pd
+
+    from tradingagents.strategies.orchestration.trading_calendar import is_session
+
+    matches = [
+        frame
+        for raw_ticker, frame in price_cache.items()
+        if str(raw_ticker).strip().upper() == ticker
+    ]
+    if len(matches) != 1:
+        status = "missing" if not matches else "conflicting"
+        reason_code = "missing_data" if not matches else "invalid_data"
+        return reason_code, (), _candidate_issue_digest({"status": status})
+    frame = matches[0]
+    if not isinstance(frame, pd.DataFrame):
+        return "invalid_data", (), _candidate_issue_digest(
+            {"status": "invalid_frame"}
+        )
+    if "Close" not in frame.columns or frame.empty:
+        status = "empty" if frame.empty else "missing_close"
+        return "missing_data", (), _candidate_issue_digest({"status": status})
+
+    observed: list[date] = []
+    invalid_session = False
+    digest_sessions: list[str] = []
+    for value in frame.index:
+        try:
+            if isinstance(value, datetime):
+                normalized = value.date()
+            elif isinstance(value, date):
+                normalized = value
+            elif isinstance(value, pd.Timestamp) and not pd.isna(value):
+                normalized = value.date()
+            else:
+                raise ValueError("invalid session")
+            digest_sessions.append(normalized.isoformat())
+            if is_session(normalized):
+                observed.append(normalized)
+            else:
+                invalid_session = True
+        except (OverflowError, TypeError, ValueError):
+            invalid_session = True
+            digest_sessions.append(
+                "invalid_session:"
+                + hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+            )
+
+    digest_closes: list[str] = []
+    invalid_close = False
+    for value in frame["Close"]:
+        try:
+            normalized_value = float(value)
+        except (TypeError, ValueError):
+            invalid_close = True
+            digest_closes.append(
+                "invalid_value:"
+                + hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+            )
+            continue
+        if not math.isfinite(normalized_value) or normalized_value <= 0:
+            invalid_close = True
+            digest_closes.append(
+                "invalid_value:"
+                + hashlib.sha256(repr(value).encode("utf-8")).hexdigest()
+            )
+        else:
+            digest_closes.append(format(normalized_value, ".17g"))
+    returned_digest = _candidate_issue_digest(
+        {
+            "status": "history",
+            "sessions": tuple(digest_sessions),
+            "closes": tuple(digest_closes),
+        }
+    )
+    observed_sessions = tuple(observed)
+    if (
+        invalid_session
+        or invalid_close
+        or len(set(observed_sessions)) != len(observed_sessions)
+        or any(
+            later <= earlier
+            for earlier, later in zip(observed_sessions, observed_sessions[1:])
+        )
+    ):
+        return "invalid_data", observed_sessions, returned_digest
+    if len(observed_sessions) < len(expected_sessions):
+        if observed_sessions and observed_sessions[-1] < expected_sessions[-1]:
+            return "stale_data", observed_sessions, returned_digest
+        return "missing_data", observed_sessions, returned_digest
+    if observed_sessions[-len(expected_sessions) :] != expected_sessions:
+        if observed_sessions[-1] < expected_sessions[-1]:
+            return "stale_data", observed_sessions, returned_digest
+        return "missing_data", observed_sessions, returned_digest
+    return "invalid_data", observed_sessions, returned_digest
+
+
+def _candidate_volatility_issue(
+    *,
+    epoch_id: str,
+    session: date,
+    ticker: str,
+    fetched_at: datetime,
+    expected_sessions: tuple[date, ...],
+    price_cache: dict[str, Any],
+    signal_identity_scope: tuple[dict[str, str], ...],
+    cohorts: list[dict[str, Any]],
+    reason_code: str | None = None,
+) -> Any:
+    """Create bounded generic evidence for an invalid candidate history."""
+    from tradingagents.strategies.orchestration.candidate_inputs import (
+        CandidateInputIssue,
+    )
+
+    identities, affected_cohorts = _candidate_volatility_scope(
+        ticker,
+        signal_identity_scope=signal_identity_scope,
+        cohorts=cohorts,
+    )
+    observed_reason_code, observed_sessions, returned_digest = (
+        _candidate_volatility_history_evidence(
+            price_cache, ticker, expected_sessions
+        )
+    )
+    provisional = CandidateInputIssue.create(
+        issue_id="candidate-volatility-provisional",
+        epoch_id=epoch_id,
+        session=session,
+        dependency_kind="volatility_history",
+        reason_code=reason_code or observed_reason_code,
+        ticker=ticker,
+        source="yfinance",
+        fetched_at=fetched_at,
+        requested_history_digest=_volatility_request_digest(
+            ticker, expected_sessions
+        ),
+        returned_history_digest=returned_digest,
+        expected_sessions=expected_sessions,
+        observed_sessions=observed_sessions,
+        retryable=False,
+        affected_signal_identities=identities,
+        affected_cohorts=affected_cohorts,
+    )
+    issue = replace(
+        provisional,
+        issue_id=_candidate_volatility_issue_id(provisional),
+    )
+    issue.validate_integrity()
+    return issue
 
 
 def _candidate_identity_conflict_tickers(
@@ -2381,38 +2592,32 @@ class CohortOrchestrator:
         candidate_bar_quarantines = sorted(
             set(existing_quarantines) | quarantined_tickers
         )
-        staging_valid = not candidate_bar_quarantines
-        for horizon, (_signals, regime, _health) in horizon_signals.items():
-            first_engine.state.save_regime_snapshot(
-                regime,
-                session=session,
-                epoch_id=self._epoch_id,
-                horizon=horizon,
-                execution_valid=True,
-                staging_valid=staging_valid,
-                candidate_bar_quarantines=tuple(candidate_bar_quarantines),
-            )
-
+        volatility_quarantines: set[str] = set()
         shared_volatility_evidence = None
         policy_settings = self._base_config.get("autoresearch", {}).get(
             "portfolio_policy"
         )
         if isinstance(policy_settings, dict):
-            governed_tickers = {
+            volatility_issue_references: list[dict[str, object]] = []
+            candidate_volatility_boundary = False
+            candidate_policy_tickers = {
                 str(signal.get("ticker", "")).strip().upper()
                 for signal in all_signals
                 if str(signal.get("ticker", "")).strip()
             }
             try:
-                for cohort in valid_cohorts:
-                    governed_tickers.update(
+                governed_policy_tickers = set(governed_reference_bars)
+                for cohort in self.cohorts:
+                    governed_policy_tickers.update(
                         str(row["ticker"]).strip().upper()
                         for row in cohort["ledger"].policy_open_lot_projection(session)
                     )
-                    governed_tickers.update(
+                    governed_policy_tickers.update(
                         str(row["ticker"]).strip().upper()
                         for row in cohort["ledger"].policy_pending_entry_projection()
                     )
+
+                candidate_policy_tickers -= governed_policy_tickers
 
                 from tradingagents.strategies.trading.portfolio_policy import (
                     build_annualized_volatility_evidence,
@@ -2432,40 +2637,190 @@ class CohortOrchestrator:
                 expected_volatility_sessions = tuple(
                     reversed(expected_sessions_descending)
                 )
-                histories_to_refetch: list[str] = []
-                for ticker in sorted(governed_tickers):
-                    try:
-                        build_annualized_volatility_evidence(
-                            first_engine._price_cache,
-                            (ticker,),
-                            lookback_sessions=volatility_lookback_sessions,
-                            floor=volatility_floor,
-                            expected_sessions=expected_volatility_sessions,
-                        )
-                    except (TypeError, ValueError, OverflowError):
-                        histories_to_refetch.append(ticker)
-                if histories_to_refetch:
-                    volatility_buffer_days = max(120, 2 * volatility_lookback_sessions)
-                    volatility_start = (
-                        datetime.strptime(trading_date, "%Y-%m-%d")
-                        - timedelta(days=volatility_buffer_days)
-                    ).date()
-                    volatility_start = min(
-                        volatility_start, expected_volatility_sessions[0]
-                    ).isoformat()
-                    first_engine._fetch_missing_prices(
-                        histories_to_refetch, volatility_start, trading_date
-                    )
 
-                shared_volatility_evidence = build_annualized_volatility_evidence(
-                    first_engine._price_cache,
-                    governed_tickers,
-                    lookback_sessions=volatility_lookback_sessions,
-                    floor=volatility_floor,
-                    expected_sessions=expected_volatility_sessions,
+                def invalid_histories(tickers: set[str]) -> list[str]:
+                    invalid: list[str] = []
+                    for ticker in sorted(tickers):
+                        try:
+                            build_annualized_volatility_evidence(
+                                first_engine._price_cache,
+                                (ticker,),
+                                lookback_sessions=volatility_lookback_sessions,
+                                floor=volatility_floor,
+                                expected_sessions=expected_volatility_sessions,
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            invalid.append(ticker)
+                    return invalid
+
+                volatility_buffer_days = max(120, 2 * volatility_lookback_sessions)
+                volatility_start = (
+                    datetime.strptime(trading_date, "%Y-%m-%d")
+                    - timedelta(days=volatility_buffer_days)
+                ).date()
+                volatility_start = min(
+                    volatility_start, expected_volatility_sessions[0]
+                ).isoformat()
+
+                candidate_volatility_boundary = True
+                stored_volatility_issues = {
+                    issue.ticker: issue
+                    for issue in self._metric_store.read_candidate_input_issues(
+                        self._epoch_id, session
+                    )
+                    if issue.dependency_kind == "volatility_history"
+                }
+                for ticker, stored_issue in sorted(
+                    stored_volatility_issues.items()
+                ):
+                    current_identities, current_cohorts = _candidate_volatility_scope(
+                        ticker,
+                        signal_identity_scope=issue_identity_scope,
+                        cohorts=self.cohorts,
+                    )
+                    # Reconstruct the emitted reference from current scope, not
+                    # from stored scope/digest fields that may be the tamper.
+                    reference = {
+                        "issue_id": stored_issue.issue_id,
+                        "epoch_id": self._epoch_id,
+                        "session": session.isoformat(),
+                        "dependency_kind": "volatility_history",
+                        "reason_code": stored_issue.reason_code,
+                        "ticker": ticker,
+                        "affected_cohorts": current_cohorts,
+                    }
+                    volatility_issue_references.append(reference)
+                    candidate_issue_references.append(reference)
+                    if (
+                        ticker in governed_policy_tickers
+                        or ticker not in candidate_policy_tickers
+                    ):
+                        raise ValueError(
+                            f"stored candidate volatility scope conflicts for {ticker}"
+                        )
+                    if stored_issue.issue_id != _candidate_volatility_issue_id(
+                        stored_issue
+                    ):
+                        raise ValueError(
+                            f"candidate volatility issue integrity failed for {ticker}"
+                        )
+                    if (
+                        stored_issue.requested_history_digest
+                        != _volatility_request_digest(
+                            ticker, expected_volatility_sessions
+                        )
+                        or stored_issue.expected_sessions
+                        != expected_volatility_sessions
+                        or tuple(
+                            dict(identity)
+                            for identity in stored_issue.affected_signal_identities
+                        )
+                        != current_identities
+                        or stored_issue.affected_cohorts != current_cohorts
+                        or stored_issue.source != "yfinance"
+                        or stored_issue.retryable is not False
+                    ):
+                        raise ValueError(
+                            f"candidate volatility issue has unequal replay evidence for {ticker}"
+                        )
+                    volatility_quarantines.add(ticker)
+                candidate_volatility_boundary = False
+
+                governed_to_refetch = invalid_histories(governed_policy_tickers)
+                governed_provider_error = False
+                if governed_to_refetch:
+                    try:
+                        first_engine._fetch_missing_prices(
+                            governed_to_refetch, volatility_start, trading_date
+                        )
+                    except Exception:
+                        governed_provider_error = True
+                if governed_provider_error:
+                    # A caught governed-provider failure is authoritative even
+                    # if the provider mutated the cache before raising.
+                    raise ValueError("provider_error")
+
+                governed_volatility_evidence = (
+                    build_annualized_volatility_evidence(
+                        first_engine._price_cache,
+                        governed_policy_tickers,
+                        lookback_sessions=volatility_lookback_sessions,
+                        floor=volatility_floor,
+                        expected_sessions=expected_volatility_sessions,
+                    )
                 )
+
+                candidate_volatility_boundary = True
+                unresolved_candidates = (
+                    candidate_policy_tickers - set(stored_volatility_issues)
+                )
+                candidate_to_refetch = invalid_histories(unresolved_candidates)
+                candidate_provider_errors: set[str] = set()
+                candidate_retry_times: dict[str, datetime] = {}
+                for ticker in candidate_to_refetch:
+                    try:
+                        first_engine._fetch_missing_prices(
+                            [ticker], volatility_start, trading_date
+                        )
+                    except Exception:
+                        candidate_provider_errors.add(ticker)
+                    candidate_retry_times[ticker] = datetime.now(timezone.utc)
+
+                for ticker in candidate_to_refetch:
+                    candidate_failed = ticker in candidate_provider_errors
+                    if not candidate_failed:
+                        try:
+                            build_annualized_volatility_evidence(
+                                first_engine._price_cache,
+                                (ticker,),
+                                lookback_sessions=volatility_lookback_sessions,
+                                floor=volatility_floor,
+                                expected_sessions=expected_volatility_sessions,
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            candidate_failed = True
+                    if candidate_failed:
+                        issue = _candidate_volatility_issue(
+                            epoch_id=self._epoch_id,
+                            session=session,
+                            ticker=ticker,
+                            fetched_at=candidate_retry_times[ticker],
+                            expected_sessions=expected_volatility_sessions,
+                            price_cache=first_engine._price_cache,
+                            signal_identity_scope=issue_identity_scope,
+                            cohorts=self.cohorts,
+                            reason_code=(
+                                "provider_error"
+                                if ticker in candidate_provider_errors
+                                else None
+                            ),
+                        )
+                        self._metric_store.save_candidate_input_issue(issue)
+                        reference = issue.reference()
+                        volatility_issue_references.append(reference)
+                        candidate_issue_references.append(reference)
+                        volatility_quarantines.add(ticker)
+
+                eligible_candidate_tickers = (
+                    candidate_policy_tickers - volatility_quarantines
+                )
+                candidate_volatility_evidence = (
+                    build_annualized_volatility_evidence(
+                        first_engine._price_cache,
+                        eligible_candidate_tickers,
+                        lookback_sessions=volatility_lookback_sessions,
+                        floor=volatility_floor,
+                        expected_sessions=expected_volatility_sessions,
+                    )
+                )
+
+                shared_volatility_evidence = dict(governed_volatility_evidence)
+                shared_volatility_evidence.update(candidate_volatility_evidence)
             except Exception as error:
-                reason = f"shared staging volatility evidence failed: {error}"
+                if candidate_volatility_boundary:
+                    reason = "candidate volatility-history validation failed"
+                else:
+                    reason = f"shared staging volatility evidence failed: {error}"
                 for cohort in valid_cohorts:
                     results[cohort["config"].name] = {
                         "error": True,
@@ -2476,6 +2831,40 @@ class CohortOrchestrator:
                         "candidate_bar_quarantines": candidate_bar_quarantines,
                     }
                 return finalize_results()
+
+        if volatility_quarantines:
+            horizon_signals = {
+                horizon: (
+                    [
+                        signal
+                        for signal in signals
+                        if str(signal.get("ticker", "")).strip().upper()
+                        not in volatility_quarantines
+                    ],
+                    regime,
+                    health,
+                )
+                for horizon, (signals, regime, health) in horizon_signals.items()
+            }
+            all_signals = [
+                signal
+                for signals, _, _ in horizon_signals.values()
+                for signal in signals
+            ]
+            for ticker in volatility_quarantines:
+                candidate_reference_bars.pop(ticker, None)
+
+        staging_valid = not (candidate_bar_quarantines or volatility_quarantines)
+        for horizon, (_signals, regime, _health) in horizon_signals.items():
+            first_engine.state.save_regime_snapshot(
+                regime,
+                session=session,
+                epoch_id=self._epoch_id,
+                horizon=horizon,
+                execution_valid=True,
+                staging_valid=staging_valid,
+                candidate_bar_quarantines=tuple(candidate_bar_quarantines),
+            )
 
         merge_conflicts = sorted(
             set(governed_reference_bars) & set(candidate_reference_bars)
