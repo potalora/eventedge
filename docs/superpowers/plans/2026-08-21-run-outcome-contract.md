@@ -65,7 +65,7 @@ def test_run_outcome_rejects_missing_or_malformed_authoritative_value(value) -> 
     ("payload", "expected"),
     (
         ({"success": True}, RunOutcome.CLEAN),
-        ({"success": False, "degraded": True, "execution_valid": True}, RunOutcome.DEGRADED),
+        ({"success": False, "degraded": True, "execution_valid": True}, RunOutcome.FAILED),
         ({"success": False}, RunOutcome.FAILED),
     ),
 )
@@ -73,6 +73,21 @@ def test_legacy_outcome_is_available_only_when_requested(payload, expected) -> N
     assert run_outcome(payload, allow_legacy=True) is expected
     with pytest.raises(ValueError, match="invalid run outcome"):
         run_outcome(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"success": True, "degraded": True},
+        {"success": True, "execution_valid": False},
+        {"success": 1},
+        {"success": True, "degraded": "false"},
+        {"success": False, "execution_valid": 1},
+    ),
+)
+def test_legacy_outcome_rejects_contradictory_or_non_boolean_fields(payload) -> None:
+    with pytest.raises(ValueError, match="invalid run outcome"):
+        run_outcome(payload, allow_legacy=True)
 
 
 def test_only_clean_and_degraded_are_completed_processes() -> None:
@@ -116,10 +131,13 @@ def run_outcome(
         except ValueError:
             pass
     if allow_legacy and "outcome" not in result:
+        for key in ("success", "degraded", "execution_valid"):
+            if key in result and not isinstance(result[key], bool):
+                raise ValueError("invalid run outcome")
         if result.get("success") is True:
+            if result.get("degraded") is True or result.get("execution_valid") is False:
+                raise ValueError("invalid run outcome")
             return RunOutcome.CLEAN
-        if result.get("degraded") is True and result.get("execution_valid") is True:
-            return RunOutcome.DEGRADED
         if result.get("success") is False:
             return RunOutcome.FAILED
     raise ValueError("invalid run outcome")
@@ -147,10 +165,15 @@ git commit -m "feat: define canonical daily run outcome"
 - Modify: `tradingagents/strategies/orchestration/generation_manager.py`
 - Modify: `tests/test_generation_manager.py`
 - Test: `tests/test_cohort_failure_reporting.py`
+- Modify: `tests/test_metrics_migration.py`
+- Test: `tests/test_preflight.py`
 
 **Interfaces:**
 - Consumes: `RunOutcome` from Task 1 and parsed cohort results from `_extract_cohort_results()`.
 - Produces: every non-preflight `_run_cohorts_subprocess()` result contains `outcome`; every daily `run_history` entry contains the same value.
+- Produces: a validated worker-wire boundary that accepts only the exact 16
+  cohort IDs built by `build_default_cohorts({})` and lifecycle-consistent
+  cohort dictionaries.
 
 - [ ] **Step 1: Write failing result and history assertions**
 
@@ -162,6 +185,35 @@ assert clean_result["outcome"] == "clean"
 assert degraded_result["outcome"] == "degraded"
 assert failed_result["outcome"] == "failed"
 ```
+
+Add a table-driven worker-wire matrix. Use all 16 names returned by
+`build_default_cohorts({})` for valid fixtures. Prove:
+
+```python
+@pytest.mark.parametrize(
+    ("returncode", "payload_kind", "expected"),
+    (
+        (0, "clean", "clean"),
+        (0, "degraded", "degraded"),
+        (2, "degraded", "degraded"),
+        (1, "degraded", "failed"),
+        (2, "clean", "failed"),
+        (1, "clean", "failed"),
+    ),
+)
+def test_worker_return_code_and_payload_must_agree(
+    tmp_path, returncode, payload_kind, expected
+):
+    result = _run_with_daily_wire(tmp_path, returncode, payload_kind)
+    assert result["outcome"] == expected
+```
+
+Also prove rc-zero fails for an empty object, unknown or missing cohort IDs,
+non-mapping values, missing/non-boolean `error`, missing lifecycle booleans on a
+non-error cohort, and unrelated trailing JSON. Update the environment/logging
+fixture in `tests/test_generation_manager.py` and the rc-zero fixture in
+`tests/test_metrics_migration.py` to emit a complete valid 16-cohort result
+when the test intends success.
 
 Update `test_run_daily_records_history` and
 `test_run_daily_records_degraded_history` so mocked results contain the new
@@ -201,15 +253,25 @@ dictionary receives `"outcome": RunOutcome.DEGRADED.value`; and the clean
 dictionary receives `"outcome": RunOutcome.CLEAN.value`.
 
 Timeouts, exceptions, malformed or unparseable nonzero output, and any parsed
-cohort failure use `failed`. Parsed execution-valid degradation uses
-`degraded`. A zero-return child with no parseable result also fails closed; a
-clean outcome requires a parseable non-empty cohort result in which no cohort
-failed or degraded. Update the existing empty-stdout success fixture to emit a
-minimal valid clean cohort JSON object, and add an explicit rc-zero malformed
-output regression.
+cohort failure use `failed`. Before classification, compare the result keys to
+the exact names from `build_default_cohorts({})`. Require every value to be a
+mapping with boolean `error`. A non-error cohort must have boolean `degraded`,
+`execution_valid`, and `staging_valid`; clean cohorts require
+`execution_valid=true`, `staging_valid=true`, and `degraded=false`; degraded
+cohorts require `execution_valid=true`. Optional lifecycle fields on an error
+cohort must still be booleans when present.
 
-Persist `"outcome": result["outcome"]` in each daily history entry. Do not
-change `_preflight_subprocess_result()` or preflight history.
+Apply this return-code matrix after schema validation:
+
+- any invalid payload or any cohort failure is `failed` regardless of rc;
+- pure degradation is `degraded` only for rc 0 or 2;
+- a pure clean payload is `clean` only for rc 0; and
+- every other payload/rc combination is `failed` as contradictory.
+
+Persist `"outcome": result["outcome"]` in each daily history entry. Add a
+preflight regression showing the preflight result and no-history behavior do
+not gain `outcome`. Do not change `_preflight_subprocess_result()` or preflight
+history.
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 
@@ -219,7 +281,7 @@ Run the Step 2 command again. Expected: all focused tests pass.
 
 ```bash
 git diff --check
-git add tradingagents/strategies/orchestration/generation_manager.py tests/test_generation_manager.py tests/test_cohort_failure_reporting.py
+git add tradingagents/strategies/orchestration/generation_manager.py tests/test_generation_manager.py tests/test_cohort_failure_reporting.py tests/test_metrics_migration.py tests/test_preflight.py
 git commit -m "feat: persist canonical generation outcomes"
 ```
 
@@ -336,7 +398,9 @@ Allow `_render_overview_card()` to receive a test history and parameterize:
         ([{"date": "2026-08-31", "outcome": "clean"}], 1),
         ([{"date": "2026-08-31", "outcome": "degraded"}], 1),
         ([{"date": "2026-08-31", "outcome": "failed"}], 0),
-        ([{"date": "2026-08-31", "success": False, "degraded": True, "execution_valid": True}], 1),
+        ([{"date": "2026-08-31", "success": True}], 1),
+        ([{"date": "2026-08-31", "success": False, "degraded": True, "execution_valid": True}], 0),
+        ([{"date": "2026-08-31", "outcome": "DEGRADED", "success": True}], 0),
     ),
 )
 def test_overview_counts_canonical_and_legacy_completed_runs(
@@ -389,7 +453,7 @@ git commit -m "refactor: consume canonical run outcomes"
 - [ ] **Step 1: Run focused verification**
 
 ```bash
-/Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest tests/test_run_outcome.py tests/test_generation_manager.py tests/test_cohort_failure_reporting.py tests/test_shell_preflight_contract.py tests/test_metrics_reporting.py -q
+/Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest tests/test_run_outcome.py tests/test_generation_manager.py tests/test_cohort_failure_reporting.py tests/test_metrics_migration.py tests/test_preflight.py tests/test_shell_preflight_contract.py tests/test_metrics_reporting.py -q
 ```
 
 - [ ] **Step 2: Run the full non-live suite**

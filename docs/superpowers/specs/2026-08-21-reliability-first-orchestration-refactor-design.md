@@ -59,7 +59,9 @@ zero because nonzero shell status means the command failed to complete safely.
 Operators and dashboards continue to alert on the manifest's `degraded`
 outcome. Transitional `success`, `degraded`, and `execution_valid` fields remain
 serialized for old manifests and external consumers, but new decisions consume
-`outcome`.
+`outcome`. Historical `success=true` entries may be read conservatively as
+clean. Historical `success=false` entries are treated as failed because the old
+booleans cannot distinguish pure degradation from a mixed failed/degraded run.
 
 Preflight retains its independent `success` contract. Per-cohort
 `execution_valid` and `staging_valid` fields also remain because they describe
@@ -108,7 +110,8 @@ not ad hoc mutations distributed throughout the results dictionary.
 - Make the dashboard prefer the canonical outcome and fall back to legacy
   fields for historical manifests.
 - Add a contract matrix covering clean, execution-valid degraded, failed,
-  malformed output, mixed generations, timeout, and legacy history.
+  malformed output, the exact 16-cohort roster, worker return-code
+  contradictions, mixed generations, timeout, and legacy history.
 - Do not alter candidate-volatility behavior or cohort execution logic.
 
 ## PR 2: Typed Candidate-Input Isolation
