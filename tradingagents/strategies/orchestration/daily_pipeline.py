@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
@@ -61,6 +61,43 @@ class DailyFinalizationState:
     governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = field(
         default_factory=dict
     )
+
+
+def failure_result(reason: str, **optional: object) -> dict[str, Any]:
+    """Build a failure while preserving omitted legacy fields."""
+    return {"error": True, "invalid_reason": reason, **optional}
+
+
+def assign_failures(
+    results: dict[str, Any],
+    cohorts_or_names: Iterable[object],
+    reason: str,
+    **optional: object,
+) -> None:
+    """Assign one canonical failure shape to cohorts or explicit names."""
+    for item in cohorts_or_names:
+        name = item if isinstance(item, str) else item["config"].name
+        results[name] = failure_result(reason, **optional)
+
+
+def filter_horizon_signals(
+    horizon_signals: dict[str, tuple[list[dict], dict, list[Any]]],
+    excluded_tickers: set[str],
+) -> dict[str, tuple[list[dict], dict, list[Any]]]:
+    """Remove excluded tickers while preserving each horizon's context."""
+    return {
+        horizon: (
+            [
+                signal
+                for signal in signals
+                if str(signal.get("ticker", "")).strip().upper()
+                not in excluded_tickers
+            ],
+            regime,
+            health,
+        )
+        for horizon, (signals, regime, health) in horizon_signals.items()
+    }
 
 
 def finalize_daily_results(

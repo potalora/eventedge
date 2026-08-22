@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from tradingagents.strategies.orchestration.daily_pipeline import (
     aggregate_candidate_input_issues,  # noqa: F401
     aggregate_governed_reporting,  # noqa: F401
+    failure_result,
     canonical_candidate_input_issue_summaries,  # noqa: F401
     count_degraded_cohorts,  # noqa: F401
     count_failed_cohorts,  # noqa: F401
@@ -783,14 +784,13 @@ class CohortOrchestrator:
             if name in committed:
                 results.setdefault(
                     name,
-                    {
-                        "error": True,
-                        "invalid_reason": result_reason or marker.reason,
-                        "degraded": False,
-                        "execution_valid": False,
-                        "staging_valid": False,
-                        "candidate_bar_quarantines": [],
-                    },
+                    failure_result(
+                        result_reason or marker.reason,
+                        degraded=False,
+                        execution_valid=False,
+                        staging_valid=False,
+                        candidate_bar_quarantines=[],
+                    ),
                 )
                 continue
             ledger = cohort["ledger"]
@@ -798,30 +798,28 @@ class CohortOrchestrator:
                 ledger.invalidate_session_and_cancel_due(
                     marker.gap_session, marker.reason, processed_at
                 )
-            results[name] = {
-                "error": True,
-                "invalid_reason": ledger.session_invalid_reason(marker.gap_session)
+            results[name] = failure_result(
+                ledger.session_invalid_reason(marker.gap_session)
                 or result_reason
                 or marker.reason,
-                "degraded": False,
-                "execution_valid": False,
-                "staging_valid": False,
-                "candidate_bar_quarantines": [],
-            }
+                degraded=False,
+                execution_valid=False,
+                staging_valid=False,
+                candidate_bar_quarantines=[],
+            )
         affected_names = set(marker.affected_cohorts)
         for cohort in self.cohorts:
             name = cohort["config"].name
             if name not in affected_names:
                 results.setdefault(
                     name,
-                    {
-                        "error": True,
-                        "invalid_reason": marker.reason,
-                        "degraded": False,
-                        "execution_valid": False,
-                        "staging_valid": False,
-                        "candidate_bar_quarantines": [],
-                    },
+                    failure_result(
+                        marker.reason,
+                        degraded=False,
+                        execution_valid=False,
+                        staging_valid=False,
+                        candidate_bar_quarantines=[],
+                    ),
                 )
         self._after_gap_p0_invalidation(marker)
         self.cohorts[0]["executor"].invalidate_metric_epoch(
@@ -861,7 +859,9 @@ class CohortOrchestrator:
         )
         from tradingagents.strategies.orchestration.daily_pipeline import (
             DailyFinalizationState,
+            assign_failures,
             finalize_daily_results,
+            filter_horizon_signals,
         )
         from tradingagents.strategies.orchestration.trading_calendar import (
             is_session,
@@ -950,10 +950,9 @@ class CohortOrchestrator:
         if metric_epoch.status == "invalid":
             for cohort in self.cohorts:
                 reason = cohort["ledger"].session_invalid_reason(session)
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason or metric_epoch.boundary_reason,
-                }
+                results[cohort["config"].name] = failure_result(
+                    reason or metric_epoch.boundary_reason
+                )
             return finalize_results()
 
         complete_replays: dict[str, Any] = {}
@@ -964,10 +963,7 @@ class CohortOrchestrator:
             ledger = cohort["ledger"]
             invalid_reason = ledger.session_invalid_reason(session)
             if invalid_reason:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": invalid_reason,
-                }
+                results[cohort["config"].name] = failure_result(invalid_reason)
                 continue
             snapshots = ledger.read_snapshots(
                 session, session, epoch_id=self._epoch_id, valid_only=True
@@ -995,10 +991,7 @@ class CohortOrchestrator:
                         for summary in persisted_context.governed_recovery_summaries
                     ]
                 except Exception as error:
-                    results[cohort["config"].name] = {
-                        "error": True,
-                        "invalid_reason": str(error),
-                    }
+                    results[cohort["config"].name] = failure_result(str(error))
                     return finalize_critical_gap(
                         session,
                         processed_at,
@@ -1078,7 +1071,7 @@ class CohortOrchestrator:
                     stored_execution.append(cohort)
                 except Exception as error:
                     logger.error("Cohort %s stored resume preparation failed", name)
-                    results[name] = {"error": True, "invalid_reason": str(error)}
+                    results[name] = failure_result(str(error))
                     return finalize_critical_gap(
                         session,
                         processed_at,
@@ -1140,11 +1133,7 @@ class CohortOrchestrator:
                 )
                 processed_at = datetime.now(timezone.utc)
             except GovernedMarketDataError as error:
-                for cohort in fresh_execution:
-                    results[cohort["config"].name] = {
-                        "error": True,
-                        "invalid_reason": "critical_market_data_gap",
-                    }
+                assign_failures(results, fresh_execution, "critical_market_data_gap")
                 return finalize_critical_gap(
                     session,
                     processed_at,
@@ -1159,10 +1148,7 @@ class CohortOrchestrator:
                     reason = "invalid corporate action batch: " + "; ".join(
                         sorted(set(error.errors))
                     )
-                    results[cohort["config"].name] = {
-                        "error": True,
-                        "invalid_reason": reason,
-                    }
+                    results[cohort["config"].name] = failure_result(reason)
                     corporate_errors[cohort["config"].name] = error
                 return finalize_critical_gap(
                     session,
@@ -1174,11 +1160,7 @@ class CohortOrchestrator:
                 )
             except Exception:
                 reason = "shared session input fetch failed"
-                for cohort in fresh_execution:
-                    results[cohort["config"].name] = {
-                        "error": True,
-                        "invalid_reason": reason,
-                    }
+                assign_failures(results, fresh_execution, reason)
                 return finalize_critical_gap(
                     session,
                     processed_at,
@@ -1210,10 +1192,7 @@ class CohortOrchestrator:
                         f"{ticker} {invalid_reasons[ticker]}"
                         for ticker in sorted(invalid_reasons)
                     )
-                    results[cohort["config"].name] = {
-                        "error": True,
-                        "invalid_reason": reason,
-                    }
+                    results[cohort["config"].name] = failure_result(reason)
                     critical_gap = True
                 if critical_gap:
                     return finalize_critical_gap(
@@ -1243,18 +1222,12 @@ class CohortOrchestrator:
                         reason = "invalid corporate action batch: " + "; ".join(
                             sorted(set(error.errors))
                         )
-                        results[name] = {
-                            "error": True,
-                            "invalid_reason": reason,
-                        }
+                        results[name] = failure_result(reason)
                         preflight_corporate_errors[name] = error
                         preflight_gap = True
                     except Exception as error:
                         reason = f"market data validation failed: {error}"
-                        results[name] = {
-                            "error": True,
-                            "invalid_reason": reason,
-                        }
+                        results[name] = failure_result(reason)
                         preflight_gap = True
                 if preflight_gap:
                     return finalize_critical_gap(
@@ -1277,7 +1250,7 @@ class CohortOrchestrator:
                     executor.persisted_input_bundle(session).bars,
                 )
             except Exception as error:
-                results[name] = {"error": True, "invalid_reason": str(error)}
+                results[name] = failure_result(str(error))
                 return finalize_critical_gap(
                     session,
                     processed_at,
@@ -1302,7 +1275,7 @@ class CohortOrchestrator:
                 )
             except Exception as error:
                 logger.error("Cohort %s stored resume failed", name, exc_info=True)
-                results[name] = {"error": True, "invalid_reason": str(error)}
+                results[name] = failure_result(str(error))
                 return finalize_critical_gap(
                     session,
                     processed_at,
@@ -1335,13 +1308,10 @@ class CohortOrchestrator:
                     )
                 except Exception as error:
                     logger.error("Cohort %s execution failed", name, exc_info=True)
-                    results[name] = {"error": True, "invalid_reason": str(error)}
+                    results[name] = failure_result(str(error))
                     continue
                 if not lifecycle.valid or lifecycle.snapshot is None:
-                    results[name] = {
-                        "error": True,
-                        "invalid_reason": lifecycle.invalid_reason,
-                    }
+                    results[name] = failure_result(lifecycle.invalid_reason)
                     if lifecycle.invalid_reason.startswith(
                         "market data validation failed:"
                     ):
@@ -1375,7 +1345,7 @@ class CohortOrchestrator:
                     executor.persisted_input_bundle(session).bars,
                 )
             except Exception as error:
-                results[name] = {"error": True, "invalid_reason": str(error)}
+                results[name] = failure_result(str(error))
                 return finalize_critical_gap(
                     session,
                     processed_at,
@@ -1446,15 +1416,15 @@ class CohortOrchestrator:
                     governed_reference_bars[ticker] = bar
         except Exception as error:
             reason = f"governed execution reference-bar validation failed: {error}"
-            for cohort in session_governed_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": False,
-                    "execution_valid": False,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": [],
-                }
+            assign_failures(
+                results,
+                session_governed_cohorts,
+                reason,
+                degraded=False,
+                execution_valid=False,
+                staging_valid=False,
+                candidate_bar_quarantines=[],
+            )
             return finalize_critical_gap(
                 session,
                 processed_at,
@@ -1502,6 +1472,25 @@ class CohortOrchestrator:
             and record.ticker not in governed_reference_bars
         )
 
+        def finalize_candidate_failure(
+            reason: str,
+            *,
+            degraded: bool = False,
+            quarantines: object = None,
+        ) -> dict[str, Any]:
+            assign_failures(
+                results,
+                valid_cohorts,
+                reason,
+                degraded=degraded,
+                execution_valid=True,
+                staging_valid=False,
+                candidate_bar_quarantines=(
+                    existing_quarantines if quarantines is None else quarantines
+                ),
+            )
+            return finalize_results()
+
         def fail_candidate_classification(conflicts: list[str]) -> dict[str, Any]:
             candidate_bar_quarantine_suppressions.update(governed_reference_bars)
             safe_quarantines = sorted(
@@ -1518,15 +1507,15 @@ class CohortOrchestrator:
                     for ticker in result.get("candidate_bar_quarantines", ())
                     if ticker not in governed_reference_bars
                 ]
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": bool(safe_quarantines),
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": safe_quarantines,
-                }
+            assign_failures(
+                results,
+                valid_cohorts,
+                reason,
+                degraded=bool(safe_quarantines),
+                execution_valid=True,
+                staging_valid=False,
+                candidate_bar_quarantines=safe_quarantines,
+            )
             return finalize_results()
 
         replay_identity_conflicts: set[str] = set()
@@ -1580,16 +1569,9 @@ class CohortOrchestrator:
                 )
         except Exception as error:
             reason = f"candidate identity validation failed: {error}"
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": bool(existing_quarantines),
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": existing_quarantines,
-                }
-            return finalize_results()
+            return finalize_candidate_failure(
+                reason, degraded=bool(existing_quarantines)
+            )
         try:
             stored_reference_issues = {
                 issue.ticker: issue
@@ -1648,42 +1630,21 @@ class CohortOrchestrator:
                     continue
                 candidate_issue_references.append(expected.reference())
             reason = "candidate reference-bar validation failed"
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": bool(existing_quarantines),
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": existing_quarantines,
-                }
-            return finalize_results()
+            return finalize_candidate_failure(
+                reason, degraded=bool(existing_quarantines)
+            )
         if replay_identity_conflicts:
             reason = _candidate_replay_conflict_reason(
                 sorted(replay_identity_conflicts)
             )
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": bool(existing_quarantines),
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": existing_quarantines,
-                }
-            return finalize_results()
+            return finalize_candidate_failure(
+                reason, degraded=bool(existing_quarantines)
+            )
         if recovery_identity_conflicts:
             reason = "candidate reference-bar validation failed"
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": bool(existing_quarantines),
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": existing_quarantines,
-                }
-            return finalize_results()
+            return finalize_candidate_failure(
+                reason, degraded=bool(existing_quarantines)
+            )
         if classification_conflicts:
             return fail_candidate_classification(classification_conflicts)
         existing_recoveries = {
@@ -1924,31 +1885,14 @@ class CohortOrchestrator:
             failed_quarantines = sorted(
                 set(existing_quarantines) | quarantined_tickers
             )
-            for cohort in valid_cohorts:
-                results[cohort["config"].name] = {
-                    "error": True,
-                    "invalid_reason": reason,
-                    "degraded": True,
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": failed_quarantines,
-                }
-            return finalize_results()
+            return finalize_candidate_failure(
+                reason, degraded=True, quarantines=failed_quarantines
+            )
 
         if quarantined_tickers:
-            horizon_signals = {
-                horizon: (
-                    [
-                        signal
-                        for signal in signals
-                        if str(signal.get("ticker", "")).strip().upper()
-                        not in quarantined_tickers
-                    ],
-                    regime,
-                    health,
-                )
-                for horizon, (signals, regime, health) in horizon_signals.items()
-            }
+            horizon_signals = filter_horizon_signals(
+                horizon_signals, quarantined_tickers
+            )
             all_signals = [
                 signal
                 for signals, _, _ in horizon_signals.values()
@@ -2188,31 +2132,21 @@ class CohortOrchestrator:
                     reason = "candidate volatility-history validation failed"
                 else:
                     reason = f"shared staging volatility evidence failed: {error}"
-                for cohort in valid_cohorts:
-                    results[cohort["config"].name] = {
-                        "error": True,
-                        "invalid_reason": reason,
-                        "degraded": bool(candidate_bar_quarantines),
-                        "execution_valid": True,
-                        "staging_valid": False,
-                        "candidate_bar_quarantines": candidate_bar_quarantines,
-                    }
+                assign_failures(
+                    results,
+                    valid_cohorts,
+                    reason,
+                    degraded=bool(candidate_bar_quarantines),
+                    execution_valid=True,
+                    staging_valid=False,
+                    candidate_bar_quarantines=candidate_bar_quarantines,
+                )
                 return finalize_results()
 
         if volatility_quarantines:
-            horizon_signals = {
-                horizon: (
-                    [
-                        signal
-                        for signal in signals
-                        if str(signal.get("ticker", "")).strip().upper()
-                        not in volatility_quarantines
-                    ],
-                    regime,
-                    health,
-                )
-                for horizon, (signals, regime, health) in horizon_signals.items()
-            }
+            horizon_signals = filter_horizon_signals(
+                horizon_signals, volatility_quarantines
+            )
             all_signals = [
                 signal
                 for signals, _, _ in horizon_signals.values()
@@ -2277,18 +2211,17 @@ class CohortOrchestrator:
                 results[name] = staged
             except Exception as error:
                 logger.error("Cohort %s staging failed", name, exc_info=True)
-                results[name] = {
-                    "error": True,
-                    "invalid_reason": str(error),
-                    "degraded": bool(candidate_bar_quarantines),
-                    "execution_valid": True,
-                    "staging_valid": False,
-                    "candidate_bar_quarantines": candidate_bar_quarantines,
-                    "governed_bar_recoveries": governed_summaries_by_cohort.get(
+                results[name] = failure_result(
+                    str(error),
+                    degraded=bool(candidate_bar_quarantines),
+                    execution_valid=True,
+                    staging_valid=False,
+                    candidate_bar_quarantines=candidate_bar_quarantines,
+                    governed_bar_recoveries=governed_summaries_by_cohort.get(
                         name, []
                     ),
-                    "governed_failure_map": {},
-                }
+                    governed_failure_map={},
+                )
 
         return finalize_results()
 
