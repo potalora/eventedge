@@ -26,6 +26,31 @@
 - no new framework, stage hierarchy, registry, event bus, or dependency-
   injection layer is introduced.
 
+## Measured outcome and safety decision
+
+The 15% whole-surface target was not achievable as a behavior-preserving
+change. The first readable phase extraction reduced `run_daily()` from 1,501
+lines to 122 lines but required explicit state and phase functions for replay,
+critical-gap, candidate-evidence, and exception-ordering contracts. It left the
+four-file surface 14 lines above the 4,966-line baseline. Removing the remaining
+759 lines needed to hit 4,221 would have required deleting strict validators or
+moving them outside the measured surface, neither of which is an acceptable
+reliability refactor.
+
+The accepted safety-bounded result merges finalization state, removes repeated
+phase dispatch, and reaches:
+
+- 4,930 physical production lines, 36 fewer than the baseline;
+- 4,603 nonblank production lines;
+- a 91-line `CohortOrchestrator.run_daily()` coordinator;
+- one explicit ordered phase list and one per-run state object;
+- no removal of governed, replay, ledger, metric, issue-integrity, or untrusted-
+  wire validation.
+
+The original 15% target remains recorded above as a missed target rather than
+being retroactively redefined. PR review and release notes must state this
+tradeoff plainly.
+
 ---
 
 ## Task 1: Freeze the merged behavior before extraction
