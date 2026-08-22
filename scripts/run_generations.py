@@ -483,6 +483,10 @@ def main():
     from tradingagents.strategies.orchestration.generation_manager import (
         GenerationManager,
     )
+    from tradingagents.strategies.orchestration.run_outcome import (
+        RunOutcome,
+        run_outcome,
+    )
     from tradingagents.strategies.orchestration.runtime_lock import (
         RuntimeLockBusy,
         RuntimeLockInvalid,
@@ -521,21 +525,18 @@ def main():
         except (RuntimeLockBusy, RuntimeLockInvalid) as error:
             _exit_runtime_lock_error(error)
         for gen_id, result in results.items():
-            status = (
-                "OK"
-                if result["success"]
-                else "DEGRADED"
-                if result.get("degraded")
-                else "FAILED"
-            )
+            outcome = run_outcome(result)
+            status = "OK" if outcome is RunOutcome.CLEAN else outcome.value.upper()
             elapsed = result.get("elapsed_s", 0)
             print(f"  {gen_id}: {status} ({elapsed:.1f}s)")
-            if not result["success"] and result.get("error"):
+            if outcome is not RunOutcome.CLEAN and result.get("error"):
                 # Print first few lines of error
                 error_lines = result["error"].strip().split("\n")
                 for line in error_lines[:5]:
                     print(f"    {line}")
-        if any(not result["success"] for result in results.values()):
+        if any(
+            run_outcome(result) is RunOutcome.FAILED for result in results.values()
+        ):
             raise SystemExit(1)
 
     elif args.command == "preflight":

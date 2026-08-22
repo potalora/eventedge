@@ -769,8 +769,13 @@ class TestGenerationDailyRun:
         from scripts import run_generations
 
         results = {
-            "gen_001": {"success": False, "elapsed_s": 1.0, "error": "invalid"},
-            "gen_002": {"success": True, "elapsed_s": 2.0},
+            "gen_001": {
+                "outcome": "failed",
+                "success": False,
+                "elapsed_s": 1.0,
+                "error": "invalid",
+            },
+            "gen_002": {"outcome": "clean", "success": True, "elapsed_s": 2.0},
         }
         monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
         monkeypatch.setattr(GenerationManager, "run_daily", lambda self, date: results)
@@ -788,7 +793,7 @@ class TestGenerationDailyRun:
         assert "gen_001: FAILED" in output
         assert "gen_002: OK" in output
 
-    def test_run_daily_cli_prints_degraded_then_exits_nonzero(
+    def test_run_daily_cli_prints_degraded_and_completes(
         self, monkeypatch, capsys
     ):
         """Monitoring must distinguish candidate quarantine from execution failure."""
@@ -796,6 +801,7 @@ class TestGenerationDailyRun:
 
         results = {
             "gen_001": {
+                "outcome": "degraded",
                 "success": False,
                 "degraded": True,
                 "execution_valid": True,
@@ -811,12 +817,67 @@ class TestGenerationDailyRun:
             ["run_generations.py", "run-daily", "--date", "2026-07-31"],
         )
 
-        with pytest.raises(SystemExit) as raised:
-            run_generations.main()
+        run_generations.main()
 
         output = capsys.readouterr().out
-        assert raised.value.code == 1
         assert "gen_001: DEGRADED" in output
+
+    def test_run_daily_cli_completes_when_clean_and_degraded_are_mixed(
+        self, monkeypatch, capsys
+    ):
+        from scripts import run_generations
+
+        results = {
+            "gen_001": {"outcome": "clean", "success": True, "elapsed_s": 1.0},
+            "gen_002": {
+                "outcome": "degraded",
+                "success": False,
+                "degraded": True,
+                "execution_valid": True,
+                "elapsed_s": 2.0,
+                "error": "candidate quarantined",
+            },
+        }
+        monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(GenerationManager, "run_daily", lambda self, date: results)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_generations.py", "run-daily", "--date", "2026-07-31"],
+        )
+
+        run_generations.main()
+
+        output = capsys.readouterr().out
+        assert "gen_001: OK" in output
+        assert "gen_002: DEGRADED" in output
+
+    def test_run_daily_cli_prints_degradation_error_from_authoritative_outcome(
+        self, monkeypatch, capsys
+    ):
+        from scripts import run_generations
+
+        results = {
+            "gen_001": {
+                "outcome": "degraded",
+                "success": True,
+                "elapsed_s": 1.0,
+                "error": "candidate quarantined",
+            },
+        }
+        monkeypatch.setattr(GenerationManager, "__init__", lambda self, *a, **k: None)
+        monkeypatch.setattr(GenerationManager, "run_daily", lambda self, date: results)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["run_generations.py", "run-daily", "--date", "2026-07-31"],
+        )
+
+        run_generations.main()
+
+        output = capsys.readouterr().out
+        assert "gen_001: DEGRADED" in output
+        assert "candidate quarantined" in output
 
 
 # ------------------------------------------------------------------
