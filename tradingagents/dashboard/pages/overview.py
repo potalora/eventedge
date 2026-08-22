@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import streamlit as st
 
 from tradingagents.dashboard.charts import (
@@ -13,6 +15,7 @@ from tradingagents.dashboard.data_loaders import (
     load_generation_metrics,
     load_regime_history,
 )
+from tradingagents.strategies.orchestration.run_outcome import RunOutcome, run_outcome
 
 
 def render() -> None:
@@ -82,13 +85,20 @@ def _render_gen_card(gen: dict) -> None:
     commit = gen.get("git_commit", "")[:7]
     desc = gen.get("description", "")
 
-    # Count dates whose execution completed, including candidate-only degradation.
+    # Count dates whose canonical outcome completed, with bounded legacy support.
     run_dates = set()
     for r in gen.get("run_history", []):
-        if r.get("success") or (
-            r.get("degraded") and r.get("execution_valid") is True
-        ):
-            run_dates.add(r["date"])
+        if not isinstance(r, Mapping):
+            continue
+        date = r.get("date")
+        if not isinstance(date, str) or not date:
+            continue
+        try:
+            outcome = run_outcome(r, allow_legacy=True)
+        except ValueError:
+            continue
+        if outcome in {RunOutcome.CLEAN, RunOutcome.DEGRADED}:
+            run_dates.add(date)
 
     metrics = load_generation_metrics(gen_id, state_dir)
     headline = dict(metrics.get("headline_books", {}) or {})

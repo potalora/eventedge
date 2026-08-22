@@ -173,7 +173,7 @@ class _OverviewStreamlit:
         return [_OverviewColumn(self.metrics) for _ in range(count)]
 
 
-def _render_overview_card(monkeypatch, metrics):
+def _render_overview_card(monkeypatch, metrics, run_history=None):
     fake_st = _OverviewStreamlit()
     monkeypatch.setattr(overview, "st", fake_st)
     monkeypatch.setattr(overview, "load_generation_metrics", lambda *_args: metrics)
@@ -184,7 +184,9 @@ def _render_overview_card(monkeypatch, metrics):
             "created_at": "2026-08-01",
             "git_commit": "abcdef123",
             "description": "candidate recovery",
-            "run_history": [
+            "run_history": run_history
+            if run_history is not None
+            else [
                 {
                     "date": "2026-08-31",
                     "success": False,
@@ -198,13 +200,58 @@ def _render_overview_card(monkeypatch, metrics):
     return fake_st
 
 
-def test_overview_counts_execution_valid_degraded_run_as_trading_day(monkeypatch):
+@pytest.mark.parametrize(
+    ("history", "expected_days"),
+    (
+        ([{"date": "2026-08-31", "outcome": "clean"}], 1),
+        ([{"date": "2026-08-31", "outcome": "degraded"}], 1),
+        ([{"date": "2026-08-31", "outcome": "failed"}], 0),
+        ([{"date": "2026-08-31", "success": True}], 1),
+        (
+            [
+                {
+                    "date": "2026-08-31",
+                    "success": False,
+                    "degraded": True,
+                    "execution_valid": True,
+                }
+            ],
+            0,
+        ),
+        ([{"date": "2026-08-31", "outcome": "DEGRADED", "success": True}], 0),
+    ),
+)
+def test_overview_counts_canonical_and_legacy_completed_runs(
+    monkeypatch, history, expected_days
+):
     rendered = _render_overview_card(
         monkeypatch,
         {"metric_schema_version": 2, "headline_books": {}},
+        run_history=history,
     )
 
-    assert ("Trading Days", 1) in rendered.metrics
+    assert ("Trading Days", expected_days) in rendered.metrics
+
+
+@pytest.mark.parametrize(
+    "history",
+    (
+        [None],
+        ["not a mapping"],
+        [{"outcome": "clean"}],
+        [{"date": None, "outcome": "clean"}],
+        [{"date": 20260831, "outcome": "clean"}],
+        [{"date": "", "outcome": "clean"}],
+    ),
+)
+def test_overview_ignores_non_mapping_and_invalid_date_history(monkeypatch, history):
+    rendered = _render_overview_card(
+        monkeypatch,
+        {"metric_schema_version": 2, "headline_books": {}},
+        run_history=history,
+    )
+
+    assert ("Trading Days", 0) in rendered.metrics
 
 
 def test_overview_discloses_candidate_recovery_and_quarantine(monkeypatch):
