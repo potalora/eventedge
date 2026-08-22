@@ -959,6 +959,50 @@ class TestGenerationManagerPreflight:
         assert saved == {}
 
     @pytest.mark.parametrize(
+        ("failure_kind", "expected_error"),
+        (
+            ("timeout", "Timed out after 3600s"),
+            ("exception", "preflight launch failed"),
+        ),
+    )
+    def test_preflight_subprocess_exception_stays_outcome_and_history_free(
+        self, tmp_path, monkeypatch, failure_kind, expected_error
+    ):
+        import tradingagents.strategies.orchestration.generation_manager as gm
+
+        _init_empty_git_repo(tmp_path)
+        manager = gm.GenerationManager(str(tmp_path))
+        manifest = {
+            "generations": [
+                {
+                    "gen_id": "gen_004",
+                    "git_commit": "a" * 40,
+                    "status": "active",
+                    "worktree_path": str(tmp_path / "gen_004"),
+                    "state_dir": str(tmp_path / "gen_004" / "state"),
+                    "run_history": [],
+                }
+            ]
+        }
+        save_manifest = MagicMock()
+        monkeypatch.setattr(manager, "_load_manifest", lambda: manifest)
+        monkeypatch.setattr(manager, "_save_manifest", save_manifest)
+        failure = (
+            subprocess.TimeoutExpired("run_cohorts", gm._GENERATION_TIMEOUT_S)
+            if failure_kind == "timeout"
+            else RuntimeError(expected_error)
+        )
+        monkeypatch.setattr(gm.subprocess, "run", MagicMock(side_effect=failure))
+
+        result = manager.run_preflight("2026-08-06", mode="screen")["gen_004"]
+
+        assert result["success"] is False
+        assert result["error"] == expected_error
+        assert "outcome" not in result
+        assert manifest["generations"][0]["run_history"] == []
+        save_manifest.assert_not_called()
+
+    @pytest.mark.parametrize(
         ("status", "ok", "governed_ok", "has_recovery", "expected_success"),
         (
             ("ready", True, True, True, True),

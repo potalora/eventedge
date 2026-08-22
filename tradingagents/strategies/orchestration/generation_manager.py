@@ -1003,21 +1003,25 @@ class GenerationManager:
             logger.error(
                 "Generation %s timed out after %.0fs", gen_data["gen_id"], elapsed
             )
-            return {
-                "outcome": RunOutcome.FAILED.value,
+            failure = {
                 "success": False,
                 "elapsed_s": round(elapsed, 2),
                 "error": f"Timed out after {_GENERATION_TIMEOUT_S}s",
             }
+            if preflight_mode is None:
+                failure["outcome"] = RunOutcome.FAILED.value
+            return failure
         except Exception as e:
             elapsed = time.monotonic() - start
             logger.error("Generation %s error: %s", gen_data["gen_id"], e)
-            return {
-                "outcome": RunOutcome.FAILED.value,
+            failure = {
                 "success": False,
                 "elapsed_s": round(elapsed, 2),
                 "error": str(e),
             }
+            if preflight_mode is None:
+                failure["outcome"] = RunOutcome.FAILED.value
+            return failure
 
     def _write_run_log(
         self,
