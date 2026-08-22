@@ -102,8 +102,10 @@ def _extract_cohort_results(stdout: str) -> dict | None:
 def _valid_daily_cohort_results(
     cohort_results: dict, trading_date: str | None = None
 ) -> bool:
-    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+    from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
+    )
+    from tradingagents.strategies.orchestration.cohort_orchestrator import (
         build_default_cohorts,
     )
 
@@ -945,7 +947,7 @@ class GenerationManager:
                     "error": "invalid daily worker result",
                 }
             if cohort_results is not None:
-                from tradingagents.strategies.orchestration.cohort_orchestrator import (
+                from tradingagents.strategies.orchestration.daily_pipeline import (
                     aggregate_candidate_input_issues,
                     aggregate_governed_reporting,
                     count_degraded_cohorts,

@@ -133,7 +133,7 @@ def _cohort_run_exit_status(
     execution is valid, but its performance must not be reported as a clean run.
     Execution failures retain exit status 1; completed degraded runs use 0.
     """
-    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+    from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
         aggregate_governed_reporting,
         count_degraded_cohorts,
