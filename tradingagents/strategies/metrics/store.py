@@ -12,6 +12,8 @@ from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
+
 from .calendar import XNYSCalendar
 from .models import (
     CandidateBarRecoveryRecord,
@@ -70,8 +72,19 @@ CREATE TABLE IF NOT EXISTS candidate_signal_identity_bindings (
   session TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS candidate_input_issues (
+  issue_id TEXT PRIMARY KEY,
+  epoch_id TEXT NOT NULL,
+  session TEXT NOT NULL,
+  dependency_kind TEXT NOT NULL,
+  ticker TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE (epoch_id, session, dependency_kind, ticker)
+);
 CREATE INDEX IF NOT EXISTS idx_candidate_bar_recoveries_epoch_session
   ON candidate_bar_recoveries(epoch_id, session);
+CREATE INDEX IF NOT EXISTS idx_candidate_input_issues_epoch_session
+  ON candidate_input_issues(epoch_id, session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_signal_identity_scope
   ON candidate_signal_identity_bindings(epoch_id, session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_gap_pending
@@ -102,6 +115,7 @@ _MAX_GOVERNED_RECOVERY_TEXT = 4_096
 _MAX_GOVERNED_RECOVERY_ROWS = 7
 _MAX_GOVERNED_RECOVERY_COHORTS = 64
 _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES = 100_000
+_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES = 1_000_000
 _NEW_YORK = ZoneInfo("America/New_York")
 _CANDIDATE_ATTEMPT_KEYS = frozenset(
     {
@@ -134,6 +148,7 @@ class MetricStore:
         self._has_candidate_bar_recoveries = True
         self._has_candidate_signal_identity_bindings = True
         self._has_governed_bar_recoveries = True
+        self._has_candidate_input_issues = True
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
@@ -171,6 +186,7 @@ class MetricStore:
             "candidate_signal_identity_bindings" in tables
         )
         store._has_governed_bar_recoveries = "governed_bar_recoveries" in tables
+        store._has_candidate_input_issues = "candidate_input_issues" in tables
         return store
 
     @property
@@ -267,6 +283,107 @@ class MetricStore:
         data["session"] = date.fromisoformat(data["session"])
         data["identities"] = tuple(dict(identity) for identity in data["identities"])
         return CandidateSignalIdentityBinding(**data)
+
+    @staticmethod
+    def _candidate_input_issue(
+        row: tuple[object, ...],
+        *,
+        expected_issue_id: str | None = None,
+        expected_scope: tuple[str, date, str, str] | None = None,
+    ) -> CandidateInputIssue:
+        try:
+            issue_id, epoch_id, session, dependency_kind, ticker, payload = row
+            if not all(
+                isinstance(value, str)
+                for value in (issue_id, epoch_id, session, dependency_kind, ticker)
+            ):
+                raise ValueError
+        except (TypeError, ValueError) as error:
+            raise ValueError("candidate input issue payload is invalid") from error
+        payload = MetricStore._bounded_candidate_input_issue_payload(payload)
+        try:
+            data = json.loads(payload)
+            expected_fields = {
+                "issue_id",
+                "epoch_id",
+                "session",
+                "dependency_kind",
+                "reason_code",
+                "ticker",
+                "source",
+                "fetched_at",
+                "requested_history_digest",
+                "returned_history_digest",
+                "expected_sessions",
+                "observed_sessions",
+                "retryable",
+                "affected_signal_identities",
+                "affected_cohorts",
+            }
+            if not isinstance(data, dict) or set(data) != expected_fields:
+                raise ValueError
+            data["session"] = date.fromisoformat(data["session"])
+            data["fetched_at"] = datetime.fromisoformat(
+                data["fetched_at"].replace("Z", "+00:00")
+            )
+            data["expected_sessions"] = tuple(
+                date.fromisoformat(value) for value in data["expected_sessions"]
+            )
+            data["observed_sessions"] = tuple(
+                date.fromisoformat(value) for value in data["observed_sessions"]
+            )
+            data["affected_signal_identities"] = tuple(
+                dict(value) for value in data["affected_signal_identities"]
+            )
+            data["affected_cohorts"] = tuple(data["affected_cohorts"])
+            record = CandidateInputIssue.create(**data)
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            RecursionError,
+            json.JSONDecodeError,
+        ) as error:
+            raise ValueError("candidate input issue payload is invalid") from error
+        if record.canonical_payload() != payload:
+            raise ValueError("candidate input issue payload is not canonical")
+        if (
+            record.issue_id,
+            record.epoch_id,
+            record.session.isoformat(),
+            record.dependency_kind,
+            record.ticker,
+        ) != (issue_id, epoch_id, session, dependency_kind, ticker):
+            raise ValueError("candidate input issue metadata does not match payload")
+        if expected_issue_id is not None and record.issue_id != expected_issue_id:
+            raise ValueError("candidate input issue metadata does not match lookup")
+        if expected_scope is not None and (
+            record.epoch_id,
+            record.session,
+            record.dependency_kind,
+            record.ticker,
+        ) != (
+            expected_scope[0],
+            expected_scope[1],
+            expected_scope[2],
+            expected_scope[3].upper(),
+        ):
+            raise ValueError("candidate input issue metadata does not match lookup")
+        record.validate_integrity()
+        return record
+
+    @staticmethod
+    def _bounded_candidate_input_issue_payload(payload: object) -> str:
+        if not isinstance(payload, str):
+            raise ValueError("candidate input issue payload is invalid")
+        try:
+            payload_size = len(payload.encode("utf-8"))
+        except UnicodeError as error:
+            raise ValueError("candidate input issue payload is invalid") from error
+        if payload_size > _MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES:
+            raise ValueError("candidate input issue payload exceeds byte bound")
+        return payload
 
     @staticmethod
     def _governed_payload_data(payload: object) -> dict[str, object]:
@@ -1347,6 +1464,146 @@ class MetricStore:
             if row
             else None
         )
+
+    def save_candidate_input_issue(self, record: CandidateInputIssue) -> None:
+        record.validate_integrity()
+        payload = self._bounded_candidate_input_issue_payload(
+            record.canonical_payload()
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_by_id = connection.execute(
+                """
+                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
+                FROM candidate_input_issues
+                WHERE issue_id = ?
+                """,
+                (record.issue_id,),
+            ).fetchone()
+            if existing_by_id is not None:
+                existing = self._candidate_input_issue(
+                    existing_by_id, expected_issue_id=record.issue_id
+                )
+                if existing.canonical_payload() != payload:
+                    raise ValueError(
+                        f"immutable candidate input issue_id {record.issue_id!r} has unequal replay evidence"
+                    )
+                return
+            scoped = connection.execute(
+                """
+                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
+                FROM candidate_input_issues
+                WHERE epoch_id = ? AND session = ? AND dependency_kind = ? AND ticker = ?
+                """,
+                (
+                    record.epoch_id,
+                    record.session.isoformat(),
+                    record.dependency_kind,
+                    record.ticker,
+                ),
+            ).fetchone()
+            if scoped is not None:
+                self._candidate_input_issue(
+                    scoped,
+                    expected_scope=(
+                        record.epoch_id,
+                        record.session,
+                        record.dependency_kind,
+                        record.ticker,
+                    ),
+                )
+                raise ValueError(
+                    "immutable candidate input issue scope has unequal replay evidence"
+                )
+            connection.execute(
+                """
+                INSERT INTO candidate_input_issues
+                  (issue_id, epoch_id, session, dependency_kind, ticker, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.issue_id,
+                    record.epoch_id,
+                    record.session.isoformat(),
+                    record.dependency_kind,
+                    record.ticker,
+                    payload,
+                ),
+            )
+
+    def load_candidate_input_issue(
+        self,
+        *,
+        epoch_id: str,
+        session: date,
+        dependency_kind: str,
+        ticker: str,
+    ) -> CandidateInputIssue | None:
+        if not self._has_candidate_input_issues:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
+                FROM candidate_input_issues
+                WHERE epoch_id = ? AND session = ? AND dependency_kind = ? AND ticker = ?
+                """,
+                (epoch_id, session.isoformat(), dependency_kind, ticker.upper()),
+            ).fetchone()
+        return (
+            self._candidate_input_issue(
+                row,
+                expected_scope=(epoch_id, session, dependency_kind, ticker),
+            )
+            if row
+            else None
+        )
+
+    def load_candidate_input_issue_by_id(
+        self, issue_id: str
+    ) -> CandidateInputIssue | None:
+        if not self._has_candidate_input_issues:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
+                FROM candidate_input_issues
+                WHERE issue_id = ?
+                """,
+                (issue_id,),
+            ).fetchone()
+        return (
+            self._candidate_input_issue(row, expected_issue_id=issue_id) if row else None
+        )
+
+    def read_candidate_input_issues(
+        self,
+        epoch_id: str,
+        session: date | None = None,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[CandidateInputIssue, ...]:
+        self._validate_limit(limit)
+        if not self._has_candidate_input_issues:
+            return ()
+        clauses = ["epoch_id = ?"]
+        values: list[object] = [epoch_id]
+        if session is not None:
+            clauses.append("session = ?")
+            values.append(session.isoformat())
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
+                FROM candidate_input_issues
+                WHERE {" AND ".join(clauses)}
+                ORDER BY session, dependency_kind, ticker, issue_id
+                LIMIT ?
+                """,
+                (*values, limit),
+            ).fetchall()
+        return tuple(self._candidate_input_issue(row) for row in rows)
 
     def read_candidate_bar_recoveries(
         self,
