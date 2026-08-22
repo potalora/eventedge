@@ -54,7 +54,9 @@ def _runtime_lock_context(*, exclusive: bool):
     try:
         inherited_fd = int(fd_value)
     except ValueError as error:
-        raise RuntimeLockInvalid("inherited runtime lock environment is invalid") from error
+        raise RuntimeLockInvalid(
+            "inherited runtime lock environment is invalid"
+        ) from error
     return runtime_lock(
         lock_path,
         exclusive=exclusive,
@@ -92,20 +94,14 @@ def _preflight_exit_status(
     )
     if not isinstance(report_date, str):
         return 1, f"PREFLIGHT {mode.upper()} FAILED: malformed report"
-    normalized = normalize_preflight_report(
-        report, mode=mode, trading_date=report_date
-    )
+    normalized = normalize_preflight_report(report, mode=mode, trading_date=report_date)
     if normalized is None:
         return 1, f"PREFLIGHT {mode.upper()} FAILED: malformed report"
     if mode in {"governed", "all"}:
         status = normalized["governed_probe_status"]
         failure_map = normalized["governed_failure_map"]
         recoveries = normalized["governed_bar_recoveries"]
-        ready = (
-            normalized["ok"] is True
-            and status == "ready"
-            and not failure_map
-        )
+        ready = normalized["ok"] is True and status == "ready" and not failure_map
         recovery_count = len(recoveries)
         if ready:
             return (
@@ -119,8 +115,7 @@ def _preflight_exit_status(
     failure_count = normalized["screen_failure_count"]
     return (
         0 if success else 1,
-        f"PREFLIGHT SCREEN {'OK' if success else 'FAILED'}: "
-        f"{failure_count} failure(s)",
+        f"PREFLIGHT SCREEN {'OK' if success else 'FAILED'}: {failure_count} failure(s)",
     )
 
 
@@ -182,6 +177,7 @@ def _raise_fd_limit() -> None:
         return
     except Exception:
         pass
+
     try:
         import resource
 
@@ -193,15 +189,10 @@ def _raise_fd_limit() -> None:
         pass
 
 
-def main():
-    _raise_fd_limit()
-    parser = argparse.ArgumentParser(
-        description="Run 16-cohort paper trading matrix",
-    )
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run 16-cohort paper trading matrix")
     parser.add_argument(
-        "--date",
-        default=None,
-        help="Trading date (YYYY-MM-DD). Defaults to today.",
+        "--date", default=None, help="Trading date (YYYY-MM-DD). Defaults to today."
     )
     parser.add_argument(
         "--learning",
@@ -209,9 +200,7 @@ def main():
         help="Refuse retired production learning (exit 2).",
     )
     parser.add_argument(
-        "--compare",
-        action="store_true",
-        help="Print cohort comparison report.",
+        "--compare", action="store_true", help="Print cohort comparison report."
     )
     parser.add_argument(
         "--reset",
@@ -219,17 +208,12 @@ def main():
         help="Refuse destructive reset; start a fresh generation instead.",
     )
     parser.add_argument(
-        "--no-llm",
-        action="store_true",
-        help="Disable LLM enrichment (on by default).",
+        "--no-llm", action="store_true", help="Disable LLM enrichment (on by default)."
     )
     parser.add_argument(
         "--preflight",
         action="store_true",
-        help=(
-            "Run the no-write integrity preflight (live fetch -> screen -> "
-            "event-identity staging gates) instead of the daily cycle."
-        ),
+        help="Run the no-write integrity preflight (live fetch -> screen -> event-identity staging gates) instead of the daily cycle.",
     )
     parser.add_argument(
         "--preflight-mode",
@@ -242,8 +226,10 @@ def main():
         default="",
         help="Comma-separated tickers to exclude (compliance). Also reads BLOCKED_TICKERS env var.",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
     if args.learning:
         print(
             "Production learning is disabled; no generation state was changed.",
@@ -252,59 +238,47 @@ def main():
         raise SystemExit(2)
     if args.reset:
         parser.error(
-            "reset is disabled for ledger-backed generation state; "
-            "start a fresh generation instead"
+            "reset is disabled for ledger-backed generation state; start a fresh generation instead"
         )
     if args.preflight and args.compare:
         parser.error("--preflight cannot be combined with --compare")
     if not args.preflight and args.preflight_mode is not None:
         parser.error("--preflight-mode requires --preflight")
-    preflight_mode = args.preflight_mode or "all"
+    if args.compare:
+        return ""
+    requested = args.date or date.today().isoformat()
+    try:
+        trading_session = date.fromisoformat(requested)
+    except ValueError:
+        parser.error(f"invalid ISO trading date: {requested}")
+    from tradingagents.strategies.orchestration.trading_calendar import is_session
 
-    # Bound for the checker; the flag exits above guarantee assignment
-    # before any branch that reads it (preflight or daily run).
-    exact_trading_date = ""
-    if not (args.learning or args.compare or args.reset):
-        requested = args.date or date.today().isoformat()
-        try:
-            trading_session = date.fromisoformat(requested)
-        except ValueError:
-            parser.error(f"invalid ISO trading date: {requested}")
+    if not is_session(trading_session):
+        parser.error(f"{requested} is not an XNYS session")
+    return trading_session.isoformat()
 
-        from tradingagents.strategies.orchestration.trading_calendar import is_session
 
-        if not is_session(trading_session):
-            parser.error(f"{requested} is not an XNYS session")
-        exact_trading_date = trading_session.isoformat()
-
+def _generation_identity(parser: argparse.ArgumentParser) -> tuple[str, str]:
     generation_id = os.environ.get("EVENTEDGE_GENERATION_ID", "").strip()
     generation_commit = os.environ.get("EVENTEDGE_GENERATION_COMMIT", "").strip()
     if not generation_id or not generation_commit:
         parser.error(
             "EVENTEDGE_GENERATION_ID and EVENTEDGE_GENERATION_COMMIT are required"
         )
+    return generation_id, generation_commit
 
+
+def _build_config(args: argparse.Namespace) -> dict:
     from dotenv import load_dotenv
-
-    load_dotenv()
-
-    from tradingagents.strategies.orchestration.cohort_orchestrator import (
-        CohortOrchestrator,
-        build_default_cohorts,
-    )
     from tradingagents.default_config import DEFAULT_CONFIG
 
-    # Build config with env-var overrides
+    load_dotenv()
     config = dict(DEFAULT_CONFIG)
     config["autoresearch"] = dict(config.get("autoresearch", {}))
-
-    # Allow generation manager to override state_dir via env var
     state_dir_override = os.environ.get("AUTORESEARCH_STATE_DIR")
     if state_dir_override:
         config["autoresearch"]["state_dir"] = state_dir_override
-
-    # Load all API keys from environment
-    for key in [
+    for key in (
         "finnhub_api_key",
         "fred_api_key",
         "regulations_api_key",
@@ -313,145 +287,159 @@ def main():
         "noaa_cdo_token",
         "usda_nass_api_key",
         "fmp_api_key",
-    ]:
+    ):
         env_val = os.environ.get(key.upper(), "")
         if env_val:
             config["autoresearch"][key] = env_val
-
-    # Blocked tickers (compliance, conflict of interest)
     blocked = args.block_tickers or os.environ.get("BLOCKED_TICKERS", "")
     if blocked:
-        tickers = [t.strip().upper() for t in blocked.split(",") if t.strip()]
-        config["autoresearch"]["blocked_tickers"] = tickers
-        logger.info("Blocked tickers: %s", tickers)
+        config["autoresearch"]["blocked_tickers"] = [
+            ticker.strip().upper() for ticker in blocked.split(",") if ticker.strip()
+        ]
+        logger.info("Blocked tickers: %s", config["autoresearch"]["blocked_tickers"])
+    return config
 
-    # Preflight: no-write integrity check. Routed before cohort/ledger
-    # construction so generation state is never opened.
-    if args.preflight:
-        from tradingagents.strategies.orchestration.preflight import run_preflight
-        from tradingagents.strategies.orchestration.runtime_lock import (
-            RuntimeLockBusy,
-            RuntimeLockInvalid,
-        )
 
-        try:
-            with _runtime_lock_context(exclusive=False):
-                start = time.time()
-                report = run_preflight(config, exact_trading_date, mode=preflight_mode)
-                elapsed = time.time() - start
-        except (RuntimeLockBusy, RuntimeLockInvalid) as error:
-            _exit_runtime_lock_error(error)
-        from tradingagents.strategies.orchestration.generation_manager import (
-            normalize_preflight_report,
-        )
-
-        normalized_report = normalize_preflight_report(
-            report,
-            mode=preflight_mode,
-            trading_date=exact_trading_date,
-        )
-        print(
-            json.dumps(
-                normalized_report
-                if normalized_report is not None
-                else {
-                    "ok": False,
-                    "preflight_mode": preflight_mode,
-                    "error": "malformed preflight report",
-                },
-                indent=2,
-                default=str,
-            )
-        )
-        exit_code, message = _preflight_exit_status(
-            report, preflight_mode, exact_trading_date
-        )
-        rendered = f"{message} ({exact_trading_date}, {elapsed:.1f}s)"
-        if exit_code == 0:
-            print(rendered)
-            return
-        print(rendered, file=sys.stderr)
-        sys.exit(exit_code)
-
-    def build_orchestrator():
-        cohort_configs = build_default_cohorts(config)
-        if args.no_llm:
-            for cohort_config in cohort_configs:
-                cohort_config.use_llm = False
-        return CohortOrchestrator(
-            cohort_configs,
-            config,
-            generation_id=generation_id,
-            generation_commit=generation_commit,
-        )
-
-    # Route to the right action
-    if args.compare:
-        from tradingagents.strategies.metrics.service import MetricsService
-        from tradingagents.strategies.orchestration.cohort_comparison import (
-            CohortComparison,
-        )
-
-        orchestrator = build_orchestrator()
-        ledgers = {
-            cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
-        }
-        generation_state_dir = config["autoresearch"]["state_dir"]
-        service = MetricsService(
-            generation_state_dir,
-            ledgers,
-            read_only=True,
-        )
-        print(
-            json.dumps(
-                CohortComparison(metrics_service=service).compare(),
-                indent=2,
-                default=str,
-            )
-        )
-        return
-
-    # Default: daily trading
+def _run_locked(exclusive: bool, operation):
     from tradingagents.strategies.orchestration.runtime_lock import (
         RuntimeLockBusy,
         RuntimeLockInvalid,
     )
 
-    trading_date = exact_trading_date
     try:
-        with _runtime_lock_context(exclusive=True):
-            start = time.time()
-            orchestrator = build_orchestrator()
-            result = orchestrator.run_daily(trading_date)
-            elapsed = time.time() - start
+        with _runtime_lock_context(exclusive=exclusive):
+            return operation()
     except (RuntimeLockBusy, RuntimeLockInvalid) as error:
         _exit_runtime_lock_error(error)
 
+
+def _build_orchestrator(args, config: dict, generation_id: str, generation_commit: str):
+    from tradingagents.strategies.orchestration.cohort_orchestrator import (
+        CohortOrchestrator,
+        build_default_cohorts,
+    )
+
+    cohort_configs = build_default_cohorts(config)
+    if args.no_llm:
+        for cohort_config in cohort_configs:
+            cohort_config.use_llm = False
+    return CohortOrchestrator(
+        cohort_configs,
+        config,
+        generation_id=generation_id,
+        generation_commit=generation_commit,
+    )
+
+
+def _run_preflight(config: dict, trading_date: str, mode: str) -> None:
+    from tradingagents.strategies.orchestration.preflight import run_preflight
+    from tradingagents.strategies.orchestration.generation_manager import (
+        normalize_preflight_report,
+    )
+
+    def operation():
+        start = time.time()
+        report = run_preflight(config, trading_date, mode=mode)
+        return report, time.time() - start
+
+    report, elapsed = _run_locked(False, operation)
+    normalized = normalize_preflight_report(
+        report, mode=mode, trading_date=trading_date
+    )
+    print(
+        json.dumps(
+            normalized
+            if normalized is not None
+            else {
+                "ok": False,
+                "preflight_mode": mode,
+                "error": "malformed preflight report",
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    exit_code, message = _preflight_exit_status(report, mode, trading_date)
+    rendered = f"{message} ({trading_date}, {elapsed:.1f}s)"
+    if exit_code == 0:
+        print(rendered)
+        return
+    print(rendered, file=sys.stderr)
+    raise SystemExit(exit_code)
+
+
+def _run_compare(
+    args, config: dict, generation_id: str, generation_commit: str
+) -> None:
+    from tradingagents.strategies.metrics.service import MetricsService
+    from tradingagents.strategies.orchestration.cohort_comparison import (
+        CohortComparison,
+    )
+
+    orchestrator = _build_orchestrator(args, config, generation_id, generation_commit)
+    ledgers = {
+        cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
+    }
+    service = MetricsService(
+        config["autoresearch"]["state_dir"], ledgers, read_only=True
+    )
+    print(
+        json.dumps(
+            CohortComparison(metrics_service=service).compare(), indent=2, default=str
+        )
+    )
+
+
+def _run_daily(
+    args, config: dict, trading_date: str, generation_id: str, generation_commit: str
+) -> None:
     from tradingagents.strategies.orchestration.run_outcome import (
         DAILY_RESULT_PREFIX,
         DAILY_RESULT_WIRE_VERSION,
     )
 
-    # Surface execution failures and alertable degradation distinctly. A
-    # completed degraded run exits zero but remains non-clean in its wire data.
+    def operation():
+        start = time.time()
+        result = _build_orchestrator(
+            args, config, generation_id, generation_commit
+        ).run_daily(trading_date)
+        return result, time.time() - start
+
+    result, elapsed = _run_locked(True, operation)
     try:
-        exit_code, message = _cohort_run_exit_status(
-            result, trading_date=trading_date
-        )
+        exit_code, message = _cohort_run_exit_status(result, trading_date=trading_date)
     except Exception:
         print("ERROR: invalid cohort reporting payload", file=sys.stderr)
-        sys.exit(1)
-
+        raise SystemExit(1)
     print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
-    envelope = {
-        "wire_version": DAILY_RESULT_WIRE_VERSION,
-        "cohort_results": result,
-    }
-    print(DAILY_RESULT_PREFIX + json.dumps(envelope, default=str))
+    print(
+        DAILY_RESULT_PREFIX
+        + json.dumps(
+            {"wire_version": DAILY_RESULT_WIRE_VERSION, "cohort_results": result},
+            default=str,
+        )
+    )
     if message:
         print(message, file=sys.stderr)
     if exit_code:
-        sys.exit(exit_code)
+        raise SystemExit(exit_code)
+
+
+def main():
+    _raise_fd_limit()
+    parser = _build_parser()
+    args = parser.parse_args()
+    exact_trading_date = _validate_args(args, parser)
+    generation_id, generation_commit = _generation_identity(parser)
+    config = _build_config(args)
+    preflight_mode = args.preflight_mode or "all"
+    if args.preflight:
+        _run_preflight(config, exact_trading_date, preflight_mode)
+        return
+    if args.compare:
+        _run_compare(args, config, generation_id, generation_commit)
+        return
+    _run_daily(args, config, exact_trading_date, generation_id, generation_commit)
 
 
 if __name__ == "__main__":
