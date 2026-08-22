@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
 from tradingagents.strategies.orchestration.trading_calendar import is_session
@@ -39,6 +40,104 @@ _CANDIDATE_ISSUE_ID_RE = re.compile(r"candidate_input_issue_[0-9a-f]{32}")
 _EPOCH_ID_RE = re.compile(
     r"(?P<generation>[A-Za-z0-9][A-Za-z0-9_-]{0,127})-(?P<session>[0-9]{4}-[0-9]{2}-[0-9]{2})-[0-9a-f]{16}"
 )
+
+
+@dataclass
+class DailyFinalizationState:
+    """Mutable per-run state required by the daily result finalizer."""
+
+    metric_store: Any
+    epoch_id: str | None
+    session: date
+    candidate_issue_references: list[dict[str, object]] = field(default_factory=list)
+    candidate_issues_hydrated: bool = False
+    candidate_bar_quarantine_suppressions: set[str] = field(default_factory=set)
+    candidate_issue_reference_suppressions: set[str] = field(default_factory=set)
+    governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = field(
+        default_factory=dict
+    )
+
+
+def finalize_daily_results(
+    state: DailyFinalizationState,
+    finalized: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply the daily run's canonical result finalization semantics."""
+    if not state.candidate_issues_hydrated:
+        by_id = {
+            str(reference["issue_id"]): reference
+            for reference in state.candidate_issue_references
+            if reference["issue_id"]
+            not in state.candidate_issue_reference_suppressions
+        }
+        if state.epoch_id is not None:
+            issues = state.metric_store.read_candidate_input_issues(
+                state.epoch_id, state.session
+            )
+            for issue in issues:
+                if issue.issue_id in state.candidate_issue_reference_suppressions:
+                    continue
+                issue.validate_integrity()
+                if issue.epoch_id != state.epoch_id or issue.session != state.session:
+                    raise ValueError("candidate input issue durable scope is invalid")
+                reference = issue.reference()
+                issue_id = str(reference["issue_id"])
+                if issue_id not in by_id:
+                    by_id[issue_id] = reference
+        state.candidate_issue_references[:] = sorted(
+            by_id.values(),
+            key=lambda reference: (
+                str(reference["session"]),
+                str(reference["dependency_kind"]),
+                str(reference["ticker"]),
+                str(reference["issue_id"]),
+            ),
+        )
+        state.candidate_issues_hydrated = True
+    for name, summaries in state.governed_summaries_by_cohort.items():
+        result = finalized.get(name)
+        if not summaries or not isinstance(result, dict):
+            continue
+        result["degraded"] = True
+        result.setdefault("execution_valid", not bool(result.get("error")))
+        result.setdefault("staging_valid", False)
+        result.setdefault("candidate_bar_quarantines", [])
+        result["governed_bar_recoveries"] = summaries
+        result.setdefault("governed_failure_map", {})
+    for name, result in finalized.items():
+        if not isinstance(result, dict):
+            continue
+        result.setdefault("degraded", False)
+        result.setdefault("execution_valid", not bool(result.get("error")))
+        result.setdefault(
+            "staging_valid",
+            not bool(result.get("error")) and not bool(result["degraded"]),
+        )
+        result.setdefault("candidate_bar_quarantines", [])
+        references = [
+            reference
+            for reference in state.candidate_issue_references
+            if name in reference["affected_cohorts"]
+        ]
+        if not references:
+            continue
+        result["candidate_input_issues"] = references
+        result["degraded"] = True
+        result["staging_valid"] = False
+        result["candidate_bar_quarantines"] = sorted(
+            {
+                *result["candidate_bar_quarantines"],
+                *(
+                    str(reference["ticker"])
+                    for reference in references
+                    if reference["dependency_kind"] == "reference_bar"
+                    and reference["ticker"]
+                    not in state.candidate_bar_quarantine_suppressions
+                ),
+            }
+            - state.candidate_bar_quarantine_suppressions
+        )
+    return finalized
 
 
 def aggregate_candidate_input_issues(

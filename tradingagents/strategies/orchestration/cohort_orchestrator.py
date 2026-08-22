@@ -1312,6 +1312,10 @@ class CohortOrchestrator:
         from tradingagents.strategies.orchestration.governed_market_data import (
             GovernedMarketDataError,
         )
+        from tradingagents.strategies.orchestration.daily_pipeline import (
+            DailyFinalizationState,
+            finalize_daily_results,
+        )
         from tradingagents.strategies.orchestration.trading_calendar import (
             is_session,
             previous_session,
@@ -1331,92 +1335,28 @@ class CohortOrchestrator:
         results: dict[str, Any] = {}
         governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = {}
         candidate_issue_references: list[dict[str, object]] = []
-        candidate_issues_hydrated = False
-        candidate_bar_quarantine_suppressions: set[str] = set()
-        candidate_issue_reference_suppressions: set[str] = set()
+        finalization_state = DailyFinalizationState(
+            metric_store=self._metric_store,
+            epoch_id=self._epoch_id,
+            session=session,
+            candidate_issue_references=candidate_issue_references,
+            candidate_bar_quarantine_suppressions=set(),
+            candidate_issue_reference_suppressions=set(),
+            governed_summaries_by_cohort=governed_summaries_by_cohort,
+        )
+        candidate_bar_quarantine_suppressions = (
+            finalization_state.candidate_bar_quarantine_suppressions
+        )
+        candidate_issue_reference_suppressions = (
+            finalization_state.candidate_issue_reference_suppressions
+        )
 
         def finalize_results(
             finalized: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            nonlocal candidate_issue_references, candidate_issues_hydrated
-            finalized = results if finalized is None else finalized
-            if not candidate_issues_hydrated:
-                by_id = {
-                    str(reference["issue_id"]): reference
-                    for reference in candidate_issue_references
-                    if reference["issue_id"]
-                    not in candidate_issue_reference_suppressions
-                }
-                if self._epoch_id is not None:
-                    issues = self._metric_store.read_candidate_input_issues(
-                        self._epoch_id, session
-                    )
-                    for issue in issues:
-                        if issue.issue_id in candidate_issue_reference_suppressions:
-                            continue
-                        issue.validate_integrity()
-                        if issue.epoch_id != self._epoch_id or issue.session != session:
-                            raise ValueError(
-                                "candidate input issue durable scope is invalid"
-                            )
-                        reference = issue.reference()
-                        issue_id = str(reference["issue_id"])
-                        if issue_id not in by_id:
-                            by_id[issue_id] = reference
-                candidate_issue_references = sorted(
-                    by_id.values(),
-                    key=lambda reference: (
-                        str(reference["session"]),
-                        str(reference["dependency_kind"]),
-                        str(reference["ticker"]),
-                        str(reference["issue_id"]),
-                    ),
-                )
-                candidate_issues_hydrated = True
-            for name, summaries in governed_summaries_by_cohort.items():
-                result = finalized.get(name)
-                if not summaries or not isinstance(result, dict):
-                    continue
-                result["degraded"] = True
-                result.setdefault("execution_valid", not bool(result.get("error")))
-                result.setdefault("staging_valid", False)
-                result.setdefault("candidate_bar_quarantines", [])
-                result["governed_bar_recoveries"] = summaries
-                result.setdefault("governed_failure_map", {})
-            for name, result in finalized.items():
-                if not isinstance(result, dict):
-                    continue
-                result.setdefault("degraded", False)
-                result.setdefault("execution_valid", not bool(result.get("error")))
-                result.setdefault(
-                    "staging_valid",
-                    not bool(result.get("error")) and not bool(result["degraded"]),
-                )
-                result.setdefault("candidate_bar_quarantines", [])
-                references = [
-                    reference
-                    for reference in candidate_issue_references
-                    if name in reference["affected_cohorts"]
-                ]
-                if not references:
-                    continue
-                result["candidate_input_issues"] = references
-                result["degraded"] = True
-                result["staging_valid"] = False
-                result["candidate_bar_quarantines"] = sorted(
-                    {
-                        *result["candidate_bar_quarantines"],
-                        *(
-                            str(reference["ticker"])
-                            for reference in references
-                            if reference["dependency_kind"] == "reference_bar"
-                            and reference["ticker"]
-                            not in candidate_bar_quarantine_suppressions
-                        ),
-                    }
-                    - candidate_bar_quarantine_suppressions
-                )
-            return finalized
+            return finalize_daily_results(
+                finalization_state, results if finalized is None else finalized
+            )
 
         def finalize_critical_gap(*args: Any, **kwargs: Any) -> dict[str, Any]:
             return finalize_results(
@@ -1440,6 +1380,7 @@ class CohortOrchestrator:
                 )
                 raise boundary_error
             self._epoch_id = pending_gap.epoch_id
+            finalization_state.epoch_id = self._epoch_id
             recovered = self._complete_pending_critical_gap(
                 pending_gap, processed_at, results
             )
@@ -1451,6 +1392,7 @@ class CohortOrchestrator:
             self._metric_epoch_context, session
         )
         self._epoch_id = metric_epoch.epoch_id
+        finalization_state.epoch_id = self._epoch_id
         session_candidate_quarantines = sorted(
             record.ticker
             for record in self._metric_store.read_candidate_bar_recoveries(
