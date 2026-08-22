@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
 from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
@@ -800,6 +802,97 @@ def _candidate_frame(aapl_close: object, msft_close: object) -> pd.DataFrame:
         index=pd.DatetimeIndex([_SESSION.isoformat()]),
         columns=columns,
     )
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_candidate_provider_failures_are_bounded_and_retried_per_ticker(mock_download):
+    """A failed batch and retry cannot leak text or abort later candidates."""
+    good_ncl = _daily_frame(
+        {"NCL": {"Open": 20, "High": 22, "Low": 19, "Close": 21}},
+        session=_SESSION,
+    )
+    good_zkh = _daily_frame(
+        {"ZKH": {"Open": 30, "High": 33, "Low": 29, "Close": 32}},
+        session=_SESSION,
+    )
+    mock_download.side_effect = [
+        RuntimeError("batch provider secret: request-123"),
+        good_ncl,
+        RuntimeError("UI provider secret: token-456"),
+        good_zkh,
+    ]
+    source = YFinancePriceSource(now=lambda: _AS_OF)
+
+    resolution = source.resolve_candidate_daily_bars(
+        ["NCL", "UI", "ZKH"], _SESSION, _AS_OF, timedelta(hours=24)
+    )
+
+    assert [call.args[0] for call in mock_download.call_args_list] == [
+        ["NCL", "UI", "ZKH"],
+        ["NCL"],
+        ["UI"],
+        ["ZKH"],
+    ]
+    assert set(resolution.bars) == {("NCL", _SESSION), ("ZKH", _SESSION)}
+    assert resolution.recovered_tickers == frozenset({"NCL", "ZKH"})
+    assert resolution.quarantined_tickers == frozenset({"UI"})
+    assert [
+        (attempt.ticker, attempt.attempt, attempt.validation_error)
+        for attempt in resolution.attempts
+    ] == [
+        ("NCL", 1, "provider_error NCL/2026-07-31"),
+        ("UI", 1, "provider_error UI/2026-07-31"),
+        ("ZKH", 1, "provider_error ZKH/2026-07-31"),
+        ("NCL", 2, None),
+        ("UI", 2, "provider_error UI/2026-07-31"),
+        ("ZKH", 2, None),
+    ]
+    serialized = json.dumps(
+        [asdict(attempt) for attempt in resolution.attempts], default=str
+    )
+    assert "provider secret" not in serialized
+    assert "request-123" not in serialized
+    assert "token-456" not in serialized
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+@pytest.mark.parametrize("error_type", (TypeError, ValueError))
+def test_candidate_bar_programmer_error_is_not_normalized(
+    mock_download, monkeypatch, error_type
+):
+    mock_download.return_value = _daily_frame(
+        {"NCL": {"Open": 20, "High": 22, "Low": 19, "Close": 21}},
+        session=_SESSION,
+    )
+    source = YFinancePriceSource(now=lambda: _AS_OF)
+
+    def invariant_failure(*_args, **_kwargs):
+        raise error_type("candidate parser invariant failed")
+
+    monkeypatch.setattr(source, "_candidate_bar_attempt", invariant_failure)
+
+    with pytest.raises(error_type, match="candidate parser invariant failed"):
+        source.resolve_candidate_daily_bars(
+            ["NCL"], _SESSION, _AS_OF, timedelta(hours=24)
+        )
+
+
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_candidate_malformed_provider_result_is_bounded_invalid_data(mock_download):
+    mock_download.side_effect = [None, None]
+    source = YFinancePriceSource(now=lambda: _AS_OF)
+
+    resolution = source.resolve_candidate_daily_bars(
+        ["NCL"], _SESSION, _AS_OF, timedelta(hours=24)
+    )
+
+    assert mock_download.call_count == 2
+    assert resolution.bars == {}
+    assert resolution.quarantined_tickers == frozenset({"NCL"})
+    assert [attempt.validation_error for attempt in resolution.attempts] == [
+        "invalid_data NCL/2026-07-31",
+        "invalid_data NCL/2026-07-31",
+    ]
 
 
 @patch("tradingagents.strategies.execution.price_source.yf.download")

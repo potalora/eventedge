@@ -7,6 +7,8 @@ with shared data fetching.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field, replace
@@ -233,6 +235,13 @@ def _candidate_replay_conflict_reason(tickers: list[str]) -> str:
     )
 
 
+def _candidate_classification_conflict_reason(tickers: list[str]) -> str:
+    """Build a bounded report reason for candidate/governed scope conflicts."""
+    displayed = [ticker[:32] for ticker in sorted(tickers)[:10]]
+    suffix = f" (+{len(tickers) - len(displayed)} more)" if len(tickers) > 10 else ""
+    return "candidate/governed classification conflict: " + ", ".join(displayed) + suffix
+
+
 def _candidate_signal_identity_scope(
     horizon_signals: dict[str, tuple[list[dict], dict, list[Any]]], session: date
 ) -> tuple[dict[str, str], ...]:
@@ -268,6 +277,136 @@ def _candidate_signal_identity_scope(
                 identity["strategy"],
             ),
         )
+    )
+
+
+def _candidate_issue_digest(value: object) -> str:
+    """Return a deterministic SHA-256 boundary for candidate issue evidence."""
+
+    def canonical(item: object) -> object:
+        if isinstance(item, datetime):
+            return item.isoformat()
+        if isinstance(item, date):
+            return item.isoformat()
+        if isinstance(item, Decimal):
+            return str(item)
+        if isinstance(item, dict):
+            return {
+                str(key): canonical(child)
+                for key, child in sorted(item.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(item, (list, tuple)):
+            return [canonical(child) for child in item]
+        return item
+
+    payload = json.dumps(
+        canonical(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _candidate_bar_recovery_id(
+    *,
+    epoch_id: str,
+    session: date,
+    ticker: str,
+    outcome: str,
+    attempts: tuple[dict[str, object], ...],
+    signal_identities: tuple[dict[str, str], ...],
+) -> str:
+    """Bind compatibility recovery identity to its complete canonical evidence."""
+    from tradingagents.strategies.execution.ids import stable_id
+
+    return stable_id(
+        "candidate_bar_recovery",
+        {
+            "epoch_id": epoch_id,
+            "session": session,
+            "ticker": ticker,
+            "outcome": outcome,
+            "attempts": attempts,
+            "signal_identities": signal_identities,
+        },
+    )
+
+
+def _candidate_reference_issue(
+    record: Any,
+    *,
+    signal_identity_scope: tuple[dict[str, str], ...],
+    cohorts: list[dict[str, Any]],
+) -> Any:
+    """Rebuild typed reference-bar issue evidence from compatibility recovery."""
+    from tradingagents.strategies.execution.ids import stable_id
+    from tradingagents.strategies.orchestration.candidate_inputs import (
+        CandidateInputIssue,
+    )
+
+    identities = tuple(
+        {
+            "event_key": identity["event_key"],
+            "strategy": identity["strategy"],
+        }
+        for identity in signal_identity_scope
+        if identity["ticker"] == record.ticker
+    )
+    horizons = {
+        identity["horizon"]
+        for identity in signal_identity_scope
+        if identity["ticker"] == record.ticker
+    }
+    affected_cohorts = tuple(
+        cohort["config"].name
+        for cohort in cohorts
+        if cohort["config"].horizon in horizons
+    )
+    if not identities or not affected_cohorts:
+        raise ValueError(
+            f"candidate issue scope is incomplete for {record.ticker}"
+        )
+    final_attempt = record.attempts[-1]
+    validation_error = str(final_attempt["validation_error"] or "")
+    if validation_error.startswith("provider_error "):
+        reason_code = "provider_error"
+    elif validation_error.startswith("missing "):
+        reason_code = "missing_data"
+    elif validation_error.startswith(("stale ", "pre-close ")):
+        reason_code = "stale_data"
+    else:
+        reason_code = "invalid_data"
+    observed_sessions = tuple(
+        record.session
+        for attempt in record.attempts
+        if any(attempt[field] is not None for field in ("open", "high", "low", "close"))
+    )
+    return CandidateInputIssue.create(
+        issue_id=stable_id(
+            "candidate_input_issue",
+            record.epoch_id,
+            record.session,
+            "reference_bar",
+            record.ticker,
+        ),
+        epoch_id=record.epoch_id,
+        session=record.session,
+        dependency_kind="reference_bar",
+        reason_code=reason_code,
+        ticker=record.ticker,
+        source=str(final_attempt["source"]),
+        fetched_at=final_attempt["fetched_at"],
+        requested_history_digest=_candidate_issue_digest(
+            {
+                "dependency_kind": "reference_bar",
+                "ticker": record.ticker,
+                "expected_sessions": (record.session,),
+            }
+        ),
+        returned_history_digest=_candidate_issue_digest(record.attempts),
+        expected_sessions=(record.session,),
+        observed_sessions=observed_sessions,
+        retryable=False,
+        affected_signal_identities=identities,
+        affected_cohorts=affected_cohorts,
     )
 
 
@@ -1220,6 +1359,7 @@ class CohortOrchestrator:
         stage_only: list[dict[str, Any]] = []
         execution_needed: list[dict[str, Any]] = []
         governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = {}
+        candidate_issue_references: list[dict[str, object]] = []
 
         def finalize_results() -> dict[str, Any]:
             for name, summaries in governed_summaries_by_cohort.items():
@@ -1232,6 +1372,20 @@ class CohortOrchestrator:
                 result.setdefault("candidate_bar_quarantines", [])
                 result["governed_bar_recoveries"] = summaries
                 result.setdefault("governed_failure_map", {})
+            for name, result in results.items():
+                if not isinstance(result, dict):
+                    continue
+                references = [
+                    reference
+                    for reference in candidate_issue_references
+                    if name in reference["affected_cohorts"]
+                ]
+                if not references:
+                    continue
+                result["candidate_input_issues"] = references
+                result["degraded"] = True
+                result.setdefault("execution_valid", not bool(result.get("error")))
+                result.setdefault("staging_valid", False)
             return results
 
         for cohort in self.cohorts:
@@ -1753,12 +1907,57 @@ class CohortOrchestrator:
             )
         }
         partial_replay = bool(completed_cohorts)
+        classification_conflicts = sorted(
+            set(stored_recoveries) & set(governed_reference_bars)
+        )
+        recovery_identity_conflicts = sorted(
+            ticker
+            for ticker, record in stored_recoveries.items()
+            if record.recovery_id
+            != _candidate_bar_recovery_id(
+                epoch_id=record.epoch_id,
+                session=record.session,
+                ticker=record.ticker,
+                outcome=record.outcome,
+                attempts=record.attempts,
+                signal_identities=record.signal_identities,
+            )
+        )
         existing_quarantines = sorted(
             record.ticker
             for record in stored_recoveries.values()
             if record.outcome == "quarantined"
+            and record.ticker not in governed_reference_bars
         )
+
+        def fail_candidate_classification(conflicts: list[str]) -> dict[str, Any]:
+            safe_quarantines = sorted(
+                ticker
+                for ticker in set(existing_quarantines) | quarantined_tickers
+                if ticker not in governed_reference_bars
+            )
+            reason = _candidate_classification_conflict_reason(conflicts)
+            for result in results.values():
+                if not isinstance(result, dict):
+                    continue
+                result["candidate_bar_quarantines"] = [
+                    ticker
+                    for ticker in result.get("candidate_bar_quarantines", ())
+                    if ticker not in governed_reference_bars
+                ]
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": bool(safe_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": safe_quarantines,
+                }
+            return finalize_results()
+
         replay_identity_conflicts: set[str] = set()
+        issue_identity_scope: tuple[dict[str, str], ...] = ()
         try:
             from tradingagents.strategies.execution.ids import stable_id
             from tradingagents.strategies.metrics.models import (
@@ -1774,6 +1973,7 @@ class CohortOrchestrator:
                 )
             )
             if stored_identity_binding is None:
+                issue_identity_scope = current_identity_scope
                 if partial_replay or stored_recoveries:
                     replay_identity_conflicts.update(signal_tickers)
                     replay_identity_conflicts.update(stored_recoveries)
@@ -1793,6 +1993,7 @@ class CohortOrchestrator:
                         )
                     )
             else:
+                issue_identity_scope = stored_identity_binding.identities
                 unfinished_horizons = set(horizon_signals)
                 stored_unfinished_scope = tuple(
                     identity
@@ -1806,6 +2007,70 @@ class CohortOrchestrator:
                 )
         except Exception as error:
             reason = f"candidate identity validation failed: {error}"
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": bool(existing_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": existing_quarantines,
+                }
+            return finalize_results()
+        try:
+            stored_reference_issues = {
+                issue.ticker: issue
+                for issue in self._metric_store.read_candidate_input_issues(
+                    self._epoch_id, session
+                )
+                if issue.dependency_kind == "reference_bar"
+            }
+            for ticker, record in stored_recoveries.items():
+                stored_issue = stored_reference_issues.pop(ticker, None)
+                if record.outcome != "quarantined":
+                    if stored_issue is not None:
+                        raise ValueError(
+                            f"candidate reference-bar issue conflicts with resolved {ticker}"
+                        )
+                    continue
+                if stored_issue is not None:
+                    candidate_issue_references.append(stored_issue.reference())
+                expected = _candidate_reference_issue(
+                    record,
+                    signal_identity_scope=issue_identity_scope,
+                    cohorts=self.cohorts,
+                )
+                if stored_issue is None:
+                    if (
+                        not replay_identity_conflicts
+                        and not recovery_identity_conflicts
+                        and not classification_conflicts
+                    ):
+                        self._metric_store.save_candidate_input_issue(expected)
+                        candidate_issue_references.append(expected.reference())
+                elif stored_issue.canonical_payload() != expected.canonical_payload():
+                    raise ValueError(
+                        f"candidate reference-bar issue has unequal replay evidence for {ticker}"
+                    )
+            if stored_reference_issues:
+                raise ValueError(
+                    "candidate reference-bar issue is missing compatibility recovery evidence"
+                )
+        except Exception:
+            if not candidate_issue_references:
+                for record in stored_recoveries.values():
+                    if record.outcome != "quarantined":
+                        continue
+                    try:
+                        expected = _candidate_reference_issue(
+                            record,
+                            signal_identity_scope=issue_identity_scope,
+                            cohorts=self.cohorts,
+                        )
+                    except Exception:
+                        continue
+                    candidate_issue_references.append(expected.reference())
+            reason = "candidate reference-bar validation failed"
             for cohort in valid_cohorts:
                 results[cohort["config"].name] = {
                     "error": True,
@@ -1830,14 +2095,32 @@ class CohortOrchestrator:
                     "candidate_bar_quarantines": existing_quarantines,
                 }
             return finalize_results()
-        existing_recoveries = stored_recoveries
+        if recovery_identity_conflicts:
+            reason = "candidate reference-bar validation failed"
+            for cohort in valid_cohorts:
+                results[cohort["config"].name] = {
+                    "error": True,
+                    "invalid_reason": reason,
+                    "degraded": bool(existing_quarantines),
+                    "execution_valid": True,
+                    "staging_valid": False,
+                    "candidate_bar_quarantines": existing_quarantines,
+                }
+            return finalize_results()
+        if classification_conflicts:
+            return fail_candidate_classification(classification_conflicts)
+        existing_recoveries = {
+            ticker: record
+            for ticker, record in stored_recoveries.items()
+            if ticker in candidate_only_tickers
+        }
         try:
             from tradingagents.strategies.execution.models import MarketBar
             from tradingagents.strategies.execution.price_source import (
                 CandidateBarAttempt,
                 CandidateBarResolution,
+                validate_required_bars,
             )
-            from tradingagents.strategies.execution.ids import stable_id
             from tradingagents.strategies.metrics.models import (
                 CandidateBarRecoveryRecord,
             )
@@ -1854,7 +2137,7 @@ class CohortOrchestrator:
                     raise ValueError(
                         f"resolved candidate evidence is incomplete for {ticker}"
                     )
-                candidate_reference_bars[ticker] = MarketBar(
+                bar = MarketBar(
                     ticker,
                     session,
                     evidence["open"],
@@ -1865,6 +2148,18 @@ class CohortOrchestrator:
                     evidence["fetched_at"],
                     False,
                 )
+                validate_required_bars(
+                    {(ticker, session): bar},
+                    {ticker},
+                    session,
+                    bar.fetched_at,
+                    timedelta.max,
+                )
+                if bar.fetched_at < session_close(session):
+                    raise ValueError(
+                        f"resolved candidate evidence is pre-close for {ticker}"
+                    )
+                candidate_reference_bars[ticker] = bar
 
             resolutions: list[tuple[set[str], CandidateBarResolution]] = []
             unresolved_candidates = candidate_only_tickers - set(existing_recoveries)
@@ -1925,6 +2220,69 @@ class CohortOrchestrator:
                 resolutions.append((unresolved_candidates, resolution))
 
             for resolution_tickers, resolution in resolutions:
+                if any(
+                    bar_session != session
+                    for _ticker, bar_session in resolution.bars
+                ):
+                    raise ValueError("candidate resolution session mismatch")
+                bar_tickers = {ticker for ticker, _session in resolution.bars}
+                recovered = set(resolution.recovered_tickers)
+                quarantined = set(resolution.quarantined_tickers)
+                attempt_tickers = {attempt.ticker for attempt in resolution.attempts}
+                resolution_scope = (
+                    bar_tickers | recovered | quarantined | attempt_tickers
+                )
+                governed_output_conflicts = sorted(
+                    resolution_scope & set(governed_reference_bars)
+                )
+                if governed_output_conflicts:
+                    return fail_candidate_classification(governed_output_conflicts)
+                if (
+                    resolution_scope != resolution_tickers
+                    or attempt_tickers != resolution_tickers
+                    or bar_tickers | quarantined != resolution_tickers
+                    or bar_tickers & quarantined
+                    or recovered & quarantined
+                    or not recovered <= bar_tickers
+                ):
+                    raise ValueError("candidate resolution state is contradictory")
+                # Fresh staging must be reproducible from the evidence replay persists.
+                for ticker in sorted(resolution_tickers):
+                    ticker_attempts = tuple(
+                        attempt
+                        for attempt in resolution.attempts
+                        if attempt.ticker == ticker
+                    )
+                    final_attempt = ticker_attempts[-1]
+                    if ticker in quarantined:
+                        if final_attempt.validation_error is None:
+                            raise ValueError(
+                                "candidate quarantine has successful final evidence"
+                            )
+                        continue
+                    bar = resolution.bars[(ticker, session)]
+                    if final_attempt.validation_error is not None or (
+                        bar.ticker,
+                        bar.session,
+                        bar.open,
+                        bar.high,
+                        bar.low,
+                        bar.close,
+                        bar.source,
+                        bar.fetched_at,
+                    ) != (
+                        ticker,
+                        session,
+                        final_attempt.open,
+                        final_attempt.high,
+                        final_attempt.low,
+                        final_attempt.close,
+                        final_attempt.source,
+                        final_attempt.fetched_at,
+                    ):
+                        raise ValueError(
+                            "candidate bar differs from successful final evidence"
+                        )
                 candidate_reference_bars.update(
                     {
                         ticker: bar
@@ -1943,39 +2301,52 @@ class CohortOrchestrator:
                         for attempt in resolution.attempts
                         if attempt.ticker == ticker
                     )
-                    self._metric_store.save_candidate_bar_recovery(
-                        CandidateBarRecoveryRecord(
-                            recovery_id=stable_id(
-                                "candidate_bar_recovery",
-                                self._epoch_id,
-                                session,
-                                ticker,
-                            ),
+                    outcome = (
+                        "quarantined"
+                        if ticker in resolution.quarantined_tickers
+                        else (
+                            "recovered"
+                            if ticker in resolution.recovered_tickers
+                            else "accepted"
+                        )
+                    )
+                    signal_identities = tuple(
+                        {
+                            "event_key": event_key,
+                            "strategy": strategy,
+                        }
+                        for event_key, strategy in identities
+                    )
+                    recovery = CandidateBarRecoveryRecord(
+                        recovery_id=_candidate_bar_recovery_id(
                             epoch_id=self._epoch_id,
                             session=session,
                             ticker=ticker,
-                            outcome=(
-                                "quarantined"
-                                if ticker in resolution.quarantined_tickers
-                                else (
-                                    "recovered"
-                                    if ticker in resolution.recovered_tickers
-                                    else "accepted"
-                                )
-                            ),
+                            outcome=outcome,
                             attempts=attempts,
-                            signal_identities=tuple(
-                                {
-                                    "event_key": event_key,
-                                    "strategy": strategy,
-                                }
-                                for event_key, strategy in identities
-                            ),
-                        )
+                            signal_identities=signal_identities,
+                        ),
+                        epoch_id=self._epoch_id,
+                        session=session,
+                        ticker=ticker,
+                        outcome=outcome,
+                        attempts=attempts,
+                        signal_identities=signal_identities,
                     )
-        except Exception as error:
-            reason = f"candidate reference-bar validation failed: {error}"
-            failed_quarantines = sorted(quarantined_tickers)
+                    self._metric_store.save_candidate_bar_recovery(recovery)
+                    if recovery.outcome == "quarantined":
+                        issue = _candidate_reference_issue(
+                            recovery,
+                            signal_identity_scope=issue_identity_scope,
+                            cohorts=self.cohorts,
+                        )
+                        self._metric_store.save_candidate_input_issue(issue)
+                        candidate_issue_references.append(issue.reference())
+        except Exception:
+            reason = "candidate reference-bar validation failed"
+            failed_quarantines = sorted(
+                set(existing_quarantines) | quarantined_tickers
+            )
             for cohort in valid_cohorts:
                 results[cohort["config"].name] = {
                     "error": True,
@@ -2007,7 +2378,9 @@ class CohortOrchestrator:
                 for signal in signals
             ]
 
-        candidate_bar_quarantines = sorted(quarantined_tickers)
+        candidate_bar_quarantines = sorted(
+            set(existing_quarantines) | quarantined_tickers
+        )
         staging_valid = not candidate_bar_quarantines
         for horizon, (_signals, regime, _health) in horizon_signals.items():
             first_engine.state.save_regime_snapshot(
@@ -2104,11 +2477,14 @@ class CohortOrchestrator:
                     }
                 return finalize_results()
 
+        merge_conflicts = sorted(
+            set(governed_reference_bars) & set(candidate_reference_bars)
+        )
+        if merge_conflicts:
+            return fail_candidate_classification(merge_conflicts)
         enrichment = self._fetch_openbb_enrichment(all_signals)
-        shared_data["_execution_reference_bars"] = {
-            **governed_reference_bars,
-            **candidate_reference_bars,
-        }
+        shared_data["_execution_reference_bars"] = dict(governed_reference_bars)
+        shared_data["_execution_reference_bars"].update(candidate_reference_bars)
 
         for cohort in valid_cohorts:
             cfg = cohort["config"]

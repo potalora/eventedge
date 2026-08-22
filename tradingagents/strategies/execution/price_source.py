@@ -610,37 +610,50 @@ class YFinancePriceSource:
     ) -> CandidateBarResolution:
         """Return valid candidate bars, retrying only initially invalid tickers once."""
         self._validate_range(tickers, session, session)
-        frame, fetched_at = self._raw_frame(tickers, session, session, adjusted=False)
+        frame, fetched_at, provider_failed = self._candidate_raw_frame(
+            tickers, session
+        )
         validation_at = max(processed_at, self._fetched_at())
         attempts: list[CandidateBarAttempt] = []
         bars: dict[tuple[str, date], MarketBar] = {}
         invalid_tickers: list[str] = []
         for ticker in tickers:
-            try:
-                bar, attempt = self._candidate_bar_attempt(
-                    frame,
-                    ticker,
-                    tickers,
-                    session,
-                    fetched_at,
-                    1,
-                    validation_at,
-                    max_age,
-                )
-            except BarValidationError as error:
+            if provider_failed:
                 bar = None
-                attempt = CandidateBarAttempt(
-                    ticker=ticker,
-                    session=session,
-                    attempt=1,
-                    source="yfinance",
-                    fetched_at=fetched_at,
-                    open=None,
-                    high=None,
-                    low=None,
-                    close=None,
-                    validation_error=str(error),
+                attempt = self._candidate_failure_attempt(
+                    ticker, session, 1, fetched_at, "provider_error"
                 )
+            elif not isinstance(frame, pd.DataFrame):
+                bar = None
+                attempt = self._candidate_failure_attempt(
+                    ticker, session, 1, fetched_at, "invalid_data"
+                )
+            else:
+                try:
+                    bar, attempt = self._candidate_bar_attempt(
+                        frame,
+                        ticker,
+                        tickers,
+                        session,
+                        fetched_at,
+                        1,
+                        validation_at,
+                        max_age,
+                    )
+                except BarValidationError as error:
+                    bar = None
+                    attempt = CandidateBarAttempt(
+                        ticker=ticker,
+                        session=session,
+                        attempt=1,
+                        source="yfinance",
+                        fetched_at=fetched_at,
+                        open=None,
+                        high=None,
+                        low=None,
+                        close=None,
+                        validation_error=str(error),
+                    )
             attempts.append(attempt)
             if attempt.validation_error is not None:
                 invalid_tickers.append(ticker)
@@ -676,6 +689,37 @@ class YFinancePriceSource:
             quarantined_tickers=frozenset(quarantined_tickers),
         )
 
+    def _candidate_raw_frame(
+        self, tickers: list[str], session: date
+    ) -> tuple[object | None, datetime, bool]:
+        """Fetch a candidate batch while keeping provider text outside evidence."""
+        key = (tuple(tickers), session, session, False)
+        cached = self._raw_cache.get(key)
+        if cached is not None:
+            self._raw_cache.move_to_end(key)
+            return cached[0], cached[1], False
+        normalized = normalize_tickers(tickers)
+        start = session.isoformat()
+        end = (session + timedelta(days=1)).isoformat()
+        try:
+            frame = yf.download(
+                normalized,
+                start=start,
+                end=end,
+                auto_adjust=False,
+                actions=True,
+                progress=False,
+                timeout=30,
+            )
+        except Exception:
+            return None, self._fetched_at(), True
+        fetched_at = self._fetched_at()
+        cached = (frame, fetched_at)
+        self._raw_cache[key] = cached
+        if len(self._raw_cache) > self._RAW_CACHE_LIMIT:
+            self._raw_cache.popitem(last=False)
+        return cached[0], cached[1], False
+
     def refresh_daily_bars(
         self,
         tickers: list[str],
@@ -684,29 +728,75 @@ class YFinancePriceSource:
     ) -> CandidateBarResolution:
         """Fetch raw daily bars without consulting or updating the raw-frame cache."""
         self._validate_range(tickers, start_session, end_session_inclusive)
-        frame = yf.download(
-            normalize_tickers(tickers),
-            start=start_session.isoformat(),
-            end=(end_session_inclusive + timedelta(days=1)).isoformat(),
-            auto_adjust=False,
-            actions=True,
-            progress=False,
-            timeout=30,
-        )
+        normalized = normalize_tickers(tickers)
+        start = start_session.isoformat()
+        end = (end_session_inclusive + timedelta(days=1)).isoformat()
+        try:
+            frame = yf.download(
+                normalized,
+                start=start,
+                end=end,
+                auto_adjust=False,
+                actions=True,
+                progress=False,
+                timeout=30,
+            )
+        except Exception:
+            fetched_at = self._fetched_at()
+            return CandidateBarResolution(
+                bars={},
+                attempts=tuple(
+                    self._candidate_failure_attempt(
+                        ticker,
+                        end_session_inclusive,
+                        2,
+                        fetched_at,
+                        "provider_error",
+                    )
+                    for ticker in tickers
+                ),
+                recovered_tickers=frozenset(),
+                quarantined_tickers=frozenset(tickers),
+            )
         fetched_at = self._fetched_at()
         bars: dict[tuple[str, date], MarketBar] = {}
         attempts: list[CandidateBarAttempt] = []
         for ticker in tickers:
-            bar, attempt = self._candidate_bar_attempt(
-                frame,
-                ticker,
-                tickers,
-                end_session_inclusive,
-                fetched_at,
-                2,
-                fetched_at,
-                timedelta.max,
-            )
+            if not isinstance(frame, pd.DataFrame):
+                bar = None
+                attempt = self._candidate_failure_attempt(
+                    ticker,
+                    end_session_inclusive,
+                    2,
+                    fetched_at,
+                    "invalid_data",
+                )
+            else:
+                try:
+                    bar, attempt = self._candidate_bar_attempt(
+                        frame,
+                        ticker,
+                        tickers,
+                        end_session_inclusive,
+                        fetched_at,
+                        2,
+                        fetched_at,
+                        timedelta.max,
+                    )
+                except BarValidationError as error:
+                    bar = None
+                    attempt = CandidateBarAttempt(
+                        ticker=ticker,
+                        session=end_session_inclusive,
+                        attempt=2,
+                        source="yfinance",
+                        fetched_at=fetched_at,
+                        open=None,
+                        high=None,
+                        low=None,
+                        close=None,
+                        validation_error=str(error),
+                    )
             attempts.append(attempt)
             if bar is not None:
                 bars[(ticker, end_session_inclusive)] = bar
@@ -715,6 +805,27 @@ class YFinancePriceSource:
             attempts=tuple(attempts),
             recovered_tickers=frozenset(),
             quarantined_tickers=frozenset(),
+        )
+
+    @staticmethod
+    def _candidate_failure_attempt(
+        ticker: str,
+        session: date,
+        attempt: int,
+        fetched_at: datetime,
+        reason_code: str,
+    ) -> CandidateBarAttempt:
+        return CandidateBarAttempt(
+            ticker=ticker,
+            session=session,
+            attempt=attempt,
+            source="yfinance",
+            fetched_at=fetched_at,
+            open=None,
+            high=None,
+            low=None,
+            close=None,
+            validation_error=f"{reason_code} {ticker}/{session}",
         )
 
     def _candidate_bar_attempt(

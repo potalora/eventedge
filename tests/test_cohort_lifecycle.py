@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+import json
 import sqlite3
 from unittest.mock import patch
 
@@ -468,11 +469,14 @@ class _CandidateLifecycleStrategy(FakeStrategy):
 class _CandidateRecoveryPriceSource:
     """P0 remains strict while candidate-only outcomes are configurable."""
 
-    def __init__(self, outcome: str = "quarantined") -> None:
+    def __init__(
+        self, outcome: str = "quarantined", *, failure_ticker: str = "ALX"
+    ) -> None:
         from test_30day_simulation import AuthoritativePriceSource
 
         self._governed = AuthoritativePriceSource()
         self.outcome = outcome
+        self.failure_ticker = failure_ticker
         self.governed_invalid = False
         self.candidate_calls: list[tuple[tuple[str, ...], date]] = []
 
@@ -507,9 +511,12 @@ class _CandidateRecoveryPriceSource:
                 bar.fetched_at,
                 bar.adjusted,
             )
-        elif "ALX" in tickers and self.outcome in {"quarantined", "recovered"}:
-            bar = bars[("ALX", session)]
-            bars[("ALX", session)] = MarketBar(
+        elif self.failure_ticker in tickers and self.outcome in {
+            "quarantined",
+            "recovered",
+        }:
+            bar = bars[(self.failure_ticker, session)]
+            bars[(self.failure_ticker, session)] = MarketBar(
                 bar.ticker,
                 bar.session,
                 bar.open,
@@ -577,7 +584,7 @@ class _CandidateRecoveryPriceSource:
         quarantined: set[str] = set()
         for ticker in requested:
             bar = bars[(ticker, session)]
-            if ticker != "ALX" or self.outcome == "valid":
+            if ticker != self.failure_ticker or self.outcome == "valid":
                 attempts.append(
                     CandidateBarAttempt(
                         ticker,
@@ -604,11 +611,13 @@ class _CandidateRecoveryPriceSource:
                     Decimal("102"),
                     bar.low,
                     Decimal("103"),
-                    "incoherent ALX candidate bar",
+                    f"incoherent {ticker} candidate bar",
                 )
             )
             retry_error = (
-                None if self.outcome == "recovered" else "incoherent ALX candidate bar"
+                None
+                if self.outcome == "recovered"
+                else f"incoherent {ticker} candidate bar"
             )
             attempts.append(
                 CandidateBarAttempt(
@@ -616,7 +625,7 @@ class _CandidateRecoveryPriceSource:
                     session,
                     2,
                     bar.source,
-                    processed_at,
+                    bar.fetched_at,
                     bar.open,
                     bar.high,
                     bar.low,
@@ -666,6 +675,60 @@ def _candidate_lifecycle_orchestrator(tmp_path, source, *, overlap_only=False):
 
 
 class TestCandidateBarLifecycle:
+    def test_ncl_ui_zkh_reference_issue_filters_only_ui(self, tmp_path):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource(
+            "quarantined", failure_ticker="UI"
+        )
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        for cohort in orchestrator.cohorts:
+            cohort["engine"].paper_trade_strategies[0]._later_tickers = (
+                "NCL",
+                "UI",
+                "ZKH",
+            )
+        staged: dict[str, tuple[str, ...]] = {}
+        for cohort in orchestrator.cohorts:
+            original = cohort["engine"].screen_and_stage
+            name = cohort["config"].name
+
+            def capture(*args, _original=original, _name=name, **kwargs):
+                staged[_name] = tuple(
+                    signal["ticker"] for signal in kwargs["shared_signals"]
+                )
+                return _original(*args, **kwargs)
+
+            cohort["engine"].screen_and_stage = capture
+
+        session = next_session(first_session)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            result = orchestrator.run_daily(session.isoformat())
+
+        assert staged == {
+            "horizon_30d": ("NCL", "ZKH"),
+            "horizon_3m": ("NCL", "ZKH"),
+        }
+        issues = orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, session
+        )
+        assert [(issue.ticker, issue.dependency_kind) for issue in issues] == [
+            ("UI", "reference_bar")
+        ]
+        assert all(
+            item["error"] is False
+            and item["candidate_bar_quarantines"] == ["UI"]
+            and item["candidate_input_issues"] == [issues[0].reference()]
+            for item in result.values()
+        )
+
     def test_candidate_quarantine_preserves_completed_p0_and_filters_every_horizon(
         self, tmp_path
     ):
@@ -715,6 +778,34 @@ class TestCandidateBarLifecycle:
             ("ALX", "quarantined"),
             ("MSFT", "accepted"),
         ]
+        issues = orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, next_session(first_session)
+        )
+        assert len(issues) == 1
+        issue = issues[0]
+        assert issue.dependency_kind == "reference_bar"
+        assert issue.reason_code == "invalid_data"
+        assert issue.ticker == "ALX"
+        assert issue.expected_sessions == (next_session(first_session),)
+        assert issue.observed_sessions == (
+            next_session(first_session),
+            next_session(first_session),
+        )
+        assert issue.retryable is False
+        assert tuple(map(dict, issue.affected_signal_identities)) == (
+            {
+                "event_key": (
+                    "candidate-lifecycle:ALX:"
+                    f"{next_session(first_session).isoformat()}"
+                ),
+                "strategy": "candidate_lifecycle",
+            },
+        )
+        assert issue.affected_cohorts == ("horizon_30d", "horizon_3m")
+        assert all(
+            cohort_result["candidate_input_issues"] == [issue.reference()]
+            for cohort_result in result.values()
+        )
         epoch = orchestrator._metric_store.load_epoch(orchestrator._epoch_id)
         assert epoch.status == "open"
         assert orchestrator._metric_store.pending_critical_gap() is None
@@ -730,6 +821,45 @@ class TestCandidateBarLifecycle:
         assert regime["execution_valid"] is True
         assert regime["staging_valid"] is False
         assert regime["candidate_bar_quarantines"] == ["ALX"]
+        for cohort in orchestrator.cohorts:
+            ledger = cohort["ledger"]
+            assert not any(
+                signal.ticker == "ALX"
+                for signal in ledger.read_signals(
+                    next_session(first_session),
+                    next_session(first_session),
+                    epoch_id=orchestrator._epoch_id,
+                )
+            )
+            assert not any(
+                decision["ticker"] == "ALX"
+                for decision in ledger.read_policy_candidate_decisions(
+                    next_session(first_session),
+                    next_session(first_session),
+                    epoch_id=orchestrator._epoch_id,
+                )
+            )
+            assert ledger._connection.execute(
+                "SELECT COUNT(*) FROM marks WHERE ticker = ? AND session = ?",
+                ("ALX", next_session(first_session).isoformat()),
+            ).fetchone()[0] == 0
+            assert ledger._connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM fills f
+                JOIN intent_signals link ON link.intent_id = f.intent_id
+                JOIN signals signal ON signal.signal_id = link.signal_id
+                WHERE signal.ticker = ? AND f.session = ?
+                """,
+                ("ALX", next_session(first_session).isoformat()),
+            ).fetchone()[0] == 0
+        assert not any(
+            outcome.ticker == "ALX"
+            and outcome.exit_session == next_session(first_session)
+            for outcome in orchestrator._metric_store.read_outcomes(
+                orchestrator._epoch_id
+            )
+        )
 
     def test_recovered_candidate_reaches_staging(self, tmp_path):
         from test_30day_simulation import _authoritative_committee
@@ -816,6 +946,217 @@ class TestCandidateBarLifecycle:
 
         assert len(source.candidate_calls) == before
         assert all(item["staging_valid"] is True for item in result.values())
+        assert orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, next_session(first_session)
+        ) == ()
+
+    def test_candidate_resolution_cannot_merge_an_extra_governed_bar(self, tmp_path):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        original_resolver = source.resolve_candidate_daily_bars
+        stage_calls = 0
+        for cohort in orchestrator.cohorts:
+            original_stage = cohort["engine"].screen_and_stage
+
+            def capture_stage(*args, _original=original_stage, **kwargs):
+                nonlocal stage_calls
+                if kwargs["trading_date"] == session.isoformat():
+                    stage_calls += 1
+                return _original(*args, **kwargs)
+
+            cohort["engine"].screen_and_stage = capture_stage
+
+        def add_governed_bar(*args, **kwargs):
+            resolution = original_resolver(*args, **kwargs)
+            candidate_bar = next(iter(resolution.bars.values()))
+            return CandidateBarResolution(
+                bars={
+                    **resolution.bars,
+                    ("SPY", session): MarketBar(
+                        ticker="SPY",
+                        session=session,
+                        open=candidate_bar.open,
+                        high=candidate_bar.high,
+                        low=candidate_bar.low,
+                        close=candidate_bar.close,
+                        source=candidate_bar.source,
+                        fetched_at=candidate_bar.fetched_at,
+                        adjusted=False,
+                    ),
+                },
+                attempts=resolution.attempts,
+                recovered_tickers=resolution.recovered_tickers,
+                quarantined_tickers=resolution.quarantined_tickers,
+            )
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            source.resolve_candidate_daily_bars = add_governed_bar
+            result = orchestrator.run_daily(session.isoformat())
+
+        assert stage_calls == 0
+        assert all(
+            item["error"] is True
+            and item["execution_valid"] is True
+            and item["staging_valid"] is False
+            and "candidate/governed classification conflict" in item["invalid_reason"]
+            and "SPY" in item["invalid_reason"]
+            for item in result.values()
+        )
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    @pytest.mark.parametrize(
+        "contradiction_kind", ("bar_and_quarantined", "successful_quarantine")
+    )
+    def test_contradictory_candidate_resolution_never_reaches_staging(
+        self, tmp_path, contradiction_kind
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        original_resolver = source.resolve_candidate_daily_bars
+        stage_reference_bars: list[set[str]] = []
+        for cohort in orchestrator.cohorts:
+            original_stage = cohort["engine"].screen_and_stage
+
+            def capture_stage(*args, _original=original_stage, **kwargs):
+                if kwargs["trading_date"] == session.isoformat():
+                    stage_reference_bars.append(
+                        set(kwargs["data"]["_execution_reference_bars"])
+                    )
+                return _original(*args, **kwargs)
+
+            cohort["engine"].screen_and_stage = capture_stage
+
+        def contradict_resolution(*args, **kwargs):
+            resolution = original_resolver(*args, **kwargs)
+            bars = resolution.bars
+            if contradiction_kind == "successful_quarantine":
+                bars = {
+                    key: bar
+                    for key, bar in resolution.bars.items()
+                    if key != ("ALX", session)
+                }
+            return CandidateBarResolution(
+                bars=bars,
+                attempts=resolution.attempts,
+                recovered_tickers=resolution.recovered_tickers,
+                quarantined_tickers=frozenset({"ALX"}),
+            )
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            source.resolve_candidate_daily_bars = contradict_resolution
+            result = orchestrator.run_daily(session.isoformat())
+
+        assert stage_reference_bars == []
+        assert all(
+            item["error"] is True
+            and item["invalid_reason"] == "candidate reference-bar validation failed"
+            and item["execution_valid"] is True
+            and item["staging_valid"] is False
+            for item in result.values()
+        )
+        assert orchestrator._metric_store.read_candidate_bar_recoveries(
+            orchestrator._epoch_id, session
+        ) == ()
+        assert orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, session
+        ) == ()
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    @pytest.mark.parametrize("mismatch_kind", ("ohlc", "ticker"))
+    def test_candidate_bar_must_equal_its_final_successful_attempt(
+        self, tmp_path, mismatch_kind
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        original_resolver = source.resolve_candidate_daily_bars
+        stage_calls = 0
+        for cohort in orchestrator.cohorts:
+            original_stage = cohort["engine"].screen_and_stage
+
+            def capture_stage(*args, _original=original_stage, **kwargs):
+                nonlocal stage_calls
+                if kwargs["trading_date"] == session.isoformat():
+                    stage_calls += 1
+                return _original(*args, **kwargs)
+
+            cohort["engine"].screen_and_stage = capture_stage
+
+        def mismatch_bar(*args, **kwargs):
+            resolution = original_resolver(*args, **kwargs)
+            bars = dict(resolution.bars)
+            original_bar = bars[("ALX", session)]
+            bars[("ALX", session)] = MarketBar(
+                ticker="ZKH" if mismatch_kind == "ticker" else "ALX",
+                session=session,
+                open=original_bar.open,
+                high=(
+                    original_bar.high + Decimal("1")
+                    if mismatch_kind == "ohlc"
+                    else original_bar.high
+                ),
+                low=original_bar.low,
+                close=original_bar.close,
+                source=original_bar.source,
+                fetched_at=original_bar.fetched_at,
+                adjusted=False,
+            )
+            return CandidateBarResolution(
+                bars=bars,
+                attempts=resolution.attempts,
+                recovered_tickers=resolution.recovered_tickers,
+                quarantined_tickers=resolution.quarantined_tickers,
+            )
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            source.resolve_candidate_daily_bars = mismatch_bar
+            result = orchestrator.run_daily(session.isoformat())
+
+        assert stage_calls == 0
+        assert all(
+            item["error"] is True
+            and item["invalid_reason"] == "candidate reference-bar validation failed"
+            and item["execution_valid"] is True
+            and item["staging_valid"] is False
+            for item in result.values()
+        )
+        assert orchestrator._metric_store.read_candidate_bar_recoveries(
+            orchestrator._epoch_id, session
+        ) == ()
+        assert orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, session
+        ) == ()
 
     def test_benchmark_candidate_uses_strict_raw_governed_bar_not_candidate_resolver(
         self, tmp_path
@@ -934,6 +1275,11 @@ class TestCandidateBarLifecycle:
             second["engine"].screen_and_stage = fail_after_resolution
             first = orchestrator.run_daily(session.isoformat())
             calls_after_first = len(source.candidate_calls)
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called during equal replay")
+                )
+            )
             replay = orchestrator.run_daily(session.isoformat())
 
         assert first["horizon_30d"]["error"] is False
@@ -960,6 +1306,511 @@ class TestCandidateBarLifecycle:
         regime = orchestrator.cohorts[0]["state"].load_latest_regime()
         assert regime["staging_valid"] is False
         assert regime["candidate_bar_quarantines"] == ["ALX"]
+
+    @pytest.mark.parametrize("overlap_ticker", ("ALX", "MSFT"))
+    def test_partial_replay_rejects_stored_candidate_that_is_now_governed(
+        self, tmp_path, overlap_ticker
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        second = orchestrator.cohorts[1]
+        original_stage = second["engine"].screen_and_stage
+        stage_calls = 0
+        fail_once = True
+
+        def fail_first_stage(*args, **kwargs):
+            nonlocal fail_once, stage_calls
+            if kwargs["trading_date"] == session.isoformat():
+                stage_calls += 1
+                if fail_once:
+                    fail_once = False
+                    raise RuntimeError("post-resolution staging failure")
+            return original_stage(*args, **kwargs)
+
+        second["engine"].screen_and_stage = fail_first_stage
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            first = orchestrator.run_daily(session.isoformat())
+            issue_reference = first["horizon_3m"]["candidate_input_issues"][0]
+            issues_before_replay = (
+                orchestrator._metric_store.read_candidate_input_issues(
+                    orchestrator._epoch_id, session
+                )
+            )
+            original_reference_bars = second[
+                "executor"
+            ].validated_execution_reference_bars
+            governed_overlap = MarketBar(
+                ticker=overlap_ticker,
+                session=session,
+                open=Decimal("100"),
+                high=Decimal("103"),
+                low=Decimal("99"),
+                close=Decimal("102"),
+                source="persisted-governed-fixture",
+                fetched_at=datetime(2026, 3, 31, 21, tzinfo=UTC),
+                adjusted=False,
+            )
+
+            def add_governed_overlap(*args, **kwargs):
+                bars = original_reference_bars(*args, **kwargs)
+                return {**bars, overlap_ticker: governed_overlap}
+
+            second[
+                "executor"
+            ].validated_execution_reference_bars = add_governed_overlap
+            candidate_calls = len(source.candidate_calls)
+            stage_calls_before_replay = stage_calls
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called for governed overlap")
+                )
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(source.candidate_calls) == candidate_calls
+        assert stage_calls == stage_calls_before_replay
+        failed = replay["horizon_3m"]
+        assert failed["error"] is True
+        assert failed["execution_valid"] is True
+        assert failed["staging_valid"] is False
+        assert failed["candidate_input_issues"] == [issue_reference]
+        assert "candidate/governed classification conflict" in failed["invalid_reason"]
+        assert overlap_ticker in failed["invalid_reason"]
+        expected_quarantines = [] if overlap_ticker == "ALX" else ["ALX"]
+        assert failed["candidate_bar_quarantines"] == expected_quarantines
+        assert overlap_ticker not in failed["candidate_bar_quarantines"]
+        assert (
+            orchestrator._metric_store.read_candidate_input_issues(
+                orchestrator._epoch_id, session
+            )
+            == issues_before_replay
+        )
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    @pytest.mark.parametrize(
+        ("source_outcome", "ticker", "expected_outcome", "tamper_kind"),
+        (
+            ("quarantined", "MSFT", "accepted", "invalid"),
+            ("quarantined", "MSFT", "accepted", "incoherent"),
+            ("quarantined", "MSFT", "accepted", "coherent"),
+            ("recovered", "ALX", "recovered", "pre_close"),
+        ),
+    )
+    def test_partial_replay_revalidates_durable_candidate_bar_semantics(
+        self,
+        tmp_path,
+        source_outcome,
+        ticker,
+        expected_outcome,
+        tamper_kind,
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource(source_outcome)
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        second = orchestrator.cohorts[1]
+        original_stage = second["engine"].screen_and_stage
+        stage_calls = 0
+        fail_once = True
+
+        def fail_first_stage(*args, **kwargs):
+            nonlocal fail_once, stage_calls
+            if kwargs["trading_date"] == session.isoformat():
+                stage_calls += 1
+                if fail_once:
+                    fail_once = False
+                    raise RuntimeError("post-resolution staging failure")
+            return original_stage(*args, **kwargs)
+
+        second["engine"].screen_and_stage = fail_first_stage
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            orchestrator.run_daily(session.isoformat())
+            recovery = next(
+                record
+                for record in orchestrator._metric_store.read_candidate_bar_recoveries(
+                    orchestrator._epoch_id, session
+                )
+                if record.ticker == ticker
+            )
+            assert recovery.outcome == expected_outcome
+            with sqlite3.connect(orchestrator._metric_store.path) as connection:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM candidate_bar_recoveries "
+                        "WHERE recovery_id = ?",
+                        (recovery.recovery_id,),
+                    ).fetchone()[0]
+                )
+                final_attempt = payload["attempts"][-1]
+                if tamper_kind == "invalid":
+                    final_attempt["open"] = "-1"
+                elif tamper_kind == "incoherent":
+                    final_attempt["high"] = "1"
+                elif tamper_kind == "coherent":
+                    final_attempt.update(
+                        {"open": "200", "high": "203", "low": "199", "close": "202"}
+                    )
+                else:
+                    final_attempt["fetched_at"] = "2026-03-31T19:00:00+00:00"
+                connection.execute(
+                    "UPDATE candidate_bar_recoveries SET payload_json = ? "
+                    "WHERE recovery_id = ?",
+                    (
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        recovery.recovery_id,
+                    ),
+                )
+            candidate_calls = len(source.candidate_calls)
+            stage_calls_before_replay = stage_calls
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called for durable replay")
+                )
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(source.candidate_calls) == candidate_calls
+        assert stage_calls == stage_calls_before_replay
+        failed = replay["horizon_3m"]
+        assert failed["error"] is True
+        assert failed["execution_valid"] is True
+        assert failed["staging_valid"] is False
+        assert "candidate reference-bar validation failed" in failed["invalid_reason"]
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    def test_resolver_exception_text_is_not_exposed_or_persisted(
+        self, tmp_path, caplog
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        sentinel = "credential=SECRET-CANDIDATE-TOKEN"
+        source = _CandidateRecoveryPriceSource("valid")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+
+        def provider_failure(*_args, **_kwargs):
+            raise RuntimeError(sentinel)
+
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            source.resolve_candidate_daily_bars = provider_failure
+            result = orchestrator.run_daily(session.isoformat())
+
+        serialized = json.dumps(result, sort_keys=True, default=str)
+        assert sentinel not in serialized
+        assert sentinel not in caplog.text
+        assert all(
+            item["error"] is True
+            and item["invalid_reason"] == "candidate reference-bar validation failed"
+            and item["execution_valid"] is True
+            and item["staging_valid"] is False
+            and "candidate_input_issues" not in item
+            for item in result.values()
+        )
+        assert orchestrator._metric_store.read_candidate_bar_recoveries(
+            orchestrator._epoch_id, session
+        ) == ()
+        assert orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, session
+        ) == ()
+        with sqlite3.connect(orchestrator._metric_store.path) as connection:
+            durable_candidate_payloads = " ".join(
+                row[0]
+                for table in (
+                    "candidate_bar_recoveries",
+                    "candidate_input_issues",
+                    "candidate_signal_identity_bindings",
+                )
+                for row in connection.execute(f"SELECT payload_json FROM {table}")
+            )
+        assert sentinel not in durable_candidate_payloads
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    def test_tampered_candidate_issue_fails_closed_without_provider_io(
+        self, tmp_path
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        second = orchestrator.cohorts[1]
+        original_stage = second["engine"].screen_and_stage
+        fail_once = True
+
+        def fail_first_stage(*args, **kwargs):
+            nonlocal fail_once
+            if kwargs["trading_date"] == session.isoformat() and fail_once:
+                fail_once = False
+                raise RuntimeError("post-resolution staging failure")
+            return original_stage(*args, **kwargs)
+
+        second["engine"].screen_and_stage = fail_first_stage
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            first = orchestrator.run_daily(session.isoformat())
+            issue_reference = first["horizon_3m"]["candidate_input_issues"][0]
+            with sqlite3.connect(orchestrator._metric_store.path) as connection:
+                payload = json.loads(
+                    connection.execute(
+                        "SELECT payload_json FROM candidate_input_issues"
+                    ).fetchone()[0]
+                )
+                payload["returned_history_digest"] = "sha256:" + "0" * 64
+                connection.execute(
+                    "UPDATE candidate_input_issues SET payload_json = ?",
+                    (json.dumps(payload, sort_keys=True, separators=(",", ":")),),
+                )
+            candidate_calls = len(source.candidate_calls)
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called after issue tamper")
+                )
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(source.candidate_calls) == candidate_calls
+        failed = replay["horizon_3m"]
+        assert failed["error"] is True
+        assert failed["execution_valid"] is True
+        assert failed["staging_valid"] is False
+        assert failed["candidate_input_issues"] == [issue_reference]
+        assert "candidate reference-bar validation failed" in failed["invalid_reason"]
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    def test_issue_replay_with_binding_missing_recovery_ticker_returns_failure(
+        self, tmp_path
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        second = orchestrator.cohorts[1]
+        original_stage = second["engine"].screen_and_stage
+        fail_once = True
+
+        def fail_first_stage(*args, **kwargs):
+            nonlocal fail_once
+            if kwargs["trading_date"] == session.isoformat() and fail_once:
+                fail_once = False
+                raise RuntimeError("post-resolution staging failure")
+            return original_stage(*args, **kwargs)
+
+        second["engine"].screen_and_stage = fail_first_stage
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            first = orchestrator.run_daily(session.isoformat())
+            issue_reference = first["horizon_3m"]["candidate_input_issues"][0]
+            issue_payload = orchestrator._metric_store.load_candidate_input_issue(
+                epoch_id=orchestrator._epoch_id,
+                session=session,
+                dependency_kind="reference_bar",
+                ticker="ALX",
+            ).canonical_payload()
+            with sqlite3.connect(orchestrator._metric_store.path) as connection:
+                row = connection.execute(
+                    "SELECT binding_id, payload_json "
+                    "FROM candidate_signal_identity_bindings "
+                    "WHERE epoch_id = ? AND session = ?",
+                    (orchestrator._epoch_id, session.isoformat()),
+                ).fetchone()
+                binding = json.loads(row[1])
+                binding["identities"] = [
+                    identity
+                    for identity in binding["identities"]
+                    if identity["ticker"] != "ALX"
+                ]
+                connection.execute(
+                    "UPDATE candidate_signal_identity_bindings SET payload_json = ? "
+                    "WHERE binding_id = ?",
+                    (
+                        json.dumps(binding, sort_keys=True, separators=(",", ":")),
+                        row[0],
+                    ),
+                )
+            candidate_calls = len(source.candidate_calls)
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called with tampered binding")
+                )
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(source.candidate_calls) == candidate_calls
+        failed = replay["horizon_3m"]
+        assert failed["error"] is True
+        assert failed["execution_valid"] is True
+        assert failed["staging_valid"] is False
+        assert failed["candidate_input_issues"] == [issue_reference]
+        assert "candidate reference-bar validation failed" in failed["invalid_reason"]
+        assert orchestrator._metric_store.load_candidate_input_issue(
+            epoch_id=orchestrator._epoch_id,
+            session=session,
+            dependency_kind="reference_bar",
+            ticker="ALX",
+        ).canonical_payload() == issue_payload
+        assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
+        assert orchestrator._metric_store.pending_critical_gap() is None
+
+    def test_partial_candidate_issue_write_backfills_from_recovery_without_io(
+        self, tmp_path, monkeypatch
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        store = orchestrator._metric_store
+        for cohort in orchestrator.cohorts:
+            cohort["engine"].paper_trade_strategies[0]._later_tickers = ("ALX",)
+        real_save_issue = store.save_candidate_input_issue
+        fail_once = True
+
+        def fail_generic_issue(record):
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("generic issue write interrupted")
+            return real_save_issue(record)
+
+        monkeypatch.setattr(store, "save_candidate_input_issue", fail_generic_issue)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            interrupted = orchestrator.run_daily(session.isoformat())
+            assert all(item["error"] is True for item in interrupted.values())
+            recoveries = store.read_candidate_bar_recoveries(
+                orchestrator._epoch_id, session
+            )
+            assert [(record.ticker, record.outcome) for record in recoveries] == [
+                ("ALX", "quarantined")
+            ]
+            assert store.read_candidate_input_issues(
+                orchestrator._epoch_id, session
+            ) == ()
+            candidate_calls = len(source.candidate_calls)
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called during partial-write replay")
+                )
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(source.candidate_calls) == candidate_calls
+        issues = store.read_candidate_input_issues(orchestrator._epoch_id, session)
+        assert [(issue.ticker, issue.dependency_kind) for issue in issues] == [
+            ("ALX", "reference_bar")
+        ]
+        assert all(
+            item["error"] is False
+            and item["degraded"] is True
+            and item["candidate_input_issues"] == [issues[0].reference()]
+            for item in replay.values()
+        )
+
+    def test_recovery_only_replay_does_not_backfill_before_identity_validation(
+        self, tmp_path, monkeypatch
+    ):
+        from test_30day_simulation import _authoritative_committee
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+
+        source = _CandidateRecoveryPriceSource("quarantined")
+        orchestrator, first_session = _candidate_lifecycle_orchestrator(
+            tmp_path, source
+        )
+        session = next_session(first_session)
+        store = orchestrator._metric_store
+        for cohort in orchestrator.cohorts:
+            cohort["engine"].paper_trade_strategies[0]._later_tickers = ("ALX",)
+        real_save_issue = store.save_candidate_input_issue
+        fail_once = True
+
+        def interrupt_issue_save(record):
+            nonlocal fail_once
+            if fail_once:
+                fail_once = False
+                raise RuntimeError("generic issue write interrupted")
+            return real_save_issue(record)
+
+        monkeypatch.setattr(store, "save_candidate_input_issue", interrupt_issue_save)
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            side_effect=_authoritative_committee,
+        ):
+            orchestrator.run_daily(first_session.isoformat())
+            orchestrator.run_daily(session.isoformat())
+            with sqlite3.connect(store.path) as connection:
+                connection.execute(
+                    "DELETE FROM candidate_signal_identity_bindings "
+                    "WHERE epoch_id = ? AND session = ?",
+                    (orchestrator._epoch_id, session.isoformat()),
+                )
+            candidate_calls = len(source.candidate_calls)
+            source.resolve_candidate_daily_bars = (
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("candidate resolver called with invalid replay scope")
+                )
+            )
+            replay = orchestrator.run_daily(session.isoformat())
+
+        assert len(source.candidate_calls) == candidate_calls
+        assert store.read_candidate_input_issues(
+            orchestrator._epoch_id, session
+        ) == ()
+        assert all(
+            item["error"] is True
+            and item["execution_valid"] is True
+            and item["staging_valid"] is False
+            and "deterministic candidate replay identity conflict"
+            in item["invalid_reason"]
+            for item in replay.values()
+        )
 
     def test_partial_replay_uses_completed_cohort_p0_bars_as_session_governance(
         self, tmp_path
@@ -1372,6 +2223,7 @@ class TestCandidateBarLifecycle:
             orchestrator.run_daily(first_session.isoformat())
             second["engine"].screen_and_stage = stage_with_one_failure
             first = orchestrator.run_daily(session.isoformat())
+            issue_reference = first["horizon_3m"]["candidate_input_issues"][0]
             candidate_calls_before_replay = len(source.candidate_calls)
             stage_calls_before_replay = len(stage_calls)
             epoch_id = orchestrator._epoch_id
@@ -1405,6 +2257,7 @@ class TestCandidateBarLifecycle:
         assert conflict["execution_valid"] is True
         assert conflict["staging_valid"] is False
         assert conflict["candidate_bar_quarantines"] == ["ALX"]
+        assert conflict["candidate_input_issues"] == [issue_reference]
         assert (
             "deterministic candidate replay identity conflict"
             in conflict["invalid_reason"]
