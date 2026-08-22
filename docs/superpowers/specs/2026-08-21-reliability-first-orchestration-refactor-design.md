@@ -104,13 +104,16 @@ not ad hoc mutations distributed throughout the results dictionary.
 
 - Introduce `RunOutcome` with `clean`, `degraded`, and `failed`.
 - Add `outcome` to every daily subprocess result and persisted daily history.
+- Replace heuristic trailing-JSON discovery with one versioned daily-result
+  envelope emitted by the worker and validated by the generation manager.
 - Keep legacy booleans as compatibility projections.
 - Make `run_generations.py run-daily` exit nonzero only when any generation has
   outcome `failed`.
 - Make the dashboard prefer the canonical outcome and fall back to legacy
   fields for historical manifests.
 - Add a contract matrix covering clean, execution-valid degraded, failed,
-  malformed output, the exact 16-cohort roster, worker return-code
+  missing/duplicate/wrong-version envelopes, malformed output, the exact
+  16-cohort roster, worker return-code
   contradictions, mixed generations, timeout, and legacy history.
 - Do not alter candidate-volatility behavior or cohort execution logic.
 

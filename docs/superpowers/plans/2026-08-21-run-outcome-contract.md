@@ -162,7 +162,10 @@ git commit -m "feat: define canonical daily run outcome"
 ### Task 2: Canonicalize every generation daily result
 
 **Files:**
+- Modify: `tradingagents/strategies/orchestration/run_outcome.py`
 - Modify: `tradingagents/strategies/orchestration/generation_manager.py`
+- Modify: `scripts/run_cohorts.py`
+- Modify: `tests/test_run_outcome.py`
 - Modify: `tests/test_generation_manager.py`
 - Test: `tests/test_cohort_failure_reporting.py`
 - Modify: `tests/test_metrics_migration.py`
@@ -174,6 +177,10 @@ git commit -m "feat: define canonical daily run outcome"
 - Produces: a validated worker-wire boundary that accepts only the exact 16
   cohort IDs built by `build_default_cohorts({})` and lifecycle-consistent
   cohort dictionaries.
+- Produces: one exact daily envelope with keys `wire_version` and
+  `cohort_results`, where `wire_version` is integer 1. Preflight remains
+  unwrapped and independent. The compact envelope is carried on exactly one
+  stdout line prefixed by `EVENTEDGE_DAILY_RESULT_V1=`.
 
 - [ ] **Step 1: Write failing result and history assertions**
 
@@ -210,7 +217,9 @@ def test_worker_return_code_and_payload_must_agree(
 
 Also prove rc-zero fails for an empty object, unknown or missing cohort IDs,
 non-mapping values, missing/non-boolean `error`, missing lifecycle booleans on a
-non-error cohort, and unrelated trailing JSON. Update the environment/logging
+non-error cohort, raw unwrapped cohort JSON, a wrong wire version, extra or
+missing envelope keys, duplicate envelopes, and unrelated trailing JSON
+including a valid-looking decoy. Update the environment/logging
 fixture in `tests/test_generation_manager.py` and the rc-zero fixture in
 `tests/test_metrics_migration.py` to emit a complete valid 16-cohort result
 when the test intends success.
@@ -247,6 +256,22 @@ Expected: new assertions fail because current results and history omit
 
 - [ ] **Step 3: Attach an outcome in every daily subprocess branch**
 
+Add `DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V1="`,
+`DAILY_RESULT_WIRE_VERSION = 1`, and helpers that render and parse exactly one
+line whose suffix is:
+
+```python
+{
+    "wire_version": 1,
+    "cohort_results": {"horizon_30d_size_5k": {}},
+}
+```
+
+The parser requires exactly one prefixed line and exact envelope keys;
+unwrapped daily JSON and multiple prefixed envelopes fail closed.
+`scripts/run_cohorts.py` prints the versioned envelope for its final daily
+result. Keep preflight on its existing independent unwrapped JSON parser.
+
 Import `RunOutcome`. Every existing failure dictionary receives
 `"outcome": RunOutcome.FAILED.value`; the execution-valid degradation
 dictionary receives `"outcome": RunOutcome.DEGRADED.value`; and the clean
@@ -259,7 +284,9 @@ mapping with boolean `error`. A non-error cohort must have boolean `degraded`,
 `execution_valid`, and `staging_valid`; clean cohorts require
 `execution_valid=true`, `staging_valid=true`, and `degraded=false`; degraded
 cohorts require `execution_valid=true`. Optional lifecycle fields on an error
-cohort must still be booleans when present.
+cohort must still be booleans when present, and an error cohort cannot claim
+`staging_valid=true`. Preserve `count_failed_cohorts()` semantics: `valid=false`
+or a truthy `invalid_reason` makes the run failed even if `error=false`.
 
 Apply this return-code matrix after schema validation:
 
@@ -281,7 +308,7 @@ Run the Step 2 command again. Expected: all focused tests pass.
 
 ```bash
 git diff --check
-git add tradingagents/strategies/orchestration/generation_manager.py tests/test_generation_manager.py tests/test_cohort_failure_reporting.py tests/test_metrics_migration.py tests/test_preflight.py
+git add tradingagents/strategies/orchestration/run_outcome.py tradingagents/strategies/orchestration/generation_manager.py scripts/run_cohorts.py tests/test_run_outcome.py tests/test_generation_manager.py tests/test_cohort_failure_reporting.py tests/test_metrics_migration.py tests/test_preflight.py
 git commit -m "feat: persist canonical generation outcomes"
 ```
 
