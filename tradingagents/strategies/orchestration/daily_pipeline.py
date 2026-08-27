@@ -367,8 +367,17 @@ def aggregate_candidate_input_issues(
                 raise ValueError(
                     "candidate input issue reference session is invalid"
                 ) from error
-            if epoch_match.group("session") != session_text:
-                raise ValueError("candidate input issue reference id is invalid")
+            try:
+                epoch_start_text = epoch_match.group("session")
+                epoch_start_session = date.fromisoformat(epoch_start_text)
+                if (
+                    epoch_start_session.isoformat() != epoch_start_text
+                    or not is_session(epoch_start_session)
+                    or epoch_start_session > parsed_session
+                ):
+                    raise ValueError
+            except (TypeError, ValueError) as error:
+                raise ValueError("candidate input issue reference id is invalid") from error
             affected_cohorts = list(affected)
             if (
                 any(

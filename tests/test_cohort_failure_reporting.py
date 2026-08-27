@@ -32,6 +32,7 @@ from tradingagents.strategies.orchestration.generation_manager import (
     _extract_cohort_results,
 )
 from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
+from tradingagents.strategies.orchestration.daily_pipeline import DailyRunState
 
 
 # --- count_failed_cohorts (pure) ---
@@ -99,11 +100,16 @@ def test_count_degraded_cohorts_is_distinct_from_execution_failures():
     assert count_degraded_cohorts(results) == (1, 2, ["candidate_quarantined"])
 
 
-def _candidate_issue_reference(*, affected_cohorts):
+def _candidate_issue_reference(
+    *,
+    affected_cohorts,
+    epoch_start_session="2026-08-10",
+    session="2026-08-10",
+):
     return {
         "issue_id": "candidate_input_issue_" + "a" * 32,
-        "epoch_id": "gen_001-2026-08-10-" + "b" * 16,
-        "session": "2026-08-10",
+        "epoch_id": f"gen_001-{epoch_start_session}-" + "b" * 16,
+        "session": session,
         "dependency_kind": "reference_bar",
         "reason_code": "provider_error",
         "ticker": "UI",
@@ -127,6 +133,99 @@ def test_candidate_issue_reporting_deduplicates_sixteen_identical_references():
     }
 
     assert aggregate_candidate_input_issues(results) == [reference]
+
+
+def test_candidate_issue_reporting_accepts_later_session_in_same_epoch():
+    reference = _candidate_issue_reference(
+        affected_cohorts=["cohort-a"],
+        epoch_start_session="2026-08-24",
+        session="2026-08-26",
+    )
+
+    assert aggregate_candidate_input_issues(
+        {"cohort-a": _candidate_issue_carrier(reference)},
+        trading_date="2026-08-26",
+    ) == [reference]
+
+
+@pytest.mark.parametrize("epoch_start_session", ("2026-08-23", "2026-08-27"))
+def test_candidate_issue_reporting_rejects_invalid_epoch_start(
+    epoch_start_session,
+):
+    reference = _candidate_issue_reference(
+        affected_cohorts=["cohort-a"],
+        epoch_start_session=epoch_start_session,
+        session="2026-08-26",
+    )
+
+    with pytest.raises(
+        ValueError, match="candidate input issue reference id is invalid"
+    ):
+        aggregate_candidate_input_issues(
+            {"cohort-a": _candidate_issue_carrier(reference)},
+            trading_date="2026-08-26",
+        )
+
+
+@pytest.mark.parametrize(
+    ("issue_epoch_id", "issue_session"),
+    (
+        pytest.param(
+            "gen_001-2026-08-10-" + "b" * 16,
+            date(2026, 8, 11),
+            id="session-mismatch",
+        ),
+        pytest.param(
+            "gen_001-2026-08-11-" + "b" * 16,
+            date(2026, 8, 10),
+            id="epoch-mismatch",
+        ),
+    ),
+)
+def test_candidate_issue_hydration_rejects_mismatched_durable_scope(
+    issue_epoch_id, issue_session
+):
+    state_session = date(2026, 8, 10)
+    state_epoch_id = "gen_001-2026-08-10-" + "b" * 16
+    issue = CandidateInputIssue.create(
+        issue_id="candidate_input_issue_" + "a" * 32,
+        epoch_id=issue_epoch_id,
+        session=issue_session,
+        dependency_kind="reference_bar",
+        reason_code="provider_error",
+        ticker="UI",
+        source="yfinance",
+        fetched_at=datetime(
+            issue_session.year,
+            issue_session.month,
+            issue_session.day,
+            21,
+            tzinfo=timezone.utc,
+        ),
+        requested_history_digest="sha256:" + "c" * 64,
+        returned_history_digest="sha256:" + "d" * 64,
+        expected_sessions=(issue_session,),
+        observed_sessions=(),
+        retryable=False,
+        affected_signal_identities=(),
+        affected_cohorts=("cohort-a",),
+    )
+
+    def read_candidate_input_issues(exact_epoch, exact_session):
+        assert (exact_epoch, exact_session) == (state_epoch_id, state_session)
+        return [issue]
+
+    store = SimpleNamespace(read_candidate_input_issues=read_candidate_input_issues)
+    state = DailyRunState(
+        owner=SimpleNamespace(_metric_store=store),
+        trading_date=state_session.isoformat(),
+        session=state_session,
+        processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
+        epoch_id=state_epoch_id,
+    )
+
+    with pytest.raises(ValueError, match="candidate input issue durable scope"):
+        state.finalize({})
 
 
 @pytest.mark.parametrize(
