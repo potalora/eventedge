@@ -291,27 +291,60 @@ Expected: a full merge SHA whose history contains both the approved design commi
 **Files and state:**
 - Inspect/mutate: `/home/hermes/trading_agents/data/generations/manifest.json`
 - Inspect/mutate: `/home/hermes/trading_agents/data/generations/gen_011/*/portfolio.db`
-- Create: `/home/hermes/eventedge-recovery/2026-08-27-gen011/`
+- Create: `/home/hermes/eventedge-recovery/<utc-timestamp>-gen011/` (timestamp-unique and collision-refusing)
 - Create temporarily: `/tmp/eventedge-cancel-gen011.py`
 
 **Interfaces:**
 - Consumes: exactly two reviewed pending intent IDs and the merged deploy SHA.
 - Produces: verified pre-recovery archive, two cancellation transitions, preserved `gen_011` worktree/state, and a retired manifest entry.
 
-- [ ] **Step 1: Reconfirm the live window before mutation**
+- [ ] **Step 1: Capture unit state and reconfirm the live window before mutation**
 
-Over SSH to `hermes@100.112.88.99`, record UTC/local time, `systemctl list-timers`, unit enabled/active state, `git status --short`, root HEAD, `gen_011` manifest entry, and worktree HEAD. Require enough time to complete and restore service before the captured next `trade.timer` trigger. Refuse to continue if a worker is running, an unexpected active generation exists, the safe window is too short, or the live pending set differs from the approved two-intent shape.
-
-- [ ] **Step 2: Stop and mask every execution entry point**
+Over SSH to `hermes@100.112.88.99`, first create the unique, collision-refusing recovery destination below. Then record UTC/local time, `systemctl list-timers`, root `git status --short`, root HEAD, the manifest-validated `gen_011` entry, and its worktree HEAD. Before any stop, disable, or mask operation, persist the exact `systemctl is-enabled` and `is-active` outputs for all six units below. Require each automatic entry point's captured enablement to be exactly `enabled` or `disabled`; otherwise stop rather than guessing how to restore it. Require enough time to complete and restore service before the captured next `trade.timer` trigger. Refuse to continue if a worker is running, an unexpected active generation exists, the safe window is too short, or the live pending set differs from the approved two-intent shape.
 
 ```bash
-sudo systemctl stop trade.timer trade-rerun.path trade-preflight.timer \
-  trade.service trade-rerun.service trade-preflight.service
-sudo systemctl mask --runtime trade.timer trade-rerun.path trade-preflight.timer \
-  trade.service trade-rerun.service trade-preflight.service
+umask 077
+recovery_stamp="$(date -u +%Y%m%dT%H%M%S%N)"
+recovery_dir="/home/hermes/eventedge-recovery/${recovery_stamp}-gen011"
+mkdir "$recovery_dir"
 ```
 
-Then verify all six units are inactive/masked, `.triggers/run-now` is absent, the runtime lock is not held, and no `daily_trading.sh`, `run_generations.py`, `run_cohorts.py`, or `preflight.sh` process exists.
+```bash
+units=(
+  trade.timer trade-rerun.path trade-preflight.timer
+  trade.service trade-rerun.service trade-preflight.service
+)
+entry_points=(trade.timer trade-rerun.path trade-preflight.timer)
+for unit in "${units[@]}"; do
+  printf '%s\t%s\t%s\n' "$unit" \
+    "$(systemctl is-enabled "$unit" || true)" \
+    "$(systemctl is-active "$unit" || true)"
+done | tee "$recovery_dir/unit-state-before.tsv"
+```
+
+`mkdir` must fail if the timestamped name already exists; do not retry with an overwrite or a non-unique name.
+
+- [ ] **Step 2: Persistently disable, then runtime-mask every execution entry point**
+
+```bash
+units=(
+  trade.timer trade-rerun.path trade-preflight.timer
+  trade.service trade-rerun.service trade-preflight.service
+)
+sudo systemctl disable --now trade.timer trade-rerun.path trade-preflight.timer
+for unit in trade.timer trade-rerun.path trade-preflight.timer; do
+  test "$(systemctl is-enabled "$unit" || true)" = disabled
+  test "$(systemctl is-active "$unit" || true)" = inactive
+done
+sudo systemctl mask --runtime trade.timer trade-rerun.path trade-preflight.timer \
+  trade.service trade-rerun.service trade-preflight.service
+for unit in "${units[@]}"; do
+  test "$(systemctl is-enabled "$unit" || true)" = masked-runtime
+  test "$(systemctl is-active "$unit" || true)" = inactive
+done
+```
+
+The persistent disable happens before the runtime masks, so a reboot cannot clear the mask and reactivate a timer or path unit. Then verify all six units are inactive/runtime-masked, `.triggers/run-now` is absent, the runtime lock is not held, and no `daily_trading.sh`, `run_generations.py`, `run_cohorts.py`, or `preflight.sh` process exists.
 
 - [ ] **Step 3: Capture exact intent and broker provenance**
 
@@ -326,7 +359,7 @@ Record exact intent IDs and price rules. Both `external_order_id` fields and joi
 
 - [ ] **Step 4: Create and verify the rollback archive**
 
-Create `/home/hermes/eventedge-recovery/2026-08-27-gen011/`, capture manifest/unit/git/process/intent evidence, hash every `gen_011` file, archive the entire state directory and manifest, hash the archive, extract it into a `mktemp -d` directory, and prove the extracted file hashes equal the originals. Do not proceed on any mismatch.
+Use the unique, collision-refusing destination created in Step 1. Capture manifest/unit/git/process/intent evidence there, hash every `gen_011` file, archive the entire manifest-derived state directory and manifest, hash the archive, extract it into a `mktemp -d` directory, and prove the extracted file hashes equal the originals. Do not proceed on any mismatch.
 
 - [ ] **Step 5: Prepare the narrow cancellation program**
 
@@ -335,14 +368,56 @@ Create `/tmp/eventedge-cancel-gen011.py` with this behavior:
 ```python
 from datetime import datetime
 from decimal import Decimal
+import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 
-from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+if len(sys.argv) != 4:
+    raise SystemExit("usage: eventedge-cancel-gen011.py TIMESTAMP INTENT_100K INTENT_50K")
 
-state_root = Path("/home/hermes/trading_agents/data/generations/gen_011")
+repo = Path("/home/hermes/trading_agents").resolve()
+manifest_path = repo / "data" / "generations" / "manifest.json"
+try:
+    manifest = json.loads(manifest_path.read_text())
+    entries = manifest["generations"]
+except (OSError, TypeError, ValueError, KeyError) as error:
+    raise SystemExit("manifest is unreadable") from error
+matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("gen_id") == "gen_011"]
+if len(matches) != 1:
+    raise SystemExit("gen_011 manifest entry is missing or ambiguous")
+entry = matches[0]
+required = ("status", "git_commit", "worktree_path", "state_dir")
+if any(not isinstance(entry.get(key), str) or not entry[key] for key in required):
+    raise SystemExit("gen_011 manifest entry is incomplete")
+if entry["status"] != "active":
+    raise SystemExit(f"gen_011 is not active: {entry['status']}")
+
+worktree_path = Path(entry["worktree_path"]).resolve()
+state_dir = Path(entry["state_dir"]).resolve()
+if not worktree_path.is_dir() or not state_dir.is_dir():
+    raise SystemExit("manifest-owned worktree or state directory is missing")
+worktree_commit = subprocess.run(
+    ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+    check=False,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+if worktree_commit != entry["git_commit"]:
+    raise SystemExit("gen_011 worktree commit does not match its manifest")
+
+sys.path.insert(0, str(worktree_path))
+from tradingagents.strategies.state import portfolio_ledger
+
+module_path = Path(portfolio_ledger.__file__).resolve()
+if not module_path.is_relative_to(worktree_path):
+    raise SystemExit("PortfolioLedger was not imported from the gen_011 worktree")
+PortfolioLedger = portfolio_ledger.PortfolioLedger
+
 operation_at = datetime.fromisoformat(sys.argv[1])
+if operation_at.tzinfo is None or operation_at.utcoffset() is None:
+    raise SystemExit("TIMESTAMP must be timezone-aware")
 reason = "operator incident recovery: retire gen_011 before fresh generation"
 targets = {
     "horizon_30d_size_100k": sys.argv[2],
@@ -350,7 +425,9 @@ targets = {
 }
 
 for cohort_id, intent_id in targets.items():
-    path = state_root / cohort_id / "portfolio.db"
+    path = state_dir / cohort_id / "portfolio.db"
+    if not path.is_file():
+        raise SystemExit(f"missing manifest-owned ledger for {cohort_id}")
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
         opening = connection.execute(
             "SELECT amount FROM cash_events WHERE cohort_id = ? "
@@ -371,7 +448,7 @@ for cohort_id, intent_id in targets.items():
         ledger.close()
 ```
 
-Root must substitute only the two IDs captured in Step 3 and pass one recorded timezone-aware timestamp. Review the file and its SHA-256 before execution.
+Root must substitute only the two IDs captured in Step 3 and pass one recorded timezone-aware timestamp. The program itself re-reads the manifest, requires active `gen_011`, derives both paths from its unique manifest entry, verifies the detached worktree commit against `git_commit`, and rejects an ambient `PortfolioLedger` import before it opens a ledger. Review the file and its SHA-256 before execution.
 
 - [ ] **Step 6: Execute once and verify logical changes**
 
@@ -431,7 +508,36 @@ Run generation listing/status and the governed/all preflight for the current eli
 
 - [ ] **Step 6: Restore normal entry points**
 
-Require the captured next daily trigger still to be in the future; otherwise leave scheduling disabled so the persistent timer cannot launch an unapproved catch-up run. Unmask all six runtime masks. Restore `trade.timer`, `trade-rerun.path`, and `trade-preflight.timer` to the enabled state captured in Task 4; leave the oneshot services disabled but unmasked. Start the enabled entry points, remove no trigger unless its absence was already verified, and confirm their next trigger times.
+Require the captured next daily trigger still to be in the future; otherwise leave the three entry points persistently disabled and all six units runtime-masked so no reboot can launch an unapproved catch-up run. If it is still future, use the recorded recovery directory below to remove all six runtime masks and restore every automatic entry point to its exact Task 4 captured enablement. The recovery only accepts captured `enabled` or `disabled`; do not change the captured persistent enablement of the oneshot services.
+
+```bash
+: "${recovery_dir:?set recovery_dir to the Task 4 archive directory}"
+test -f "$recovery_dir/unit-state-before.tsv"
+sudo systemctl unmask --runtime \
+  trade.timer trade-rerun.path trade-preflight.timer \
+  trade.service trade-rerun.service trade-preflight.service
+while IFS=$'\t' read -r unit enabled _active; do
+  case "$unit" in
+    trade.timer|trade-rerun.path|trade-preflight.timer)
+      case "$enabled" in
+        enabled) sudo systemctl enable --now "$unit" ;;
+        disabled) sudo systemctl disable --now "$unit" ;;
+        *) echo "unexpected captured enablement for $unit: $enabled" >&2; exit 1 ;;
+      esac
+      ;;
+  esac
+done < "$recovery_dir/unit-state-before.tsv"
+for unit in trade.timer trade-rerun.path trade-preflight.timer; do
+  captured="$(awk -F $'\t' -v unit="$unit" '$1 == unit { print $2 }' "$recovery_dir/unit-state-before.tsv")"
+  test "$(systemctl is-enabled "$unit" || true)" = "$captured"
+done
+for unit in trade.timer trade-rerun.path trade-preflight.timer \
+  trade.service trade-rerun.service trade-preflight.service; do
+  test "$(systemctl is-enabled "$unit" || true)" != masked-runtime
+done
+```
+
+Re-read and compare the three entry-point enablement values to `unit-state-before.tsv`, verify the six units are no longer runtime-masked, remove no trigger unless its absence was already verified, and confirm next trigger times.
 
 - [ ] **Step 7: Final production verification**
 

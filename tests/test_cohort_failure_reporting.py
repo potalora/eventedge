@@ -167,19 +167,41 @@ def test_candidate_issue_reporting_rejects_invalid_epoch_start(
         )
 
 
-def test_candidate_issue_hydration_rejects_a_different_issue_session():
+@pytest.mark.parametrize(
+    ("issue_epoch_id", "issue_session"),
+    (
+        pytest.param(
+            "gen_001-2026-08-10-" + "b" * 16,
+            date(2026, 8, 11),
+            id="session-mismatch",
+        ),
+        pytest.param(
+            "gen_001-2026-08-11-" + "b" * 16,
+            date(2026, 8, 10),
+            id="epoch-mismatch",
+        ),
+    ),
+)
+def test_candidate_issue_hydration_rejects_mismatched_durable_scope(
+    issue_epoch_id, issue_session
+):
     state_session = date(2026, 8, 10)
-    issue_session = date(2026, 8, 11)
-    epoch_id = "gen_001-2026-08-10-" + "b" * 16
+    state_epoch_id = "gen_001-2026-08-10-" + "b" * 16
     issue = CandidateInputIssue.create(
         issue_id="candidate_input_issue_" + "a" * 32,
-        epoch_id=epoch_id,
+        epoch_id=issue_epoch_id,
         session=issue_session,
         dependency_kind="reference_bar",
         reason_code="provider_error",
         ticker="UI",
         source="yfinance",
-        fetched_at=datetime(2026, 8, 11, 21, tzinfo=timezone.utc),
+        fetched_at=datetime(
+            issue_session.year,
+            issue_session.month,
+            issue_session.day,
+            21,
+            tzinfo=timezone.utc,
+        ),
         requested_history_digest="sha256:" + "c" * 64,
         returned_history_digest="sha256:" + "d" * 64,
         expected_sessions=(issue_session,),
@@ -189,15 +211,17 @@ def test_candidate_issue_hydration_rejects_a_different_issue_session():
         affected_cohorts=("cohort-a",),
     )
 
-    store = SimpleNamespace(
-        read_candidate_input_issues=lambda exact_epoch, exact_session: [issue]
-    )
+    def read_candidate_input_issues(exact_epoch, exact_session):
+        assert (exact_epoch, exact_session) == (state_epoch_id, state_session)
+        return [issue]
+
+    store = SimpleNamespace(read_candidate_input_issues=read_candidate_input_issues)
     state = DailyRunState(
         owner=SimpleNamespace(_metric_store=store),
         trading_date=state_session.isoformat(),
         session=state_session,
         processed_at=datetime(2026, 8, 10, 21, tzinfo=timezone.utc),
-        epoch_id=epoch_id,
+        epoch_id=state_epoch_id,
     )
 
     with pytest.raises(ValueError, match="candidate input issue durable scope"):
