@@ -1,0 +1,295 @@
+# SEC Primary Ticker Resolution Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Make SEC duplicate issuer-name resolution choose a stable primary
+standard ticker so litigation candidates resolve Globe Life to `GL` and Nexera
+Technologies to `NEXR`, then recover production through a fresh immutable
+generation.
+
+**Architecture:** Keep `EDGARSource.name_to_ticker()` and its one-value cache
+interface unchanged. During cache construction, compare duplicate SEC tickers
+with one pure deterministic preference key: all-letter symbols first, then
+shortest symbol, then lexical order. Preserve the existing volatility-history
+gate as defense in depth and deploy only after reviewed merge-SHA parity.
+
+**Tech Stack:** Python 3.10+, pytest, SEC `company_tickers.json`, yfinance,
+Git/GitHub, systemd, SQLite generation ledgers.
+
+## Global Constraints
+
+- Never patch the detached active generation worktree in place.
+- Never replay or backdate the 2026-08-27 session.
+- Do not weaken candidate-input, governed-data, execution, or staging gates.
+- Do not add a live provider call to ticker resolution.
+- Preserve `gen_012` evidence and cancel only the exact reviewed unsubmitted
+  pending intents before retirement.
+- Require source HEAD, manifest commit, and detached generation HEAD parity.
+
+---
+
+### Task 1: Deterministic primary ticker resolution
+
+**Files:**
+- Modify: `tests/test_litigation_strategy.py`
+- Modify: `tradingagents/strategies/data_sources/edgar_source.py`
+
+**Interfaces:**
+- Consumes: SEC-shaped entries with `title` and `ticker` fields from
+  `EDGARSource._session_cache["_company_tickers"]`.
+- Produces: `EDGARSource._company_ticker_preference(ticker: str) -> tuple[bool, int, str]`
+  and the unchanged `name_to_ticker(company_name: str, *, allow_prefix: bool = True) -> str | None` behavior.
+
+- [ ] **Step 1: Write the failing collision-order regression**
+
+Add this test immediately after the existing exact-name tests in
+`tests/test_litigation_strategy.py`:
+
+```python
+@pytest.mark.parametrize("reverse", [False, True])
+def test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order(
+    reverse: bool,
+) -> None:
+    entries = [
+        {"cik_str": 320335, "ticker": "GL", "title": "GLOBE LIFE INC."},
+        {"cik_str": 320335, "ticker": "GL-PD", "title": "GLOBE LIFE INC."},
+        {
+            "cik_str": 1885408,
+            "ticker": "NEXR",
+            "title": "Nexera Technologies Ltd",
+        },
+        {
+            "cik_str": 1885408,
+            "ticker": "NEXRW",
+            "title": "Nexera Technologies Ltd",
+        },
+    ]
+    if reverse:
+        entries.reverse()
+    source = EDGARSource()
+    source._session_cache["_company_tickers"] = {
+        str(index): entry for index, entry in enumerate(entries)
+    }
+
+    assert source.name_to_ticker("Globe Life Inc.", allow_prefix=False) == "GL"
+    assert (
+        source.name_to_ticker("Nexera Technologies Ltd", allow_prefix=False)
+        == "NEXR"
+    )
+```
+
+- [ ] **Step 2: Run the regression and verify the production-shaped failure**
+
+Run:
+
+```bash
+/Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest \
+  tests/test_litigation_strategy.py::test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order \
+  -q
+```
+
+Expected: one parameter fails because the current last-write-wins map returns
+`GL-PD` and `NEXRW`.
+
+- [ ] **Step 3: Implement the minimal deterministic selector**
+
+Add this method above `_ensure_name_map()` in `EDGARSource`:
+
+```python
+    @staticmethod
+    def _company_ticker_preference(ticker: str) -> tuple[bool, int, str]:
+        """Rank a standard base ticker ahead of issuer-linked extensions."""
+        normalized = ticker.strip().upper()
+        return (not normalized.isalpha(), len(normalized), normalized)
+```
+
+Replace the assignment loop in `_ensure_name_map()` with:
+
+```python
+        mapping: dict[str, str] = {}
+        for entry in tickers_data.values():
+            title = str(entry.get("title", "")).strip()
+            ticker = str(entry.get("ticker", "")).strip().upper()
+            if not title or not ticker:
+                continue
+            normalized_title = self._normalize_name(title)
+            current = mapping.get(normalized_title)
+            if current is None or self._company_ticker_preference(
+                ticker
+            ) < self._company_ticker_preference(current):
+                mapping[normalized_title] = ticker
+```
+
+- [ ] **Step 4: Run the focused regression and strategy suite**
+
+Run:
+
+```bash
+/Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest \
+  tests/test_litigation_strategy.py -q
+```
+
+Expected: `11 passed` and no live API call.
+
+- [ ] **Step 5: Check formatting and commit the tested source change**
+
+Run:
+
+```bash
+git diff --check
+git add tests/test_litigation_strategy.py \
+  tradingagents/strategies/data_sources/edgar_source.py
+git commit -m "fix: prefer primary SEC issuer tickers"
+```
+
+Expected: a two-file commit with the collision regression and selector only.
+
+---
+
+### Task 2: Repository and live-data acceptance
+
+**Files:**
+- Verify: `tests/test_litigation_strategy.py`
+- Verify: `tradingagents/strategies/data_sources/edgar_source.py`
+
+**Interfaces:**
+- Consumes: the Task 1 commit.
+- Produces: a reviewable branch whose unit, non-live, and read-only live-data
+  evidence all agree on `GL` and `NEXR`.
+
+- [ ] **Step 1: Run the complete non-live suite**
+
+Run:
+
+```bash
+/Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest \
+  -m "not live" -q
+```
+
+Expected: all selected tests pass.
+
+- [ ] **Step 2: Run a read-only current SEC and market-history acceptance**
+
+Run:
+
+```bash
+/Users/potalora/ai_workspace/trading_agents/.venv/bin/python - <<'PY'
+from tradingagents.strategies.data_sources.edgar_source import EDGARSource
+import yfinance as yf
+
+source = EDGARSource(user_agent="EventEdge acceptance ops@example.com")
+expected = {"Globe Life Inc.": "GL", "Nexera Technologies Ltd": "NEXR"}
+for issuer, ticker in expected.items():
+    actual = source.name_to_ticker(issuer, allow_prefix=False)
+    assert actual == ticker, (issuer, actual, ticker)
+    history = yf.download(
+        ticker,
+        start="2026-06-01",
+        end="2026-08-27",
+        auto_adjust=False,
+        progress=False,
+    )
+    assert len(history) == 61, (ticker, len(history))
+    print(issuer, actual, len(history))
+PY
+```
+
+Expected: `Globe Life Inc. GL 61` and
+`Nexera Technologies Ltd NEXR 61`.
+
+- [ ] **Step 3: Review the complete branch diff**
+
+Run:
+
+```bash
+git diff --check private/main...HEAD
+git diff --stat private/main...HEAD
+git log --oneline --decorate private/main..HEAD
+```
+
+Expected: only the approved design, plan, regression, and resolver change.
+Use the requesting-code-review skill and resolve every blocking finding before
+shipping.
+
+- [ ] **Step 4: Push, open, review, merge, and synchronize**
+
+Use the ship skill. Require a green pull request, merge it into `private/main`,
+fetch the merged revision, and verify that the source-change commit is an
+ancestor of the merge commit. Record the full merge SHA for production.
+
+---
+
+### Task 3: Audited VPS generation recovery
+
+**Files:**
+- Preserve: `/home/hermes/trading_agents/data/generations/gen_012/`
+- Update by Git only: `/home/hermes/trading_agents`
+- Create through `GenerationManager`: `.worktrees/gen_013/` and
+  `data/generations/gen_013/`
+
+**Interfaces:**
+- Consumes: the reviewed `private/main` merge SHA from Task 2 and the exact
+  `gen_012` pending-intent inventory.
+- Produces: `gen_013` as the sole active empty generation at that SHA, with
+  scheduler state restored and no duplicate run.
+
+- [ ] **Step 1: Freeze automatic execution and capture state**
+
+On Hermes, record `is-enabled` and `is-active` for `trade.timer`,
+`trade-rerun.path`, `trade-preflight.timer`, `trade.service`,
+`trade-rerun.service`, and `trade-preflight.service`. Disable the three entry
+points, install unique runtime `RefuseManualStart=yes` drop-ins for all six
+units, reload systemd, and prove all six are inactive, no worker remains, and
+`.triggers/run-now` is absent.
+
+- [ ] **Step 2: Inventory and archive `gen_012` before mutation**
+
+Capture manifest identity, worktree SHA/cleanliness, database hashes and row
+counts, all pending intents and provenance, external-order tables, logs, and
+run history. Require exactly 32 pending 2026-08-28 paper intents: BA and LDOS
+in each of 16 cohorts, no `external_order_id`, and zero external-order rows.
+Create a timestamp-unique archive with no overwrite, hash it, extract it to a
+new temporary directory, and require every database hash to match.
+
+- [ ] **Step 3: Terminalize only the reviewed pending intents**
+
+Open each cohort database through `PortfolioLedger`, call `cancel_intent()` for
+only the captured IDs, use one timezone-aware timestamp, and use the exact
+reason `operator incident recovery: retire gen_012 before primary ticker fix`.
+Re-open every ledger and require all 32 exact transitions, no pending intents,
+and unchanged unrelated signals, fills, lots, marks, snapshots, and external
+orders.
+
+- [ ] **Step 4: Retire `gen_012` and install the reviewed merge**
+
+Retire `gen_012` with `--keep-worktree`. Preserve its state, logs, run history,
+archive, and detached worktree. Update the root checkout to the recorded merge
+SHA without overwriting the inventoried mode-only `deploy/systemd/install.sh`
+change or untracked `data/`. Require root worktree status to contain no other
+change.
+
+- [ ] **Step 5: Start and verify fresh `gen_013`**
+
+Run `scripts/run_generations.py start` from the reviewed root HEAD. Require the
+new manifest entry to be `gen_013`, status `active`, and its `git_commit` equal
+the recorded merge SHA. Require detached generation HEAD parity, a clean
+generation worktree, and an empty state directory with no inherited databases,
+journals, snapshots, signals, intents, fills, lots, marks, metric epochs,
+candidate issues, or external orders.
+
+- [ ] **Step 6: Preflight and restore the scheduler without a run**
+
+At or after the XNYS close, run the normal no-write all-mode preflight for
+2026-08-27 and require screen and governed success. Remove all six runtime
+barriers and restore each automatic entry point to its exact captured enabled
+and active state. Require `gen_013` to be the sole active generation, all
+service/timer states and next triggers to be intact, no worker or manual
+trigger to exist, and no second 2026-08-27 daily run in history.
+
+- [ ] **Step 7: Preserve the final evidence bundle**
+
+Record the merge SHA, root/manifest/generation parity, final manifest statuses,
+fresh-state proof, preflight outcome, scheduler state, archive path/hash, exact
+cancellation count, and unchanged external-order count. Classify the Aug. 27
+historical run as degraded and the recovery state as ready for the next normal
+session; never relabel the incident as clean.
