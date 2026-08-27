@@ -2,16 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make SEC duplicate issuer-name resolution choose a stable primary
-standard ticker so litigation candidates resolve Globe Life to `GL` and Nexera
-Technologies to `NEXR`, then recover production through a fresh immutable
-generation.
+**Goal:** Make SEC duplicate issuer-name resolution choose an unambiguous base
+ticker so litigation candidates resolve Globe Life to `GL` and Nexera
+Technologies to `NEXR`, while ambiguous issuers fail closed, then recover
+production through a fresh immutable generation.
 
 **Architecture:** Keep `EDGARSource.name_to_ticker()` and its one-value cache
-interface unchanged. During cache construction, compare duplicate SEC tickers
-with one pure deterministic preference key: all-letter symbols first, then
-shortest symbol, then lexical order. Preserve the existing volatility-history
-gate as defense in depth and deploy only after reviewed merge-SHA parity.
+interface unchanged. First group normalized issuer names into `set[str]`
+candidates. Then use the pure
+`_select_company_ticker(tickers: set[str]) -> str | None`: a unique ticker
+resolves directly; duplicates resolve only when exactly one candidate is a
+strict prefix of another candidate in that same set; every other duplicate set
+is omitted from the cache. Preserve the existing volatility-history gate as
+defense in depth and deploy only after reviewed merge-SHA parity.
 
 **Tech Stack:** Python 3.10+, pytest, SEC `company_tickers.json`, yfinance,
 Git/GitHub, systemd, SQLite generation ledgers.
@@ -37,10 +40,10 @@ Git/GitHub, systemd, SQLite generation ledgers.
 **Interfaces:**
 - Consumes: SEC-shaped entries with `title` and `ticker` fields from
   `EDGARSource._session_cache["_company_tickers"]`.
-- Produces: `EDGARSource._company_ticker_preference(ticker: str) -> tuple[bool, int, str]`
+- Produces: `EDGARSource._select_company_ticker(tickers: set[str]) -> str | None`
   and the unchanged `name_to_ticker(company_name: str, *, allow_prefix: bool = True) -> str | None` behavior.
 
-- [ ] **Step 1: Write the failing collision-order regression**
+- [ ] **Step 1: Write the failing collision-order and malformed-field regressions**
 
 Add this test immediately after the existing exact-name tests in
 `tests/test_litigation_strategy.py`:
@@ -72,11 +75,14 @@ def test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order(
     }
 
     assert source.name_to_ticker("Globe Life Inc.", allow_prefix=False) == "GL"
-    assert (
-        source.name_to_ticker("Nexera Technologies Ltd", allow_prefix=False)
-        == "NEXR"
-    )
+    assert source.name_to_ticker("Nexera Technologies Ltd", allow_prefix=False) == "NEXR"
 ```
+
+Also add order-reversed Alternus `ALCED`/`ACLEW` fixtures that return `None`,
+and a malformed-field fixture proving null, numeric, and blank `title` or
+`ticker` values create no bogus mappings. Direct selector cases must cover a
+single unique ticker, `GOOG`/`GOOGL`, the unrelated Alternus pair, and a
+multi-base chain. These regressions must run before resolver code changes.
 
 - [ ] **Step 2: Run the regression and verify the production-shaped failure**
 
@@ -84,12 +90,14 @@ Run:
 
 ```bash
 /Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest \
-  tests/test_litigation_strategy.py::test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order \
+  tests/test_litigation_strategy.py \
+  -k 'fails_closed_for_unrelated_tickers or skips_malformed_title_and_ticker_fields or selector_only_resolves_unique_base_extensions' \
   -q
 ```
 
-Expected: one parameter fails because the current last-write-wins map returns
-`GL-PD` and `NEXRW`.
+Expected before the resolver change: 7 failures. The Alternus cases select
+`ACLEW`, malformed fields create mappings such as `none` and `17`, and direct
+selector cases fail because the method is absent.
 
 - [ ] **Step 3: Implement the minimal deterministic selector**
 
@@ -97,27 +105,48 @@ Add this method above `_ensure_name_map()` in `EDGARSource`:
 
 ```python
     @staticmethod
-    def _company_ticker_preference(ticker: str) -> tuple[bool, int, str]:
-        """Rank a standard base ticker ahead of issuer-linked extensions."""
-        normalized = ticker.strip().upper()
-        return (not normalized.isalpha(), len(normalized), normalized)
+    def _select_company_ticker(tickers: set[str]) -> str | None:
+        """Resolve a unique ticker or an unambiguous base-extension pair."""
+        if len(tickers) == 1:
+            return next(iter(tickers))
+        base_tickers = {
+            ticker
+            for ticker in tickers
+            if any(
+                other_ticker.startswith(ticker)
+                for other_ticker in tickers
+                if other_ticker != ticker
+            )
+        }
+        if len(base_tickers) == 1:
+            return next(iter(base_tickers))
+        return None
 ```
 
-Replace the assignment loop in `_ensure_name_map()` with:
+Replace the assignment loop in `_ensure_name_map()` with grouped candidates
+and strict string-field validation:
 
 ```python
-        mapping: dict[str, str] = {}
+        candidates_by_name: dict[str, set[str]] = {}
         for entry in tickers_data.values():
-            title = str(entry.get("title", "")).strip()
-            ticker = str(entry.get("ticker", "")).strip().upper()
+            title = entry.get("title")
+            ticker = entry.get("ticker")
+            if not isinstance(title, str) or not isinstance(ticker, str):
+                continue
+            title = title.strip()
+            ticker = ticker.strip().upper()
             if not title or not ticker:
                 continue
             normalized_title = self._normalize_name(title)
-            current = mapping.get(normalized_title)
-            if current is None or self._company_ticker_preference(
-                ticker
-            ) < self._company_ticker_preference(current):
-                mapping[normalized_title] = ticker
+            if not normalized_title:
+                continue
+            candidates_by_name.setdefault(normalized_title, set()).add(ticker)
+
+        mapping = {
+            name: selected
+            for name, tickers in candidates_by_name.items()
+            if (selected := self._select_company_ticker(tickers)) is not None
+        }
 ```
 
 - [ ] **Step 4: Run the focused regression and strategy suite**
@@ -129,7 +158,7 @@ Run:
   tests/test_litigation_strategy.py -q
 ```
 
-Expected: `11 passed` and no live API call.
+Expected: `18 passed` and no live API call.
 
 - [ ] **Step 5: Check formatting and commit the tested source change**
 
@@ -138,11 +167,14 @@ Run:
 ```bash
 git diff --check
 git add tests/test_litigation_strategy.py \
-  tradingagents/strategies/data_sources/edgar_source.py
-git commit -m "fix: prefer primary SEC issuer tickers"
+  tradingagents/strategies/data_sources/edgar_source.py \
+  docs/superpowers/specs/2026-08-27-sec-primary-ticker-resolution-design.md \
+  docs/superpowers/plans/2026-08-27-sec-primary-ticker-resolution.md
+git commit -m "fix: fail closed on ambiguous SEC issuer tickers"
 ```
 
-Expected: a two-file commit with the collision regression and selector only.
+Expected: one focused four-file commit with the strict selector, regressions,
+and matching approved design and recovery plan.
 
 ---
 
@@ -155,7 +187,8 @@ Expected: a two-file commit with the collision regression and selector only.
 **Interfaces:**
 - Consumes: the Task 1 commit.
 - Produces: a reviewable branch whose unit, non-live, and read-only live-data
-  evidence all agree on `GL` and `NEXR`.
+  evidence agrees on `GL` and `NEXR` while Alternus remains unresolved until a
+  valid common ticker appears in the SEC response.
 
 - [ ] **Step 1: Run the complete non-live suite**
 
@@ -231,16 +264,21 @@ ancestor of the merge commit. Record the full merge SHA for production.
 - Consumes: the reviewed `private/main` merge SHA from Task 2 and the exact
   `gen_012` pending-intent inventory.
 - Produces: `gen_013` as the sole active empty generation at that SHA, with
-  scheduler state restored and no duplicate run.
+  scheduler state restored only when the captured `trade.timer` trigger is
+  still future, otherwise with all automatic entry points and runtime barriers
+  held disabled pending controlled next-session restoration, and no duplicate
+  run.
 
 - [ ] **Step 1: Freeze automatic execution and capture state**
 
-On Hermes, record `is-enabled` and `is-active` for `trade.timer`,
-`trade-rerun.path`, `trade-preflight.timer`, `trade.service`,
-`trade-rerun.service`, and `trade-preflight.service`. Disable the three entry
-points, install unique runtime `RefuseManualStart=yes` drop-ins for all six
-units, reload systemd, and prove all six are inactive, no worker remains, and
-`.triggers/run-now` is absent.
+On Hermes, first capture `trade.timer`'s exact next trigger, then record
+`is-enabled` and `is-active` for `trade.timer`, `trade-rerun.path`,
+`trade-preflight.timer`, `trade.service`, `trade-rerun.service`, and
+`trade-preflight.service`. Disable the three entry points, install unique
+runtime `RefuseManualStart=yes` drop-ins for all six units, reload systemd,
+and prove all six are inactive, no worker remains, and `.triggers/run-now` is
+absent. Because `trade.timer` has `Persistent=true`, the captured next trigger
+must be preserved for the restoration decision.
 
 - [ ] **Step 2: Inventory and archive `gen_012` before mutation**
 
@@ -280,16 +318,22 @@ candidate issues, or external orders.
 - [ ] **Step 6: Preflight and restore the scheduler without a run**
 
 At or after the XNYS close, run the normal no-write all-mode preflight for
-2026-08-27 and require screen and governed success. Remove all six runtime
-barriers and restore each automatic entry point to its exact captured enabled
-and active state. Require `gen_013` to be the sole active generation, all
-service/timer states and next triggers to be intact, no worker or manual
-trigger to exist, and no second 2026-08-27 daily run in history.
+2026-08-27 and require screen and governed success. Restore automatic entry
+points only if the exact `trade.timer` next trigger captured before disabling
+remains future. In that case, remove all six runtime barriers and restore each
+automatic entry point to its exact captured enabled and active state. If that
+trigger has elapsed, keep all six runtime barriers and all three automatic
+entry points disabled pending an explicitly controlled next-session
+restoration; never allow `Persistent=true` to catch up into a duplicate run.
+Require `gen_013` to be the sole active generation, no worker or manual trigger
+to exist, and no second 2026-08-27 daily run in history.
 
 - [ ] **Step 7: Preserve the final evidence bundle**
 
 Record the merge SHA, root/manifest/generation parity, final manifest statuses,
-fresh-state proof, preflight outcome, scheduler state, archive path/hash, exact
-cancellation count, and unchanged external-order count. Classify the Aug. 27
-historical run as degraded and the recovery state as ready for the next normal
-session; never relabel the incident as clean.
+fresh-state proof, preflight outcome, captured timer trigger and restoration
+decision, scheduler state, archive path/hash, exact cancellation count, and
+unchanged external-order count. Classify the Aug. 27 historical run as degraded
+and the recovery state as ready for the next normal session only if the
+captured trigger remains future; otherwise classify automatic restoration as
+pending explicit next-session control. Never relabel the incident as clean.

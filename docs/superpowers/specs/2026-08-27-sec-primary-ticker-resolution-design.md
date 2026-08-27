@@ -27,10 +27,16 @@ Both common tickers have complete 2026-06-01 through 2026-08-26 daily history,
 while the selected instruments have none. The downstream volatility gate
 correctly failed closed; the defect is the upstream issuer-to-ticker choice.
 
+The same response contains Alternus Clean Energy candidates `ALCED` and
+`ACLEW`. Its 2026-08-14 10-Q identifies common stock as `ALCE` and `ACLEW` as
+warrants, but `ALCE` is absent from `company_tickers.json`. A resolver cannot
+safely invent the absent common ticker or choose lexically between the two
+unrelated candidates, so this issuer must remain unresolved.
+
 ## Goals
 
-- Resolve duplicate SEC issuer names to a deterministic primary standard
-  ticker rather than SEC payload order.
+- Resolve only an unambiguous duplicate SEC issuer name to a deterministic
+  base ticker rather than SEC payload order, and fail closed for ambiguity.
 - Resolve the observed issuers to `GL` and `NEXR`.
 - Keep litigation exact-name matching and every existing market-data safety
   gate unchanged.
@@ -46,31 +52,41 @@ correctly failed closed; the defect is the upstream issuer-to-ticker choice.
 - Do not patch the detached `gen_012` worktree in place.
 - Do not weaken candidate-input, governed-data, execution, or staging gates.
 - Do not add another live API dependency to litigation screening.
-- Do not infer a security type from Yahoo availability or silently discard an
-  issuer that has a usable common-equity ticker.
+- Do not infer a missing common-equity ticker from Yahoo availability, SEC
+  filing text, or a lexical tie-break.
 - Do not migrate `gen_012` ledger state into the replacement generation.
 
 ## Resolver change
 
-`EDGARSource._ensure_name_map()` will continue to expose the existing
-normalized-name-to-string interface. While building that map, it will compare
-every duplicate candidate with a deterministic preference key:
+`EDGARSource._ensure_name_map()` continues to expose the existing
+normalized-name-to-string interface and `name_to_ticker()` retains its public
+signature. It first builds a normalized-name-to-`set[str]` candidate map, then
+adds only resolved names to the existing `dict[str, str]` cache.
 
-1. all-letter symbols before symbols containing punctuation or other
-   non-letter characters;
-2. shorter symbols before longer symbols;
-3. lexical order as the final stable tie-break.
+The pure selector has the exact signature
+`_select_company_ticker(tickers: set[str]) -> str | None` and applies this
+strict rule:
 
-This policy selects a standard base symbol over the usual preferred, warrant,
-right, or unit extension without encoding an unsafe list of suffix letters.
-That distinction matters because valid common tickers can themselves end in
-`R`, `U`, or `W`. Equal-class cases such as multiple common share classes use
-the lexical tie-break; either class still represents common equity and the
-result is independent of SEC response order.
+```python
+if len(tickers) == 1:
+    return next(iter(tickers))
+base_tickers = {
+    ticker for ticker in tickers
+    if any(other.startswith(ticker) for other in tickers if other != ticker)
+}
+return next(iter(base_tickers)) if len(base_tickers) == 1 else None
+```
 
-The cache remains one dictionary and `name_to_ticker()` retains its public
-signature. Exact and compatibility prefix lookups therefore receive the same
-stable resolution. No caller or state format changes.
+Thus `GL`/`GL-PD`, `NEXR`/`NEXRW`, and `GOOG`/`GOOGL` resolve to their sole
+strict-prefix base ticker. Unrelated candidates such as `ALCED`/`ACLEW`, and
+multi-base chains such as `A`/`AB`/`ABC`, return `None`. This intentionally
+does not attempt to classify preferred shares, warrants, rights, or units from
+their suffixes.
+
+Only non-empty string `title` and `ticker` fields are stripped and normalized;
+null and non-string fields are skipped before conversion. This preserves the
+prior malformed-row skip intent without allowing `str(None)` or numeric values
+to create bogus name mappings.
 
 ## Defense in depth
 
@@ -92,8 +108,13 @@ and will not call a live API. They will prove that:
 - Globe Life resolves to `GL` instead of `GL-PD`;
 - Nexera Technologies resolves to `NEXR` instead of `NEXRW`;
 - reversing the duplicate feed order produces the same result;
+- Alternus resolves to `None` in both feed orders;
+- null, numeric, and blank title/ticker fields do not create mappings;
+- unique tickers and a unique base-extension pair resolve, while unrelated
+  candidates and multi-base chains fail closed;
 - ordinary single-ticker exact and prefix behavior remains unchanged;
-- the complete non-live suite remains green.
+- the focused `tests/test_litigation_strategy.py -q` suite has 18 passing
+  tests and makes no live API call.
 
 A read-only acceptance check may fetch the official SEC file and current Yahoo
 history after tests pass, but live data will not be part of unit acceptance.
@@ -103,9 +124,12 @@ history after tests pass, but live data will not be part of unit acceptance.
 Production mutation begins only after review, merge, and exact commit identity
 verification.
 
-1. Capture scheduler/service state, disable automatic entry points, install the
-   established runtime manual-start barriers, and prove no worker or trigger is
-   active.
+1. Before disabling anything, capture `trade.timer`'s exact next trigger along
+   with scheduler/service state. Then disable the three automatic entry points,
+   install the established runtime manual-start barriers for all six units, and
+   prove no worker or trigger is active. `trade.timer` has `Persistent=true`,
+   so the captured trigger is a recovery precondition, not merely diagnostic
+   data.
 2. Capture the `gen_012` manifest entry, detached commit, state paths, database
    hashes, row counts, and the complete pending-intent set. Refuse unless the
    reviewed set is exactly 32 paper intents: one BA buy and one LDOS buy in
@@ -125,9 +149,13 @@ verification.
 8. Start `gen_013` from that exact commit. Require root `HEAD`, manifest commit,
    and detached generation `HEAD` parity, a clean generation worktree, and an
    empty fresh state directory.
-9. Run the time-appropriate no-write preflight and restore scheduler state only
-   after all checks pass. Do not invoke a current-date duplicate or historical
-   daily run; the next normal timer owns the next production session.
+9. Run the time-appropriate no-write preflight. Restore automatic entry points
+   only after all checks pass *and* the exact trigger captured in step 1 remains
+   future. Do not invoke a current-date duplicate or historical daily run. If
+   that trigger has elapsed, keep all six runtime barriers and all three
+   automatic entry points disabled pending an explicitly controlled
+   next-session restoration; never let `Persistent=true` catch up into a
+   duplicate run.
 
 If cancellation verification fails, keep entry points disabled and runtime
 barriers installed, preserve the partial state for forensics, restore the
@@ -148,5 +176,7 @@ also leaves the scheduler disabled for investigation.
 - `gen_012` remains available with its worktree, run history, logs, verified
   rollback archive, and audited post-cancellation state.
 - `gen_013` is the sole active, clean, empty generation at the reviewed commit.
-- Scheduler entry points return to their recorded state without a duplicate or
+- Scheduler entry points return to their recorded state only when the exact
+  pre-disable `trade.timer` trigger remains future; otherwise all three remain
+  disabled with all six runtime barriers installed, without a duplicate or
   historical run.

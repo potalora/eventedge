@@ -441,10 +441,23 @@ class EDGARSource:
         return " ".join(name.split()).strip(" .,")
 
     @staticmethod
-    def _company_ticker_preference(ticker: str) -> tuple[bool, int, str]:
-        """Rank a standard base ticker ahead of issuer-linked extensions."""
-        normalized = ticker.strip().upper()
-        return (not normalized.isalpha(), len(normalized), normalized)
+    def _select_company_ticker(tickers: set[str]) -> str | None:
+        """Resolve a unique ticker or an unambiguous base-extension pair."""
+        if len(tickers) == 1:
+            return next(iter(tickers))
+
+        base_tickers = {
+            ticker
+            for ticker in tickers
+            if any(
+                other_ticker.startswith(ticker)
+                for other_ticker in tickers
+                if other_ticker != ticker
+            )
+        }
+        if len(base_tickers) == 1:
+            return next(iter(base_tickers))
+        return None
 
     def _ensure_name_map(self) -> dict[str, str]:
         """Build and cache normalized-company-name → ticker mapping."""
@@ -455,18 +468,26 @@ class EDGARSource:
         self._ensure_company_tickers()
         tickers_data = self._session_cache.get("_company_tickers", {})
 
-        mapping: dict[str, str] = {}
+        candidates_by_name: dict[str, set[str]] = {}
         for entry in tickers_data.values():
-            title = str(entry.get("title", "")).strip()
-            ticker = str(entry.get("ticker", "")).strip().upper()
+            title = entry.get("title")
+            ticker = entry.get("ticker")
+            if not isinstance(title, str) or not isinstance(ticker, str):
+                continue
+            title = title.strip()
+            ticker = ticker.strip().upper()
             if not title or not ticker:
                 continue
             normalized_title = self._normalize_name(title)
-            current = mapping.get(normalized_title)
-            if current is None or self._company_ticker_preference(
-                ticker
-            ) < self._company_ticker_preference(current):
-                mapping[normalized_title] = ticker
+            if not normalized_title:
+                continue
+            candidates_by_name.setdefault(normalized_title, set()).add(ticker)
+
+        mapping = {
+            name: selected
+            for name, tickers in candidates_by_name.items()
+            if (selected := self._select_company_ticker(tickers)) is not None
+        }
         self._name_to_ticker_cache = mapping
         return mapping
 

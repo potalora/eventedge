@@ -60,6 +60,65 @@ def test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order(
     )
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_edgar_duplicate_issuer_fails_closed_for_unrelated_tickers(
+    reverse: bool,
+) -> None:
+    entries = [
+        {
+            "cik_str": 1847345,
+            "ticker": "ALCED",
+            "title": "Alternus Clean Energy Inc.",
+        },
+        {
+            "cik_str": 1847345,
+            "ticker": "ACLEW",
+            "title": "Alternus Clean Energy Inc.",
+        },
+    ]
+    if reverse:
+        entries.reverse()
+    source = EDGARSource()
+    source._session_cache["_company_tickers"] = {
+        str(index): entry for index, entry in enumerate(entries)
+    }
+
+    assert (
+        source.name_to_ticker("Alternus Clean Energy Inc.", allow_prefix=False)
+        is None
+    )
+
+
+def test_edgar_name_map_skips_malformed_title_and_ticker_fields() -> None:
+    source = EDGARSource()
+    source._session_cache["_company_tickers"] = {
+        "null-ticker": {"ticker": None, "title": "Null Ticker Inc."},
+        "null-title": {"ticker": "NULLTITLE", "title": None},
+        "numeric-ticker": {"ticker": 17, "title": "Numeric Ticker Inc."},
+        "numeric-title": {"ticker": "NUMTITLE", "title": 44},
+        "blank-ticker": {"ticker": " ", "title": "Blank Ticker Inc."},
+        "blank-title": {"ticker": "BLANKTITLE", "title": " "},
+        "valid": {"ticker": "real", "title": "Valid Issuer Inc."},
+    }
+
+    assert source._ensure_name_map() == {"valid issuer": "REAL"}
+
+
+@pytest.mark.parametrize(
+    ("tickers", "expected"),
+    [
+        ({"ONLY"}, "ONLY"),
+        ({"GOOG", "GOOGL"}, "GOOG"),
+        ({"ALCED", "ACLEW"}, None),
+        ({"A", "AB", "ABC"}, None),
+    ],
+)
+def test_edgar_company_ticker_selector_only_resolves_unique_base_extensions(
+    tickers: set[str], expected: str | None
+) -> None:
+    assert EDGARSource._select_company_ticker(tickers) == expected
+
+
 @pytest.fixture
 def exact_litigation_tickers(monkeypatch: pytest.MonkeyPatch) -> None:
     matches = {
