@@ -324,7 +324,7 @@ Expected: a full merge SHA whose history contains both the approved design commi
 
 - [ ] **Step 1: Capture unit state and reconfirm the live window before mutation**
 
-Over SSH to `hermes@100.112.88.99`, first create the unique, collision-refusing recovery destination below. Then record UTC/local time, `systemctl list-timers`, root `git status --short`, root HEAD, the manifest-validated `gen_011` entry, and its worktree HEAD. Before any stop, disable, or mask operation, persist the exact `systemctl is-enabled` and `is-active` outputs for all six units below. Require each automatic entry point's captured enablement to be exactly `enabled` or `disabled`; otherwise stop rather than guessing how to restore it. Require enough time to complete and restore service before the captured next `trade.timer` trigger. Refuse to continue if a worker is running, an unexpected active generation exists, the safe window is too short, or the live pending set differs from the approved two-intent shape.
+Over SSH to `hermes@100.112.88.99`, first create the unique, collision-refusing recovery destination below. Then record UTC/local time, `systemctl list-timers`, root `git status --short`, root HEAD, the manifest-validated `gen_011` entry, and its worktree HEAD. Before any stop, disable, or runtime-barrier operation, persist the exact `systemctl is-enabled` and `is-active` outputs for all six units below. Require each automatic entry point's captured enablement to be exactly `enabled` or `disabled` and its activity to be exactly `active` or `inactive`; otherwise stop rather than guessing how to restore it. Require enough time to complete and restore service before the captured next `trade.timer` trigger. Refuse to continue if a worker is running, an unexpected active generation exists, the safe window is too short, or the live pending set differs from the approved two-intent shape.
 
 ```bash
 umask 077
@@ -334,6 +334,7 @@ mkdir "$recovery_dir"
 ```
 
 ```bash
+set -euo pipefail
 units=(
   trade.timer trade-rerun.path trade-preflight.timer
   trade.service trade-rerun.service trade-preflight.service
@@ -348,9 +349,10 @@ done | tee "$recovery_dir/unit-state-before.tsv"
 
 `mkdir` must fail if the timestamped name already exists; do not retry with an overwrite or a non-unique name.
 
-- [ ] **Step 2: Persistently disable, then runtime-mask every execution entry point**
+- [ ] **Step 2: Persistently disable automatic entry points, then block all manual starts**
 
 ```bash
+set -euo pipefail
 units=(
   trade.timer trade-rerun.path trade-preflight.timer
   trade.service trade-rerun.service trade-preflight.service
@@ -360,15 +362,31 @@ for unit in trade.timer trade-rerun.path trade-preflight.timer; do
   test "$(systemctl is-enabled "$unit" || true)" = disabled
   test "$(systemctl is-active "$unit" || true)" = inactive
 done
-sudo systemctl mask --runtime trade.timer trade-rerun.path trade-preflight.timer \
-  trade.service trade-rerun.service trade-preflight.service
+sudo systemctl stop trade.service trade-rerun.service trade-preflight.service
+sudo systemctl reset-failed trade.service trade-rerun.service \
+  trade-preflight.service || true
 for unit in "${units[@]}"; do
-  test "$(systemctl is-enabled "$unit" || true)" = masked-runtime
+  dropin_dir="/run/systemd/system/${unit}.d"
+  dropin="$dropin_dir/99-eventedge-recovery.conf"
+  test ! -e "$dropin"
+done
+for unit in "${units[@]}"; do
+  dropin_dir="/run/systemd/system/${unit}.d"
+  dropin="$dropin_dir/99-eventedge-recovery.conf"
+  sudo install -d -m 0755 "$dropin_dir"
+  printf '[Unit]\nRefuseManualStart=yes\n' | sudo tee "$dropin" >/dev/null
+  sudo chmod 0644 "$dropin"
+done
+sudo systemctl daemon-reload
+for unit in "${units[@]}"; do
+  dropin="/run/systemd/system/${unit}.d/99-eventedge-recovery.conf"
+  cmp -s "$dropin" <(printf '[Unit]\nRefuseManualStart=yes\n')
+  test "$(systemctl show "$unit" -p RefuseManualStart --value)" = yes
   test "$(systemctl is-active "$unit" || true)" = inactive
 done
 ```
 
-The persistent disable happens before the runtime masks, so a reboot cannot clear the mask and reactivate a timer or path unit. Then verify all six units are inactive/runtime-masked, `.triggers/run-now` is absent, the runtime lock is not held, and no `daily_trading.sh`, `run_generations.py`, `run_cohorts.py`, or `preflight.sh` process exists.
+The unit files are regular files in `/etc/systemd/system`; `/run/systemd/system/<unit> -> /dev/null` masks do not take precedence on this host. The unique runtime drop-ins are the effective immediate start barrier. The persistent disable happens first, so a reboot can clear the drop-ins without reactivating a timer or path unit. Verify all six units are inactive with `RefuseManualStart=yes`, `.triggers/run-now` is absent, the runtime lock is not held, and no `daily_trading.sh`, `run_generations.py`, `run_cohorts.py`, or `preflight.sh` process exists.
 
 - [ ] **Step 3: Capture exact intent and broker provenance**
 
@@ -476,7 +494,7 @@ Root must substitute only the two IDs captured in Step 3 and pass one recorded t
 
 - [ ] **Step 6: Execute once and verify logical changes**
 
-Run the program once. Re-open every ledger read-only and require zero pending intents, exactly two new `cancelled` transitions with the recorded timestamp/reason, no external orders, and no changes to unrelated logical table content. If execution or verification fails, keep units masked, preserve the partial state, restore the whole `gen_011` directory from the verified extraction by same-filesystem replacement, and recheck original hashes.
+Run the program once. Re-open every ledger read-only and require zero pending intents, exactly two new `cancelled` transitions with the recorded timestamp/reason, no external orders, and no changes to unrelated logical table content. If execution or verification fails, keep the entry points disabled and all six runtime start barriers installed, preserve the partial state, restore the whole `gen_011` directory from the verified extraction by same-filesystem replacement, and recheck original hashes.
 
 - [ ] **Step 7: Retire while preserving the worktree**
 
@@ -528,40 +546,59 @@ Require root HEAD, `gen_012.git_commit` in the manifest, and `.worktrees/gen_012
 
 - [ ] **Step 5: Run read-only smoke checks**
 
-Run generation listing/status and the governed/all preflight for the current eligible session. A preflight provider failure is not permission to bypass a gate: leave scheduling disabled, record the evidence, and investigate. Do not run `run-daily` for a historical date.
+Run generation listing/status and choose the no-write preflight mode by XNYS readiness. Before the session close, run screen mode; a governed/all probe is expected to return `not_ready` and is not a provider failure. At or after the close, require governed or all mode to be ready. Any actual screen/provider/governed failure is not permission to bypass a gate: leave scheduling disabled, record the evidence, and investigate. Do not run `run-daily` for a historical date.
 
 - [ ] **Step 6: Restore normal entry points**
 
-Require the captured next daily trigger still to be in the future; otherwise leave the three entry points persistently disabled and all six units runtime-masked so no reboot can launch an unapproved catch-up run. If it is still future, use the recorded recovery directory below to remove all six runtime masks and restore every automatic entry point to its exact Task 4 captured enablement. The recovery only accepts captured `enabled` or `disabled`; do not change the captured persistent enablement of the oneshot services.
+Require the captured next daily trigger still to be in the future; otherwise leave the three entry points persistently disabled and all six runtime start barriers installed so no reboot can launch an unapproved catch-up run. If it is still future, use the recorded recovery directory below to remove the six exact recovery drop-ins and restore every automatic entry point to its exact Task 4 captured enablement and activity. The recovery only accepts captured enablement of `enabled` or `disabled` and activity of `active` or `inactive`; do not change the captured persistent enablement of the oneshot services.
 
 ```bash
+set -euo pipefail
 : "${recovery_dir:?set recovery_dir to the Task 4 archive directory}"
 test -f "$recovery_dir/unit-state-before.tsv"
-sudo systemctl unmask --runtime \
-  trade.timer trade-rerun.path trade-preflight.timer \
+units=(
+  trade.timer trade-rerun.path trade-preflight.timer
   trade.service trade-rerun.service trade-preflight.service
+)
+for unit in "${units[@]}"; do
+  dropin="/run/systemd/system/${unit}.d/99-eventedge-recovery.conf"
+  test -f "$dropin"
+  cmp -s "$dropin" <(printf '[Unit]\nRefuseManualStart=yes\n')
+done
+for unit in "${units[@]}"; do
+  dropin="/run/systemd/system/${unit}.d/99-eventedge-recovery.conf"
+  sudo rm -- "$dropin"
+  sudo rmdir --ignore-fail-on-non-empty "/run/systemd/system/${unit}.d"
+done
+sudo systemctl daemon-reload
+for unit in "${units[@]}"; do
+  test "$(systemctl show "$unit" -p RefuseManualStart --value)" = no
+done
 while IFS=$'\t' read -r unit enabled _active; do
   case "$unit" in
     trade.timer|trade-rerun.path|trade-preflight.timer)
       case "$enabled" in
-        enabled) sudo systemctl enable --now "$unit" ;;
-        disabled) sudo systemctl disable --now "$unit" ;;
+        enabled) sudo systemctl enable "$unit" ;;
+        disabled) sudo systemctl disable "$unit" ;;
         *) echo "unexpected captured enablement for $unit: $enabled" >&2; exit 1 ;;
+      esac
+      case "$_active" in
+        active) sudo systemctl start "$unit" ;;
+        inactive) sudo systemctl stop "$unit" ;;
+        *) echo "unexpected captured activity for $unit: $_active" >&2; exit 1 ;;
       esac
       ;;
   esac
 done < "$recovery_dir/unit-state-before.tsv"
 for unit in trade.timer trade-rerun.path trade-preflight.timer; do
-  captured="$(awk -F $'\t' -v unit="$unit" '$1 == unit { print $2 }' "$recovery_dir/unit-state-before.tsv")"
-  test "$(systemctl is-enabled "$unit" || true)" = "$captured"
-done
-for unit in trade.timer trade-rerun.path trade-preflight.timer \
-  trade.service trade-rerun.service trade-preflight.service; do
-  test "$(systemctl is-enabled "$unit" || true)" != masked-runtime
+  captured_enabled="$(awk -F $'\t' -v unit="$unit" '$1 == unit { print $2 }' "$recovery_dir/unit-state-before.tsv")"
+  captured_active="$(awk -F $'\t' -v unit="$unit" '$1 == unit { print $3 }' "$recovery_dir/unit-state-before.tsv")"
+  test "$(systemctl is-enabled "$unit" || true)" = "$captured_enabled"
+  test "$(systemctl is-active "$unit" || true)" = "$captured_active"
 done
 ```
 
-Re-read and compare the three entry-point enablement values to `unit-state-before.tsv`, verify the six units are no longer runtime-masked, remove no trigger unless its absence was already verified, and confirm next trigger times.
+Re-read and compare the three entry-point enablement and activity values to `unit-state-before.tsv`, verify all six report `RefuseManualStart=no`, remove no trigger unless its absence was already verified, and confirm next trigger times. Both drop-in loops are intentionally two-pass: every file must exactly match the recovery content before any one of them is removed.
 
 - [ ] **Step 7: Final production verification**
 
