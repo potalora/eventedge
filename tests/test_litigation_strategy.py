@@ -66,12 +66,12 @@ def test_edgar_duplicate_issuer_fails_closed_for_unrelated_tickers(
 ) -> None:
     entries = [
         {
-            "cik_str": 1847345,
+            "cik_str": 1883984,
             "ticker": "ALCED",
             "title": "Alternus Clean Energy Inc.",
         },
         {
-            "cik_str": 1847345,
+            "cik_str": 1883984,
             "ticker": "ACLEW",
             "title": "Alternus Clean Energy Inc.",
         },
