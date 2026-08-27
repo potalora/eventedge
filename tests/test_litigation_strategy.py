@@ -89,16 +89,62 @@ def test_edgar_duplicate_issuer_fails_closed_for_unrelated_tickers(
     )
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_edgar_same_cik_mixed_ticker_families_fail_closed(reverse: bool) -> None:
+    entries = [
+        {
+            "cik_str": 1004434,
+            "ticker": ticker,
+            "title": "Affiliated Managers Group, Inc.",
+        }
+        for ticker in ("AMG", "MGR", "MGRB", "MGRD", "MGRE")
+    ]
+    if reverse:
+        entries.reverse()
+    source = EDGARSource()
+    source._session_cache["_company_tickers"] = {
+        str(index): entry for index, entry in enumerate(entries)
+    }
+
+    assert (
+        source.name_to_ticker("Affiliated Managers Group, Inc.", allow_prefix=False)
+        is None
+    )
+
+
+def test_edgar_name_map_fails_closed_for_cross_cik_title_collision() -> None:
+    source = EDGARSource()
+    source._session_cache["_company_tickers"] = {
+        "base": {
+            "cik_str": 101,
+            "ticker": "BASE",
+            "title": "Shared Issuer Name Inc.",
+        },
+        "extension": {
+            "cik_str": 202,
+            "ticker": "BASEW",
+            "title": "Shared Issuer Name Inc.",
+        },
+    }
+
+    assert source.name_to_ticker("Shared Issuer Name Inc.", allow_prefix=False) is None
+
+
 def test_edgar_name_map_skips_malformed_title_and_ticker_fields() -> None:
     source = EDGARSource()
     source._session_cache["_company_tickers"] = {
-        "null-ticker": {"ticker": None, "title": "Null Ticker Inc."},
-        "null-title": {"ticker": "NULLTITLE", "title": None},
-        "numeric-ticker": {"ticker": 17, "title": "Numeric Ticker Inc."},
-        "numeric-title": {"ticker": "NUMTITLE", "title": 44},
-        "blank-ticker": {"ticker": " ", "title": "Blank Ticker Inc."},
-        "blank-title": {"ticker": "BLANKTITLE", "title": " "},
-        "valid": {"ticker": "real", "title": "Valid Issuer Inc."},
+        "null-ticker": {"cik_str": 1, "ticker": None, "title": "Null Ticker Inc."},
+        "null-title": {"cik_str": 1, "ticker": "NULLTITLE", "title": None},
+        "numeric-ticker": {"cik_str": 1, "ticker": 17, "title": "Numeric Ticker Inc."},
+        "numeric-title": {"cik_str": 1, "ticker": "NUMTITLE", "title": 44},
+        "blank-ticker": {"cik_str": 1, "ticker": " ", "title": "Blank Ticker Inc."},
+        "blank-title": {"cik_str": 1, "ticker": "BLANKTITLE", "title": " "},
+        "missing-cik": {"ticker": "MISSINGCIK", "title": "Missing Cik Inc."},
+        "zero-cik": {"cik_str": 0, "ticker": "ZEROCIK", "title": "Zero Cik Inc."},
+        "negative-cik": {"cik_str": -1, "ticker": "NEGCIK", "title": "Negative Cik Inc."},
+        "string-cik": {"cik_str": "2", "ticker": "STRINGCIK", "title": "String Cik Inc."},
+        "bool-cik": {"cik_str": True, "ticker": "BOOLCIK", "title": "Boolean Cik Inc."},
+        "valid": {"cik_str": 3, "ticker": "real", "title": "Valid Issuer Inc."},
     }
 
     assert source._ensure_name_map() == {"valid issuer": "REAL"}
@@ -111,6 +157,7 @@ def test_edgar_name_map_skips_malformed_title_and_ticker_fields() -> None:
         ({"GOOG", "GOOGL"}, "GOOG"),
         ({"ALCED", "ACLEW"}, None),
         ({"A", "AB", "ABC"}, None),
+        ({"AMG", "MGR", "MGRB", "MGRD", "MGRE"}, None),
     ],
 )
 def test_edgar_company_ticker_selector_only_resolves_unique_base_extensions(

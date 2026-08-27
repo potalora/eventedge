@@ -456,7 +456,13 @@ class EDGARSource:
             )
         }
         if len(base_tickers) == 1:
-            return next(iter(base_tickers))
+            base_ticker = next(iter(base_tickers))
+            if all(
+                other_ticker.startswith(base_ticker)
+                for other_ticker in tickers
+                if other_ticker != base_ticker
+            ):
+                return base_ticker
         return None
 
     def _ensure_name_map(self) -> dict[str, str]:
@@ -468,11 +474,17 @@ class EDGARSource:
         self._ensure_company_tickers()
         tickers_data = self._session_cache.get("_company_tickers", {})
 
-        candidates_by_name: dict[str, set[str]] = {}
+        candidates_by_name_and_cik: dict[str, dict[int, set[str]]] = {}
         for entry in tickers_data.values():
             title = entry.get("title")
             ticker = entry.get("ticker")
-            if not isinstance(title, str) or not isinstance(ticker, str):
+            cik = entry.get("cik_str")
+            if (
+                not isinstance(title, str)
+                or not isinstance(ticker, str)
+                or type(cik) is not int
+                or cik <= 0
+            ):
                 continue
             title = title.strip()
             ticker = ticker.strip().upper()
@@ -481,13 +493,18 @@ class EDGARSource:
             normalized_title = self._normalize_name(title)
             if not normalized_title:
                 continue
-            candidates_by_name.setdefault(normalized_title, set()).add(ticker)
+            candidates_by_name_and_cik.setdefault(normalized_title, {}).setdefault(
+                cik, set()
+            ).add(ticker)
 
-        mapping = {
-            name: selected
-            for name, tickers in candidates_by_name.items()
-            if (selected := self._select_company_ticker(tickers)) is not None
-        }
+        mapping: dict[str, str] = {}
+        for name, tickers_by_cik in candidates_by_name_and_cik.items():
+            if len(tickers_by_cik) != 1:
+                continue
+            tickers = next(iter(tickers_by_cik.values()))
+            selected = self._select_company_ticker(tickers)
+            if selected is not None:
+                mapping[name] = selected
         self._name_to_ticker_cache = mapping
         return mapping
 

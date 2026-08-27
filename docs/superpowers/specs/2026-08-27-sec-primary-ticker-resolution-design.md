@@ -60,8 +60,9 @@ unrelated candidates, so this issuer must remain unresolved.
 
 `EDGARSource._ensure_name_map()` continues to expose the existing
 normalized-name-to-string interface and `name_to_ticker()` retains its public
-signature. It first builds a normalized-name-to-`set[str]` candidate map, then
-adds only resolved names to the existing `dict[str, str]` cache.
+signature. It first builds a normalized-name-to-CIK-to-`set[str]` candidate
+map, then adds a resolved name to the existing `dict[str, str]` cache only
+when exactly one valid CIK contributed to that normalized name.
 
 The pure selector has the exact signature
 `_select_company_ticker(tickers: set[str]) -> str | None` and applies this
@@ -74,19 +75,32 @@ base_tickers = {
     ticker for ticker in tickers
     if any(other.startswith(ticker) for other in tickers if other != ticker)
 }
-return next(iter(base_tickers)) if len(base_tickers) == 1 else None
+if len(base_tickers) != 1:
+    return None
+base_ticker = next(iter(base_tickers))
+return (
+    base_ticker
+    if all(other.startswith(base_ticker) for other in tickers if other != base_ticker)
+    else None
+)
 ```
 
 Thus `GL`/`GL-PD`, `NEXR`/`NEXRW`, and `GOOG`/`GOOGL` resolve to their sole
-strict-prefix base ticker. Unrelated candidates such as `ALCED`/`ACLEW`, and
-multi-base chains such as `A`/`AB`/`ABC`, return `None`. This intentionally
-does not attempt to classify preferred shares, warrants, rights, or units from
-their suffixes.
+strict-prefix base ticker. Both quantifiers are required: exactly one candidate
+must prefix at least one sibling, and that candidate must prefix every other
+ticker in its same-CIK set. Unrelated candidates such as `ALCED`/`ACLEW`,
+multi-base chains such as `A`/`AB`/`ABC`, and Affiliated Managers Group's
+same-CIK `AMG`/`MGR`/`MGRB`/`MGRD`/`MGRE` set return `None`; `MGR` does not
+prefix `AMG`. This intentionally does not attempt to classify preferred
+shares, warrants, rights, units, or notes from their suffixes.
 
 Only non-empty string `title` and `ticker` fields are stripped and normalized;
 null and non-string fields are skipped before conversion. This preserves the
 prior malformed-row skip intent without allowing `str(None)` or numeric values
-to create bogus name mappings.
+to create bogus name mappings. `cik_str` must be a positive integer (not a
+boolean); missing, string, zero, and negative CIK values are skipped. A
+normalized title contributed by more than one valid CIK is an explicit
+ambiguity and is omitted before ticker selection.
 
 ## Defense in depth
 
@@ -109,11 +123,15 @@ and will not call a live API. They will prove that:
 - Nexera Technologies resolves to `NEXR` instead of `NEXRW`;
 - reversing the duplicate feed order produces the same result;
 - Alternus resolves to `None` in both feed orders;
-- null, numeric, and blank title/ticker fields do not create mappings;
+- null, numeric, and blank title/ticker fields, plus invalid or missing CIK
+  fields, do not create mappings;
 - unique tickers and a unique base-extension pair resolve, while unrelated
-  candidates and multi-base chains fail closed;
+  candidates, multi-base chains, and the exact same-CIK AMG/MGR security set
+  fail closed;
+- a normalized-title collision across different CIKs fails closed even when
+  one ticker is a base of the other;
 - ordinary single-ticker exact and prefix behavior remains unchanged;
-- the focused `tests/test_litigation_strategy.py -q` suite has 18 passing
+- the focused `tests/test_litigation_strategy.py -q` suite has 22 passing
   tests and makes no live API call.
 
 A read-only acceptance check may fetch the official SEC file and current Yahoo

@@ -8,13 +8,15 @@ Technologies to `NEXR`, while ambiguous issuers fail closed, then recover
 production through a fresh immutable generation.
 
 **Architecture:** Keep `EDGARSource.name_to_ticker()` and its one-value cache
-interface unchanged. First group normalized issuer names into `set[str]`
-candidates. Then use the pure
+interface unchanged. First group normalized issuer names by valid positive
+integer CIK into `set[str]` candidates. Then use the pure
 `_select_company_ticker(tickers: set[str]) -> str | None`: a unique ticker
 resolves directly; duplicates resolve only when exactly one candidate is a
-strict prefix of another candidate in that same set; every other duplicate set
-is omitted from the cache. Preserve the existing volatility-history gate as
-defense in depth and deploy only after reviewed merge-SHA parity.
+strict prefix of at least one sibling *and* it is a strict prefix of every
+other ticker in that same-CIK set. A normalized name maps only when exactly one
+CIK contributed; every other duplicate or cross-CIK set is omitted from the
+cache. Preserve the existing volatility-history gate as defense in depth and
+deploy only after reviewed merge-SHA parity.
 
 **Tech Stack:** Python 3.10+, pytest, SEC `company_tickers.json`, yfinance,
 Git/GitHub, systemd, SQLite generation ledgers.
@@ -38,7 +40,8 @@ Git/GitHub, systemd, SQLite generation ledgers.
 - Modify: `tradingagents/strategies/data_sources/edgar_source.py`
 
 **Interfaces:**
-- Consumes: SEC-shaped entries with `title` and `ticker` fields from
+- Consumes: SEC-shaped entries with positive integer `cik_str` plus `title`
+  and `ticker` fields from
   `EDGARSource._session_cache["_company_tickers"]`.
 - Produces: `EDGARSource._select_company_ticker(tickers: set[str]) -> str | None`
   and the unchanged `name_to_ticker(company_name: str, *, allow_prefix: bool = True) -> str | None` behavior.
@@ -79,10 +82,13 @@ def test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order(
 ```
 
 Also add order-reversed Alternus `ALCED`/`ACLEW` fixtures that return `None`,
-and a malformed-field fixture proving null, numeric, and blank `title` or
-`ticker` values create no bogus mappings. Direct selector cases must cover a
-single unique ticker, `GOOG`/`GOOGL`, the unrelated Alternus pair, and a
-multi-base chain. These regressions must run before resolver code changes.
+an order-reversed same-CIK `AMG`/`MGR`/`MGRB`/`MGRD`/`MGRE` fixture that
+returns `None`, and a synthetic cross-CIK normalized-title collision that
+returns `None`. The malformed-field fixture must prove null, numeric, and blank
+`title` or `ticker` values plus missing, string, zero, negative, and boolean
+`cik_str` values create no bogus mappings. Direct selector cases must cover a
+single unique ticker, `GOOG`/`GOOGL`, the unrelated Alternus pair, a multi-base
+chain, and the AMG set. These regressions must run before resolver code changes.
 
 - [ ] **Step 2: Run the regression and verify the production-shaped failure**
 
@@ -91,13 +97,13 @@ Run:
 ```bash
 /Users/potalora/ai_workspace/trading_agents/.venv/bin/python -m pytest \
   tests/test_litigation_strategy.py \
-  -k 'fails_closed_for_unrelated_tickers or skips_malformed_title_and_ticker_fields or selector_only_resolves_unique_base_extensions' \
+  -k 'same_cik_mixed_ticker_families or cross_cik_title_collision or skips_malformed_title_and_ticker_fields or selector_only_resolves_unique_base_extensions' \
   -q
 ```
 
-Expected before the resolver change: 7 failures. The Alternus cases select
-`ACLEW`, malformed fields create mappings such as `none` and `17`, and direct
-selector cases fail because the method is absent.
+Expected before the second selector revision: 5 failures and 4 passing cases.
+The AMG cases select `MGR`, the cross-CIK collision selects `BASE`, invalid CIK
+rows create mappings, and the AMG direct selector case resolves incorrectly.
 
 - [ ] **Step 3: Implement the minimal deterministic selector**
 
@@ -119,19 +125,31 @@ Add this method above `_ensure_name_map()` in `EDGARSource`:
             )
         }
         if len(base_tickers) == 1:
-            return next(iter(base_tickers))
+            base_ticker = next(iter(base_tickers))
+            if all(
+                other_ticker.startswith(base_ticker)
+                for other_ticker in tickers
+                if other_ticker != base_ticker
+            ):
+                return base_ticker
         return None
 ```
 
 Replace the assignment loop in `_ensure_name_map()` with grouped candidates
-and strict string-field validation:
+per normalized name and CIK, strict field validation, and cross-CIK rejection:
 
 ```python
-        candidates_by_name: dict[str, set[str]] = {}
+        candidates_by_name_and_cik: dict[str, dict[int, set[str]]] = {}
         for entry in tickers_data.values():
             title = entry.get("title")
             ticker = entry.get("ticker")
-            if not isinstance(title, str) or not isinstance(ticker, str):
+            cik = entry.get("cik_str")
+            if (
+                not isinstance(title, str)
+                or not isinstance(ticker, str)
+                or type(cik) is not int
+                or cik <= 0
+            ):
                 continue
             title = title.strip()
             ticker = ticker.strip().upper()
@@ -140,13 +158,18 @@ and strict string-field validation:
             normalized_title = self._normalize_name(title)
             if not normalized_title:
                 continue
-            candidates_by_name.setdefault(normalized_title, set()).add(ticker)
+            candidates_by_name_and_cik.setdefault(normalized_title, {}).setdefault(
+                cik, set()
+            ).add(ticker)
 
-        mapping = {
-            name: selected
-            for name, tickers in candidates_by_name.items()
-            if (selected := self._select_company_ticker(tickers)) is not None
-        }
+        mapping: dict[str, str] = {}
+        for name, tickers_by_cik in candidates_by_name_and_cik.items():
+            if len(tickers_by_cik) != 1:
+                continue
+            tickers = next(iter(tickers_by_cik.values()))
+            selected = self._select_company_ticker(tickers)
+            if selected is not None:
+                mapping[name] = selected
 ```
 
 - [ ] **Step 4: Run the focused regression and strategy suite**
@@ -158,7 +181,7 @@ Run:
   tests/test_litigation_strategy.py -q
 ```
 
-Expected: `18 passed` and no live API call.
+Expected: `22 passed` and no live API call.
 
 - [ ] **Step 5: Check formatting and commit the tested source change**
 
