@@ -440,6 +440,12 @@ class EDGARSource:
         # Collapse whitespace and strip
         return " ".join(name.split()).strip(" .,")
 
+    @staticmethod
+    def _company_ticker_preference(ticker: str) -> tuple[bool, int, str]:
+        """Rank a standard base ticker ahead of issuer-linked extensions."""
+        normalized = ticker.strip().upper()
+        return (not normalized.isalpha(), len(normalized), normalized)
+
     def _ensure_name_map(self) -> dict[str, str]:
         """Build and cache normalized-company-name → ticker mapping."""
         if self._name_to_ticker_cache is not None:
@@ -451,10 +457,16 @@ class EDGARSource:
 
         mapping: dict[str, str] = {}
         for entry in tickers_data.values():
-            title = entry.get("title", "")
-            ticker = entry.get("ticker", "")
-            if title and ticker:
-                mapping[self._normalize_name(title)] = ticker.upper()
+            title = str(entry.get("title", "")).strip()
+            ticker = str(entry.get("ticker", "")).strip().upper()
+            if not title or not ticker:
+                continue
+            normalized_title = self._normalize_name(title)
+            current = mapping.get(normalized_title)
+            if current is None or self._company_ticker_preference(
+                ticker
+            ) < self._company_ticker_preference(current):
+                mapping[normalized_title] = ticker
         self._name_to_ticker_cache = mapping
         return mapping
 

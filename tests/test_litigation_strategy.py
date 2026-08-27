@@ -28,6 +28,38 @@ def test_edgar_exact_name_match_rejects_ambiguous_prefix() -> None:
     assert source.name_to_ticker("United States") == "USLM"
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_edgar_duplicate_issuer_prefers_primary_ticker_regardless_of_order(
+    reverse: bool,
+) -> None:
+    entries = [
+        {"cik_str": 320335, "ticker": "GL", "title": "GLOBE LIFE INC."},
+        {"cik_str": 320335, "ticker": "GL-PD", "title": "GLOBE LIFE INC."},
+        {
+            "cik_str": 1885408,
+            "ticker": "NEXR",
+            "title": "Nexera Technologies Ltd",
+        },
+        {
+            "cik_str": 1885408,
+            "ticker": "NEXRW",
+            "title": "Nexera Technologies Ltd",
+        },
+    ]
+    if reverse:
+        entries.reverse()
+    source = EDGARSource()
+    source._session_cache["_company_tickers"] = {
+        str(index): entry for index, entry in enumerate(entries)
+    }
+
+    assert source.name_to_ticker("Globe Life Inc.", allow_prefix=False) == "GL"
+    assert (
+        source.name_to_ticker("Nexera Technologies Ltd", allow_prefix=False)
+        == "NEXR"
+    )
+
+
 @pytest.fixture
 def exact_litigation_tickers(monkeypatch: pytest.MonkeyPatch) -> None:
     matches = {
