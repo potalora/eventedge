@@ -58,6 +58,28 @@ cp .env.example .env     # add your API keys
 
 You'll need an Anthropic API key for the autoresearch LLM calls. Stock prices come from yfinance by default — no key needed. Most event strategies need free-tier keys for their data sources (Finnhub, FRED, NOAA CDO, USDA NASS, FMP, EDGAR User-Agent). The system gracefully degrades if a strategy's data source is unavailable. See `.env.example` for the full list.
 
+Daily and preflight worker attempts retain separate JSON evidence under
+`data/logs/run_attempts/`. The generation CLI prints the artifact path, and failed
+governed checks also print their available ticker/reason details. Each artifact
+contains the session, generation commit, process status, captured output, and
+structured result; later runs do not overwrite it. Managed timeouts retain partial
+output. The latest daily log remains available for existing readers.
+
+These are operational logs: preflight still leaves the generation manifest and
+entire generation-state tree unchanged. A process completion or `clean` outcome
+does not by itself prove healthy strategy inputs or research eligibility. The
+full 12-strategy, 16-portfolio matrix remains in place; the staged reliability
+design is in [the matrix reliability plan](docs/superpowers/specs/2026-09-06-matrix-reliability-design.md).
+
+Evidence files use restrictive permissions and redact known credential environment
+values and common authentication fields. Keep them private: provider payloads and
+research data can remain sensitive. Archives accumulate without automatic deletion;
+include them in log storage/retention planning. A host loss or hard kill before the
+manager finishes can still leave no finalized artifact. Lock rejection, command
+validation failure, and separately invoked report commands are outside this worker
+attempt archive. If writing evidence fails, the CLI reports that separately without
+changing the worker's outcome or rerunning economic work.
+
 ```bash
 # Daily automation — run all active generations
 python scripts/run_generations.py run-daily --date 2026-07-31
