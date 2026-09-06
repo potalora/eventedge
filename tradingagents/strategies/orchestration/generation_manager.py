@@ -16,10 +16,14 @@ import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
+from tradingagents.strategies.orchestration.run_evidence import (
+    persist_run_evidence,
+    sanitize_evidence_text,
+)
 from tradingagents.strategies.orchestration.run_outcome import (
     DAILY_RESULT_ENVELOPE_KEYS,
     DAILY_RESULT_PREFIX,
@@ -76,6 +80,11 @@ def _normalize_daily_candidate_issues(
         canonical_candidate_input_issue_summaries,
     )
 
+    diagnostics = {
+        key: result[key]
+        for key in ("evidence_path", "evidence_error")
+        if key in result
+    }
     try:
         candidate_issues = canonical_candidate_input_issue_summaries(
             result["candidate_input_issues"], trading_date
@@ -86,6 +95,7 @@ def _normalize_daily_candidate_issues(
             "success": False,
             "elapsed_s": result.get("elapsed_s", 0.0),
             "error": "invalid candidate input issue summary",
+            **diagnostics,
         }
     outcome = result.get("outcome")
     consistent = result.get("success") is False and (
@@ -105,6 +115,7 @@ def _normalize_daily_candidate_issues(
             "success": False,
             "elapsed_s": result.get("elapsed_s", 0.0),
             "error": "invalid candidate input issue summary",
+            **diagnostics,
         }
     normalized = dict(result)
     normalized["candidate_input_issues"] = candidate_issues
@@ -122,7 +133,13 @@ def _daily_history_entry(result: dict, trading_date: str) -> dict:
     }
     if result.get("degraded"):
         history_entry["degraded"] = True
-    for key in ("execution_valid", "candidate_bar_quarantines", "error"):
+    for key in (
+        "execution_valid",
+        "candidate_bar_quarantines",
+        "error",
+        "evidence_path",
+        "evidence_error",
+    ):
         if key in result:
             history_entry[key] = result[key]
     recoveries = _canonical_recoveries(
@@ -860,6 +877,71 @@ class GenerationManager:
         Daily results include a canonical ``outcome``. Preflight results retain
         their independent outcome-free report contract.
         """
+        started_at = datetime.now(timezone.utc)
+        capture: dict = {
+            "stdout": "",
+            "stderr": "",
+            "returncode": None,
+            "status": "launch_error",
+        }
+        result = self._run_cohorts_subprocess_result(
+            gen_data,
+            extra_args,
+            log_name,
+            preflight_mode=preflight_mode,
+            write_log=write_log,
+            inherited_lock=inherited_lock,
+            capture=capture,
+        )
+        finished_at = datetime.now(timezone.utc)
+        try:
+            date_index = extra_args.index("--date") + 1
+            requested_session = extra_args[date_index]
+        except (ValueError, IndexError):
+            requested_session = ""
+        evidence = {
+            "schema_version": 1,
+            "generation_id": gen_data["gen_id"],
+            "generation_commit": gen_data["git_commit"],
+            "requested_session": requested_session,
+            "action": "preflight" if preflight_mode is not None else "daily",
+            "preflight_mode": preflight_mode,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "process_return_code": capture["returncode"],
+            "process_status": capture["status"],
+            "stdout": capture["stdout"],
+            "stderr": capture["stderr"],
+            "result": result,
+        }
+        result = dict(result)
+        try:
+            result["evidence_path"] = str(
+                persist_run_evidence(self._repo_root, evidence)
+            )
+        except Exception as error:  # noqa: BLE001
+            # Diagnostics are best effort and cannot replace a completed run result.
+            error_text = str(error) or type(error).__name__
+            result["evidence_error"] = sanitize_evidence_text(error_text)
+            logger.warning(
+                "Failed to persist attempt evidence for %s: %s",
+                gen_data.get("gen_id"),
+                result["evidence_error"],
+            )
+        return result
+
+    def _run_cohorts_subprocess_result(
+        self,
+        gen_data: dict,
+        extra_args: list[str],
+        log_name: str = "last_run_output.log",
+        *,
+        preflight_mode: str | None = None,
+        write_log: bool = True,
+        inherited_lock: object | None = None,
+        capture: dict,
+    ) -> dict:
+        """Produce the existing worker result and collect process diagnostics."""
         env = os.environ.copy()
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
         env["PYTHONPATH"] = str(Path(gen_data["worktree_path"]).resolve())
@@ -893,6 +975,14 @@ class GenerationManager:
                 pass_fds=pass_fds,
             )
             elapsed = time.monotonic() - start
+            capture.update(
+                {
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                    "returncode": proc.returncode,
+                    "status": "completed",
+                }
+            )
 
             # Persist the run's full stdout/stderr (per-source fetch counts,
             # per-strategy signal counts, etc.) so a silent strategy can always
@@ -1051,8 +1141,16 @@ class GenerationManager:
                 "elapsed_s": round(elapsed, 2),
             }
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
             elapsed = time.monotonic() - start
+            capture.update(
+                {
+                    "stdout": error.stdout or "",
+                    "stderr": error.stderr or "",
+                    "returncode": None,
+                    "status": "timeout",
+                }
+            )
             logger.error(
                 "Generation %s timed out after %.0fs", gen_data["gen_id"], elapsed
             )
