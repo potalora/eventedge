@@ -72,10 +72,15 @@ full 12-strategy, 16-portfolio matrix remains in place; the staged reliability
 design is in [the matrix reliability plan](docs/superpowers/specs/2026-09-06-matrix-reliability-design.md).
 
 Evidence files use restrictive permissions and redact known credential environment
-values and common authentication fields. Keep them private: provider payloads and
-research data can remain sensitive. Archives accumulate without automatic deletion;
+values (including common JSON/repr escaping) and common authentication fields.
+Truncated quoted credentials and complete authorization-header lines are redacted;
+this does not detect arbitrary unknown secrets. Keep files private: provider
+payloads and research data can remain sensitive. Archives accumulate without automatic deletion;
 include them in log storage/retention planning. A host loss or hard kill before the
-manager finishes can still leave no finalized artifact. Lock rejection, command
+manager finishes can still leave no finalized artifact or a private temporary file.
+Temporary-file cleanup failures are logged without masking a completed archive.
+Publication is atomic for readers; directory entries are not explicitly synced,
+so power-loss durability is not guaranteed. Lock rejection, command
 validation failure, and separately invoked report commands are outside this worker
 attempt archive. If writing evidence fails, the CLI reports that separately without
 changing the worker's outcome or rerunning economic work.
