@@ -1,4 +1,8 @@
-"""Deterministic reproducer for completed futures lost at timeout handling."""
+"""Historical PR #37 reproducer; requires pre-fix commit 897be39.
+
+Do not run as acceptance for the combined release containing PR #38. The fixed
+implementation is covered by tests/test_fetch_timeout_boundary.py instead.
+"""
 
 from __future__ import annotations
 
