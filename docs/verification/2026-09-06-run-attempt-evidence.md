@@ -1,5 +1,10 @@
 # Run attempt evidence verification — September 6, 2026
 
+Integration update: the September 7 release also includes PR #38. The timeout
+race described below is historical evidence from PR #37, not an unresolved defect
+in the combined release. Use the [repair verification](2026-09-06-source-fetch-timeout.md)
+and `tests/test_fetch_timeout_boundary.py` for current-code acceptance.
+
 Validated in an isolated EventEdge checkout on `codex/matrix-run-evidence`, based
 on fetched `origin/main` at `0ffd2cf`. Python 3.12.14; dependencies installed from
 the existing project metadata into a fresh local virtual environment. No runtime
@@ -137,7 +142,7 @@ generation state, strategy definitions, and portfolio construction were not chan
 .venv/bin/python -m pytest -m 'not live' -q
 # Focused cross-version suite (run with each fresh environment's Python):
 python -m pytest tests/test_run_evidence*.py -q
-.venv/bin/python docs/verification/reproduce_fetch_timeout_race.py
+# Historical reproducer: run only on PR #37's pre-fix checkout.
 .venv/bin/python -m ruff check --select E4,E7,E9,F \
   scripts/run_generations.py \
   tradingagents/strategies/orchestration/generation_manager.py \
