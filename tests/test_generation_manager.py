@@ -17,7 +17,6 @@ import pytest
 
 from tradingagents.strategies.orchestration.generation_manager import GenerationManager
 
-
 # ------------------------------------------------------------------
 # Fixtures
 # ------------------------------------------------------------------
@@ -329,6 +328,17 @@ class TestGenerationDailyRun:
         assert results["gen_001"]["success"] is True
         assert identity() == before
         assert not any(tree.rglob("last_preflight_output.log"))
+        evidence_path = Path(results["gen_001"]["evidence_path"])
+        evidence = json.loads(evidence_path.read_text())
+        assert evidence_path.is_relative_to(git_repo / "data" / "logs")
+        assert evidence["action"] == "preflight"
+        assert evidence["preflight_mode"] == "screen"
+        assert evidence["requested_session"] == "2026-08-06"
+        assert evidence["process_status"] == "completed"
+        assert evidence["process_return_code"] == 0
+        assert evidence["stdout"] == process.stdout
+        assert evidence["stderr"] == process.stderr
+        assert evidence["result"]["screen_ok"] is True
 
     def test_daily_busy_is_bounded_and_starts_no_child_or_history(
         self, git_repo, manager
@@ -510,6 +520,215 @@ class TestGenerationDailyRun:
         assert entry["outcome"] == "clean"
         assert entry["success"] is True
         assert "elapsed_s" in entry
+
+    def test_run_daily_history_keeps_evidence_diagnostics(self, git_repo, manager):
+        manager.start_generation("evidence history")
+
+        with patch.object(manager, "_run_cohorts_subprocess") as run_child:
+            run_child.return_value = {
+                "outcome": "clean",
+                "success": True,
+                "elapsed_s": 1.0,
+                "evidence_path": "/tmp/attempt.json",
+                "evidence_error": "archive unavailable",
+            }
+            manager.run_daily("2026-09-06")
+
+        entry = manager.get_generation("gen_001").run_history[0]
+        assert entry["evidence_path"] == "/tmp/attempt.json"
+        assert entry["evidence_error"] == "archive unavailable"
+
+    def test_two_daily_invocations_keep_independent_attempt_evidence(
+        self, git_repo, manager
+    ):
+        info = manager.start_generation("independent evidence")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        process = MagicMock(returncode=0, stdout=_valid_daily_stdout(), stderr="")
+        with patch.object(gm_mod.subprocess, "run", return_value=process):
+            first = manager._run_cohorts_subprocess(
+                {
+                    "gen_id": info.gen_id,
+                    "git_commit": info.git_commit,
+                    "state_dir": info.state_dir,
+                    "worktree_path": info.worktree_path,
+                },
+                ["--date", "2026-09-06"],
+            )
+            first_path = Path(first["evidence_path"])
+            first_bytes = first_path.read_bytes()
+            second = manager._run_cohorts_subprocess(
+                {
+                    "gen_id": info.gen_id,
+                    "git_commit": info.git_commit,
+                    "state_dir": info.state_dir,
+                    "worktree_path": info.worktree_path,
+                },
+                ["--date", "2026-09-06"],
+            )
+
+        assert second["evidence_path"] != first["evidence_path"]
+        assert first_path.read_bytes() == first_bytes
+
+    @pytest.mark.parametrize(
+        ("raised", "expected_status", "expected_stdout", "expected_stderr"),
+        [
+            (
+                subprocess.TimeoutExpired(
+                    cmd=["python", "run_cohorts.py"],
+                    timeout=3600,
+                    output=b"partial timeout stdout",
+                    stderr=b"partial timeout stderr",
+                ),
+                "timeout",
+                "partial timeout stdout",
+                "partial timeout stderr",
+            ),
+            (OSError("launch refused"), "launch_error", "", ""),
+        ],
+    )
+    def test_failed_process_attempt_retains_status_streams_and_reason(
+        self,
+        git_repo,
+        manager,
+        raised,
+        expected_status,
+        expected_stdout,
+        expected_stderr,
+    ):
+        info = manager.start_generation("failed attempt evidence")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        gen_data = {
+            "gen_id": info.gen_id,
+            "git_commit": info.git_commit,
+            "state_dir": info.state_dir,
+            "worktree_path": info.worktree_path,
+        }
+        with patch.object(gm_mod.subprocess, "run", side_effect=raised):
+            result = manager._run_cohorts_subprocess(
+                gen_data,
+                ["--date", "2026-09-06"],
+                write_log=False,
+            )
+
+        evidence = json.loads(Path(result["evidence_path"]).read_text())
+        assert result["outcome"] == "failed"
+        assert result["success"] is False
+        assert evidence["process_status"] == expected_status
+        assert evidence["process_return_code"] is None
+        assert evidence["stdout"] == expected_stdout
+        assert evidence["stderr"] == expected_stderr
+        assert evidence["result"]["error"] == result["error"]
+        assert evidence["result"]["elapsed_s"] == result["elapsed_s"]
+
+    def test_evidence_write_failure_preserves_worker_result(
+        self, git_repo, manager, caplog, monkeypatch
+    ):
+        info = manager.start_generation("evidence write failure")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        secret = "archive-credential-secret"
+        monkeypatch.setenv("ARCHIVE_API_KEY", secret)
+        process = MagicMock(returncode=0, stdout=_valid_daily_stdout(), stderr="")
+        with (
+            patch.object(gm_mod.subprocess, "run", return_value=process),
+            patch.object(
+                gm_mod,
+                "persist_run_evidence",
+                side_effect=OSError(f"archive unavailable: token={secret}"),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            result = manager._run_cohorts_subprocess(
+                {
+                    "gen_id": info.gen_id,
+                    "git_commit": info.git_commit,
+                    "state_dir": info.state_dir,
+                    "worktree_path": info.worktree_path,
+                },
+                ["--date", "2026-09-06"],
+            )
+
+        assert result == {
+            "outcome": "clean",
+            "success": True,
+            "elapsed_s": result["elapsed_s"],
+            "evidence_error": "archive unavailable: token=<redacted>",
+        }
+        assert "Failed to persist attempt evidence for gen_001" in caplog.text
+        assert secret not in caplog.text
+
+    def test_evidence_write_failure_preserves_timeout_result(self, git_repo, manager):
+        info = manager.start_generation("timeout archive failure")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        timeout = subprocess.TimeoutExpired(["worker"], 3600, output=b"partial")
+        with (
+            patch.object(gm_mod.subprocess, "run", side_effect=timeout),
+            patch.object(
+                gm_mod,
+                "persist_run_evidence",
+                side_effect=OSError("archive unavailable"),
+            ),
+        ):
+            result = manager._run_cohorts_subprocess(
+                {
+                    "gen_id": info.gen_id,
+                    "git_commit": info.git_commit,
+                    "state_dir": info.state_dir,
+                    "worktree_path": info.worktree_path,
+                },
+                ["--date", "2026-09-06"],
+                write_log=False,
+            )
+
+        assert result["outcome"] == "failed"
+        assert result["success"] is False
+        assert result["error"] == "Timed out after 3600s"
+        assert result["evidence_error"] == "archive unavailable"
+
+    def test_evidence_write_failure_preserves_preflight_result(
+        self, git_repo, manager
+    ):
+        info = manager.start_generation("preflight archive failure")
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+
+        report = {
+            "ok": False,
+            "screen_ok": False,
+            "screen_failures": ["horizon_30d"],
+            "failures": ["screen failed"],
+            "horizons": {},
+        }
+        process = MagicMock(
+            returncode=1, stdout=json.dumps(report, indent=2), stderr=""
+        )
+        with (
+            patch.object(gm_mod.subprocess, "run", return_value=process),
+            patch.object(
+                gm_mod,
+                "persist_run_evidence",
+                side_effect=OSError("archive unavailable"),
+            ),
+        ):
+            result = manager._run_cohorts_subprocess(
+                {
+                    "gen_id": info.gen_id,
+                    "git_commit": info.git_commit,
+                    "state_dir": info.state_dir,
+                    "worktree_path": info.worktree_path,
+                },
+                ["--date", "2026-09-06", "--preflight"],
+                preflight_mode="screen",
+                write_log=False,
+            )
+
+        assert result["success"] is False
+        assert "outcome" not in result
+        assert result["error"] == "preflight screen status: failed"
+        assert result["screen_failure_count"] == 1
+        assert result["evidence_error"] == "archive unavailable"
 
     def test_run_daily_records_degraded_history(self, git_repo, manager):
         """Candidate quarantine is alertable without becoming an execution failure."""
@@ -763,6 +982,8 @@ class TestGenerationDailyRun:
                 "candidate_input_issues": [malformed],
                 "elapsed_s": 1.0,
                 "error": "candidate input issue",
+                "evidence_path": "/tmp/malformed-attempt.json",
+                "evidence_error": "secondary archive warning",
             }
             results = manager.run_daily("2026-08-10")
 
@@ -771,6 +992,10 @@ class TestGenerationDailyRun:
         entry = manager.get_generation("gen_001").run_history[0]
         assert entry["outcome"] == "failed"
         assert "candidate_input_issues" not in entry
+        assert results["gen_001"]["evidence_path"] == "/tmp/malformed-attempt.json"
+        assert results["gen_001"]["evidence_error"] == "secondary archive warning"
+        assert entry["evidence_path"] == "/tmp/malformed-attempt.json"
+        assert entry["evidence_error"] == "secondary archive warning"
         assert secret not in json.dumps({"results": results, "entry": entry})
 
     def test_daily_history_rejects_clean_top_level_outcome_with_candidate_issues(
