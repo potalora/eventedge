@@ -1,5 +1,5 @@
 from datetime import date
-from time import sleep
+from threading import Event
 
 from tradingagents.strategies.metrics.health import classify_strategy_run
 from tradingagents.strategies.metrics.models import MetricEpoch
@@ -277,11 +277,16 @@ def test_fetch_exception_is_retained_and_classified_as_data_failure(tmp_path) ->
 
 
 def test_timed_out_fetch_is_retained_and_classified_as_data_failure(tmp_path) -> None:
+    release = Event()
+
     def slow_fetch() -> dict:
-        sleep(0.05)
+        release.wait(10)
         return {}
 
-    data = _gather_with_timeout({"finnhub": (slow_fetch, ())}, timeout_s=0.001)
+    try:
+        data = _gather_with_timeout({"finnhub": (slow_fetch, ())}, timeout_s=0.001)
+    finally:
+        release.set()
     engine = MultiStrategyEngine(
         config={"autoresearch": {"state_dir": str(tmp_path)}},
         strategies=[_ScreenStrategy("provider_timeout", [])],

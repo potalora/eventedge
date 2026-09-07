@@ -179,18 +179,16 @@ def _gather_with_timeout(
     """Run each ``name -> (fn, args)`` fetch in a thread pool, returning
     ``{name: result}``.
 
-    Every source defaults to ``{}``; failures and timeouts retain an explicit
-    error payload rather than being mistaken for healthy empty results. Python
+    Each source is classified from one completed/pending wait partition;
+    failures and timeouts retain an explicit error payload rather than being
+    mistaken for healthy empty results. A pending source remains timed out even
+    if it finishes while the result is assembled. Python
     cannot safely stop a running thread, so this is not request cancellation.
     On timeout the pool is shut down with ``wait=False`` so its teardown does
     not re-block the caller; sources need cooperative scheduling deadlines to
     avoid issuing follow-on requests after the caller has moved on.
     """
-    from concurrent.futures import (
-        ThreadPoolExecutor,
-        TimeoutError as FuturesTimeout,
-        as_completed,
-    )
+    from concurrent.futures import ThreadPoolExecutor, wait
 
     results: dict[str, Any] = {name: {} for name in api_fetches}
     if not api_fetches:
@@ -201,23 +199,23 @@ def _gather_with_timeout(
         futures = {
             pool.submit(fn, *args): name for name, (fn, args) in api_fetches.items()
         }
-        try:
-            for future in as_completed(futures, timeout=timeout_s):
-                name = futures[future]
-                try:
-                    results[name] = future.result()
-                except Exception as error:
-                    logger.error("Failed to fetch %s", name, exc_info=True)
-                    results[name] = {"error": f"{type(error).__name__}: {error}"}
-        except FuturesTimeout:
-            stuck = sorted(futures[f] for f in futures if not f.done())
+        done, pending = wait(futures, timeout=timeout_s)
+        for future, name in futures.items():
+            if future not in done:
+                results[name] = {"error": f"timeout after {timeout_s:g}s"}
+                continue
+            try:
+                results[name] = future.result()
+            except Exception as error:
+                logger.error("Failed to fetch %s", name, exc_info=True)
+                results[name] = {"error": f"{type(error).__name__}: {error}"}
+        if pending:
+            stuck = sorted(futures[future] for future in pending)
             logger.error(
                 "Data fetch exceeded %.0fs; abandoning slow sources: %s",
                 timeout_s,
                 stuck,
             )
-            for name in stuck:
-                results[name] = {"error": f"timeout after {timeout_s:g}s"}
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
