@@ -79,6 +79,15 @@ coverage classification and changed research eligibility belong to Stage 2.
 
 ## Stage 2: Record input coverage and eligibility
 
+First repair the source-fetch timeout race exposed by expanded testing. A future
+that finishes between the timeout decision and a later `done()` check can lose
+either its successful payload or its exception, leaving `{}`. The deterministic
+[reproducer](../../verification/reproduce_fetch_timeout_race.py) demonstrates both
+cases; this does not establish the cause of a historical VPS incident. Define one
+deadline partition and classify every source exactly once. Test completed success,
+completed exception, and unfinished sources at that boundary without timing sleeps.
+Treat this as a separate reviewed behavior change for a new generation.
+
 Expose scheduler completion, accounting validity, required-input coverage,
 decision/staging completion, and research eligibility separately. Keep the
 existing operational outcome compatible while adding evidence-backed dimensions;
