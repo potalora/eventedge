@@ -155,6 +155,43 @@ def test_duplicate_recommendation_choice_is_permutation_invariant() -> None:
     assert forward == reverse
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_policy_candidate_identity_is_unique_per_ticker_direction_across_events(
+    reverse: bool,
+) -> None:
+    committee = PortfolioCommittee(DEFAULT_CONFIG, size_profile=SIZE_PROFILES["100k"])
+    signals = [
+        _signal(),
+        {
+            **_signal(),
+            "strategy": "filing_analysis",
+            "event_key": "event-msft-filing",
+            "source_event_keys": ("native-filing-2",),
+        },
+    ]
+    recommendations = [
+        _oversized(position_size_pct=0.05, event_key="event-msft-q2"),
+        _oversized(position_size_pct=0.04, event_key="event-msft-filing"),
+    ]
+    if reverse:
+        signals.reverse()
+        recommendations.reverse()
+    with patch.object(committee, "_llm_synthesize", return_value=recommendations):
+        result = committee.synthesize(signals, risk_context=_empty_context())
+
+    # Staging can key the sizing outcome by this pair: attribution combines the
+    # events, and deduplication precedes policy evaluation and its audit sidecar.
+    assert len(result) == 1
+    assert len(committee.last_policy_decisions) == 1
+    recommendation = result[0]
+    decision = committee.last_policy_decisions[0]
+    assert (decision.ticker, decision.direction) == ("MSFT", "long")
+    assert decision.event_key == recommendation.event_key == "event-msft-filing"
+    assert decision.requested_weight == 0.05
+    assert recommendation.contributing_strategies == ["earnings_call", "filing_analysis"]
+    assert recommendation.source_event_keys == ("native-disclosure-1", "native-filing-2")
+
+
 def test_post_pass_derives_attribution_from_matching_input_signals() -> None:
     committee = PortfolioCommittee(DEFAULT_CONFIG, size_profile=SIZE_PROFILES["100k"])
     second = {

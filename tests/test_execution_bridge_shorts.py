@@ -146,6 +146,54 @@ def test_friday_close_recommendation_stages_monday_intent_without_mutation(tmp_p
         ledger.close()
 
 
+@pytest.mark.parametrize("direction", ["long", "short"])
+@pytest.mark.parametrize("price", ["500", "500.01"])
+def test_whole_share_boundary_never_increases_approved_allocation(
+    tmp_path, direction, price
+):
+    from tradingagents.strategies.trading.execution_bridge import ZeroShareIntentError
+
+    bridge, ledger = _bridge(tmp_path)
+    signal = replace(_signal(direction=direction), reference_close=Decimal(price))
+    try:
+        ledger.record_signal(signal)
+        before = ledger.account_state()
+        if price == "500":
+            intent = bridge.stage_intent(
+                _recommendation(direction), (signal,), before, signal.decision_at, MONDAY,
+            )
+            assert intent.requested_qty == 1
+        else:
+            with pytest.raises(ZeroShareIntentError, match="zero shares"):
+                bridge.stage_intent(
+                    _recommendation(direction), (signal,), before, signal.decision_at, MONDAY,
+                )
+            assert ledger.pending_intents(MONDAY) == []
+        assert ledger.account_state() == before
+        assert ledger.read_fills() == []
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("weight", [0, -0.1, float("nan"), float("inf"), "bad"])
+def test_invalid_sizing_is_not_a_zero_share_rejection(tmp_path, weight):
+    from tradingagents.strategies.trading.execution_bridge import ZeroShareIntentError
+
+    bridge, ledger = _bridge(tmp_path)
+    signal = _signal()
+    recommendation = replace(_recommendation(), position_size_pct=weight)
+    try:
+        ledger.record_signal(signal)
+        with pytest.raises(ValueError) as caught:
+            bridge.stage_intent(
+                recommendation, (signal,), ledger.account_state(), signal.decision_at, MONDAY,
+            )
+        assert not isinstance(caught.value, ZeroShareIntentError)
+        assert ledger.pending_intents(MONDAY) == []
+    finally:
+        ledger.close()
+
+
 def test_mixed_direction_exact_contributors_stage_winning_direction(tmp_path):
     bridge, ledger = _bridge(tmp_path)
     long_signal = _signal(signal_id="long", strategy="litigation")

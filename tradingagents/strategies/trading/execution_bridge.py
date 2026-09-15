@@ -39,6 +39,10 @@ from tradingagents.strategies.trading.risk_gate import (
 logger = logging.getLogger(__name__)
 
 
+class ZeroShareIntentError(ValueError):
+    """A valid approved allocation cannot fund one whole reference-price share."""
+
+
 class ExecutionBridge:
     """Persist orders before prices exist, then execute through one paper ledger."""
 
@@ -146,7 +150,7 @@ class ExecutionBridge:
         )
         requested_qty = int(allocation / reference_price)
         if requested_qty <= 0:
-            raise ValueError("approved recommendation sizes to zero shares")
+            raise ZeroShareIntentError("approved recommendation sizes to zero shares")
 
         side = "short" if recommendation.direction == "short" else "buy"
         intent = OrderIntent(
