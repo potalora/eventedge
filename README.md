@@ -107,12 +107,28 @@ python scripts/run_generations.py list
 python scripts/run_generations.py compare \
   --pair gen_005:horizon_30d_size_100k:candidate_epoch_id,gen_004:horizon_30d_size_100k:baseline_epoch_id
 
+# After a candidate has run in parallel, check five consecutive XNYS sessions
+# before considering retirement of the prior generation. This reads state only.
+python scripts/check_generation_readiness.py --repo /path/to/production/repo \
+  --generation gen_NNN --expected-commit FULL_40_CHARACTER_SHA \
+  --through 2026-09-21
+
 # Streamlit dashboard (interactive, in a browser)
 python -m streamlit run tradingagents/dashboard/app.py
 
 # Email-able HTML snapshot (forward to yourself in Gmail)
 python scripts/email_dashboard.py
 ```
+
+The readiness command exits 0 only when all five sessions have one clean daily
+result, valid completed accounting and SPY/BIL benchmarks in all 16 cohorts,
+completed staging in all 16 cohorts, no quarantined candidate bars or input
+issues, and healthy evidence from all 12 strategies across four horizons. It
+fails closed on missing or inconsistent records. This is an observed continuity
+gate for a parallel candidate, not a pre-deployment simulation or a performance
+claim. Review incident-specific replay tests before launching a candidate, keep
+the prior generation available during the observation window, and apply the
+separate 30/60/90-session performance gates before any strategy promotion.
 
 Docker works too:
 ```bash

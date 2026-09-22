@@ -464,6 +464,62 @@ def test_governed_recovery_requires_daily_agreement(
     assert resolution.failure_map == {"ESS": "invalid ESS/2026-08-10"}
 
 
+@pytest.mark.parametrize(
+    ("ticker", "daily", "hourly_close", "middle"),
+    [
+        (
+            "BRC",
+            {
+                "Open": 84.51000213623047,
+                "High": 84.30500030517578,
+                "Low": 83.06749725341797,
+                "Close": 83.38999938964844,
+            },
+            83.43000030517578,
+            83.5,
+        ),
+        (
+            "ICE",
+            {
+                "Open": 155.9199981689453,
+                "High": 155.6999969482422,
+                "Low": 152.5050048828125,
+                "Close": 152.92999267578125,
+            },
+            153.0,
+            153.4,
+        ),
+    ],
+)
+@patch("tradingagents.strategies.execution.price_source.yf.download")
+def test_sep22_governed_close_disagreement_blocks_recovery(
+    mock_download, ticker, daily, hourly_close, middle
+):
+    """Replay the BRC/ICE daily and 60-minute disagreement seen in production."""
+    session = date(2026, 9, 22)
+    observed_at = datetime(2026, 9, 22, 22, 5, tzinfo=timezone.utc)
+    rows = (
+        [(daily["Open"], daily["Open"], daily["Low"], middle)]
+        + [(middle, middle, daily["Low"], middle)] * 5
+        + [(middle, middle, daily["Low"], hourly_close)]
+    )
+    starts = [datetime(2026, 9, 22, hour, 30, tzinfo=_ET) for hour in range(9, 16)]
+    mock_download.side_effect = [
+        _daily_frame({ticker: daily}, session=session),
+        _hourly_frame(starts=starts, rows=rows, ticker=ticker),
+    ]
+
+    resolution = YFinancePriceSource(now=lambda: observed_at).resolve_governed_daily_bars(
+        [ticker], session, processed_at=observed_at
+    )
+
+    assert resolution.bars == {}
+    assert resolution.attempts[ticker].validation_error == f"incoherent {ticker}/{session}"
+    assert resolution.failure_map == {ticker: f"invalid {ticker}/{session}"}
+    assert len(resolution.recoveries[ticker].intraday_bars) == 7
+    assert mock_download.call_count == 2
+
+
 @patch("tradingagents.strategies.execution.price_source.yf.download")
 def test_governed_recovery_rejects_both_broken_daily_extremes(mock_download):
     daily = {
