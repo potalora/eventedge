@@ -130,6 +130,14 @@ claim. Review incident-specific replay tests before launching a candidate, keep
 the prior generation available during the observation window, and apply the
 separate 30/60/90-session performance gates before any strategy promotion.
 
+Run the checker while the runtime is idle: it requires the existing canonical
+runtime lock and refuses a busy lock without creating or changing one. SQLite
+reads use temporary copies, including committed WAL data; source fingerprints
+must remain unchanged. The frozen generation worktree must match the full SHA
+and have no tracked modifications. Evidence must match the generation epoch,
+cohort, and exact strategy/horizon policies. If runtime configuration overrides
+`autoresearch.paper_ledger.policy_id`, pass that same value with `--policy-id`.
+
 Docker works too:
 ```bash
 docker compose run --rm tradingagents
