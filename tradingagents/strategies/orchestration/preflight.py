@@ -273,6 +273,7 @@ def _governed_snapshot_report(
 ) -> dict[str, Any]:
     from tradingagents.strategies.orchestration.governed_market_data import (
         GovernedMarketDataError,
+        resolve_governed_bars,
     )
     from tradingagents.strategies.orchestration.preflight_state import (
         PreflightStateError,
@@ -313,7 +314,7 @@ def _governed_snapshot_report(
             processed_at=now,
             persist=False,
         )
-        if runtime_source and getattr(resolve, "__module__", "") == "tradingagents.strategies.orchestration.governed_market_data":
+        if runtime_source and resolve is resolve_governed_bars:
             from tradingagents.strategies.execution.alpaca_daily_bar import AlpacaHistoricalSIPSource
 
             resolve_args["alpaca_sip_source"] = AlpacaHistoricalSIPSource()
