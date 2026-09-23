@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable
 
-from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
+from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
@@ -519,7 +519,7 @@ def aggregate_governed_reporting(
                     )
                     or ticker != ticker.strip().upper()
                     or _MARKET_TICKER_RE.fullmatch(ticker) is None
-                    or contract != GOVERNED_BAR_RECOVERY_CONTRACT
+                    or contract not in {GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT}
                     or not recovery_id.startswith("governed_bar_recovery:")
                     or len(recovery_id.removeprefix("governed_bar_recovery:")) != 64
                     or any(

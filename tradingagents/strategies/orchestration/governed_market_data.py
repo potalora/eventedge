@@ -9,6 +9,11 @@ from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 
 from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
+from tradingagents.strategies.execution.alpaca_daily_bar import (
+    SOURCE as ALPACA_SIP_SOURCE,
+    AlpacaDailyBarResult,
+    AlpacaHistoricalSIPSource,
+)
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.execution.price_source import (
     GovernedBarRecoveryEvidence,
@@ -18,6 +23,7 @@ from tradingagents.strategies.execution.price_source import (
 )
 from tradingagents.strategies.metrics.models import (
     GOVERNED_BAR_RECOVERY_CONTRACT,
+    GOVERNED_SIP_RECOVERY_CONTRACT,
     GovernedBarRecoveryRecord,
 )
 from tradingagents.strategies.metrics.calendar import XNYSCalendar
@@ -176,6 +182,27 @@ def _bar_from_record(record: GovernedBarRecoveryRecord) -> MarketBar:
     validator = MetricStore.__new__(MetricStore)
     validator._calendar = XNYSCalendar()
     validator._validate_governed_bar_recovery(record)
+    if record.contract_version == GOVERNED_SIP_RECOVERY_CONTRACT:
+        assert record.alternate_daily is not None
+        alternate = record.alternate_daily
+        bar = MarketBar(
+            ticker=record.ticker,
+            session=record.session,
+            open=_decimal(alternate["open"]),
+            high=_decimal(alternate["high"]),
+            low=_decimal(alternate["low"]),
+            close=_decimal(alternate["close"]),
+            source=ALPACA_SIP_SOURCE,
+            fetched_at=_timestamp(alternate["fetched_at"]),
+            adjusted=False,
+        )
+        validate_required_bars(
+            {(record.ticker, record.session): bar},
+            {record.ticker},
+            record.session,
+            bar.fetched_at,
+        )
+        return bar
     if not record.intraday_rows or record.final_validation_error is not None:
         raise ValueError("governed recovery is not accepted")
     close_at = XNYSCalendar().session_close(record.session)
@@ -280,6 +307,81 @@ def _record_from_recovery(
     )
 
 
+def _record_from_sip_recovery(
+    *,
+    yahoo_recovery: GovernedBarRecoveryEvidence,
+    sip_result: AlpacaDailyBarResult,
+    epoch_id: str,
+    affected_cohort_ids: tuple[str, ...],
+) -> GovernedBarRecoveryRecord:
+    attempt = yahoo_recovery.daily_attempt
+    bar = sip_result.bar
+    if (
+        bar is None
+        or sip_result.failure is not None
+        or attempt.raw_ohlc is None
+        or attempt.validation_error != f"incoherent {attempt.ticker}/{attempt.session}"
+        or yahoo_recovery.validation_error != f"invalid {attempt.ticker}/{attempt.session}"
+        or yahoo_recovery.reconstructed is not None
+        or sip_result.request_start is None
+        or sip_result.request_end is None
+        or sip_result.bar_timestamp is None
+    ):
+        raise ValueError("governed SIP recovery is not eligible")
+    return GovernedBarRecoveryRecord.create(
+        contract_version=GOVERNED_SIP_RECOVERY_CONTRACT,
+        epoch_id=epoch_id,
+        session=attempt.session,
+        ticker=attempt.ticker,
+        original_daily={
+            **attempt.raw_ohlc,
+            "source": attempt.source,
+            "fetched_at": attempt.fetched_at,
+        },
+        original_validation_error=attempt.validation_error,
+        expected_starts=yahoo_recovery.expected_starts,
+        observed_starts=yahoo_recovery.observed_starts,
+        intraday_rows=tuple(
+            {
+                "start": row.start,
+                "open": row.open,
+                "high": row.high,
+                "low": row.low,
+                "close": row.close,
+                "fetched_at": row.fetched_at,
+            }
+            for row in yahoo_recovery.intraday_bars
+        ),
+        yahoo_recovery_error=yahoo_recovery.validation_error,
+        alternate_daily={
+            "provider": "alpaca",
+            "feed": sip_result.feed,
+            "adjustment": sip_result.adjustment,
+            "timeframe": sip_result.timeframe,
+            "request_start": sip_result.request_start,
+            "request_end": sip_result.request_end,
+            "response_symbol": sip_result.response_symbol,
+            "response_timestamp": sip_result.bar_timestamp,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "fetched_at": bar.fetched_at,
+            "row_count": sip_result.row_count,
+            "pagination_complete": sip_result.pagination_complete,
+        },
+        reconstructed_bar={
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "source": bar.source,
+        },
+        final_validation_error=None,
+        affected_cohort_ids=affected_cohort_ids,
+    )
+
+
 def _is_normalized_failure(
     ticker: str, session: date, failure: object
 ) -> bool:
@@ -377,6 +479,7 @@ def _healthy_attempt_binds_bar(
 def resolve_governed_bars(
     *,
     price_source: PriceSource,
+    alpaca_sip_source: AlpacaHistoricalSIPSource | None = None,
     metric_store: MetricStore | None,
     epoch_id: str,
     session: date,
@@ -420,7 +523,9 @@ def resolve_governed_bars(
         if record is None:
             unresolved.append(ticker)
             continue
-        if record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
+        if record.contract_version not in {
+            GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
+        }:
             raise _fail_closed((ticker,), session)
         if (
             record.epoch_id != canonical_epoch
@@ -497,6 +602,46 @@ def resolve_governed_bars(
                 raise _fail_closed((ticker,), session)
             records[ticker] = record
             bars[ticker] = provider_bar
+        if alpaca_sip_source is not None:
+            for ticker in tuple(sorted(failures)):
+                yahoo_recovery = provider_resolution.recoveries.get(ticker)
+                if (
+                    yahoo_recovery is None
+                    or yahoo_recovery.daily_attempt.validation_error
+                    != f"incoherent {ticker}/{session}"
+                    or yahoo_recovery.validation_error
+                    != f"invalid {ticker}/{session}"
+                    or yahoo_recovery.reconstructed is not None
+                ):
+                    continue
+                try:
+                    sip_result = alpaca_sip_source.fetch_daily_bar(
+                        ticker, session, now=_utc_now()
+                    )
+                except Exception:
+                    continue
+                if not isinstance(sip_result, AlpacaDailyBarResult):
+                    raise _fail_closed((ticker,), session)
+                if sip_result.bar is None:
+                    continue
+                try:
+                    record = _record_from_sip_recovery(
+                        yahoo_recovery=yahoo_recovery,
+                        sip_result=sip_result,
+                        epoch_id=canonical_epoch,
+                        affected_cohort_ids=cohorts_by_ticker[ticker],
+                    )
+                    if _bar_from_record(record) != sip_result.bar:
+                        raise ValueError("governed SIP bar does not bind to evidence")
+                    if persist:
+                        if metric_store is None or getattr(metric_store, "read_only", False):
+                            raise ValueError("writable metric store is required")
+                        metric_store.save_governed_bar_recovery(record)
+                except Exception:
+                    raise _fail_closed((ticker,), session) from None
+                records[ticker] = record
+                bars[ticker] = sip_result.bar
+                del failures[ticker]
     else:
         failures = {}
 

@@ -8,6 +8,7 @@ Provider contract:
 https://docs.alpaca.markets/us/reference/stockbarsingle-1
 https://docs.alpaca.markets/us/docs/market-data-faq
 """
+
 from __future__ import annotations
 
 import os
@@ -23,7 +24,6 @@ import requests
 
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.metrics.calendar import XNYSCalendar
-
 
 SOURCE = "alpaca-sip-1d-raw"
 FEED = "sip"
@@ -164,10 +164,18 @@ class AlpacaHistoricalSIPSource:
             op, high, low, close = (_price(row[key]) for key in ("o", "h", "l", "c"))
             if high < max(op, close) or low > min(op, close) or high < low:
                 return fail(AlpacaBarFailure.INVALID_RESPONSE)
-            bar = MarketBar(ticker, session, op, high, low, close, SOURCE, fetched_at, False)
+            bar = MarketBar(
+                ticker, session, op, high, low, close, SOURCE, fetched_at, False
+            )
             return AlpacaDailyBarResult(
-                bar, None, start, end, stamp, response_symbol=ticker,
-                row_count=1, pagination_complete=True,
+                bar,
+                None,
+                start,
+                end,
+                stamp,
+                response_symbol=ticker,
+                row_count=1,
+                pagination_complete=True,
             )
         except (KeyError, ValueError, TypeError, InvalidOperation, OverflowError):
             return fail(AlpacaBarFailure.INVALID_RESPONSE)

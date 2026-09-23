@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT
+from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_evidence import (
     persist_run_evidence,
     sanitize_evidence_text,
@@ -297,7 +297,7 @@ def _canonical_recoveries(
             or ticker != ticker.strip().upper()
             or _MARKET_TICKER_RE.fullmatch(ticker) is None
             or session_text != trading_date
-            or contract != GOVERNED_BAR_RECOVERY_CONTRACT
+            or contract not in {GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT}
             or not _fixed_digest(recovery_id, "governed_bar_recovery:")
             or not _fixed_digest(digest, "sha256:")
             or not isinstance(cohorts, (list, tuple))
