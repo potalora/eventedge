@@ -41,6 +41,17 @@ validation covers both the main-based repair branch and the exact deployed
 future scheduled session or continuity; those remain operational acceptance
 checks.
 
+The first integrated-release run was interrupted after 920 passing tests when
+the valid-score LLM boundary cases contacted SEC through the default registry.
+Those tests now receive an explicit empty registry and reject DNS/socket
+connections. Their 28 assertions pass offline. This is test isolation only;
+production ticker validation is unchanged.
+
+The main-based repair suite passed 1,976 tests (4 live tests deselected). The
+integrated `7950fec` release plus reporting repair and test isolation passed
+2,310 tests (4 live tests deselected) in 103 seconds. Critical Ruff checks and
+whitespace checks passed. These results cover all final runtime changes.
+
 ## Separate provider history gap
 
 The quarantines themselves are valid. Fresh direct Yahoo chart responses for
@@ -72,3 +83,10 @@ reporting repair to gen_015, preserving the ledger, pending intents, historical
 failure labels, data-source policy, and timers. No trading replay or generation
 restart is needed for this reporting defect. Provider-history recovery remains
 a separate unresolved change.
+
+The readiness gate also requires the frozen worktree to match its recorded
+commit exactly. An uncommitted in-place source patch would block that gate even
+if reporting succeeds. Do not bypass the check or change the historical metric
+epoch's identity to conceal the patch. Any operational patch must disclose that
+limitation; the next reviewed source-policy release needs a clean immutable
+generation and fresh observed continuity.

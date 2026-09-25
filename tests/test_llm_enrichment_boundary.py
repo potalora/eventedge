@@ -1,15 +1,30 @@
 """LLM scores must not corrupt the deterministic candidate fallback."""
 
+import socket
 from types import SimpleNamespace
 
 import pytest
 
+from tradingagents.strategies.data_sources.registry import DataSourceRegistry
 from tradingagents.strategies.modules.base import Candidate
 from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
 
 
+@pytest.fixture(autouse=True)
+def forbid_network(monkeypatch):
+    def unexpected_network(*args, **kwargs):
+        pytest.fail("LLM enrichment boundary tests must not access the network")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unexpected_network)
+    monkeypatch.setattr(socket.socket, "connect", unexpected_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", unexpected_network)
+
+
 def _enrich(tmp_path, result):
-    engine = MultiStrategyEngine(config={"autoresearch": {"state_dir": str(tmp_path)}})
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}},
+        registry=DataSourceRegistry(),
+    )
     engine._analyzer = SimpleNamespace(analyze_supply_chain=lambda *args, **kwargs: result)
     candidate = Candidate(
         ticker="DAL", date="2026-09-10", direction="long", score=0.7,
