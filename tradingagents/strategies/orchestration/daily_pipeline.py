@@ -293,7 +293,6 @@ def aggregate_candidate_input_issues(
     issue_id_by_scope: dict[tuple[str, str, str, str], str] = {}
     observed_epochs: set[str] = set()
     observed_sessions: set[str] = set()
-    item_count = 0
     for cohort_name in cohort_names:
         result = results[cohort_name]
         if not isinstance(result, dict) or "candidate_input_issues" not in result:
@@ -302,12 +301,10 @@ def aggregate_candidate_input_issues(
         if (
             not isinstance(references, (list, tuple))
             or not references
+            or len(references) > _MAX_CANDIDATE_ISSUE_REFERENCES
             or result.get("degraded") is not True
             or result.get("staging_valid") is not False
         ):
-            raise ValueError("candidate input issue reference collection is invalid")
-        item_count += len(references)
-        if item_count > _MAX_CANDIDATE_ISSUE_REFERENCES:
             raise ValueError("candidate input issue reference collection is invalid")
         for reference in references:
             if (
@@ -411,6 +408,11 @@ def aggregate_candidate_input_issues(
             observed_epochs.add(epoch_id)
             observed_sessions.add(session_text)
             normalized[issue_id] = canonical
+            # Shared observations are repeated by each affected scenario book.
+            # Bound distinct issues, plus each carrier list, rather than charging
+            # the same issue against the global budget once per cohort.
+            if len(normalized) > _MAX_CANDIDATE_ISSUE_REFERENCES:
+                raise ValueError("candidate input issue reference collection is invalid")
             observed_by_issue.setdefault(issue_id, set()).add(cohort_name)
     if any(
         observed_by_issue[issue_id] != set(reference["affected_cohorts"])
