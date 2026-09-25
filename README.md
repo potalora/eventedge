@@ -58,6 +58,33 @@ cp .env.example .env     # add your API keys
 
 You'll need an Anthropic API key for the autoresearch LLM calls. Stock prices come from yfinance by default — no key needed. Most event strategies need free-tier keys for their data sources (Finnhub, FRED, NOAA CDO, USDA NASS, FMP, EDGAR User-Agent). The system gracefully degrades if a strategy's data source is unavailable. See `.env.example` for the full list.
 
+Daily and preflight worker attempts retain separate JSON evidence under
+`data/logs/run_attempts/`. The generation CLI prints the artifact path, and failed
+governed checks also print their available ticker/reason details. Each artifact
+contains the session, generation commit, process status, captured output, and
+structured result; later runs do not overwrite it. Managed timeouts retain partial
+output. The latest daily log remains available for existing readers.
+
+These are operational logs: preflight still leaves the generation manifest and
+entire generation-state tree unchanged. A process completion or `clean` outcome
+does not by itself prove healthy strategy inputs or research eligibility. The
+full 12-strategy, 16-portfolio matrix remains in place; the staged reliability
+design is in [the matrix reliability plan](docs/superpowers/specs/2026-09-06-matrix-reliability-design.md).
+
+Evidence files use restrictive permissions and redact known credential environment
+values (including common JSON/repr escaping) and common authentication fields.
+Truncated quoted credentials and complete authorization-header lines are redacted;
+this does not detect arbitrary unknown secrets. Keep files private: provider
+payloads and research data can remain sensitive. Archives accumulate without automatic deletion;
+include them in log storage/retention planning. A host loss or hard kill before the
+manager finishes can still leave no finalized artifact or a private temporary file.
+Temporary-file cleanup failures are logged without masking a completed archive.
+Publication is atomic for readers; directory entries are not explicitly synced,
+so power-loss durability is not guaranteed. Lock rejection, command
+validation failure, and separately invoked report commands are outside this worker
+attempt archive. If writing evidence fails, the CLI reports that separately without
+changing the worker's outcome or rerunning economic work.
+
 ```bash
 # Daily automation — run all active generations
 python scripts/run_generations.py run-daily --date 2026-07-31
@@ -80,12 +107,36 @@ python scripts/run_generations.py list
 python scripts/run_generations.py compare \
   --pair gen_005:horizon_30d_size_100k:candidate_epoch_id,gen_004:horizon_30d_size_100k:baseline_epoch_id
 
+# After a candidate has run in parallel, check five consecutive XNYS sessions
+# before considering retirement of the prior generation. This reads state only.
+python scripts/check_generation_readiness.py --repo /path/to/production/repo \
+  --generation gen_NNN --expected-commit FULL_40_CHARACTER_SHA \
+  --through 2026-09-21
+
 # Streamlit dashboard (interactive, in a browser)
 python -m streamlit run tradingagents/dashboard/app.py
 
 # Email-able HTML snapshot (forward to yourself in Gmail)
 python scripts/email_dashboard.py
 ```
+
+The readiness command exits 0 only when all five sessions have one clean daily
+result, valid completed accounting and SPY/BIL benchmarks in all 16 cohorts,
+completed staging in all 16 cohorts, no quarantined candidate bars or input
+issues, and healthy evidence from all 12 strategies across four horizons. It
+fails closed on missing or inconsistent records. This is an observed continuity
+gate for a parallel candidate, not a pre-deployment simulation or a performance
+claim. Review incident-specific replay tests before launching a candidate, keep
+the prior generation available during the observation window, and apply the
+separate 30/60/90-session performance gates before any strategy promotion.
+
+Run the checker while the runtime is idle: it requires the existing canonical
+runtime lock and refuses a busy lock without creating or changing one. SQLite
+reads use temporary copies, including committed WAL data; source fingerprints
+must remain unchanged. The frozen generation worktree must match the full SHA
+and have no tracked modifications. Evidence must match the generation epoch,
+cohort, and exact strategy/horizon policies. If runtime configuration overrides
+`autoresearch.paper_ledger.policy_id`, pass that same value with `--policy-id`.
 
 Docker works too:
 ```bash

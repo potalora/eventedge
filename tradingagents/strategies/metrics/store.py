@@ -20,6 +20,7 @@ from .models import (
     CandidateSignalIdentityBinding,
     CriticalGapMarker,
     GOVERNED_BAR_RECOVERY_CONTRACT,
+    GOVERNED_SIP_RECOVERY_CONTRACT,
     GovernedBarRecoveryRecord,
     MetricEpoch,
     OutcomeRecord,
@@ -411,6 +412,8 @@ class MetricStore:
             "final_validation_error",
             "affected_cohort_ids",
         }
+        if isinstance(data, dict) and data.get("contract_version") == GOVERNED_SIP_RECOVERY_CONTRACT:
+            record_fields |= {"yahoo_recovery_error", "alternate_daily"}
         if not isinstance(data, dict) or set(data) != record_fields:
             raise ValueError("governed bar recovery payload shape is invalid")
         text_fields = (
@@ -466,6 +469,18 @@ class MetricStore:
             isinstance(item, str) for item in data["affected_cohort_ids"]
         ):
             raise ValueError("governed bar recovery payload shape is invalid")
+        if data["contract_version"] == GOVERNED_SIP_RECOVERY_CONTRACT:
+            alternate_keys = bar_keys | {
+                "provider", "feed", "adjustment", "timeframe",
+                "request_start", "request_end", "response_symbol",
+                "response_timestamp", "fetched_at", "row_count",
+                "pagination_complete",
+            }
+            if (
+                not isinstance(data["yahoo_recovery_error"], str)
+                or not shaped_mapping(data["alternate_daily"], alternate_keys)
+            ):
+                raise ValueError("governed SIP recovery payload shape is invalid")
         return data
 
     def _governed_bar_recovery(
@@ -513,6 +528,8 @@ class MetricStore:
                 affected_cohort_ids=data["affected_cohort_ids"],
                 evidence_digest=data["evidence_digest"],
                 recovery_id=data["recovery_id"],
+                yahoo_recovery_error=data.get("yahoo_recovery_error"),
+                alternate_daily=data.get("alternate_daily"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("governed bar recovery payload is invalid") from error
@@ -725,12 +742,108 @@ class MetricStore:
             high >= max(opening, close) and low <= min(opening, close) and high >= low
         )
 
+    def _validate_governed_sip_recovery(
+        self, record: GovernedBarRecoveryRecord
+    ) -> None:
+        alternate = record.alternate_daily
+        if alternate is None:
+            raise ValueError("governed SIP evidence is missing")
+        if (
+            not record.epoch_id
+            or not record.ticker
+            or record.ticker != record.ticker.upper()
+            or not record.affected_cohort_ids
+            or len(record.affected_cohort_ids) > _MAX_GOVERNED_RECOVERY_COHORTS
+            or record.affected_cohort_ids != tuple(sorted(set(record.affected_cohort_ids)))
+            or any(not self._bounded_governed_recovery_text(c) for c in record.affected_cohort_ids)
+            or record.final_validation_error is not None
+            or record.original_validation_error != f"incoherent {record.ticker}/{record.session}"
+            or record.yahoo_recovery_error != f"invalid {record.ticker}/{record.session}"
+            or record.original_daily.get("source") != "yfinance"
+            or self._governed_ohlc_is_positive_and_coherent(record.original_daily)
+            or self._governed_ohlc_values(record.original_daily) is None
+        ):
+            raise ValueError("governed SIP recovery scope is invalid")
+        expected_alternate_keys = {
+            "provider", "feed", "adjustment", "timeframe", "request_start",
+            "request_end", "response_symbol", "response_timestamp", "fetched_at",
+            "open", "high", "low", "close", "row_count", "pagination_complete",
+        }
+        if set(alternate) != expected_alternate_keys or (
+            alternate["provider"] != "alpaca"
+            or alternate["feed"] != "sip"
+            or alternate["adjustment"] != "raw"
+            or alternate["timeframe"] != "1Day"
+            or alternate["response_symbol"] != record.ticker
+            or type(alternate["row_count"]) is not int
+            or alternate["row_count"] != 1
+            or alternate["pagination_complete"] is not True
+            or not self._governed_ohlc_is_positive_and_coherent(alternate)
+            or record.reconstructed_bar.get("source") != "alpaca-sip-1d-raw"
+            or self._governed_ohlc_values(alternate)
+            != self._governed_ohlc_values(record.reconstructed_bar)
+        ):
+            raise ValueError("governed SIP observation is invalid")
+        try:
+            close_at = self._calendar.session_close(record.session)
+            midnight = datetime.combine(record.session, datetime.min.time(), _NEW_YORK)
+            request_start = datetime.fromisoformat(str(alternate["request_start"]))
+            request_end = datetime.fromisoformat(str(alternate["request_end"]))
+            response_timestamp = datetime.fromisoformat(str(alternate["response_timestamp"]))
+            fetched_at = datetime.fromisoformat(str(alternate["fetched_at"]))
+            original_fetched_at = datetime.fromisoformat(str(record.original_daily["fetched_at"]))
+            if any(
+                stamp.tzinfo is None or stamp.utcoffset() is None
+                for stamp in (request_start, request_end, response_timestamp, fetched_at, original_fetched_at)
+            ):
+                raise ValueError("naive timestamp")
+            if (
+                request_start != midnight
+                or response_timestamp != midnight
+                or request_end < close_at
+                or request_end > fetched_at - timedelta(minutes=15)
+                or fetched_at < close_at + timedelta(minutes=15)
+                or fetched_at.astimezone(_NEW_YORK).date() != record.session
+                or original_fetched_at < close_at
+                or original_fetched_at > fetched_at
+            ):
+                raise ValueError("timestamp scope")
+        except (ValueError, TypeError, KeyError) as error:
+            raise ValueError("governed SIP timing is invalid") from error
+        try:
+            session_open = self._calendar.session_open(record.session).astimezone(_NEW_YORK)
+            session_close = close_at.astimezone(_NEW_YORK)
+            starts = []
+            cursor = session_open
+            while cursor < session_close:
+                starts.append(cursor.isoformat())
+                cursor += timedelta(hours=1)
+            if (
+                record.expected_starts != tuple(starts)
+                or record.observed_starts
+                != tuple(row["start"] for row in record.intraday_rows)
+                or len(record.intraday_rows) > len(starts)
+                or any(
+                    set(row) != {"start", "open", "high", "low", "close", "fetched_at"}
+                    or not self._governed_ohlc_is_positive_and_coherent(row)
+                    for row in record.intraday_rows
+                )
+            ):
+                raise ValueError("hourly evidence")
+        except (ValueError, TypeError, KeyError) as error:
+            raise ValueError("governed SIP Yahoo hourly evidence is invalid") from error
+
     def _validate_governed_bar_recovery(
         self, record: GovernedBarRecoveryRecord
     ) -> None:
         record.validate_integrity()
+        if record.contract_version == GOVERNED_SIP_RECOVERY_CONTRACT:
+            self._validate_governed_sip_recovery(record)
+            return
         if record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
             raise ValueError("governed bar recovery contract is unsupported")
+        if record.yahoo_recovery_error is not None or record.alternate_daily is not None:
+            raise ValueError("Yahoo recovery contains alternate evidence")
         for value in (
             record.recovery_id,
             record.contract_version,

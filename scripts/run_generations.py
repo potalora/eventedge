@@ -351,6 +351,19 @@ def _run_explicit_comparison(manager, pairs: tuple) -> dict[str, object]:
             ledger.close()
 
 
+def _print_run_evidence(result: dict) -> None:
+    """Show bounded diagnostics without reinterpreting the worker's outcome."""
+    failures = result.get("governed_failure_map", {})
+    for ticker, reason in sorted(failures.items())[:5]:
+        print(f"    Governed data: {ticker}: {reason}")
+    if len(failures) > 5:
+        print(f"    {len(failures) - 5} more governed failures; see retained evidence")
+    if result.get("evidence_path"):
+        print(f"    Evidence: {result['evidence_path']}")
+    if result.get("evidence_error"):
+        print(f"    Evidence unavailable: {result['evidence_error']}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Manage parallel paper trading generations",
@@ -534,6 +547,7 @@ def main():
                 error_lines = result["error"].strip().split("\n")
                 for line in error_lines[:5]:
                     print(f"    {line}")
+            _print_run_evidence(result)
         if any(
             run_outcome(result) is RunOutcome.FAILED for result in results.values()
         ):
@@ -575,6 +589,7 @@ def main():
                 error_lines = result["error"].strip().split("\n")
                 for line in error_lines[:5]:
                     print(f"    {line}")
+            _print_run_evidence(result)
         if any(not result["success"] for result in results.values()):
             raise SystemExit(1)
 

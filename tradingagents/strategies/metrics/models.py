@@ -23,6 +23,7 @@ METRIC_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_LABEL = "1_legacy_calendar_signed"
 OUTCOME_WINDOWS = (5, 10, 20, 30)
 GOVERNED_BAR_RECOVERY_CONTRACT = "yfinance-60m-v1"
+GOVERNED_SIP_RECOVERY_CONTRACT = "alpaca-sip-1d-raw-v1"
 
 
 @dataclass(frozen=True)
@@ -199,7 +200,7 @@ def canonical_governed_recovery_json(payload: Mapping[str, object]) -> str:
 
 @dataclass(frozen=True)
 class GovernedBarRecoveryRecord:
-    """Immutable canonical evidence for one governed daily-bar reconstruction."""
+    """Immutable canonical evidence for a governed daily-bar recovery."""
 
     recovery_id: str
     contract_version: str
@@ -215,6 +216,8 @@ class GovernedBarRecoveryRecord:
     reconstructed_bar: Mapping[str, object]
     final_validation_error: str | None
     affected_cohort_ids: tuple[str, ...]
+    yahoo_recovery_error: str | None = None
+    alternate_daily: Mapping[str, object] | None = None
 
     @classmethod
     def create(
@@ -234,6 +237,8 @@ class GovernedBarRecoveryRecord:
         affected_cohort_ids: tuple[str, ...] | list[str],
         evidence_digest: str | None = None,
         recovery_id: str | None = None,
+        yahoo_recovery_error: str | None = None,
+        alternate_daily: Mapping[str, object] | None = None,
     ) -> "GovernedBarRecoveryRecord":
         if not isinstance(session, date) or isinstance(session, datetime):
             raise ValueError("governed bar recovery session is invalid")
@@ -258,6 +263,9 @@ class GovernedBarRecoveryRecord:
             "final_validation_error": final_validation_error,
             "affected_cohort_ids": tuple(sorted(set(affected_cohort_ids))),
         }
+        if yahoo_recovery_error is not None or alternate_daily is not None:
+            fields["yahoo_recovery_error"] = yahoo_recovery_error
+            fields["alternate_daily"] = _canonical_value(alternate_daily)
         canonical_fields = _canonical_value(fields)
         if not isinstance(canonical_fields, dict):  # pragma: no cover - typed above
             raise ValueError("governed bar recovery evidence is invalid")
@@ -303,11 +311,17 @@ class GovernedBarRecoveryRecord:
             reconstructed_bar=_deep_freeze(canonical_fields["reconstructed_bar"]),
             final_validation_error=canonical_fields["final_validation_error"],
             affected_cohort_ids=tuple(canonical_fields["affected_cohort_ids"]),
+            yahoo_recovery_error=canonical_fields.get("yahoo_recovery_error"),
+            alternate_daily=(
+                _deep_freeze(canonical_fields["alternate_daily"])
+                if "alternate_daily" in canonical_fields
+                else None
+            ),
         )
 
     def evidence_fields(self) -> dict[str, object]:
         """Return the complete evidence excluding its derived identifiers."""
-        return {
+        fields = {
             "contract_version": self.contract_version,
             "epoch_id": self.epoch_id,
             "session": self.session,
@@ -321,6 +335,10 @@ class GovernedBarRecoveryRecord:
             "final_validation_error": self.final_validation_error,
             "affected_cohort_ids": self.affected_cohort_ids,
         }
+        if self.yahoo_recovery_error is not None or self.alternate_daily is not None:
+            fields["yahoo_recovery_error"] = self.yahoo_recovery_error
+            fields["alternate_daily"] = self.alternate_daily
+        return fields
 
     def canonical_payload(self) -> str:
         return canonical_governed_recovery_json(
@@ -343,6 +361,10 @@ class GovernedBarRecoveryRecord:
             or not isinstance(self.original_daily, MappingProxyType)
             or not isinstance(self.reconstructed_bar, MappingProxyType)
             or any(not isinstance(row, MappingProxyType) for row in self.intraday_rows)
+            or (
+                self.alternate_daily is not None
+                and not isinstance(self.alternate_daily, MappingProxyType)
+            )
         ):
             raise ValueError("governed bar recovery record is not canonical")
 

@@ -178,6 +178,7 @@ def _validate_governed_resolution(
     )
     from tradingagents.strategies.metrics.models import (
         GOVERNED_BAR_RECOVERY_CONTRACT,
+        GOVERNED_SIP_RECOVERY_CONTRACT,
     )
     from tradingagents.strategies.orchestration.governed_market_data import (
         GovernedInputResolution,
@@ -206,18 +207,18 @@ def _validate_governed_resolution(
         bar = resolution.bars[ticker]
         if type(bar) is not MarketBar or bar.ticker != ticker or bar.session != session:
             raise ValueError("governed bar identity is invalid")
-        if bar.source not in {"yfinance", "yfinance-60m-reconstruction"}:
+        if bar.source not in {"yfinance", "yfinance-60m-reconstruction", "alpaca-sip-1d-raw"}:
             raise ValueError("governed bar source is invalid")
         if bar.fetched_at < session_close(session):
             raise ValueError("governed bar predates the session close")
         raw_bars[(ticker, session)] = bar
     validate_required_bars(raw_bars, bars, session, processed_at)
-    reconstructed = {
+    recovered = {
         ticker
         for ticker in bars
-        if resolution.bars[ticker].source == "yfinance-60m-reconstruction"
+        if resolution.bars[ticker].source in {"yfinance-60m-reconstruction", "alpaca-sip-1d-raw"}
     }
-    if set(resolution.recovery_bindings) != reconstructed:
+    if set(resolution.recovery_bindings) != recovered:
         raise ValueError("governed recovery binding source is invalid")
 
     recoveries = _bounded_recovery_summaries(resolution.recovery_summaries)
@@ -228,7 +229,7 @@ def _validate_governed_resolution(
             ticker in summary_by_ticker
             or ticker not in bars
             or summary["session"] != session.isoformat()
-            or summary["contract_version"] != GOVERNED_BAR_RECOVERY_CONTRACT
+            or summary["contract_version"] not in {GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT}
             or not _fixed_digest(
                 summary["recovery_id"], "governed_bar_recovery:"
             )
@@ -242,11 +243,16 @@ def _validate_governed_resolution(
         raise ValueError("governed recovery binding scope is invalid")
     for ticker, binding in resolution.recovery_bindings.items():
         summary = summary_by_ticker[ticker]
+        source_contract = {
+            "yfinance-60m-reconstruction": GOVERNED_BAR_RECOVERY_CONTRACT,
+            "alpaca-sip-1d-raw": GOVERNED_SIP_RECOVERY_CONTRACT,
+        }
         if (
             type(binding) is not GovernedRecoveryBinding
             or binding.ticker != ticker
             or binding.recovery_id != summary["recovery_id"]
             or binding.contract_version != summary["contract_version"]
+            or binding.contract_version != source_contract.get(resolution.bars[ticker].source)
             or binding.evidence_digest != summary["evidence_digest"]
         ):
             raise ValueError("governed recovery binding is invalid")
@@ -267,6 +273,7 @@ def _governed_snapshot_report(
 ) -> dict[str, Any]:
     from tradingagents.strategies.orchestration.governed_market_data import (
         GovernedMarketDataError,
+        resolve_governed_bars,
     )
     from tradingagents.strategies.orchestration.preflight_state import (
         PreflightStateError,
@@ -291,12 +298,13 @@ def _governed_snapshot_report(
         base["ok"] = True
         return base
 
-    if price_source is None:
+    runtime_source = price_source is None
+    if runtime_source:
         from tradingagents.strategies.execution.price_source import YFinancePriceSource
 
         price_source = YFinancePriceSource()
     try:
-        resolution = resolve(
+        resolve_args = dict(
             price_source=price_source,
             metric_store=metric_store,
             epoch_id=snapshot.epoch_id,
@@ -306,6 +314,11 @@ def _governed_snapshot_report(
             processed_at=now,
             persist=False,
         )
+        if runtime_source and resolve is resolve_governed_bars:
+            from tradingagents.strategies.execution.alpaca_daily_bar import AlpacaHistoricalSIPSource
+
+            resolve_args["alpaca_sip_source"] = AlpacaHistoricalSIPSource()
+        resolution = resolve(**resolve_args)
         # Provider evidence is timestamped when retrieval completes, not when
         # the probe started. Validate it against the completion boundary so a
         # genuinely fresh response is not falsely classified as future data.

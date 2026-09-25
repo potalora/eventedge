@@ -3243,6 +3243,80 @@ def _policy_enabled_staging_fixture(tmp_path):
     return ledger, engine, call
 
 
+@pytest.mark.parametrize("zero_first", [True, False])
+@pytest.mark.parametrize("all_zero", [False, True])
+def test_zero_share_candidate_is_audited_without_aborting_other_staging(
+    tmp_path, zero_first, all_zero
+):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    call["annualized_volatility_evidence"] = {"AAPL": 0.31, "MSFT": 0.31}
+    second = deepcopy(call["shared_signals"][0])
+    second.update(
+        ticker="MSFT", event_key="event-msft",
+        source_event_keys=("native-msft",), risk_tags=("event:msft",),
+        metadata={"event_key": "event-msft", "observed_at": "2026-07-31T19:30:00+00:00"},
+    )
+    call["shared_signals"].append(second)
+    call["data"]["_execution_reference_bars"].update({
+        "AAPL": _bar("AAPL", FRIDAY, open_="600", close="600"),
+        "MSFT": _bar(
+            "MSFT", FRIDAY,
+            open_="600" if all_zero else "100",
+            close="600" if all_zero else "100",
+        ),
+    })
+    call["enrichment"]["profiles"]["MSFT"] = {"sector": "Technology"}
+
+    def synthesize(committee, **_kwargs):
+        tickers = ("AAPL", "MSFT") if zero_first else ("MSFT", "AAPL")
+        committee.last_policy_decisions = tuple(
+            PortfolioPolicyDecision(
+                ticker, "long", f"event-{ticker.lower()}",
+                "accepted", "accepted", 0.10, 0.10,
+            ) for ticker in tickers
+        )
+        return [
+            TradeRecommendation(
+                ticker, "long", 0.10, 0.8, "test", ["strategy"],
+                event_key=f"event-{ticker.lower()}",
+                source_event_keys=(f"native-{ticker.lower()}",),
+                strategy_tags=("strategy",), risk_tags=(f"event:{ticker.lower()}",),
+            ) for ticker in tickers
+        ]
+
+    try:
+        before = ledger.account_state()
+        with patch(
+            "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
+            new=synthesize,
+        ):
+            result = engine.screen_and_stage(**call)
+        assert len(result["intents_staged"]) == (0 if all_zero else 1)
+        intents = ledger.pending_intents(MONDAY)
+        assert len(intents) == (0 if all_zero else 1)
+        if not all_zero:
+            assert intents[0].requested_qty == 5
+            assert ledger.signals_for_intent(intents[0].intent_id)[0].ticker == "MSFT"
+        assert ledger.account_state() == before
+        assert ledger.read_fills() == []
+        decisions = {row["ticker"]: row for row in ledger.read_policy_candidate_decisions()}
+        assert decisions["AAPL"]["decision"] == "rejected"
+        assert decisions["AAPL"]["reason_codes"] == ("zero_shares",)
+        assert decisions["AAPL"]["requested_weight"] == pytest.approx(0.10)
+        assert decisions["AAPL"]["approved_weight"] == 0
+        assert decisions["MSFT"]["decision"] == ("rejected" if all_zero else "accepted")
+        assert decisions["MSFT"]["approved_weight"] == pytest.approx(0 if all_zero else 0.10)
+        manifests = ledger.read_policy_staging_audit_manifests()
+        assert len(manifests) == 1
+        replay = engine.screen_and_stage(**call)
+        assert replay["replayed"] is True
+        assert ledger.pending_intents(MONDAY) == intents
+        assert ledger.read_policy_staging_audit_manifests() == manifests
+        assert {row["ticker"]: row for row in ledger.read_policy_candidate_decisions()} == decisions
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize("evidence_argument", ["omitted", "none"])
 def test_fresh_policy_staging_requires_explicit_volatility_evidence(
     tmp_path, evidence_argument

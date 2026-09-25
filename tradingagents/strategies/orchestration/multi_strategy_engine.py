@@ -179,18 +179,16 @@ def _gather_with_timeout(
     """Run each ``name -> (fn, args)`` fetch in a thread pool, returning
     ``{name: result}``.
 
-    Every source defaults to ``{}``; failures and timeouts retain an explicit
-    error payload rather than being mistaken for healthy empty results. Python
+    Each source is classified from one completed/pending wait partition;
+    failures and timeouts retain an explicit error payload rather than being
+    mistaken for healthy empty results. A pending source remains timed out even
+    if it finishes while the result is assembled. Python
     cannot safely stop a running thread, so this is not request cancellation.
     On timeout the pool is shut down with ``wait=False`` so its teardown does
     not re-block the caller; sources need cooperative scheduling deadlines to
     avoid issuing follow-on requests after the caller has moved on.
     """
-    from concurrent.futures import (
-        ThreadPoolExecutor,
-        TimeoutError as FuturesTimeout,
-        as_completed,
-    )
+    from concurrent.futures import ThreadPoolExecutor, wait
 
     results: dict[str, Any] = {name: {} for name in api_fetches}
     if not api_fetches:
@@ -201,23 +199,23 @@ def _gather_with_timeout(
         futures = {
             pool.submit(fn, *args): name for name, (fn, args) in api_fetches.items()
         }
-        try:
-            for future in as_completed(futures, timeout=timeout_s):
-                name = futures[future]
-                try:
-                    results[name] = future.result()
-                except Exception as error:
-                    logger.error("Failed to fetch %s", name, exc_info=True)
-                    results[name] = {"error": f"{type(error).__name__}: {error}"}
-        except FuturesTimeout:
-            stuck = sorted(futures[f] for f in futures if not f.done())
+        done, pending = wait(futures, timeout=timeout_s)
+        for future, name in futures.items():
+            if future not in done:
+                results[name] = {"error": f"timeout after {timeout_s:g}s"}
+                continue
+            try:
+                results[name] = future.result()
+            except Exception as error:
+                logger.error("Failed to fetch %s", name, exc_info=True)
+                results[name] = {"error": f"{type(error).__name__}: {error}"}
+        if pending:
+            stuck = sorted(futures[future] for future in pending)
             logger.error(
                 "Data fetch exceeded %.0fs; abandoning slow sources: %s",
                 timeout_s,
                 stuck,
             )
-            for name in stuck:
-                results[name] = {"error": f"timeout after {timeout_s:g}s"}
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -437,7 +435,10 @@ class MultiStrategyEngine:
             session_close,
         )
         from tradingagents.strategies.orchestration.session_executor import PHASES
-        from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
+        from tradingagents.strategies.trading.execution_bridge import (
+            ExecutionBridge,
+            ZeroShareIntentError,
+        )
         from tradingagents.strategies.trading.portfolio_committee import (
             PortfolioCommittee,
         )
@@ -1042,26 +1043,7 @@ class MultiStrategyEngine:
         staged_ids: list[str] = []
 
         def persist_staging() -> None:
-            candidate_decision_ids: list[str] = []
-            if policy_config is not None:
-                assert policy_binding is not None
-                for outcome, contributors in candidate_decision_specs:
-                    persisted = self.ledger.record_policy_candidate_decision(
-                        session,
-                        epoch_id=epoch_id,
-                        policy_version=policy_config.version,
-                        ticker=outcome.ticker,
-                        direction=outcome.direction,
-                        event_key=outcome.event_key,
-                        signal_ids=contributors,
-                        requested_weight=outcome.requested_weight,
-                        approved_weight=outcome.approved_weight,
-                        decision=outcome.decision,
-                        reason_codes=(outcome.reason,),
-                        bound_context_digest=str(policy_binding["context_digest"]),
-                        captured_at=cutoff,
-                    )
-                    candidate_decision_ids.append(str(persisted["decision_id"]))
+            zero_share_candidates: set[tuple[str, str]] = set()
             for intent in cancellations:
                 self.ledger.cancel_intent(
                     intent.intent_id, cutoff, "strategy exit superseded resting stop"
@@ -1077,13 +1059,24 @@ class MultiStrategyEngine:
                     recommendation.ticker
                 ):
                     continue
-                intent = bridge.stage_intent(
-                    recommendation,
-                    contributor_records,
-                    self.ledger.account_state(),
-                    cutoff,
-                    eligible_session,
-                )
+                try:
+                    intent = bridge.stage_intent(
+                        recommendation,
+                        contributor_records,
+                        self.ledger.account_state(),
+                        cutoff,
+                        eligible_session,
+                    )
+                except ZeroShareIntentError:
+                    zero_share_candidates.add(
+                        (recommendation.ticker, recommendation.direction)
+                    )
+                    logger.info(
+                        "Skipping %s %s: approved allocation sizes to zero shares",
+                        recommendation.ticker,
+                        recommendation.direction,
+                    )
+                    continue
                 if policy_config is not None:
                     assert policy_binding is not None
                     outcome = candidate_decisions.get(
@@ -1114,6 +1107,35 @@ class MultiStrategyEngine:
                         captured_at=cutoff,
                     )
                 staged_ids.append(intent.intent_id)
+            # Persist final candidate outcomes after whole-share sizing.  One
+            # unrepresentable entry must not roll back other entries or exits.
+            candidate_decision_ids: list[str] = []
+            if policy_config is not None:
+                assert policy_binding is not None
+                for outcome, contributors in candidate_decision_specs:
+                    zero_shares = (
+                        outcome.ticker, outcome.direction
+                    ) in zero_share_candidates
+                    persisted = self.ledger.record_policy_candidate_decision(
+                        session,
+                        epoch_id=epoch_id,
+                        policy_version=policy_config.version,
+                        ticker=outcome.ticker,
+                        direction=outcome.direction,
+                        event_key=outcome.event_key,
+                        signal_ids=contributors,
+                        requested_weight=outcome.requested_weight,
+                        approved_weight=(
+                            0.0 if zero_shares else outcome.approved_weight
+                        ),
+                        decision="rejected" if zero_shares else outcome.decision,
+                        reason_codes=(
+                            ("zero_shares",) if zero_shares else (outcome.reason,)
+                        ),
+                        bound_context_digest=str(policy_binding["context_digest"]),
+                        captured_at=cutoff,
+                    )
+                    candidate_decision_ids.append(str(persisted["decision_id"]))
             if policy_config is not None:
                 assert policy_binding is not None
                 ingress_ids = tuple(sorted(eligible_signal_ids))
@@ -2073,7 +2095,27 @@ class MultiStrategyEngine:
                         hold_days=21,
                         regime_context=regime_context,
                     )
+                # A parsed JSON response can still violate the numeric score
+                # contract. Validate before changing any candidate fields, so
+                # malformed analysis uses the same rule-based fallback as an
+                # unavailable analyzer rather than poisoning every cohort.
+                if llm_result:
+                    if not isinstance(llm_result, dict):
+                        raise ValueError("LLM analysis must be an object")
+                    llm_result = dict(llm_result)
+                    score_key = (
+                        "conviction" if "conviction" in llm_result else "score"
+                    )
+                    if score_key in llm_result:
+                        value = llm_result[score_key]
+                        if isinstance(value, bool):
+                            raise ValueError("LLM score must be numeric")
+                        score = float(value)
+                        if not math.isfinite(score) or not 0 <= score <= 1:
+                            raise ValueError("LLM score must be between zero and one")
+                        llm_result[score_key] = score
             except Exception:
+                llm_result = {}
                 logger.error(
                     "LLM analysis failed for %s/%s",
                     strategy_name,

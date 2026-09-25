@@ -30,6 +30,7 @@ from tradingagents.strategies.execution.price_source import (
     AdjustedClose,
     BarValidationError,
     PriceSource,
+    YFinancePriceSource,
     validate_adjusted_closes,
     validate_required_bars,
 )
@@ -45,7 +46,7 @@ from tradingagents.strategies.orchestration.governed_market_data import (
     _bar_from_record,
     resolve_governed_bars,
 )
-from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, SignalMetricRecord
+from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, SignalMetricRecord, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.metrics.epochs import EpochContext, EpochManager
 from tradingagents.strategies.metrics.models import MetricEpoch
 from tradingagents.strategies.metrics.outcomes import OutcomeCalculator
@@ -765,6 +766,14 @@ class SessionExecutor:
         ):
             raise ValueError("incomplete governed market-data governance context")
         if governed_context and tickers:
+            sip_source = None
+            if isinstance(price_source, YFinancePriceSource):
+                from tradingagents.strategies.execution.alpaca_daily_bar import AlpacaHistoricalSIPSource
+
+                sip_source = AlpacaHistoricalSIPSource()
+            resolver_options = (
+                {"alpaca_sip_source": sip_source} if sip_source is not None else {}
+            )
             resolved = resolve_governed_bars(
                 price_source=price_source,
                 metric_store=metric_store,
@@ -774,6 +783,7 @@ class SessionExecutor:
                 cohort_ids_by_ticker=cohort_ids_by_ticker,
                 processed_at=processed_at,
                 persist=persist,
+                **resolver_options,
             )
             bars = {(ticker, session): bar for ticker, bar in resolved.bars.items()}
             recoveries = resolved.recovery_bindings
@@ -981,7 +991,7 @@ class SessionExecutor:
         unbound_reconstructions = sorted(
             ticker
             for ticker, bar in bars.items()
-            if bar.source == "yfinance-60m-reconstruction"
+            if bar.source in {"yfinance-60m-reconstruction", "alpaca-sip-1d-raw"}
             and ticker not in governed_recoveries
         )
         if unbound_reconstructions:
@@ -1000,8 +1010,8 @@ class SessionExecutor:
                 record.validate_integrity()
                 if (
                     binding.ticker != ticker
-                    or binding.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT
-                    or record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT
+                    or binding.contract_version not in {GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT}
+                    or record.contract_version not in {GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT}
                     or record.recovery_id != binding.recovery_id
                     or record.evidence_digest != binding.evidence_digest
                     or record.contract_version != binding.contract_version
