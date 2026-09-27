@@ -111,13 +111,10 @@ DEFAULT_CONFIG = {
         "state_dir": "data/state",
         "total_capital": 5000,
         "proposals_per_strategy": 3,
-        # LLM for autoresearch. Sonnet 5 uses adaptive thinking by default;
-        # medium effort is the balanced cost/intelligence setting for these
-        # short, structured classification and committee calls.
-        "autoresearch_model": "claude-sonnet-5",
-        "llm_effort": "medium",
-        # Sampling temperature for older models. Sonnet 5 rejects non-default
-        # sampling parameters, so this is intentionally omitted for that model.
+        # Main event analysis and portfolio committee use OpenAI Responses.
+        "autoresearch_model": "gpt-6-luna",
+        "llm_effort": "high",
+        # Sampling controls apply only to legacy non-reasoning Claude calls.
         "llm_temperature": 0.0,
         # Tickers to exclude from trading (compliance, conflict of interest)
         "blocked_tickers": [],

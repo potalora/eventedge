@@ -225,8 +225,8 @@ class TestGateLogic:
 
     def test_usda_crop_decline_gate_triggers(self, strategy, price_data):
         usda = {"crop_progress": {"CORN": [
-            {"week_ending": "2025-06-08", "good_pct": 50, "excellent_pct": 20},
-            {"week_ending": "2025-06-15", "good_pct": 45, "excellent_pct": 17},
+            {"week_ending": "2025-06-08", "state": "IA", "good_pct": 50, "excellent_pct": 20},
+            {"week_ending": "2025-06-15", "state": "IA", "good_pct": 45, "excellent_pct": 17},
         ]}}
         data = _make_data(price_data, usda=usda)
         result = strategy.screen(data, "2025-06-15", strategy.get_default_params())
@@ -331,26 +331,26 @@ class TestCropDecline:
 
     def test_single_week_returns_zero(self):
         usda = {"crop_progress": {"CORN": [
-            {"good_pct": 50, "excellent_pct": 20},
+            {"week_ending": "2025-06-08", "state": "IA", "good_pct": 50, "excellent_pct": 20},
         ]}}
         assert WeatherAgStrategy._check_crop_decline(usda) == 0.0
 
     def test_computes_decline(self):
         usda = {"crop_progress": {"CORN": [
-            {"good_pct": 50, "excellent_pct": 20},
-            {"good_pct": 45, "excellent_pct": 17},
+            {"week_ending": "2025-06-08", "state": "IA", "good_pct": 50, "excellent_pct": 20},
+            {"week_ending": "2025-06-15", "state": "IA", "good_pct": 45, "excellent_pct": 17},
         ]}}
         assert WeatherAgStrategy._check_crop_decline(usda) == 8  # 70 - 62 = 8
 
     def test_max_across_commodities(self):
         usda = {"crop_progress": {
             "CORN": [
-                {"good_pct": 50, "excellent_pct": 20},
-                {"good_pct": 48, "excellent_pct": 19},  # decline = 3
+                {"week_ending": "2025-06-08", "state": "IA", "good_pct": 50, "excellent_pct": 20},
+                {"week_ending": "2025-06-15", "state": "IA", "good_pct": 48, "excellent_pct": 19},  # decline = 3
             ],
             "WHEAT": [
-                {"good_pct": 40, "excellent_pct": 15},
-                {"good_pct": 35, "excellent_pct": 10},  # decline = 10
+                {"week_ending": "2025-06-08", "state": "IA", "good_pct": 40, "excellent_pct": 15},
+                {"week_ending": "2025-06-15", "state": "IA", "good_pct": 35, "excellent_pct": 10},  # decline = 10
             ],
         }}
         assert WeatherAgStrategy._check_crop_decline(usda) == 10
@@ -421,3 +421,66 @@ class TestGen004:
         strategy = WeatherAgStrategy()
         space = strategy.get_param_space()
         assert space["hold_days"][0] >= 20, "hold_days floor should be >= 20"
+
+
+class TestDatedRegionalCropDecline:
+    @staticmethod
+    def decline(rows):
+        return WeatherAgStrategy._check_crop_decline({"crop_progress": {"CORN": rows}})
+
+    def test_one_week_two_states_is_not_weekly_decline(self):
+        assert self.decline([
+            {"week_ending": "2026-09-13", "state": "IA", "good_pct": 70, "excellent_pct": 10},
+            {"week_ending": "2026-09-13", "state": "IL", "good_pct": 30, "excellent_pct": 10},
+        ]) == 0
+
+    def test_matches_state_and_chronology_not_row_order(self):
+        rows = [
+            {"week_ending": "2026-09-20", "state": "IA", "good_pct": 50, "excellent_pct": 10},
+            {"week_ending": "2026-09-13", "state": "IL", "good_pct": 20, "excellent_pct": 10},
+            {"week_ending": "2026-09-13", "state": "IA", "good_pct": 60, "excellent_pct": 10},
+            {"week_ending": "2026-09-20", "state": "IL", "good_pct": 20, "excellent_pct": 10},
+        ]
+        assert self.decline(rows) == 10
+        assert self.decline(list(reversed(rows))) == 10
+
+    def test_disjoint_states_and_missing_week_do_not_compare(self):
+        assert self.decline([
+            {"week_ending": "2026-09-13", "state": "IA", "good_pct": 70, "excellent_pct": 10},
+            {"week_ending": "2026-09-20", "state": "IL", "good_pct": 20, "excellent_pct": 10},
+        ]) == 0
+        assert self.decline([
+            {"week_ending": "2026-09-06", "state": "IA", "good_pct": 70, "excellent_pct": 10},
+            {"week_ending": "2026-09-20", "state": "IA", "good_pct": 20, "excellent_pct": 10},
+        ]) == 0
+
+    def test_wheat_classes_and_conflicting_duplicates_do_not_cross(self):
+        rows = [
+            {"week_ending": "2026-09-13", "state": "IA", "crop_class": "WINTER", "good_pct": 80, "excellent_pct": 0},
+            {"week_ending": "2026-09-20", "state": "IA", "crop_class": "SPRING", "good_pct": 20, "excellent_pct": 0},
+        ]
+        assert self.decline(rows) == 0
+        rows[1]["crop_class"] = "WINTER"
+        rows.append(dict(rows[0], good_pct=70))
+        assert self.decline(rows) == 0
+
+    def test_undated_or_nonfinite_observations_do_not_compare(self):
+        assert self.decline([
+            {"state": "IA", "good_pct": 80, "excellent_pct": 0},
+            {"state": "IA", "good_pct": 20, "excellent_pct": 0},
+        ]) == 0
+        assert self.decline([
+            {"week_ending": "2026-09-13", "state": "IA", "good_pct": float("inf"), "excellent_pct": 0},
+            {"week_ending": "2026-09-20", "state": "IA", "good_pct": 20, "excellent_pct": 0},
+        ]) == 0
+
+    @pytest.mark.parametrize("identity", [[], {}, 4, None, ""])
+    @pytest.mark.parametrize("field", ["state", "crop_class"])
+    def test_non_scalar_region_identity_is_ignored(self, identity, field):
+        rows = [
+            {"week_ending": "2026-09-13", "state": "IA", "crop_class": "ALL CLASSES", "good_pct": 70, "excellent_pct": 10},
+            {"week_ending": "2026-09-20", "state": "IA", "crop_class": "ALL CLASSES", "good_pct": 20, "excellent_pct": 10},
+        ]
+        for row in rows:
+            row[field] = identity
+        assert self.decline(rows) == 0

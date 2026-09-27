@@ -329,17 +329,20 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
         if not crop_progress:
             return 0.0
 
-        max_decline = 0.0
-        for commodity, weeks in crop_progress.items():
-            if not isinstance(weeks, list) or len(weeks) < 2:
-                continue
-            # Compare last two weeks (most recent data)
-            latest = weeks[-1]
-            prior = weeks[-2]
-            latest_ge = latest.get("good_pct", 0) + latest.get("excellent_pct", 0)
-            prior_ge = prior.get("good_pct", 0) + prior.get("excellent_pct", 0)
-            decline = prior_ge - latest_ge
-            if decline > max_decline:
-                max_decline = decline
+        from datetime import timedelta
 
+        from tradingagents.strategies.data_sources.usda_source import (
+            validated_condition_observations,
+        )
+
+        max_decline = 0.0
+        for weeks in crop_progress.values():
+            latest, observations = validated_condition_observations(weeks)
+            if latest is None:
+                continue
+            previous = latest - timedelta(days=7)
+            for (week, state, crop_class), value in observations.items():
+                prior = observations.get((previous, state, crop_class))
+                if week == latest and value is not None and prior is not None:
+                    max_decline = max(max_decline, prior - value)
         return max_decline

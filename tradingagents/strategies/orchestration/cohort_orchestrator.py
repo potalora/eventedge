@@ -262,6 +262,10 @@ class CohortOrchestrator:
             key: (base_config.get(key) if index < 3 else ar_config.get(key))
             for index, key in enumerate(model_keys)
         }
+        models["llm_effort"] = ar_config.get("llm_effort", "medium")
+        models["portfolio_committee_model"] = ar_config.get("paper_trade", {}).get(
+            "portfolio_committee_model", ar_config.get("autoresearch_model")
+        )
         for key, value in models.items():
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"model {key} must be non-empty text")

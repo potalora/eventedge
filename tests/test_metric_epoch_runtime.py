@@ -58,6 +58,13 @@ def _models(**changes: str | None) -> dict[str, str | None]:
     return models
 
 
+@pytest.mark.parametrize("key", ["llm_effort", "portfolio_committee_model"])
+def test_analysis_effort_and_committee_override_are_semantic_identity(key):
+    before = _context(models=_models(**{key: "low"}))
+    after = _context(models=_models(**{key: "high"}))
+    assert before.behavior_hash != after.behavior_hash
+
+
 def _execution_policy(**changes: object) -> dict[str, object]:
     policy: dict[str, object] = {
         "policy_document_version": POLICY_DOCUMENT_VERSION,
