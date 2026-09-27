@@ -1,8 +1,8 @@
 """LLM-based signal analyzer for paper-trade strategies.
 
 Each method takes raw event data and returns a structured signal dict with
-direction, conviction, and rationale. The VPS defaults to Claude Sonnet 5 at
-medium effort.
+direction, conviction, and rationale. New generations default to GPT-6 Luna
+with high reasoning effort.
 """
 from __future__ import annotations
 
@@ -154,18 +154,25 @@ class LLMAnalyzer:
             self._prompt_overrides.pop(strategy_name, None)
 
     def _get_client(self):
-        """Lazy-init the Anthropic client."""
+        """Lazy-init the selected provider; credentials stay in its environment."""
         if self._client is None:
             try:
+                from tradingagents.strategies.llm_utils import LUNA_MODEL
+                if self._model_name == LUNA_MODEL:
+                    from openai import OpenAI
+                    self._client = OpenAI(
+                        timeout=httpx.Timeout(120.0, connect=10.0), max_retries=0,
+                    )
+                    return self._client
                 import anthropic
                 self._client = anthropic.Anthropic(
                     timeout=httpx.Timeout(60.0, connect=10.0),
                 )
             except ImportError:
-                logger.error("anthropic package not installed")
+                logger.error("Selected LLM provider package not installed")
                 return None
             except Exception:
-                logger.error("Failed to create Anthropic client", exc_info=True)
+                logger.error("Failed to create LLM client", exc_info=True)
                 return None
         return self._client
 
@@ -191,23 +198,12 @@ class LLMAnalyzer:
         if client is None:
             return ""
         try:
-            from tradingagents.strategies.llm_utils import (
-                anthropic_request_options,
-                anthropic_response_text,
+            from tradingagents.strategies.llm_utils import call_analysis_model
+            return call_analysis_model(
+                client, model=self._model_name, max_tokens=max_tokens,
+                system=system, prompt=user, temperature=self._temperature,
+                effort=self._effort,
             )
-
-            response = client.messages.create(
-                model=self._model_name,
-                max_tokens=max_tokens,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                **anthropic_request_options(
-                    model=self._model_name,
-                    temperature=self._temperature,
-                    effort=self._effort,
-                ),
-            )
-            return anthropic_response_text(response)
         except Exception:
             logger.error("LLM call failed", exc_info=True)
             return ""
@@ -594,20 +590,33 @@ Analyze for PQC regime signal and trading direction. Return JSON.""" + self._reg
         drought_states = ag_context.get("drought_states", {})
         usda = ag_context.get("usda_data", {})
 
-        # Format USDA crop progress for prompt
+        # Use the same dated region/class observations as the screening gate.
+        from datetime import timedelta
+
+        from tradingagents.strategies.data_sources.usda_source import (
+            validated_condition_observations,
+        )
+
         crop_lines = []
         crop_progress = usda.get("crop_progress", {}) if isinstance(usda, dict) else {}
-        for commodity, weeks in crop_progress.items():
-            if not isinstance(weeks, list) or not weeks:
+        for commodity, weeks in sorted(crop_progress.items()):
+            latest, observations = validated_condition_observations(weeks)
+            if latest is None:
                 continue
-            latest = weeks[-1]
-            ge = latest.get("good_pct", 0) + latest.get("excellent_pct", 0)
-            change = ""
-            if len(weeks) >= 2:
-                prior = weeks[-2]
-                prior_ge = prior.get("good_pct", 0) + prior.get("excellent_pct", 0)
-                change = f" (change: {ge - prior_ge:+d}pp)"
-            crop_lines.append(f"- {commodity}: {ge}% Good/Excellent{change}")
+            previous = latest - timedelta(days=7)
+            for (week, state, crop_class), ge in sorted(observations.items()):
+                if week != latest:
+                    continue
+                label = f"- {commodity}, {state}, {crop_class}, week ending {week}"
+                if ge is None:
+                    crop_lines.append(f"{label}: condition data unavailable (invalid or incomplete)")
+                    continue
+                prior_ge = observations.get((previous, state, crop_class))
+                change = (
+                    f"change: {ge - prior_ge:+g}pp from {previous}"
+                    if prior_ge is not None else "weekly comparison unavailable"
+                )
+                crop_lines.append(f"{label}: {ge:g}% Good/Excellent ({change})")
 
         # Count states in severe+ drought
         severe_states = [s for s, d in drought_states.items()

@@ -5,8 +5,8 @@ for corn, soybeans, and wheat across key agricultural states.
 
 Primary: QuickStats JSON API.
 Fallback: ESMIS Crop Progress weekly text reports (used when QuickStats is
-down — its app servers periodically stall while the publication mirror at
-esmis.nal.usda.gov stays up).
+unavailable). The publication mirror may lag the API; report observation
+dates remain explicit and a single report is not weekly-change history.
 
 API docs: https://quickstats.nass.usda.gov/api/
 ESMIS:    https://esmis.nal.usda.gov/concern/publications/8336h188j
@@ -59,7 +59,7 @@ _STATE_NAMES_TO_CODES = {
 # Map a requested commodity to the ESMIS section name(s) that carry CONDITION data
 _COMMODITY_TO_ESMIS_SECTIONS = {
     "CORN": ["Corn Condition"],
-    "SOYBEANS": ["Soybeans Condition"],
+    "SOYBEANS": ["Soybean Condition"],
     # Wheat reports split winter and spring. Both belong to "WHEAT" semantically.
     "WHEAT": ["Winter Wheat Condition", "Spring Wheat Condition"],
     "COTTON": ["Cotton Condition"],
@@ -67,8 +67,47 @@ _COMMODITY_TO_ESMIS_SECTIONS = {
     "SORGHUM": ["Sorghum Condition"],
     "OATS": ["Oats Condition"],
     "BARLEY": ["Barley Condition"],
-    "PEANUTS": ["Peanuts Condition"],
+    "PEANUTS": ["Peanut Condition"],
 }
+
+
+def validated_condition_observations(weeks: Any) -> tuple[Any, dict]:
+    """Return newest observed week and region/class G+E values (None if invalid).
+
+    Shared by the screen and LLM prompt so neither can impute zero or substitute
+    an older week when the newest observation is invalid.
+    """
+    from datetime import date
+
+    observations = {}
+    if not isinstance(weeks, list):
+        return None, observations
+    for row in weeks:
+        try:
+            week = date.fromisoformat(row["week_ending"])
+            state = row["state"]
+            crop_class = row.get("crop_class", "ALL CLASSES")
+            if not all(isinstance(value, str) and value.strip() for value in (state, crop_class)):
+                continue
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        key = (week, state, crop_class)
+        value = None
+        try:
+            good = float(row["good_pct"])
+            excellent = float(row["excellent_pct"])
+            if row.get("condition_valid") is not False and (
+                0 <= good <= 100 and 0 <= excellent <= 100
+                and good + excellent <= 100
+            ):
+                value = good + excellent
+        except (KeyError, TypeError, ValueError):
+            pass
+        if key in observations and observations[key] != value:
+            value = None
+        observations[key] = value
+    latest = max((key[0] for key in observations), default=None)
+    return latest, observations
 
 
 class USDASource:
@@ -122,7 +161,11 @@ class USDASource:
         if not self._api_key:
             return []
 
-        cache_key = f"{commodity}|{year}"
+        requested_states = sorted({
+            state.strip().upper()
+            for state in (states or AG_STATES).split(",") if state.strip()
+        })
+        cache_key = f"{commodity.upper()}|{year}|{','.join(requested_states)}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -130,16 +173,19 @@ class USDASource:
             "key": self._api_key,
             "commodity_desc": commodity.upper(),
             "statisticcat_desc": "CONDITION",
-            "unit_desc": "PCT OF AREA PLANTED",
+            "agg_level_desc": "STATE",
             "freq_desc": "WEEKLY",
             "year": str(year),
-            "state_alpha": states or AG_STATES,
+            "state_alpha": requested_states,
             "format": "JSON",
         }
 
-        # Short-circuit if we've already seen USDA fail this run.
+        # Bypass the failed primary, while keeping fallback available for each crop.
         if self._unavailable:
-            return []
+            fallback = self._esmis_fallback(commodity, year, states)
+            if fallback:
+                self._cache[cache_key] = fallback
+            return fallback
 
         max_retries = 1
         base_delay = 3.0
@@ -193,38 +239,59 @@ class USDASource:
         if data is None:
             return []
 
-        # Group records by (week_ending, state) and pivot condition categories
-        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        # Keep wheat classes separate while pivoting condition categories.
+        grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        invalid_groups: set[tuple[str, str, str]] = set()
         for record in data.get("data", []):
+            if not isinstance(record, dict):
+                continue
             week = record.get("week_ending", "")
             state = record.get("state_alpha", "")
+            crop_class = record.get("class_desc", "ALL CLASSES")
             unit = record.get("unit_desc", "")
-            value_str = record.get("Value", "")
-
+            if not all(isinstance(value, str) and value.strip() for value in (week, state, crop_class, unit)):
+                continue
             field = CONDITION_CATEGORIES.get(unit)
-            if not field or not week or not state:
+            if not field:
                 continue
-
-            try:
-                value = int(value_str.strip())
-            except (ValueError, AttributeError):
-                continue
-
-            key = (week, state)
+            key = (week, state, crop_class)
             if key not in grouped:
                 grouped[key] = {
                     "week_ending": week,
                     "commodity": commodity.upper(),
+                    "crop_class": crop_class,
                     "state": state,
-                    "excellent_pct": 0,
-                    "good_pct": 0,
-                    "fair_pct": 0,
-                    "poor_pct": 0,
-                    "very_poor_pct": 0,
                 }
+            try:
+                value = int(record.get("Value", "").strip())
+                if not 0 <= value <= 100:
+                    raise ValueError("condition percentage outside range")
+            except (ValueError, AttributeError):
+                invalid_groups.add(key)
+                continue
+            if field in grouped[key] and grouped[key][field] != value:
+                invalid_groups.add(key)
             grouped[key][field] = value
 
-        weeks = sorted(grouped.values(), key=lambda w: (w["week_ending"], w["state"]))
+        # Preserve invalid dates without numerical values: dropping the newest
+        # week would let downstream consumers silently reuse an older decline.
+        observations = []
+        for key, row in grouped.items():
+            if (
+                key in invalid_groups
+                or "good_pct" not in row or "excellent_pct" not in row
+                or row["good_pct"] + row["excellent_pct"] > 100
+            ):
+                row = {
+                    field: row[field]
+                    for field in ("week_ending", "commodity", "crop_class", "state")
+                }
+                row["condition_valid"] = False
+            observations.append(row)
+        weeks = sorted(
+            observations,
+            key=lambda row: (row["week_ending"], row["state"], row["crop_class"]),
+        )
         self._cache[cache_key] = weeks
         return weeks
 
@@ -358,7 +425,7 @@ class USDASource:
     def _esmis_fallback(
         self,
         commodity: str,
-        year: int,  # noqa: ARG002 (year is fixed to current week's report)
+        year: int,
         states: str | None,
     ) -> list[dict[str, Any]]:
         """Build crop-condition rows from the ESMIS weekly text report.
@@ -374,16 +441,24 @@ class USDASource:
         if text is None:
             return []
 
-        wanted_states: set[str] | None = None
-        if states:
-            wanted_states = {s.strip().upper() for s in states.split(",") if s.strip()}
+        wanted_states = {
+            state.strip().upper()
+            for state in (states or AG_STATES).split(",") if state.strip()
+        }
 
         rows: list[dict[str, Any]] = []
         for section in sections:
             for row in self._parse_esmis_section(text, section):
-                if wanted_states and row["state"] not in wanted_states:
+                if (
+                    row["state"] not in wanted_states
+                    or not row["week_ending"].startswith(f"{year}-")
+                ):
                     continue
                 row["commodity"] = commodity.upper()
+                row["crop_class"] = (
+                    section.split(" Wheat")[0].upper()
+                    if commodity.upper() == "WHEAT" else "ALL CLASSES"
+                )
                 rows.append(row)
 
         rows.sort(key=lambda r: (r["week_ending"], r["state"]))

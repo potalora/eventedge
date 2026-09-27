@@ -47,8 +47,8 @@ class TestCohortEligibilityWiring:
         assert opts["covered_call_default_dte"] == 30
         assert opts["covered_call_strike_offset"] == 0.05
 
-    def test_autoresearch_model_is_sonnet_5_medium_effort(self):
+    def test_autoresearch_model_is_luna_high_effort(self):
         from tradingagents.default_config import DEFAULT_CONFIG
         autoresearch = DEFAULT_CONFIG["autoresearch"]
-        assert autoresearch["autoresearch_model"] == "claude-sonnet-5"
-        assert autoresearch["llm_effort"] == "medium"
+        assert autoresearch["autoresearch_model"] == "gpt-6-luna"
+        assert autoresearch["llm_effort"] == "high"

@@ -24,6 +24,8 @@ ALLOWED_MODEL_KEYS = frozenset(
         "strategist_model",
         "cro_model",
         "autoresearch_model",
+        "llm_effort",
+        "portfolio_committee_model",
     }
 )
 
@@ -245,7 +247,9 @@ def build_epoch_context(
         raise ValueError(
             f"unexpected model key {sorted(unexpected_model_keys)[0]!r}"
         )
-    missing_model_keys = ALLOWED_MODEL_KEYS - actual_model_keys
+    # Earlier frozen generations did not bind these settings explicitly.
+    legacy_model_keys = ALLOWED_MODEL_KEYS - {"llm_effort", "portfolio_committee_model"}
+    missing_model_keys = legacy_model_keys - actual_model_keys
     if missing_model_keys:
         raise ValueError(
             f"model key set is missing {sorted(missing_model_keys)[0]!r}"

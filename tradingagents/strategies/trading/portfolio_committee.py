@@ -834,9 +834,17 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
             return []
 
     def _get_client(self):
-        """Lazy-init Anthropic client."""
+        """Lazy-init the selected provider."""
         if self._client is None:
             try:
+                from tradingagents.strategies.llm_utils import LUNA_MODEL
+                if self._model_name == LUNA_MODEL:
+                    import httpx
+                    from openai import OpenAI
+                    self._client = OpenAI(
+                        timeout=httpx.Timeout(120.0, connect=10.0), max_retries=0,
+                    )
+                    return self._client
                 import anthropic
                 import httpx
                 # Force IPv4 — IPv6 connections to Anthropic hang on some networks
@@ -862,23 +870,12 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
         base_delay = 2.0
         for attempt in range(max_retries + 1):
             try:
-                from tradingagents.strategies.llm_utils import (
-                    anthropic_request_options,
-                    anthropic_response_text,
+                from tradingagents.strategies.llm_utils import call_analysis_model
+                return call_analysis_model(
+                    client, model=self._model_name, max_tokens=max_tokens,
+                    system=system, prompt=prompt, temperature=self._temperature,
+                    effort=self._effort,
                 )
-
-                response = client.messages.create(
-                    model=self._model_name,
-                    max_tokens=max_tokens,
-                    system=system,
-                    messages=[{"role": "user", "content": prompt}],
-                    **anthropic_request_options(
-                        model=self._model_name,
-                        temperature=self._temperature,
-                        effort=self._effort,
-                    ),
-                )
-                return anthropic_response_text(response)
             except Exception as exc:
                 is_rate_limit = "rate" in str(exc).lower() or "429" in str(exc)
                 is_overloaded = "overloaded" in str(exc).lower() or "529" in str(exc)

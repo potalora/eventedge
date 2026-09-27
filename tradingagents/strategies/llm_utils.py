@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 SONNET_5_MODEL = "claude-sonnet-5"
+LUNA_MODEL = "gpt-6-luna"
 _VALID_EFFORTS = frozenset({"low", "medium", "high", "max"})
 
 
@@ -38,3 +39,38 @@ def anthropic_response_text(response: Any) -> str:
     if not text:
         raise RuntimeError("Anthropic response contained no text block")
     return text
+
+
+def call_analysis_model(
+    client: Any, *, model: str, system: str, prompt: str,
+    max_tokens: int, temperature: float, effort: str,
+) -> str:
+    """Keep existing Claude calls and route Luna to OpenAI Responses.
+
+    Luna's output budget includes hidden reasoning. Reserve room beyond the
+    short visible JSON budget and reject incomplete output before JSON repair.
+    """
+    if model == LUNA_MODEL:
+        if effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
+            raise ValueError("Invalid Luna reasoning effort")
+        response = client.responses.create(
+            model=model, instructions=system, input=prompt,
+            reasoning={"effort": effort},
+            max_output_tokens=max(16384, max_tokens), store=False,
+        )
+        if getattr(response, "status", None) != "completed":
+            raise RuntimeError("OpenAI analysis response did not complete")
+        for item in getattr(response, "output", []):
+            for block in getattr(item, "content", []) or []:
+                if getattr(block, "type", None) == "refusal":
+                    raise RuntimeError("OpenAI analysis response was refused")
+        text = getattr(response, "output_text", None)
+        if not isinstance(text, str) or not text.strip():
+            raise RuntimeError("OpenAI analysis response contained no text")
+        return text.strip()
+    response = client.messages.create(
+        model=model, max_tokens=max_tokens, system=system,
+        messages=[{"role": "user", "content": prompt}],
+        **anthropic_request_options(model=model, temperature=temperature, effort=effort),
+    )
+    return anthropic_response_text(response)
