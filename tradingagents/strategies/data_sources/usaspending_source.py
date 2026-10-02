@@ -4,6 +4,8 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from .fetch_errors import SourceFetchError, source_fetch_error
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.usaspending.gov/api/v2/"
@@ -68,6 +70,8 @@ class USASpendingSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {"error": str(exc)}
         except Exception:
             logger.error("USASpendingSource.fetch(%s) failed", method, exc_info=True)
             return {"error": f"{method} fetch failed"}
@@ -151,11 +155,15 @@ class USASpendingSource:
             )
             if resp.status_code != 200:
                 logger.warning("USASpending search returned %d", resp.status_code)
-                return []
+                raise SourceFetchError("USASpending request failed", reason_code="http_error", http_status=resp.status_code)
 
             data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                raise SourceFetchError("USASpending response invalid", reason_code="invalid_response")
             results: list[dict[str, Any]] = []
-            for row in data.get("results", []):
+            for row in data["results"]:
+                if not isinstance(row, dict):
+                    raise SourceFetchError("USASpending response invalid", reason_code="invalid_response")
                 results.append(
                     {
                         "award_id": row.get("Award ID", ""),
@@ -170,9 +178,10 @@ class USASpendingSource:
                     }
                 )
             return results
-        except Exception:
-            logger.error("search_contracts failed", exc_info=True)
-            return []
+        except Exception as exc:
+            safe_error = source_fetch_error("USASpending contract fetch failed", exc)
+            logger.error("%s", safe_error)
+            raise safe_error from None
 
     def get_recent_large_contracts(
         self,

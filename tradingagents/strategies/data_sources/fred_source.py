@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from .fetch_errors import SourceFetchError, source_fetch_error
+
 logger = logging.getLogger(__name__)
 
 # Common FRED series used by strategies
@@ -51,6 +53,8 @@ class FREDSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {"error": str(exc)}
         except Exception:
             logger.error("FREDSource.fetch(%s) failed", method, exc_info=True)
             return {"error": f"{method} fetch failed"}
@@ -78,19 +82,40 @@ class FREDSource:
         fred = Fred(api_key=self._api_key)
         try:
             data = fred.get_series(series_id, observation_start=start, observation_end=end)
+            if not isinstance(data, pd.Series):
+                raise SourceFetchError("FRED series response invalid", reason_code="invalid_response")
             self._cache[cache_key] = data
             return data
-        except Exception:
-            logger.error("Failed to fetch FRED series %s", series_id, exc_info=True)
-            return pd.Series(dtype=float)
+        except Exception as exc:
+            classified = source_fetch_error("FRED series fetch failed", exc)
+            safe_error = SourceFetchError(
+                "FRED series fetch failed", reason_code=classified.reason_code,
+                http_status=classified.http_status,
+                failed_operations={series_id: classified.reason_code},
+            )
+            logger.error("%s", safe_error)
+            raise safe_error from None
 
     def fetch_multi_series(
         self, series_ids: list[str], start: str, end: str
     ) -> dict[str, pd.Series]:
         """Fetch multiple FRED series."""
         results: dict[str, pd.Series] = {}
+        failures: dict[str, str] = {}
+        http_statuses: dict[str, int] = {}
         for sid in series_ids:
-            results[sid] = self.fetch_series(sid, start, end)
+            try:
+                results[sid] = self.fetch_series(sid, start, end)
+            except SourceFetchError as exc:
+                failures[sid] = exc.reason_code
+                if exc.http_status is not None:
+                    http_statuses[sid] = exc.http_status
+        if failures:
+            raise SourceFetchError(
+                "FRED series fetch failed", reason_code="batch_failure",
+                failed_operations=failures, failed_http_statuses=http_statuses,
+                partial_data=results,
+            )
         return results
 
     def fetch_credit_spreads(self, start: str, end: str) -> dict[str, pd.Series]:
@@ -123,5 +148,11 @@ class FREDSource:
         series_ids = params.get("series_ids", [])
         start = params.get("start", "")
         end = params.get("end", "")
-        results = self.fetch_multi_series(series_ids, start, end)
+        try:
+            results = self.fetch_multi_series(series_ids, start, end)
+        except SourceFetchError as exc:
+            return {
+                "data": {k: v.to_dict() for k, v in exc.partial_data.items()},
+                "error": str(exc),
+            }
         return {"data": {k: v.to_dict() for k, v in results.items()}}

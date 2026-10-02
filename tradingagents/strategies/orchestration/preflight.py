@@ -1,7 +1,8 @@
 """Pre-run screen integrity and governed market-data checks.
 
 ``screen`` runs the daily cycle's shared multi-source fetch followed by
-per-horizon strategy screens and validates every candidate through the same
+per-horizon strategy screens, reports explicit shared-source failures, and
+validates every candidate through the same
 event-identity gates that ``screen_and_stage`` applies
 (``canonical_event_key`` + ``canonical_observation_time``). No generation
 state is written, no LLM is called, and nothing is staged or executed, so
@@ -29,7 +30,8 @@ Notes:
   signals before staging (LLM enrichment resolves tickers first for
   ``needs_llm_analysis`` candidates from regulatory_pipeline/litigation).
   Staging of LLM-resolved candidates is therefore outside this no-LLM
-  check's coverage; everything the deterministic path stages is covered.
+  check's coverage. The deterministic path's identity gates are covered, but
+  candidate reference bars, volatility history, and actual staging are not.
 - Candidate screening is deliberately re-run per horizon, mirroring the
   four screen passes of the daily cycle.
 """
@@ -513,7 +515,41 @@ def _run_screen_preflight(
             ),
             "horizons": {},
             "failures": [],
+            "source_warnings": [],
         }
+
+        # Fetchers preserve provider failures separately from successful empty
+        # responses. Report each shared source once, without copying provider
+        # exception text (which may contain credentials) into the wire result.
+        from tradingagents.strategies.orchestration.multi_strategy_engine import (
+            OPTIONAL_ENRICHMENT_SOURCES,
+            _provider_errors,
+        )
+
+        dependencies = {
+            source
+            for strategy in engine.paper_trade_strategies
+            for source in getattr(strategy, "data_sources", ())
+        }
+        source_errors = _provider_errors(
+            shared_data,
+            dependencies.intersection(report["fetched_sources"]),
+            include_optional=True,
+        )
+        for source in sorted(source_errors):
+            if source in OPTIONAL_ENRICHMENT_SOURCES:
+                report["source_warnings"].append(
+                    {"source": source, "error": "optional enrichment unavailable"}
+                )
+                continue
+            report["failures"].append(
+                {
+                    "horizon": "shared",
+                    "strategy": "source_health",
+                    "ticker": None,
+                    "error": f"{source}: provider fetch failed",
+                }
+            )
 
         for horizon in sorted(HORIZON_PARAMS):
             horizon_report: dict[str, Any] = {}
