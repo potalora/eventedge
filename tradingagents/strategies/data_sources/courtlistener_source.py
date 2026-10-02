@@ -10,6 +10,8 @@ import os
 import time
 from typing import Any
 
+from .fetch_errors import SourceFetchError, source_fetch_error
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.courtlistener.com/api/rest/v4"
@@ -37,6 +39,8 @@ class CourtListenerSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {"error": str(exc)}
         except Exception:
             logger.error("CourtListenerSource.fetch(%s) failed", method, exc_info=True)
             return {"error": f"{method} fetch failed"}
@@ -91,11 +95,15 @@ class CourtListenerSource:
             )
             if resp.status_code != 200:
                 logger.warning("CourtListener returned %d", resp.status_code)
-                return []
+                raise SourceFetchError("CourtListener request failed", reason_code="http_error", http_status=resp.status_code)
 
             data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
             results = []
-            for item in data.get("results", []):
+            for item in data["results"]:
+                if not isinstance(item, dict):
+                    raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
                 results.append({
                     "docket_id": item.get("docket_id", ""),
                     "case_name": item.get("caseName", ""),
@@ -107,9 +115,10 @@ class CourtListenerSource:
                     "jury_demand": item.get("juryDemand", ""),
                 })
             return results
-        except Exception:
-            logger.error("search_dockets failed", exc_info=True)
-            return []
+        except Exception as exc:
+            safe_error = source_fetch_error("CourtListener search_dockets failed", exc)
+            logger.error("%s", safe_error)
+            raise safe_error from None
 
     def search_opinions(
         self,
@@ -139,11 +148,15 @@ class CourtListenerSource:
             )
             if resp.status_code != 200:
                 logger.warning("CourtListener opinions returned %d", resp.status_code)
-                return []
+                raise SourceFetchError("CourtListener request failed", reason_code="http_error", http_status=resp.status_code)
 
             data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+                raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
             results = []
-            for item in data.get("results", []):
+            for item in data["results"]:
+                if not isinstance(item, dict):
+                    raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
                 results.append({
                     "opinion_id": item.get("id", ""),
                     "case_name": item.get("caseName", ""),
@@ -152,9 +165,10 @@ class CourtListenerSource:
                     "type": item.get("type", ""),
                 })
             return results
-        except Exception:
-            logger.error("search_opinions failed", exc_info=True)
-            return []
+        except Exception as exc:
+            safe_error = source_fetch_error("CourtListener search_opinions failed", exc)
+            logger.error("%s", safe_error)
+            raise safe_error from None
 
     def clear_cache(self) -> None:
         self._cache.clear()

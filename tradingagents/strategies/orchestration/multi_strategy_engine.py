@@ -41,10 +41,19 @@ _FINNHUB_FETCH_SAFETY_MARGIN_S = 30.0
 _DIAGNOSTIC_HOLDING_SESSIONS = 5
 
 
-def _provider_errors(data: Mapping[str, Any], sources: Iterable[str]) -> dict[str, str]:
-    """Return only explicit provider failures from the shared fetch payload."""
+# Shared fetch uses OpenBB only for optional enrichment/expansion, not for
+# required screen inputs. Keep this distinction consistent with preflight.
+OPTIONAL_ENRICHMENT_SOURCES = frozenset({"openbb"})
+
+
+def _provider_errors(
+    data: Mapping[str, Any], sources: Iterable[str], *, include_optional: bool = False
+) -> dict[str, str]:
+    """Return required-source failures, optionally including enrichment diagnostics."""
     errors: dict[str, str] = {}
     for source in sources:
+        if source in OPTIONAL_ENRICHMENT_SOURCES and not include_optional:
+            continue
         if source not in data:
             errors[str(source)] = "missing from shared data"
             continue
@@ -1752,17 +1761,27 @@ class MultiStrategyEngine:
     def _fetch_courtlistener_data(self) -> dict[str, Any]:
         """Fetch CourtListener data for litigation strategy."""
         from tradingagents.strategies.learning.event_monitor import EventMonitor
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
 
         monitor = EventMonitor(self.registry)
         result: dict[str, Any] = {}
+        failures: list[str] = []
 
         # Search for securities-related cases
         for query in ["securities class action", "SEC enforcement", "antitrust"]:
-            dockets = monitor.poll_court_dockets(query=query, days_back=14)
+            try:
+                dockets = monitor.poll_court_dockets(query=query, days_back=14)
+            except Exception as exc:
+                safe_error = source_fetch_error("CourtListener docket fetch failed", exc)
+                failures.append(f"{query.lower().replace(' ', '_')}: {safe_error}")
+                logger.error("%s", safe_error)
+                continue
             existing = result.get("dockets", [])
             existing.extend(dockets)
             result["dockets"] = existing
 
+        if failures:
+            result["error"] = "; ".join(failures)
         logger.info(
             "CourtListener fetch: %d dockets",
             len(result.get("dockets", [])),
@@ -1771,11 +1790,14 @@ class MultiStrategyEngine:
 
     def _fetch_fred_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch FRED credit spreads and economic indicators."""
+        from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+
         source = self.registry.get("fred")
         if source is None:
             return {}
 
         result: dict[str, Any] = {}
+        failures: list[str] = []
 
         # Credit spreads for regime model
         try:
@@ -1783,15 +1805,26 @@ class MultiStrategyEngine:
             result.update(
                 spreads
             )  # Keys are FRED series IDs (BAMLH0A0HYM2, BAMLC0A4CBBB)
+        except SourceFetchError as exc:
+            result.update(exc.partial_data)
+            failures.append(str(exc))
         except Exception:
-            logger.error("Failed to fetch FRED credit spreads", exc_info=True)
+            logger.error("Failed to fetch FRED credit spreads")
+            failures.append("FRED credit spreads [provider_error]")
 
         # Economic indicators for regime model
         try:
             indicators = source.fetch_economic_indicators(start_date, end_date)
             result.update(indicators)  # Keys are FRED series IDs (UNRATE, PAYEMS, etc.)
+        except SourceFetchError as exc:
+            result.update(exc.partial_data)
+            failures.append(str(exc))
         except Exception:
-            logger.error("Failed to fetch FRED economic indicators", exc_info=True)
+            logger.error("Failed to fetch FRED economic indicators")
+            failures.append("FRED economic indicators [provider_error]")
+
+        if failures:
+            result["error"] = "; ".join(failures)
 
         # Map friendly names for strategies that use them
         from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
@@ -1821,6 +1854,8 @@ class MultiStrategyEngine:
 
     def _fetch_usaspending_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch recent large federal contract awards."""
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+
         source = self.registry.get("usaspending")
         if source is None:
             return {}
@@ -1834,9 +1869,10 @@ class MultiStrategyEngine:
             result = {"contracts": contracts}
             logger.info("USASpending fetch: %d large contracts", len(contracts))
             return {"data": result}
-        except Exception:
-            logger.error("Failed to fetch USASpending data", exc_info=True)
-            return {}
+        except Exception as exc:
+            safe_error = source_fetch_error("USASpending contract fetch failed", exc)
+            logger.error("%s", safe_error)
+            return {"error": str(safe_error)}
 
     def _fetch_cftc_data(self) -> dict[str, Any]:
         """Fetch CFTC COT positioning data for commodity strategy."""
@@ -2128,14 +2164,17 @@ class MultiStrategyEngine:
                 c.direction = llm_result.get("direction", c.direction)
                 c.score = llm_result.get("conviction", llm_result.get("score", c.score))
                 c.metadata["llm_analysis"] = llm_result
-                # Resolve ticker if LLM provided one
+                # SEC's company list validates newly inferred companies. It
+                # does not cover the strategy's configured ETF universe.
+                resolved_by_llm = False
                 if not c.ticker and llm_result.get("defendant_ticker"):
                     c.ticker = llm_result["defendant_ticker"]
+                    resolved_by_llm = True
                 if not c.ticker and llm_result.get("affected_tickers"):
                     c.ticker = llm_result["affected_tickers"][0]
+                    resolved_by_llm = True
 
-                # Validate LLM-resolved ticker against SEC data
-                if c.ticker:
+                if resolved_by_llm and c.ticker:
                     edgar = self.registry.get("edgar")
                     if edgar and hasattr(edgar, "validate_ticker"):
                         if not edgar.validate_ticker(c.ticker):

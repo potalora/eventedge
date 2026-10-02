@@ -235,7 +235,7 @@ def test_available_openbb_enrichment_source_is_not_missing_data_failure(
     assert health[0].status == "legitimate_no_event"
 
 
-def test_unavailable_openbb_enrichment_source_is_explicit_data_failure(
+def test_unavailable_openbb_enrichment_source_is_optional(
     tmp_path,
 ) -> None:
     engine = MultiStrategyEngine(
@@ -251,7 +251,7 @@ def test_unavailable_openbb_enrichment_source_is_explicit_data_failure(
     )
 
     assert data["openbb"]["error"] == "source unavailable or skipped"
-    assert health[0].status == "data_failure"
+    assert health[0].status == "legitimate_no_event"
 
 
 def test_fetch_exception_is_retained_and_classified_as_data_failure(tmp_path) -> None:
