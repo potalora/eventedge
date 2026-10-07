@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .request_policy import provider_request
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
 logger = logging.getLogger(__name__)
 
 CAPITOLTRADES_URL = "https://www.capitoltrades.com/trades"
@@ -197,13 +200,12 @@ class CongressSource:
     """Data source for congressional stock trading disclosures.
 
     Uses FMP's authenticated latest House and Senate disclosure endpoints when
-    a key is configured. CapitolTrades' undocumented RSC page is a best-effort
-    fallback because it may rate-limit server IPs. Results are cached in-memory
-    for the session.
+    a key is configured. Missing access is an explicit coverage failure.
+    Results are cached in-memory only after both chambers succeed.
     """
 
     name: str = "congress"
-    requires_api_key: bool = False
+    requires_api_key: bool = True
 
     def __init__(self, fmp_api_key: str | None = None) -> None:
         self._fmp_api_key = fmp_api_key or os.environ.get("FMP_API_KEY", "")
@@ -230,12 +232,16 @@ class CongressSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("CongressSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("CongressSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
-        """Congress data is available if requests is installed."""
+        """Congress requires a configured stable FMP feed."""
+        if not self._fmp_api_key:
+            return False
         try:
             import requests  # noqa: F401
 
@@ -255,105 +261,51 @@ class CongressSource:
         allowance while covering the most recent disclosures.
         """
         if not self._fmp_api_key:
-            return []
+            raise SourceFetchError("FMP congressional access missing", reason_code="provider_error")
         if "fmp_latest" in self._cache:
             return self._cache["fmp_latest"]
 
         import requests
 
         trades: list[dict[str, Any]] = []
+        failures, statuses = {}, {}
         for chamber in ("House", "Senate"):
             endpoint = f"{chamber.lower()}-latest"
             try:
-                response = requests.get(
-                    f"{FMP_BASE_URL}/{endpoint}",
-                    params={
-                        "page": 0,
-                        "limit": FMP_FREE_LIMIT,
-                        "apikey": self._fmp_api_key,
-                    },
-                    timeout=20,
-                )
-                if response.status_code != 200:
-                    logger.warning(
-                        "FMP %s disclosures returned %d",
-                        chamber,
-                        response.status_code,
-                    )
-                    continue
+                response = provider_request("congress", "GET", f"{FMP_BASE_URL}/{endpoint}",
+                    operation=endpoint, params={"page": 0, "limit": FMP_FREE_LIMIT,
+                                                "apikey": self._fmp_api_key}, timeout=20)
                 payload = response.json()
-                if not isinstance(payload, list):
-                    logger.warning("FMP %s disclosures returned non-list data", chamber)
-                    continue
-                trades.extend(_normalize_fmp_trade(item, chamber) for item in payload)
-            except Exception:
-                logger.error(
-                    "Failed to fetch FMP %s disclosures", chamber, exc_info=True
-                )
-
-        if trades:
-            self._cache["fmp_latest"] = trades
-            logger.info("Loaded %d congressional trades from FMP", len(trades))
+                if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+                    raise SourceFetchError("FMP disclosures invalid", reason_code="invalid_response")
+                invalid_rows = False
+                for item in payload:
+                    representative = item.get("office") or " ".join(str(item.get(key) or "") for key in ("firstName", "lastName"))
+                    if (not all(source_text(item.get(key)) for key in ("symbol", "type", "amount"))
+                            or not source_text(representative)
+                            or not all(source_date(item.get(key)) for key in ("transactionDate", "disclosureDate"))):
+                        invalid_rows = True
+                        continue
+                    trades.append(_normalize_fmp_trade(item, chamber))
+                if invalid_rows:
+                    raise SourceFetchError("FMP disclosure records invalid", reason_code="invalid_response")
+            except Exception as exc:
+                error = source_fetch_error("FMP disclosures failed", exc)
+                failures[endpoint] = error.reason_code
+                if error.http_status is not None:
+                    statuses[endpoint] = error.http_status
+        if failures:
+            raise SourceFetchError("FMP congressional coverage incomplete", reason_code="batch_failure",
+                failed_operations=failures, failed_http_statuses=statuses,
+                partial_data={"recent_trades": trades})
+        self._cache["fmp_latest"] = trades
         return trades
 
-    def _fetch_page(self, page: int = 1, page_size: int = 96) -> list[dict[str, Any]]:
-        """Fetch a single page of trades from CapitolTrades."""
-        import requests
-
-        cache_key = f"page|{page}|{page_size}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        try:
-            resp = requests.get(
-                CAPITOLTRADES_URL,
-                params={"page": page, "pageSize": page_size},
-                headers=_RSC_HEADERS,
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                logger.warning("CapitolTrades returned %d", resp.status_code)
-                return []
-
-            raw_trades = _extract_trades_from_rsc(resp.text)
-            trades = [_normalize_trade(t) for t in raw_trades]
-            self._cache[cache_key] = trades
-            return trades
-        except Exception:
-            logger.error("Failed to fetch CapitolTrades page %d", page, exc_info=True)
-            return []
-
     def fetch_all_trades(self, max_pages: int = 3) -> list[dict[str, Any]]:
-        """Fetch recent trades from CapitolTrades (up to max_pages * 96 trades).
-
-        Args:
-            max_pages: Maximum number of pages to fetch (96 trades/page).
-
-        Returns:
-            List of normalized trade records.
-        """
-        if "all_trades" in self._cache:
-            return self._cache["all_trades"]
-
-        fmp_trades = self._fetch_fmp_latest()
-        if fmp_trades:
-            self._cache["all_trades"] = fmp_trades
-            return fmp_trades
-        if self._fmp_api_key:
-            logger.warning("FMP returned no congressional trades; trying CapitolTrades")
-
-        all_trades: list[dict[str, Any]] = []
-        for page in range(1, max_pages + 1):
-            trades = self._fetch_page(page=page)
-            if not trades:
-                break
-            all_trades.extend(trades)
-
-        self._cache["all_trades"] = all_trades
-        logger.info(
-            "Loaded %d congressional trades from CapitolTrades", len(all_trades)
-        )
-        return all_trades
+        """Fetch the stable FMP House/Senate pages; max_pages is legacy-only."""
+        if "all_trades" not in self._cache:
+            self._cache["all_trades"] = self._fetch_fmp_latest()
+        return self._cache["all_trades"]
 
     def get_recent_trades(
         self, days_back: int = 30, as_of: str | None = None
@@ -373,13 +325,20 @@ class CongressSource:
 
         ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now()
         cutoff = ref_date - timedelta(days=days_back)
-        all_trades = self.fetch_all_trades()
-
-        recent: list[dict[str, Any]] = []
-        for trade in all_trades:
-            trade_date = self._parse_trade_date(trade)
-            if trade_date and cutoff <= trade_date <= ref_date:
-                recent.append(trade)
+        def in_window(trades):
+            recent = []
+            for trade in trades:
+                trade_date = self._parse_trade_date(trade)
+                publication_date = self._parse_trade_date({"transaction_date": trade.get("publication_date")})
+                if trade_date and publication_date and cutoff <= trade_date <= ref_date and publication_date <= ref_date:
+                    recent.append(trade)
+            return recent
+        try:
+            all_trades = self.fetch_all_trades()
+        except SourceFetchError as exc:
+            exc.partial_data = {"recent_trades": in_window(exc.partial_data.get("recent_trades", []))}
+            raise
+        recent = in_window(all_trades)
 
         self._cache[cache_key] = recent
         return recent
@@ -427,6 +386,8 @@ class CongressSource:
         raw = trade.get("transaction_date", "")
         if not raw:
             return None
+        if source_date(raw):
+            return datetime.strptime(raw[:10], "%Y-%m-%d")
 
         for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
             try:
@@ -445,7 +406,7 @@ class CongressSource:
 
     def _dispatch_recent_trades(self, params: dict[str, Any]) -> dict[str, Any]:
         days_back = params.get("days_back", 30)
-        trades = self.get_recent_trades(days_back=days_back)
+        trades = self.get_recent_trades(days_back=days_back, as_of=params.get("as_of"))
         return {"data": trades, "count": len(trades)}
 
     def _dispatch_trades_by_ticker(self, params: dict[str, Any]) -> dict[str, Any]:

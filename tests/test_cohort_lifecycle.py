@@ -816,7 +816,7 @@ class TestCandidateBarLifecycle:
             record.status
             for record in health
             if record.strategy == "candidate_lifecycle"
-        } == {"data_failure"}
+        } == {"signals"}
         regime = orchestrator.cohorts[0]["state"].load_latest_regime()
         assert regime["execution_valid"] is True
         assert regime["staging_valid"] is False

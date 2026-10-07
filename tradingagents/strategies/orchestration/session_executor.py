@@ -31,6 +31,7 @@ from tradingagents.strategies.execution.price_source import (
     BarValidationError,
     PriceSource,
     YFinancePriceSource,
+    SIP_PRICING_VERSION,
     validate_adjusted_closes,
     validate_required_bars,
 )
@@ -246,6 +247,11 @@ class SessionExecutor:
             else None
         )
         self.ledger_config = self.ar_config.get("paper_ledger", {})
+        # Hand-built injected fixtures may omit the runtime source policy.
+        # Production configuration and the runtime factory select SIP only.
+        self.pricing_version = self.ledger_config.get("pricing_version")
+        if self.pricing_version not in {None, SIP_PRICING_VERSION}:
+            raise ValueError("unsupported pricing_version")
         self.benchmark_symbols = tuple(
             self.ledger_config.get("benchmark_symbols", ("SPY", "BIL"))
         )
@@ -988,6 +994,22 @@ class SessionExecutor:
     ) -> tuple[Mapping[str, object], ...]:
         """Require every bound reconstruction to match its immutable record."""
         summaries: list[Mapping[str, object]] = []
+        if self.pricing_version == SIP_PRICING_VERSION:
+            from tradingagents.strategies.execution.alpaca_daily_bar import (
+                HISTORICAL_DELAY,
+                SOURCE,
+            )
+
+            if governed_recoveries or any(
+                bar.source != SOURCE
+                or bar.adjusted
+                or bar.fetched_at < session_close(session) + HISTORICAL_DELAY
+                for bar in bars.values()
+            ):
+                raise _GovernedRecoveryConflictError(
+                    "primary SIP price policy provenance conflict"
+                )
+            return ()
         unbound_reconstructions = sorted(
             ticker
             for ticker, bar in bars.items()
@@ -1169,7 +1191,10 @@ class SessionExecutor:
                     completed_market = json.loads(
                         str(bound_context["economic_inputs_json"])
                     ).get("market", {})
-                    if completed_market.get("governed_recoveries", {}):
+                    if (
+                        completed_market.get("governed_recoveries", {})
+                        or self.pricing_version == SIP_PRICING_VERSION
+                    ):
                         self.persisted_input_bundle(session)
                     return SessionExecutionResult(
                         session, True, existing[0], "", PHASES
@@ -1203,7 +1228,9 @@ class SessionExecutor:
                 else {}
             )
             bound_recoveries = bound_market.get("governed_recoveries", {})
-            if bound_context is not None and bound_recoveries:
+            if bound_context is not None and (
+                bound_recoveries or self.pricing_version == SIP_PRICING_VERSION
+            ):
                 bundle = self.persisted_input_bundle(session)
             elif isinstance(price_source, SessionInputBundle):
                 bundle = price_source
@@ -1573,6 +1600,13 @@ class SessionExecutor:
             },
         }
         policy_document = self.portfolio_policy_document()
+        if self.pricing_version == SIP_PRICING_VERSION:
+            # Bind current provider and benchmark semantics against same-session
+            # source-policy substitution.
+            semantic_inputs["price_source_policy"] = self.pricing_version
+            semantic_inputs["benchmark_price_source_policy"] = (
+                "yfinance-total-return-adjusted-v1"
+            )
         if policy_document is not None:
             semantic_inputs["portfolio_policy"] = policy_document
         config_inputs = _canonical_json_value(semantic_inputs)

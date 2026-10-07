@@ -180,6 +180,10 @@ def _build_policy(config: Mapping[str, Any], endpoint: str) -> _RetryPolicy:
     )
 
 
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+from .request_policy import provider_call, current_provider_deadline
+
+
 class _FinnhubHTTPAdapter:
     """Small project-owned adapter for Finnhub's documented HTTP endpoints."""
 
@@ -294,7 +298,9 @@ class FinnhubSource:
         return self._monotonic() + budget_s
 
     def _resolve_deadline(self, deadline: float | None) -> float:
-        return deadline if deadline is not None else self.new_workflow_deadline()
+        own = deadline if deadline is not None else self.new_workflow_deadline()
+        shared = current_provider_deadline("finnhub")
+        return min(own, shared) if shared is not None else own
 
     def _has_budget(self, deadline: float) -> bool:
         return deadline - self._monotonic() > _MIN_REQUEST_BUDGET_S
@@ -308,16 +314,8 @@ class FinnhubSource:
 
     def _safe_error_message(self, exc: BaseException) -> str:
         """Return a bounded exception message with API credentials redacted."""
-        message = str(exc) or "<empty>"
-        if self._api_key:
-            message = message.replace(self._api_key, "<redacted>")
-        message = re.sub(
-            r"([?&]token=)[^&\s]+",
-            r"\1<redacted>",
-            message,
-            flags=re.IGNORECASE,
-        )
-        return message[:500]
+        error = source_fetch_error("Finnhub acquisition failed", exc)
+        return str(error)
 
     def _wait_for_request_slot(
         self,
@@ -434,6 +432,15 @@ class FinnhubSource:
         backoff, so no follow-on request starts once it has expired.
         """
         selected = policy or _RATE_LIMIT_POLICY
+        # The engine's shared policy owns retries; never nest the legacy loop.
+        shared_deadline = current_provider_deadline("finnhub")
+        if shared_deadline is not None:
+            def call():
+                options = dict(kwargs)
+                if selected.pass_timeout:
+                    options["timeout"] = self._request_timeout(selected, shared_deadline - self._monotonic())
+                return fn(*args, **options)
+            return provider_call("finnhub", endpoint or "sdk", call)
         endpoint_name = endpoint or getattr(fn, "__name__", "unknown")
         started = self._monotonic()
         effective_deadline = self._resolve_deadline(deadline)
@@ -543,8 +550,10 @@ class FinnhubSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("FinnhubSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("FinnhubSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -572,7 +581,7 @@ class FinnhubSource:
             strategy="earnings_call",
             endpoint="earnings_calendar",
         ):
-            return []
+            raise SourceFetchError("Finnhub acquisition deadline exhausted", reason_code="timeout")
         try:
             result = self._call_with_retry(
                 self._http.get,
@@ -588,9 +597,21 @@ class FinnhubSource:
                 endpoint="earnings_calendar",
                 deadline=workflow_deadline,
             )
-            events = result.get("earningsCalendar", [])
-            # Filter to those with actual results (already reported)
-            reported = [e for e in events if e.get("epsActual") is not None]
+            if not isinstance(result, dict) or not isinstance(result.get("earningsCalendar"), list) or not all(isinstance(item, dict) for item in result["earningsCalendar"]):
+                raise SourceFetchError("Finnhub earnings response invalid", reason_code="invalid_response")
+            events = result["earningsCalendar"]
+            valid_events, invalid = [], False
+            for event in events:
+                if (not source_text(event.get("symbol")) or not source_date(event.get("date"))
+                        or "epsActual" not in event
+                        or (event["epsActual"] is not None and not source_number(event["epsActual"]))):
+                    invalid = True
+                else:
+                    valid_events.append(event)
+            reported = [event for event in valid_events if event["epsActual"] is not None]
+            if invalid:
+                raise SourceFetchError("Finnhub earnings records invalid", reason_code="invalid_response",
+                                       partial_data={"earnings": reported})
             self._cache[cache_key] = reported
             logger.info(
                 "Finnhub fetch complete strategy=earnings_call endpoint=earnings_calendar "
@@ -606,7 +627,7 @@ class FinnhubSource:
                 type(exc).__name__,
                 self._safe_error_message(exc),
             )
-            return []
+            raise source_fetch_error("Finnhub fetch failed", exc) from None
 
     def fetch_earnings_news(
         self,
@@ -632,7 +653,7 @@ class FinnhubSource:
                 type(exc).__name__,
                 self._safe_error_message(exc),
             )
-            return []
+            raise source_fetch_error("Finnhub fetch failed", exc) from None
         date_from = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
         date_to = (dt + timedelta(days=2)).strftime("%Y-%m-%d")
 
@@ -663,7 +684,7 @@ class FinnhubSource:
             endpoint="company_news",
             symbol=symbol,
         ):
-            return []
+            raise SourceFetchError("Finnhub acquisition deadline exhausted", reason_code="timeout")
         try:
             news = self._call_with_retry(
                 self._http.get,
@@ -675,8 +696,15 @@ class FinnhubSource:
                 symbol=symbol,
                 deadline=workflow_deadline,
             )
+            if not isinstance(news, list) or not all(isinstance(item, dict) for item in news):
+                raise SourceFetchError("Finnhub news response invalid", reason_code="invalid_response")
             result = []
+            invalid = False
             for n in news or []:
+                if (not source_text(n.get("headline"))
+                        or _company_news_publication_time(n.get("datetime")) is None):
+                    invalid = True
+                    continue
                 item = {
                     "headline": n.get("headline", ""),
                     "summary": n.get("summary", ""),
@@ -689,6 +717,9 @@ class FinnhubSource:
                 if published_at is not None:
                     item["published_at"] = published_at
                 result.append(item)
+            if invalid:
+                raise SourceFetchError("Finnhub news records invalid", reason_code="invalid_response",
+                                       partial_data={"news": result})
             self._cache[cache_key] = result
             return result
         except Exception as exc:  # noqa: BLE001 - graceful source degradation boundary
@@ -699,7 +730,7 @@ class FinnhubSource:
                 type(exc).__name__,
                 self._safe_error_message(exc),
             )
-            return []
+            raise source_fetch_error("Finnhub fetch failed", exc) from None
 
     def fetch_supply_chain(
         self,
@@ -719,7 +750,7 @@ class FinnhubSource:
             endpoint="company_peers",
             symbol=symbol,
         ):
-            return []
+            raise SourceFetchError("Finnhub acquisition deadline exhausted", reason_code="timeout")
         try:
             peers = self._call_with_retry(
                 self._http.get,
@@ -731,6 +762,8 @@ class FinnhubSource:
                 symbol=symbol,
                 deadline=workflow_deadline,
             )
+            if not isinstance(peers, list) or not all(source_text(item) for item in peers):
+                raise SourceFetchError("Finnhub peers response invalid", reason_code="invalid_response")
             result = [{"ticker": p, "relationship": "peer"} for p in (peers or [])]
             self._cache[cache_key] = result
             logger.info(
@@ -750,7 +783,7 @@ class FinnhubSource:
                 type(exc).__name__,
                 self._safe_error_message(exc),
             )
-            return []
+            raise source_fetch_error("Finnhub fetch failed", exc) from None
 
     def fetch_supply_chains(
         self,
@@ -769,13 +802,19 @@ class FinnhubSource:
         chains: dict[str, list[dict]] = {}
         attempted = 0
 
+        failures, statuses = {}, {}
         for symbol in unique_symbols:
             if not self._has_budget(workflow_deadline):
-                break
+                failures[symbol] = "timeout"
+                continue
             attempted += 1
-            peers = self.fetch_supply_chain(symbol, deadline=workflow_deadline)
-            if peers:
+            try:
+                peers = self.fetch_supply_chain(symbol, deadline=workflow_deadline)
                 chains[symbol] = peers
+            except SourceFetchError as exc:
+                failures[symbol] = exc.reason_code
+                if exc.http_status is not None:
+                    statuses[symbol] = exc.http_status
 
         deadline_exhausted = attempted < len(unique_symbols) or not self._has_budget(
             workflow_deadline
@@ -790,6 +829,10 @@ class FinnhubSource:
             str(deadline_exhausted).lower(),
             self._monotonic() - started,
         )
+        if failures:
+            raise SourceFetchError("Finnhub peer coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data=chains)
         return chains
 
     def fetch_earnings_transcript(

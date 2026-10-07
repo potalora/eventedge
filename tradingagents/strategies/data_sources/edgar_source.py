@@ -4,6 +4,9 @@ import logging
 import time
 from typing import Any
 
+from .request_policy import provider_request
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
 logger = logging.getLogger(__name__)
 
 # SEC rate limit: 10 requests/sec
@@ -37,8 +40,7 @@ class EDGARSource:
     """Data source for SEC EDGAR filings.
 
     Uses ``requests`` directly (no edgartools dependency).
-    Respects SEC rate limits (10 req/sec) via ``time.sleep(0.1)`` between
-    requests.
+    Uses the common acquisition budget and SEC request pacing.
     """
 
     name: str = "edgar"
@@ -81,8 +83,10 @@ class EDGARSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("EDGARSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("EDGARSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -120,36 +124,41 @@ class EDGARSource:
         """
         import requests
 
-        query_parts = [f'form:"{form_type}"']
+        params: dict[str, Any] = {"forms": form_type, "q": keyword or ""}
         if ticker:
-            query_parts.append(f'ticker:"{ticker}"')
-        if keyword:
-            query_parts.append(f'"{keyword}"')
-
-        params: dict[str, Any] = {
-            "q": " AND ".join(query_parts),
-        }
+            cik = self.ticker_to_cik(ticker)
+            if not cik:
+                return []
+            params["ciks"] = cik.zfill(10)
         if date_from:
             params["startdt"] = date_from
         if date_to:
             params["enddt"] = date_to
 
-        time.sleep(_SEC_DELAY)
-        resp = requests.get(
+        resp = provider_request("edgar", "GET",
             EDGAR_SEARCH,
             params=params,
             headers={"User-Agent": self._user_agent},
             timeout=15,
         )
-        if resp.status_code != 200:
-            logger.warning("EDGAR search returned %d", resp.status_code)
-            return []
-
-        data = resp.json()
-        hits = data.get("hits", {}).get("hits", [])
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise SourceFetchError("EDGAR search response invalid", reason_code="invalid_response") from None
+        hits_container = data.get("hits") if isinstance(data, dict) else None
+        hits = hits_container.get("hits") if isinstance(hits_container, dict) else None
+        if not isinstance(hits, list):
+            raise SourceFetchError("EDGAR search response invalid", reason_code="invalid_response")
         results: list[dict[str, Any]] = []
         for hit in hits:
-            src = hit.get("_source", {})
+            src = hit.get("_source") if isinstance(hit, dict) else None
+            if (not isinstance(src, dict) or not source_text(src.get("form"))
+                    or not source_date(src.get("file_date")) or not source_text(src.get("adsh"))
+                    or not isinstance(src.get("display_names"), list) or not src["display_names"]
+                    or not all(source_text(value) for value in src["display_names"])
+                    or not isinstance(src.get("ciks"), list) or not src["ciks"]
+                    or not all(source_text(value) and value.isdigit() and int(value) > 0 for value in src["ciks"])):
+                raise SourceFetchError("EDGAR search hit invalid", reason_code="invalid_response", partial_data={"filings": results})
             display_names = src.get("display_names", [])
             entity_name = display_names[0] if display_names else ""
             # Extract ticker from display_name format: "Company Name  (TICK)  (CIK ...)"
@@ -196,25 +205,28 @@ class EDGARSource:
         padded_cik = cik.zfill(10)
         url = f"{SUBMISSIONS_BASE}/CIK{padded_cik}.json"
 
-        time.sleep(_SEC_DELAY)
-        resp = requests.get(
+        resp = provider_request("edgar", "GET",
             url,
             headers={"User-Agent": self._user_agent},
             timeout=15,
         )
-        if resp.status_code != 200:
-            logger.warning("Company filings returned %d for CIK %s", resp.status_code, cik)
-            return []
-
-        data = resp.json()
-        recent = data.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        dates = recent.get("filingDate", [])
-        accessions = recent.get("accessionNumber", [])
-        documents = recent.get("primaryDocument", [])
+        try:
+            data = resp.json()
+            recent = data["filings"]["recent"]
+            forms = recent["form"]
+            dates = recent["filingDate"]
+            accessions = recent["accessionNumber"]
+            documents = recent["primaryDocument"]
+            if not all(isinstance(items, list) for items in (forms, dates, accessions, documents)) or not len(forms) == len(dates) == len(accessions) == len(documents):
+                raise ValueError("invalid submissions schema")
+        except Exception:
+            raise SourceFetchError("EDGAR submissions response invalid", reason_code="invalid_response") from None
 
         results: list[dict[str, Any]] = []
         for i in range(min(len(forms), len(dates))):
+            if not source_text(forms[i]) or not source_date(dates[i]) or not source_text(accessions[i]) or not source_text(documents[i]):
+                raise SourceFetchError("EDGAR submission record invalid", reason_code="invalid_response",
+                                       partial_data={"filings": results})
             if form_types and forms[i] not in form_types:
                 continue
             results.append({
@@ -238,23 +250,15 @@ class EDGARSource:
         """
         import requests
 
-        time.sleep(_SEC_DELAY)
-        try:
-            resp = requests.get(
-                url,
-                headers={"User-Agent": self._user_agent},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                return resp.text
-            logger.warning("Filing text returned %d for %s", resp.status_code, url)
-            return ""
-        except Exception:
-            logger.error("get_filing_text failed for %s", url, exc_info=True)
-            return ""
+        resp = provider_request("edgar", "GET", url,
+                                headers={"User-Agent": self._user_agent}, timeout=30,
+                                operation="filing_text")
+        if not isinstance(resp.text, str) or not resp.text.strip():
+            raise SourceFetchError("EDGAR filing text invalid", reason_code="invalid_response")
+        return resp.text
 
     def get_recent_form4(
-        self, ticker: str, days_back: int = 30
+        self, ticker: str, days_back: int = 30, *, as_of: str | None = None
     ) -> list[dict[str, Any]]:
         """Get recent Form 4 (insider transaction) filings for a ticker.
 
@@ -276,13 +280,17 @@ class EDGARSource:
 
         filings = self.get_company_filings(cik, form_types=["4", "4/A"], count=40)
 
-        cutoff = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        recent = [f for f in filings if f.get("filing_date", "") >= cutoff]
+        cutoff = ((datetime.fromisoformat(as_of) if as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        recent = [f for f in filings if f.get("filing_date", "") >= cutoff and (as_of is None or f.get("filing_date", "") <= as_of)]
 
         # Enrich with parsed transaction details
         enriched: list[dict[str, Any]] = []
         for filing in recent:
-            transactions = self._parse_form4_xml(cik, filing)
+            try:
+                transactions = self._parse_form4_xml(cik, filing)
+            except SourceFetchError as exc:
+                exc.partial_data = {"form4_filings": enriched}
+                raise
             if transactions:
                 for txn in transactions:
                     enriched.append({**filing, **txn})
@@ -317,21 +325,15 @@ class EDGARSource:
         accession_nodash = accession.replace("-", "")
         url = f"https://www.sec.gov/Archives/edgar/data/{padded_cik}/{accession_nodash}/{primary_doc}"
 
-        time.sleep(_SEC_DELAY)
-        try:
-            resp = requests.get(
-                url, headers={"User-Agent": self._user_agent}, timeout=15,
-            )
-            if resp.status_code != 200:
-                return []
-        except Exception:
-            logger.debug("Form 4 XML fetch failed: %s", url)
-            return []
-
+        resp = provider_request("edgar", "GET", url,
+                                headers={"User-Agent": self._user_agent}, timeout=15,
+                                operation="form4_xml")
         try:
             root = ElementTree.fromstring(resp.text)
+            if root.tag.rsplit("}", 1)[-1] != "ownershipDocument":
+                raise ElementTree.ParseError("not ownership XML")
         except ElementTree.ParseError:
-            return []
+            raise SourceFetchError("EDGAR Form 4 XML invalid", reason_code="invalid_response") from None
 
         # Handle XML namespaces
         ns = ""
@@ -516,19 +518,16 @@ class EDGARSource:
 
         import requests
 
-        time.sleep(_SEC_DELAY)
+        resp = provider_request("edgar", "GET", COMPANY_TICKERS_URL,
+                                headers={"User-Agent": self._user_agent}, timeout=15,
+                                operation="company_tickers")
         try:
-            resp = requests.get(
-                COMPANY_TICKERS_URL,
-                headers={"User-Agent": self._user_agent},
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                self._session_cache[cache_key] = resp.json()
-            else:
-                logger.warning("Company tickers returned %d", resp.status_code)
+            data = resp.json()
+            if not isinstance(data, dict) or not data or not all(isinstance(row, dict) for row in data.values()):
+                raise ValueError("invalid ticker schema")
         except Exception:
-            logger.error("company_tickers download failed", exc_info=True)
+            raise SourceFetchError("EDGAR company tickers invalid", reason_code="invalid_response") from None
+        self._session_cache[cache_key] = data
 
     def name_to_ticker(
         self,

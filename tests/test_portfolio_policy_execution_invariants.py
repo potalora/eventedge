@@ -94,7 +94,7 @@ def _bar(ticker: str, session: date, open_: str = "100", close: str = "100") -> 
         max(opened, closed),
         min(opened, closed),
         closed,
-        "fixture-raw",
+        "alpaca-sip-1d-raw",
         PROCESSED,
         False,
     )

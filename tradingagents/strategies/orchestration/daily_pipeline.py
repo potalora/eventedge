@@ -14,6 +14,9 @@ from typing import Any, Iterable
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
+from tradingagents.strategies.orchestration.source_coverage import (
+    aggregate_source_health_failures, apply_source_coverage,
+)
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     previous_session,
@@ -271,6 +274,7 @@ def finalize_daily_results(
             }
             - state.candidate_bar_quarantine_suppressions
         )
+    apply_source_coverage(state, finalized)
     return finalized
 
 
@@ -1480,9 +1484,26 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     lookback_start = (
         datetime.strptime(state.trading_date, "%Y-%m-%d") - timedelta(days=90)
     ).strftime("%Y-%m-%d")
-    state.shared_data = state.first_engine._fetch_all_data(
-        lookback_start, state.trading_date
+    from tradingagents.strategies.orchestration.source_inputs import (
+        SourceInputError, daily_source_store,
     )
+
+    try:
+        source_store, source_identity = daily_source_store(owner, state.trading_date)
+        state.shared_data = source_store.load_frozen(source_identity)
+        if state.shared_data is None:
+            acquired = state.first_engine._fetch_all_data(lookback_start, state.trading_date)
+            # Persist and decode before any strategy/model can mutate observations.
+            state.shared_data = source_store.freeze(source_identity, acquired)
+        if not isinstance(state.shared_data, dict):
+            raise SourceInputError("shared source bundle must be a mapping")
+        yfinance_inputs = state.shared_data.get("yfinance")
+        shared_prices = yfinance_inputs.get("prices", {}) if isinstance(yfinance_inputs, dict) else {}
+        if isinstance(shared_prices, dict) and hasattr(state.first_engine, "_price_cache"):
+            state.first_engine._price_cache.update(shared_prices)
+    except (OSError, SourceInputError):
+        logger.error("Accepted shared source bundle invalid for %s", state.trading_date)
+        return state.fail_candidates("shared_source_bundle_invalid")
     logger.info("Shared data fetched: %s", list(state.shared_data.keys()))
     for horizon in sorted({cohort["config"].horizon for cohort in state.valid}):
         signals, regime, health = owner._screen_for_horizon(
@@ -1965,6 +1986,54 @@ def _invalid_volatility_histories(
     return invalid
 
 
+def _restore_staging_volatility(
+    state: DailyRunState,
+    document: Any,
+    required_tickers: set[str],
+    *,
+    lookback: int,
+    floor: float,
+    expected_sessions: tuple[date, ...],
+) -> None:
+    from tradingagents.strategies.trading.portfolio_policy import (
+        build_annualized_volatility_evidence,
+    )
+
+    if (
+        not isinstance(document, dict)
+        or set(document) != {
+            "price_history", "expected_sessions", "lookback", "floor",
+            "quarantined_tickers",
+        }
+        or document["expected_sessions"] != expected_sessions
+        or type(document["lookback"]) is not int
+        or document["lookback"] != lookback
+        or document["floor"] != floor
+        or document["quarantined_tickers"] != tuple(sorted(state.volatility_quarantines))
+        or not isinstance(document["price_history"], dict)
+        or not required_tickers <= set(document["price_history"])
+    ):
+        raise ValueError("accepted staging volatility identity mismatch")
+    histories = document["price_history"]
+    # Recompute from the accepted observations, including any completed horizon's
+    # tickers, so every resumed committee receives the original evidence map.
+    evidence = build_annualized_volatility_evidence(
+        histories, histories, lookback_sessions=lookback, floor=floor,
+        expected_sessions=expected_sessions,
+    )
+    state.first_engine._price_cache.update(histories)
+    state.shared_volatility_evidence = evidence
+
+
+def _finish_volatility_validation(state: DailyRunState) -> None:
+    if state.volatility_quarantines:
+        state.horizon_signals = filter_horizon_signals(
+            state.horizon_signals, state.volatility_quarantines
+        )
+        for ticker in state.volatility_quarantines:
+            state.candidate_reference_bars.pop(ticker, None)
+
+
 def run_candidate_volatility_validation(
     state: DailyRunState,
 ) -> dict[str, Any] | None:
@@ -1972,6 +2041,7 @@ def run_candidate_volatility_validation(
     from tradingagents.strategies.trading.portfolio_policy import (
         build_annualized_volatility_evidence,
     )
+    from tradingagents.strategies.orchestration.source_inputs import daily_volatility_store
 
     settings = state.owner._base_config.get("autoresearch", {}).get(
         "portfolio_policy"
@@ -2049,12 +2119,33 @@ def run_candidate_volatility_validation(
                 raise
             reference = stored_issue.reference()
             state.candidate_issue_references.append(reference)
-            if ticker in governed_tickers or ticker not in candidate_tickers:
+            # The validated session-wide identity may belong only to a horizon
+            # whose staging already completed. Preserve its quarantine on resume.
+            if ticker in governed_tickers:
                 raise ValueError(
                     f"stored candidate volatility scope conflicts for {ticker}"
                 )
             state.volatility_quarantines.add(ticker)
         candidate_boundary = False
+        volatility_store, volatility_identity = daily_volatility_store(
+            state.owner, state.trading_date
+        )
+        accepted = volatility_store.load_frozen(volatility_identity)
+        required = governed_tickers | (candidate_tickers - state.volatility_quarantines)
+        if accepted is not None:
+            _restore_staging_volatility(
+                state, accepted, required, lookback=lookback, floor=floor,
+                expected_sessions=expected_sessions,
+            )
+            _finish_volatility_validation(state)
+            return None
+        if state.completed or any(
+            cohort["ledger"].read_policy_session_context(
+                state.session, binding_kind="staging"
+            ) is not None
+            for cohort in state.owner.cohorts
+        ):
+            raise ValueError("accepted staging volatility missing after staging began")
         governed_refetch = _invalid_volatility_histories(
             state.first_engine,
             governed_tickers,
@@ -2130,6 +2221,21 @@ def run_candidate_volatility_validation(
         )
         state.shared_volatility_evidence = dict(governed_evidence)
         state.shared_volatility_evidence.update(candidate_evidence)
+        candidate_boundary = False
+        accepted = volatility_store.freeze(volatility_identity, {
+            "price_history": {
+                ticker: state.first_engine._price_cache[ticker]
+                for ticker in sorted(state.shared_volatility_evidence)
+            },
+            "expected_sessions": expected_sessions,
+            "lookback": lookback,
+            "floor": floor,
+            "quarantined_tickers": tuple(sorted(state.volatility_quarantines)),
+        })
+        _restore_staging_volatility(
+            state, accepted, set(state.shared_volatility_evidence),
+            lookback=lookback, floor=floor, expected_sessions=expected_sessions,
+        )
     except Exception as error:
         reason = (
             "candidate volatility-history validation failed"
@@ -2146,12 +2252,7 @@ def run_candidate_volatility_validation(
             candidate_bar_quarantines=state.candidate_bar_quarantines,
         )
         return state.finalize()
-    if state.volatility_quarantines:
-        state.horizon_signals = filter_horizon_signals(
-            state.horizon_signals, state.volatility_quarantines
-        )
-        for ticker in state.volatility_quarantines:
-            state.candidate_reference_bars.pop(ticker, None)
+    _finish_volatility_validation(state)
     return None
 
 
@@ -2238,6 +2339,8 @@ class DailyRunSummary:
     governed_failure_map: dict[str, str]
     candidate_input_issues: tuple[dict[str, object], ...]
     degradation_label: str | None
+    input_coverage_valid: bool
+    source_health_failures: tuple[dict[str, object], ...]
 
 
 def summarize_cohort_results(
@@ -2252,6 +2355,11 @@ def summarize_cohort_results(
         tuple(aggregate_candidate_input_issues(issue_results, trading_date))
         if issue_results
         else ()
+    )
+    source_failures = tuple(aggregate_source_health_failures(results, trading_date))
+    coverage_valid = bool(results) and all(
+        isinstance(result, dict) and result.get("input_coverage_valid", True) is True
+        for result in results.values()
     )
     recoveries, failures = aggregate_governed_reporting(results)
     n_failed, total, failed = count_failed_cohorts(results)
@@ -2279,8 +2387,10 @@ def summarize_cohort_results(
             label = "governed bar recovery"
         elif candidate_issues:
             label = "candidate input issue"
-        else:
+        elif quarantines:
             label = "candidate data quarantined"
+        if source_failures:
+            label = (label + "; " if label else "") + "source coverage incomplete"
     outcome = (
         RunOutcome.FAILED.value
         if n_failed
@@ -2299,4 +2409,6 @@ def summarize_cohort_results(
         failures,
         candidate_issues,
         label,
+        coverage_valid,
+        source_failures,
     )

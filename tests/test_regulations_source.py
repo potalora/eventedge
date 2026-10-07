@@ -23,8 +23,8 @@ def _mock_response(docs):
             {
                 "id": d["id"],
                 "attributes": {
-                    "title": d.get("title", ""),
-                    "agencyId": d.get("agency", ""),
+                    "title": d.get("title", "Fixture proposed rule"),
+                    "agencyId": d.get("agency", "EPA"),
                     "documentType": "Proposed Rule",
                     "postedDate": d["posted"],
                     "summary": "",
@@ -91,5 +91,11 @@ def test_search_documents_propagates_non_200_as_provider_failure():
     response.status_code = 503
 
     with patch("time.sleep"), patch("requests.get", return_value=response):
-        with pytest.raises(RuntimeError, match="regulations.gov returned 503"):
+        with pytest.raises(RuntimeError, match="http_status=503"):
             src.search_documents(agency_id="EPA")
+
+
+@pytest.fixture(autouse=True)
+def offline_request_policy(monkeypatch):
+    monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
+    monkeypatch.setattr('time.sleep', lambda _: None)

@@ -166,7 +166,7 @@ def test_yfinance_fetch_prices_passes_timeout():
 def test_yfinance_fetch_vix_is_explicitly_raw():
     from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
 
-    with patch("yfinance.download", return_value=pd.DataFrame()) as mock_dl:
+    with patch("yfinance.download", return_value=pd.DataFrame({"Close": [20.0]}, index=pd.to_datetime(["2026-06-01"]))) as mock_dl:
         YFinanceSource().fetch_vix("2026-06-01", "2026-06-10")
 
     assert mock_dl.call_args.kwargs.get("timeout") == 30

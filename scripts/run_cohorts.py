@@ -161,6 +161,11 @@ def _cohort_run_exit_status(
             message += "; quarantined tickers: " + ", ".join(quarantined_tickers)
         if recovered_tickers:
             message += "; recovered tickers: " + ", ".join(recovered_tickers)
+        if summary.source_health_failures:
+            sources = sorted({source for row in summary.source_health_failures for source in row["sources"]})
+            message += "; source coverage incomplete"
+            if sources:
+                message += ": " + ", ".join(sources)
         return 0, message
     return 0, ""
 

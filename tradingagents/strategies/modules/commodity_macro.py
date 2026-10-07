@@ -132,7 +132,7 @@ class CommodityMacroStrategy:
         candidates = []
 
         for commodity, cot in cot_data.items():
-            if isinstance(cot, str):
+            if commodity not in _COMMODITY_TO_ETF or not isinstance(cot, dict):
                 continue
 
             percentile = cot.get("percentile", 0.5)

@@ -41,6 +41,7 @@ def source_for(body=None, *, status=200):
 
 @pytest.fixture(autouse=True)
 def credentials(monkeypatch):
+    monkeypatch.setattr("tradingagents.strategies.data_sources.request_policy.time.sleep", lambda _: None)
     monkeypatch.setenv("ALPACA_API_KEY", "test-key-do-not-persist")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret-do-not-persist")
 
@@ -149,7 +150,7 @@ def test_http_failures_do_not_fallback_or_parse_provider_body(status):
     source, get = source_for(status=status)
     result = source.fetch_daily_bar("BRC", SESSION, now=NOW)
     assert result.failure == AlpacaBarFailure.HTTP_ERROR
-    get.assert_called_once()
+    assert get.call_count == (3 if status in {429, 500} else 1)
     get.return_value.json.assert_not_called()
 
 
@@ -158,7 +159,7 @@ def test_transport_error_is_sanitized_and_has_no_fallback(caplog):
     result = AlpacaHistoricalSIPSource(get=get).fetch_daily_bar("BRC", SESSION, now=NOW)
     assert result.failure == AlpacaBarFailure.TRANSPORT_ERROR
     assert "test-secret" not in repr(result) + caplog.text
-    get.assert_called_once()
+    assert get.call_count == 3
 
 
 def test_invalid_json_is_sanitized_and_closed():
@@ -173,3 +174,22 @@ def test_invalid_json_is_sanitized_and_closed():
 def test_result_requires_exactly_one_bar_or_failure():
     with pytest.raises(ValueError):
         AlpacaDailyBarResult(None, None)
+
+
+def test_transient_primary_sip_transport_recovers_with_one_shared_budget():
+    from tradingagents.strategies.data_sources.request_policy import provider_budget
+    from test_request_policy import Clock
+    clock = Clock()
+    source, get = source_for()
+    good = get.return_value
+    busy = Mock(status_code=503, headers={})
+    get.side_effect = [busy, good]
+    diagnostics = []
+    with provider_budget('alpaca', 10, clock=clock, sleep=clock.sleep,
+                         random_fn=lambda: 0, limits=(), diagnostics=diagnostics):
+        result = source.fetch_daily_bar('BRC', SESSION, now=NOW)
+    assert result.failure is None
+    assert get.call_count == 2
+    assert diagnostics[-1]['recovered'] is True
+    assert diagnostics[-1]['attempts'] == 2
+    assert sum(clock.waits) == 0.5

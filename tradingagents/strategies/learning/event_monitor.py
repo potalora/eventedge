@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError, source_fetch_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +24,7 @@ class EventMonitor:
             registry: DataSourceRegistry instance.
         """
         self.registry = registry
+        self.as_of: str | None = None
         self._last_poll: dict[str, str] = {}  # source -> last poll timestamp
 
     def poll_edgar_filings(
@@ -43,47 +46,63 @@ class EventMonitor:
             List of filing dicts (enriched with text fields if fetch_text=True).
         """
         source = self.registry.get("edgar")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        date_to = datetime.now().strftime("%Y-%m-%d")
+        date_from = ((datetime.fromisoformat(self.as_of) if self.as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = self.as_of or datetime.now().strftime("%Y-%m-%d")
 
         all_filings = []
-        for form_type in form_types:
-            filings = source.search_filings(
-                form_type=form_type,
-                date_from=date_from,
-                date_to=date_to,
-            )
-            all_filings.extend(filings)
+        failures, statuses = {}, {}
+        for index, form_type in enumerate(form_types):
+            operation = f"form_{index}"
+            try:
+                filings = source.search_filings(form_type=form_type, date_from=date_from, date_to=date_to)
+                all_filings.extend(filings)
+            except SourceFetchError as exc:
+                all_filings.extend(exc.partial_data.get("filings", []))
+                failures[operation] = exc.reason_code
+                if exc.http_status is not None:
+                    statuses[operation] = exc.http_status
 
         # Fetch filing text for LLM analysis
-        if fetch_text and source:
-            text_forms = {"10-K", "10-Q", "DEF 14A"}
-            fetched = 0
-            for filing in all_filings:
-                if fetched >= max_text_fetches:
-                    break
-                form = filing.get("form_type", "")
-                url = filing.get("file_url", "")
-                if form not in text_forms or not url:
-                    continue
+        try:
+            if fetch_text and source:
+                text_forms = {"10-K", "10-Q", "DEF 14A"}
+                fetched = 0
+                for filing in all_filings:
+                    if fetched >= max_text_fetches:
+                        break
+                    form = filing.get("form_type", "")
+                    url = filing.get("file_url", "")
+                    if form not in text_forms or not url:
+                        continue
 
-                raw_text = source.get_filing_text(url)
-                if raw_text:
-                    # Strip HTML tags for cleaner LLM input
-                    clean_text = self._strip_html(raw_text)
-                    if form == "DEF 14A":
-                        filing["proxy_text"] = clean_text[:5000]
-                    else:
-                        filing["current_text"] = clean_text[:5000]
-                        # Fetch prior filing of same type for comparison
-                        filing["prior_text"] = self._fetch_prior_filing_text(
-                            source, filing, form,
-                        )
-                    fetched += 1
-                    logger.debug("Fetched text for %s %s (%d chars)", form, filing.get("ticker", "?"), len(clean_text))
+                    raw_text = source.get_filing_text(url)
+                    if raw_text:
+                        # Strip HTML tags for cleaner LLM input
+                        clean_text = self._strip_html(raw_text)
+                        if form == "DEF 14A":
+                            filing["proxy_text"] = clean_text[:5000]
+                        else:
+                            filing["current_text"] = clean_text[:5000]
+                            # Fetch prior filing of same type for comparison
+                            filing["prior_text"] = self._fetch_prior_filing_text(
+                                source, filing, form,
+                            )
+                        fetched += 1
+                        logger.debug("Fetched text for %s %s (%d chars)", form, filing.get("ticker", "?"), len(clean_text))
+
+        except SourceFetchError as exc:
+            failures["filing_text"] = exc.reason_code
+            if exc.http_status is not None:
+                statuses["filing_text"] = exc.http_status
+        if failures:
+            raise SourceFetchError("EDGAR filing coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data={"filings": all_filings})
 
         self._last_poll["edgar"] = datetime.now().isoformat()
         logger.info("EDGAR poll: %d filings found for %s", len(all_filings), form_types)
@@ -146,6 +165,8 @@ class EventMonitor:
                     form_type, filing.get("ticker", "?"), len(clean),
                 )
                 return clean[:5000]
+        except SourceFetchError:
+            raise
         except Exception:
             logger.warning(
                 "Failed to fetch prior %s for %s",
@@ -169,8 +190,10 @@ class EventMonitor:
     def poll_13d_filings(self, days_back: int = 14) -> list[dict]:
         """Poll for new SC 13D activist filings."""
         source = self.registry.get("edgar")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
         return source.get_recent_13d(days_back=days_back)
 
     def poll_keyword_filings(
@@ -198,23 +221,29 @@ class EventMonitor:
             Deduplicated list of filing dicts.
         """
         source = self.registry.get("edgar")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        date_to = datetime.now().strftime("%Y-%m-%d")
+        date_from = ((datetime.fromisoformat(self.as_of) if self.as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = self.as_of or datetime.now().strftime("%Y-%m-%d")
 
         seen_urls: set[str] = set()
         all_filings: list[dict] = []
 
-        for form_type in form_types:
-            for keyword in keywords:
-                filings = source.search_filings(
-                    form_type=form_type,
-                    date_from=date_from,
-                    date_to=date_to,
-                    keyword=keyword,
-                )
+        failures, statuses = {}, {}
+        for form_index, form_type in enumerate(form_types):
+            for keyword_index, keyword in enumerate(keywords):
+                operation = f"keyword_{form_index}_{keyword_index}"
+                try:
+                    filings = source.search_filings(form_type=form_type, date_from=date_from,
+                                                   date_to=date_to, keyword=keyword)
+                except SourceFetchError as exc:
+                    filings = exc.partial_data.get("filings", [])
+                    failures[operation] = exc.reason_code
+                    if exc.http_status is not None:
+                        statuses[operation] = exc.http_status
                 for f in filings:
                     url = f.get("file_url", "")
                     if url and url not in seen_urls:
@@ -223,18 +252,28 @@ class EventMonitor:
                         all_filings.append(f)
 
         # Fetch filing text for LLM analysis
-        if fetch_text and source:
-            fetched = 0
-            for filing in all_filings:
-                if fetched >= max_text_fetches:
-                    break
-                url = filing.get("file_url", "")
-                if not url:
-                    continue
-                raw_text = source.get_filing_text(url)
-                if raw_text:
-                    filing["filing_text"] = self._strip_html(raw_text)[:5000]
-                    fetched += 1
+        try:
+            if fetch_text and source:
+                fetched = 0
+                for filing in all_filings:
+                    if fetched >= max_text_fetches:
+                        break
+                    url = filing.get("file_url", "")
+                    if not url:
+                        continue
+                    raw_text = source.get_filing_text(url)
+                    if raw_text:
+                        filing["filing_text"] = self._strip_html(raw_text)[:5000]
+                        fetched += 1
+
+        except SourceFetchError as exc:
+            failures["filing_text"] = exc.reason_code
+            if exc.http_status is not None:
+                statuses["filing_text"] = exc.http_status
+        if failures:
+            raise SourceFetchError("EDGAR keyword coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data={"pqc_filings": all_filings})
 
         logger.info(
             "Keyword filing poll: %d filings for %s across %s",
@@ -251,14 +290,32 @@ class EventMonitor:
             Dict mapping ticker to list of Form 4 filings.
         """
         source = self.registry.get("edgar")
-        if source is None or not source.is_available():
+        if source is None:
             return {}
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
         results: dict[str, list[dict]] = {}
+        failures, statuses = {}, {}
         for ticker in tickers:
-            filings = source.get_recent_form4(ticker, days_back=days_back)
-            if filings:
-                results[ticker] = filings
+            try:
+                if self.as_of:
+                    filings = source.get_recent_form4(ticker, days_back=days_back, as_of=self.as_of)
+                else:
+                    filings = source.get_recent_form4(ticker, days_back=days_back)
+                if filings:
+                    results[ticker] = filings
+            except SourceFetchError as exc:
+                partial = exc.partial_data.get("form4_filings")
+                if partial:
+                    results[ticker] = partial
+                failures[ticker] = exc.reason_code
+                if exc.http_status is not None:
+                    statuses[ticker] = exc.http_status
+        if failures:
+            raise SourceFetchError("EDGAR Form 4 coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data={"form4": results})
         return results
 
     def poll_large_contracts(
@@ -266,8 +323,10 @@ class EventMonitor:
     ) -> list[dict]:
         """Poll USAspending for recent large contract awards."""
         source = self.registry.get("usaspending")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
         return source.get_recent_large_contracts(
             min_amount=min_amount, days_back=days_back
         )
@@ -275,8 +334,10 @@ class EventMonitor:
     def poll_congressional_trades(self, days_back: int = 30) -> list[dict]:
         """Poll for recent congressional stock trades."""
         source = self.registry.get("congress")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
         return source.get_recent_trades(days_back=days_back)
 
     def poll_proposed_rules(
@@ -284,12 +345,15 @@ class EventMonitor:
     ) -> list[dict]:
         """Poll regulations.gov for recently proposed rules."""
         source = self.registry.get("regulations")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        rules = source.get_recent_proposed_rules(
-            agencies=agencies, days_back=days_back,
-        )
+        options = {"agencies": agencies, "days_back": days_back}
+        if self.as_of:
+            options["as_of"] = self.as_of
+        rules = source.get_recent_proposed_rules(**options)
         self._last_poll["regulations"] = datetime.now().isoformat()
         logger.info("Regulations.gov poll: %d proposed rules", len(rules))
         return rules
@@ -299,10 +363,12 @@ class EventMonitor:
     ) -> list[dict]:
         """Poll CourtListener for recent court dockets."""
         source = self.registry.get("courtlistener")
-        if source is None or not source.is_available():
+        if source is None:
             return []
+        if not source.is_available():
+            raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_from = ((datetime.fromisoformat(self.as_of) if self.as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         dockets = source.search_dockets(
             query=query, date_filed_after=date_from,
         )

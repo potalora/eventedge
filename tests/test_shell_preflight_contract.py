@@ -30,6 +30,7 @@ case "$*" in
   *"preflight"*"--preflight-mode screen"*) exit "${SCREEN_RC:-0}" ;;
   *"preflight"*"--preflight-mode governed"*) exit "${GOVERNED_RC:-0}" ;;
   *"run-daily"*) exit "${DAILY_RC:-0}" ;;
+  *"generate_operational_report.py"*) exit "${REPORT_RC:-0}" ;;
 esac
 exit 99
 """,
@@ -82,7 +83,7 @@ def test_screen_failure_continues_to_governed_then_daily(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     calls = _calls(calls_path)
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert "preflight --date 2026-08-06 --preflight-mode screen" in calls[0]
     assert "preflight --date 2026-08-06 --preflight-mode governed" in calls[1]
     assert "run-daily --date 2026-08-06" in calls[2]
@@ -102,7 +103,7 @@ def test_governed_nonzero_never_invokes_daily(tmp_path: Path, label: str) -> Non
 
     assert result.returncode == 1
     calls = _calls(calls_path)
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert "--preflight-mode screen" in calls[0]
     assert "--preflight-mode governed" in calls[1]
     assert all("run-daily" not in call for call in calls)
@@ -139,7 +140,7 @@ def test_daily_failure_propagates_nonzero(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     calls = _calls(calls_path)
-    assert len(calls) == 3
+    assert len(calls) == 4
     assert "run-daily --date 2026-08-06" in calls[2]
 
 
@@ -157,3 +158,25 @@ def test_midday_preflight_is_explicitly_screen_only(tmp_path: Path) -> None:
     calls = _calls(calls_path)
     assert len(calls) == 1
     assert "preflight --date 2026-08-06 --preflight-mode screen" in calls[0]
+
+
+@pytest.mark.parametrize('daily_rc', (0, 1))
+def test_operational_report_runs_after_completed_or_failed_daily(tmp_path, daily_rc):
+    env, calls_path = _shell_environment(tmp_path, daily_rc=daily_rc)
+    result = subprocess.run(['bash', str(REPO_ROOT / 'scripts/daily_trading.sh')],
+                            env=env, capture_output=True, text=True)
+    calls = _calls(calls_path)
+    assert 'generate_operational_report.py' in calls[-1]
+    assert '--all-active --date 2026-08-06' in calls[-1]
+    assert result.returncode == daily_rc
+
+
+def test_report_failure_is_visible_after_valid_daily(tmp_path):
+    env, calls_path = _shell_environment(tmp_path)
+    env['REPORT_RC'] = '2'
+    result = subprocess.run(['bash', str(REPO_ROOT / 'scripts/daily_trading.sh')],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert sum('run-daily' in call for call in _calls(calls_path)) == 1
+    log = (tmp_path / 'logs/daily_2026-08-06.log').read_text()
+    assert 'OPERATIONAL REPORT INCOMPLETE' in log

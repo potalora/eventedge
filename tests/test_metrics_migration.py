@@ -232,11 +232,13 @@ def test_generation_subprocess_env_includes_exact_generation_metadata(
                 "degraded": False,
                 "execution_valid": True,
                 "staging_valid": True,
+                "input_coverage_valid": True,
+                "source_health_failures": [],
             }
             for cohort in build_default_cohorts({})
         }
-        envelope = {"wire_version": 1, "cohort_results": cohort_results}
-        stdout = "EVENTEDGE_DAILY_RESULT_V1=" + json.dumps(envelope) + "\n"
+        envelope = {"wire_version": 2, "cohort_results": cohort_results}
+        stdout = "EVENTEDGE_DAILY_RESULT_V2=" + json.dumps(envelope) + "\n"
         return MagicMock(returncode=0, stdout=stdout, stderr="")
 
     gen_data = {

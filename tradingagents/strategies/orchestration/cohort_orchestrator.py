@@ -233,7 +233,7 @@ class CohortOrchestrator:
         from tradingagents.strategies.orchestration.session_executor import (
             SessionExecutor,
         )
-        from tradingagents.strategies.execution.price_source import YFinancePriceSource
+        from tradingagents.strategies.execution.price_source import build_price_source
         from tradingagents.strategies.metrics.store import MetricStore
         from tradingagents.strategies.orchestration.metric_epoch_context import (
             CohortSemanticPolicy,
@@ -401,7 +401,7 @@ class CohortOrchestrator:
         )
 
         self._base_config = base_config
-        self._price_source = price_source or YFinancePriceSource()
+        self._price_source = price_source or build_price_source(base_config)
         self._epoch_id: str | None = None
         self._after_gap_blocker = lambda marker: None
         self._after_gap_marker = lambda marker: None

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+import math
+from numbers import Real
 import json
 import re
 from itertools import islice
 from typing import Any
 from urllib.error import HTTPError, URLError
 
+import httpx
 import requests
+from urllib3.exceptions import ProtocolError, TimeoutError as Urllib3TimeoutError
 
 _REASON_CODES = frozenset(
     {
@@ -38,9 +43,11 @@ class SourceFetchError(RuntimeError):
         failed_operations: dict[str, str] | None = None,
         failed_http_statuses: dict[str, int] | None = None,
         partial_data: dict[str, Any] | None = None,
+        attempts: int = 0,
     ):
         if reason_code not in _REASON_CODES:
             raise ValueError("unknown source failure reason")
+        self.attempts = attempts if type(attempts) is int and 0 <= attempts <= 5 else 0
         self.reason_code = reason_code
         self.http_status = (
             http_status
@@ -88,11 +95,11 @@ def source_fetch_error(message: str, error: Exception) -> SourceFetchError:
         seen.add(id(current))
         if isinstance(current, SourceFetchError):
             return current
-        if isinstance(current, (TimeoutError, requests.Timeout)) or (
+        if isinstance(current, (TimeoutError, requests.Timeout, httpx.TimeoutException, Urllib3TimeoutError)) or (
             isinstance(current, URLError) and isinstance(current.reason, TimeoutError)
         ):
             return SourceFetchError(message, reason_code="timeout")
-        if isinstance(current, (HTTPError, requests.HTTPError)):
+        if isinstance(current, (HTTPError, requests.HTTPError, httpx.HTTPStatusError)):
             status = (
                 current.code
                 if isinstance(current, HTTPError)
@@ -105,7 +112,31 @@ def source_fetch_error(message: str, error: Exception) -> SourceFetchError:
             current, (json.JSONDecodeError, requests.exceptions.JSONDecodeError)
         ):
             return SourceFetchError(message, reason_code="invalid_response")
-        if isinstance(current, (requests.RequestException, URLError, OSError)):
+        if isinstance(current, (requests.RequestException, httpx.TransportError, ProtocolError, URLError, OSError)):
             return SourceFetchError(message, reason_code="transport_error")
         current = current.__cause__ or current.__context__
     return SourceFetchError(message, reason_code="provider_error")
+
+
+def source_text(value: Any) -> bool:
+    """A required text field is a nonblank string, never a coercion."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def source_date(value: Any) -> bool:
+    """Provider dates must carry a valid ISO calendar day."""
+    if not source_text(value) or len(value) < 10:
+        return False
+    try:
+        date.fromisoformat(value) if len(value) == 10 else datetime.fromisoformat(value)
+        return True
+    except ValueError:
+        return False
+
+
+def source_number(value: Any, *, minimum=None, maximum=None) -> bool:
+    """Consumed numerical observations must be finite and within their domain."""
+    return (isinstance(value, Real) and not isinstance(value, bool)
+            and math.isfinite(value)
+            and (minimum is None or value >= minimum)
+            and (maximum is None or value <= maximum))

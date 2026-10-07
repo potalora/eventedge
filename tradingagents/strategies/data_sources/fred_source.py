@@ -11,7 +11,9 @@ from typing import Any
 
 import pandas as pd
 
-from .fetch_errors import SourceFetchError, source_fetch_error
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
+from .request_policy import provider_call
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ class FREDSource:
         except SourceFetchError as exc:
             return {"error": str(exc)}
         except Exception:
-            logger.error("FREDSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("FREDSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -81,9 +83,14 @@ class FREDSource:
 
         fred = Fred(api_key=self._api_key)
         try:
-            data = fred.get_series(series_id, observation_start=start, observation_end=end)
+            data = provider_call("fred", series_id, lambda: fred.get_series(series_id, observation_start=start, observation_end=end))
             if not isinstance(data, pd.Series):
                 raise SourceFetchError("FRED series response invalid", reason_code="invalid_response")
+            if not data.empty:
+                usable = data.map(source_number)
+                if not usable.any() or (data.notna() & ~usable).any() or not usable.iloc[-1]:
+                    raise SourceFetchError("FRED series observations invalid", reason_code="invalid_response",
+                                           partial_data={series_id: data.loc[usable]})
             self._cache[cache_key] = data
             return data
         except Exception as exc:
@@ -92,6 +99,7 @@ class FREDSource:
                 "FRED series fetch failed", reason_code=classified.reason_code,
                 http_status=classified.http_status,
                 failed_operations={series_id: classified.reason_code},
+                partial_data=classified.partial_data,
             )
             logger.error("%s", safe_error)
             raise safe_error from None
@@ -107,6 +115,8 @@ class FREDSource:
             try:
                 results[sid] = self.fetch_series(sid, start, end)
             except SourceFetchError as exc:
+                if isinstance(exc.partial_data.get(sid), pd.Series):
+                    results[sid] = exc.partial_data[sid]
                 failures[sid] = exc.reason_code
                 if exc.http_status is not None:
                     http_statuses[sid] = exc.http_status

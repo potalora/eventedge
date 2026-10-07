@@ -14,6 +14,9 @@ from typing import Any
 
 import requests
 
+from .request_policy import provider_request
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://usdmdataservices.unl.edu/api/StateStatistics/GetDroughtSeverityStatisticsByAreaPercent"
@@ -42,8 +45,10 @@ class DroughtMonitorSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("DroughtMonitorSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("DroughtMonitorSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -83,66 +88,36 @@ class DroughtMonitorSource:
             "statisticsType": 1,  # State-level
         }
 
-        max_retries = 3
-        base_delay = 5.0
-        data = None
-        for attempt in range(max_retries + 1):
-            try:
-                resp = requests.get(
-                    BASE_URL,
-                    params=params,
-                    headers={"Accept": "application/json"},
-                    timeout=60,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    break
-                elif resp.status_code >= 500:
-                    if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(
-                            "Drought Monitor returned %d (attempt %d/%d), retrying in %.0fs",
-                            resp.status_code, attempt + 1, max_retries, delay,
-                        )
-                        time.sleep(delay)
-                        continue
-                    logger.warning("Drought Monitor returned %d after %d retries", resp.status_code, max_retries)
-                    return {}
-                else:
-                    logger.warning("Drought Monitor returned %d", resp.status_code)
-                    return {}
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-                if attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(
-                        "Drought Monitor request failed (attempt %d/%d): %s, retrying in %.0fs",
-                        attempt + 1, max_retries, exc, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                logger.error("Drought Monitor request failed after %d retries", max_retries, exc_info=True)
-                return {}
-            except requests.RequestException:
-                logger.error("Drought Monitor request failed", exc_info=True)
-                return {}
-        if data is None:
-            return {}
+        response = provider_request("drought_monitor", "GET", BASE_URL, operation="severity",
+                                    params=params, headers={"Accept": "application/json"}, timeout=60)
+        try:
+            data = response.json()
+            if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
+                raise ValueError("invalid drought schema")
+        except Exception:
+            raise SourceFetchError("Drought Monitor response invalid", reason_code="invalid_response") from None
 
         result: dict[str, dict[str, float]] = {}
+        latest_dates = {}
+        invalid = False
         for record in data:
-            state = record.get("StateAbbreviation", "")
-            if not state or state not in states:
+            state = record.get("StateAbbreviation")
+            map_date = record.get("MapDate")
+            if isinstance(map_date, str) and len(map_date) == 8 and map_date.isdigit():
+                map_date = f"{map_date[:4]}-{map_date[4:6]}-{map_date[6:]}"
+            categories = ("None", "D0", "D1", "D2", "D3", "D4")
+            if (not source_text(state) or not source_date(map_date)
+                    or not all(source_number(record.get(key), minimum=0, maximum=100) for key in categories)):
+                invalid = True
                 continue
-            # Keep the latest record per state
-            result[state] = {
-                "None": record.get("None", 0.0),
-                "D0": record.get("D0", 0.0),
-                "D1": record.get("D1", 0.0),
-                "D2": record.get("D2", 0.0),
-                "D3": record.get("D3", 0.0),
-                "D4": record.get("D4", 0.0),
-            }
-
+            if state not in states or not start <= map_date[:10] <= end:
+                continue
+            if state not in latest_dates or map_date > latest_dates[state]:
+                latest_dates[state] = map_date
+                result[state] = {key: float(record[key]) for key in categories}
+        if invalid:
+            raise SourceFetchError("Drought Monitor records invalid", reason_code="invalid_response",
+                                   partial_data={"states": result})
         return result
 
     def fetch_composite_score(

@@ -22,6 +22,9 @@ from typing import Any
 
 import requests
 
+from .request_policy import provider_request
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://quickstats.nass.usda.gov/api/api_GET/"
@@ -133,8 +136,10 @@ class USDASource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("USDASource.fetch(%s) failed", method, exc_info=True)
+            logger.error("USDASource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -159,7 +164,7 @@ class USDASource:
             good_pct, fair_pct, poor_pct, very_poor_pct.
         """
         if not self._api_key:
-            return []
+            raise SourceFetchError("USDA access missing", reason_code="provider_error")
 
         requested_states = sorted({
             state.strip().upper()
@@ -180,68 +185,33 @@ class USDASource:
             "format": "JSON",
         }
 
-        # Bypass the failed primary, while keeping fallback available for each crop.
-        if self._unavailable:
-            fallback = self._esmis_fallback(commodity, year, states)
-            if fallback:
-                self._cache[cache_key] = fallback
-            return fallback
-
-        max_retries = 1
-        base_delay = 3.0
-        data = None
-        for attempt in range(max_retries + 1):
-            try:
-                resp = requests.get(BASE_URL, params=params, timeout=15)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    break
-                elif resp.status_code >= 500:
-                    if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning(
-                            "USDA NASS returned %d (attempt %d/%d), retrying in %.0fs",
-                            resp.status_code, attempt + 1, max_retries, delay,
-                        )
-                        time.sleep(delay)
-                        continue
-                    logger.warning("USDA NASS returned %d for %s/%d — trying ESMIS fallback", resp.status_code, commodity, year)
-                    self._unavailable = True
+        try:
+            response = provider_request("usda", "GET", BASE_URL, operation="crop_condition",
+                                        params=params, timeout=15)
+        except SourceFetchError as primary_error:
+            # A validated weekly report remains usable partial evidence. It
+            # cannot prove the primary's historical week-over-week coverage.
+            transient = primary_error.reason_code in {"timeout", "transport_error"} or primary_error.http_status in {429, 500, 502, 503, 504}
+            fallback = []
+            if transient:
+                try:
                     fallback = self._esmis_fallback(commodity, year, states)
-                    if fallback:
-                        self._cache[cache_key] = fallback
-                    return fallback
-                else:
-                    logger.warning("USDA NASS returned %d for %s/%d", resp.status_code, commodity, year)
-                    return []
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-                if attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(
-                        "USDA NASS request failed (attempt %d/%d): %s, retrying in %.0fs",
-                        attempt + 1, max_retries, exc, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                logger.warning("USDA NASS unreachable after %d retries — trying ESMIS fallback: %s", max_retries, exc)
-                self._unavailable = True
-                fallback = self._esmis_fallback(commodity, year, states)
-                if fallback:
-                    self._cache[cache_key] = fallback
-                return fallback
-            except requests.RequestException:
-                logger.warning("USDA NASS request failed — trying ESMIS fallback", exc_info=True)
-                self._unavailable = True
-                fallback = self._esmis_fallback(commodity, year, states)
-                if fallback:
-                    self._cache[cache_key] = fallback
-                return fallback
-        if data is None:
-            return []
+                except SourceFetchError:
+                    pass
+            if fallback:
+                primary_error.partial_data = {"crop_progress": {commodity.upper(): fallback}}
+            raise primary_error from None
+        try:
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list) or not all(isinstance(row, dict) for row in data["data"]):
+                raise ValueError("invalid crop schema")
+        except Exception:
+            raise SourceFetchError("USDA crop response invalid", reason_code="invalid_response") from None
 
         # Keep wheat classes separate while pivoting condition categories.
         grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
         invalid_groups: set[tuple[str, str, str]] = set()
+        invalid_records = False
         for record in data.get("data", []):
             if not isinstance(record, dict):
                 continue
@@ -249,10 +219,13 @@ class USDASource:
             state = record.get("state_alpha", "")
             crop_class = record.get("class_desc", "ALL CLASSES")
             unit = record.get("unit_desc", "")
-            if not all(isinstance(value, str) and value.strip() for value in (week, state, crop_class, unit)):
+            if (not source_date(week) or not all(source_text(value) for value in (state, crop_class, unit))
+                    or state not in requested_states or not week.startswith(str(year))):
+                invalid_records = True
                 continue
             field = CONDITION_CATEGORIES.get(unit)
             if not field:
+                invalid_records = True
                 continue
             key = (week, state, crop_class)
             if key not in grouped:
@@ -287,16 +260,23 @@ class USDASource:
                     for field in ("week_ending", "commodity", "crop_class", "state")
                 }
                 row["condition_valid"] = False
+                invalid_records = True
             observations.append(row)
         weeks = sorted(
             observations,
             key=lambda row: (row["week_ending"], row["state"], row["crop_class"]),
         )
+        if invalid_records:
+            # Invalid latest-week markers prevent older valid rows masquerading
+            # as a current comparison. They carry no numerical observations.
+            raise SourceFetchError("USDA crop records invalid", reason_code="invalid_response",
+                                   partial_data={"crop_progress": {commodity.upper(): weeks}})
         self._cache[cache_key] = weeks
         return weeks
 
     def clear_cache(self) -> None:
         self._cache.clear()
+        self._esmis_text_cache = None
 
     def _dispatch_crop_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         commodity = params.get("commodity", "CORN")
@@ -309,43 +289,40 @@ class USDASource:
     # ESMIS fallback
     # ------------------------------------------------------------------
 
-    _esmis_text_cache: str | None = None  # class-level cache: one fetch per process
+    _esmis_text_cache: str | None = None  # instance-level session cache
 
     def _esmis_fetch_latest_report(self) -> str | None:
         """Fetch the most recent Crop Progress text report from ESMIS.
 
         Returns the raw report text, or None on failure.
         """
-        if USDASource._esmis_text_cache is not None:
-            return USDASource._esmis_text_cache
+        if self._esmis_text_cache is not None:
+            return self._esmis_text_cache
 
         try:
-            resp = requests.get(ESMIS_LANDING, timeout=10)
+            resp = provider_request("usda", "GET", ESMIS_LANDING, operation="esmis_landing", timeout=10)
             if resp.status_code != 200:
                 logger.warning("ESMIS landing returned %d", resp.status_code)
                 return None
-        except requests.RequestException as exc:
-            logger.warning("ESMIS landing fetch failed: %s", exc)
-            return None
+        except SourceFetchError:
+            raise
 
         # Find the first prog<NNYY>.txt link — they are listed newest-first.
         match = re.search(r'href="(/sites/default/release-files/\d+/prog\d+\.txt)"', resp.text)
         if not match:
-            logger.warning("No prog*.txt link found on ESMIS landing")
-            return None
+            raise SourceFetchError("ESMIS report locator invalid", reason_code="invalid_response")
 
         report_url = "https://esmis.nal.usda.gov" + match.group(1)
         try:
-            r = requests.get(report_url, timeout=15)
+            r = provider_request("usda", "GET", report_url, operation="esmis_report", timeout=15)
             if r.status_code != 200:
                 logger.warning("ESMIS report fetch returned %d for %s", r.status_code, report_url)
                 return None
-            USDASource._esmis_text_cache = r.text
+            self._esmis_text_cache = r.text
             logger.info("ESMIS fallback: loaded %s (%d bytes)", report_url, len(r.text))
             return r.text
-        except requests.RequestException as exc:
-            logger.warning("ESMIS report fetch failed: %s", exc)
-            return None
+        except SourceFetchError:
+            raise
 
     @staticmethod
     def _parse_esmis_section(text: str, section_label: str) -> list[dict[str, Any]]:

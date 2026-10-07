@@ -7,6 +7,8 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from functools import wraps
+import time
 from types import MappingProxyType
 from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
@@ -17,7 +19,19 @@ import yfinance as yf
 from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
 from tradingagents.strategies.execution.ids import stable_id
 from tradingagents.strategies.execution.models import CorporateAction, MarketBar
+from tradingagents.strategies.execution.alpaca_daily_bar import (
+    ADJUSTMENT as SIP_ADJUSTMENT,
+    FEED as SIP_FEED,
+    HISTORICAL_DELAY,
+    SOURCE as SIP_SOURCE,
+    TIMEFRAME as SIP_TIMEFRAME,
+    AlpacaBarFailure,
+    AlpacaDailyBarResult,
+    AlpacaHistoricalSIPSource,
+)
 from tradingagents.strategies.orchestration.trading_calendar import (
+    is_session,
+    next_session,
     session_close,
     session_open,
 )
@@ -78,7 +92,7 @@ class CandidateBarResolution:
 
 @dataclass(frozen=True)
 class GovernedDailyBarAttempt:
-    """The exact initial Yahoo daily evidence retained for one governed ticker."""
+    """The exact initial daily evidence retained for one governed ticker."""
 
     ticker: str
     session: date
@@ -1053,6 +1067,249 @@ class YFinancePriceSource:
             return self._fetched_at()
         except Exception:
             return datetime.now(timezone.utc)
+
+
+SIP_PRICING_VERSION = "raw-alpaca-sip-v1"
+
+
+class SIPPriceError(BarValidationError):
+    """Typed, credential-free primary price failure with no alternative source."""
+
+    def __init__(self, failures: Mapping[str, AlpacaBarFailure], session: date):
+        self.failure_map = MappingProxyType(dict(failures))
+        super().__init__(
+            "; ".join(
+                f"{failure.value} {ticker}/{session}"
+                for ticker, failure in sorted(failures.items())
+            )
+        )
+
+
+def _sip_acquisition(method):
+    """Share one five-minute deadline across a requested batch of symbols."""
+    @wraps(method)
+    def acquire(*args, **kwargs):
+        from tradingagents.strategies.data_sources.request_policy import (
+            current_provider_deadline, provider_budget,
+        )
+        if current_provider_deadline("alpaca") is not None:
+            return method(*args, **kwargs)
+        with provider_budget("alpaca", time.monotonic() + 300):
+            return method(*args, **kwargs)
+    return acquire
+
+
+class AlpacaSIPPriceSource:
+    """Exact raw SIP execution prices, with separately declared Yahoo inputs.
+
+    Yahoo supplies corporate actions and the established total-return-adjusted
+    benchmark series. Raw SIP closes are never mislabeled as total returns.
+    Research history/volatility/VIX remain separate pipeline dependencies.
+    Successful exact-session bars are reused within this bounded source object;
+    generation/session persistence remains the executor's immutable input bundle.
+    """
+
+    pricing_version = SIP_PRICING_VERSION
+    yahoo_dependencies = ("corporate_actions", "total_return_adjusted_benchmarks")
+    _CACHE_LIMIT = 2048
+
+    def __init__(
+        self,
+        *,
+        sip_source: AlpacaHistoricalSIPSource | None = None,
+        research_source: PriceSource | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._sip_source = sip_source or AlpacaHistoricalSIPSource()
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._research_source = research_source or YFinancePriceSource(now=self._now)
+        self._bars: OrderedDict[tuple[str, date], AlpacaDailyBarResult] = OrderedDict()
+
+    def _fetch(
+        self, ticker: str, session: date, processed_at: datetime, max_age: timedelta
+    ) -> tuple[MarketBar | None, AlpacaBarFailure | None, datetime]:
+        fetched_at = self._now()
+        if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+            raise BarValidationError("now must return a timezone-aware datetime")
+        if processed_at.tzinfo is None or processed_at.utcoffset() is None:
+            raise BarValidationError("processed_at must be timezone-aware")
+        key = (ticker, session)
+        result = self._bars.get(key)
+        if result is not None and (
+            result.bar is None or fetched_at - result.bar.fetched_at > max_age
+        ):
+            del self._bars[key]
+            result = None
+        if result is None:
+            try:
+                result = self._sip_source.fetch_daily_bar(ticker, session, now=fetched_at)
+            except Exception:
+                return None, AlpacaBarFailure.TRANSPORT_ERROR, fetched_at
+        if not isinstance(result, AlpacaDailyBarResult):
+            return None, AlpacaBarFailure.INVALID_RESPONSE, fetched_at
+        if result.failure is not None:
+            reason = (
+                result.failure
+                if isinstance(result.failure, AlpacaBarFailure)
+                else AlpacaBarFailure.INVALID_RESPONSE
+            )
+            return None, reason, fetched_at
+        bar = result.bar
+        try:
+            assert bar is not None
+            start = datetime.combine(session, datetime.min.time(), _ET)
+            if (
+                result.feed != SIP_FEED
+                or result.adjustment != SIP_ADJUSTMENT
+                or result.timeframe != SIP_TIMEFRAME
+                or result.response_symbol != ticker
+                or result.row_count != 1
+                or result.pagination_complete is not True
+                or result.request_start != start
+                or result.bar_timestamp != start
+                or result.request_end is None
+                or result.request_end < start
+                or result.request_end >= start + timedelta(days=1)
+                or result.request_end > bar.fetched_at - HISTORICAL_DELAY
+                or bar.source != SIP_SOURCE
+                or bar.fetched_at < session_close(session) + HISTORICAL_DELAY
+            ):
+                raise BarValidationError("invalid SIP provenance")
+            validate_required_bars(
+                {key: bar}, {ticker}, session, max(processed_at, fetched_at), max_age
+            )
+        except (AssertionError, BarValidationError, TypeError, ValueError, AttributeError):
+            return None, AlpacaBarFailure.INVALID_RESPONSE, fetched_at
+        self._bars[key] = result
+        self._bars.move_to_end(key)
+        if len(self._bars) > self._CACHE_LIMIT:
+            self._bars.popitem(last=False)
+        return bar, None, bar.fetched_at
+
+    @_sip_acquisition
+    def get_daily_bars(
+        self,
+        tickers: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+        adjusted: bool = False,
+    ) -> dict[tuple[str, date], MarketBar]:
+        YFinancePriceSource._validate_range(tickers, start_session, end_session_inclusive)
+        if adjusted:
+            raise BarValidationError("primary SIP policy permits raw daily bars only")
+        if not is_session(start_session) or not is_session(end_session_inclusive):
+            raise BarValidationError("daily range endpoints must be XNYS sessions")
+        bars: dict[tuple[str, date], MarketBar] = {}
+        session = start_session
+        while session <= end_session_inclusive:
+            failures = {}
+            for ticker in dict.fromkeys(tickers):
+                bar, failure, _ = self._fetch(
+                    ticker, session, self._now(), timedelta(hours=24)
+                )
+                if failure is not None:
+                    failures[ticker] = failure
+                else:
+                    assert bar is not None
+                    bars[(ticker, session)] = bar
+            if failures:
+                raise SIPPriceError(failures, session)
+            if session == end_session_inclusive:
+                break
+            session = next_session(session)
+        return bars
+
+    @_sip_acquisition
+    def resolve_candidate_daily_bars(
+        self,
+        tickers: list[str],
+        session: date,
+        processed_at: datetime,
+        max_age: timedelta,
+    ) -> CandidateBarResolution:
+        bars = {}
+        attempts = []
+        failures = set()
+        for ticker in dict.fromkeys(tickers):
+            bar, failure, fetched_at = self._fetch(ticker, session, processed_at, max_age)
+            attempts.append(
+                CandidateBarAttempt(
+                    ticker, session, 1, SIP_SOURCE, fetched_at,
+                    bar.open if bar else None,
+                    bar.high if bar else None,
+                    bar.low if bar else None,
+                    bar.close if bar else None,
+                    f"{failure.value} {ticker}/{session}" if failure else None,
+                )
+            )
+            if bar is not None:
+                bars[(ticker, session)] = bar
+            else:
+                failures.add(ticker)
+        return CandidateBarResolution(
+            bars, tuple(attempts), frozenset(), frozenset(failures)
+        )
+
+    def resolve_governed_daily_bars(
+        self,
+        tickers: Collection[str],
+        session: date,
+        *,
+        processed_at: datetime,
+        max_age: timedelta = timedelta(hours=24),
+    ) -> GovernedDailyBarResolution:
+        candidate = self.resolve_candidate_daily_bars(
+            list(tickers), session, processed_at, max_age
+        )
+        attempts = {
+            item.ticker: GovernedDailyBarAttempt(
+                item.ticker, session, item.source, item.fetched_at,
+                dict(zip(
+                    ("open", "high", "low", "close"),
+                    (item.open, item.high, item.low, item.close),
+                ))
+                if item.validation_error is None else None,
+                item.validation_error,
+            )
+            for item in candidate.attempts
+        }
+        return GovernedDailyBarResolution(
+            {ticker: bar for (ticker, _), bar in candidate.bars.items()},
+            attempts,
+            {},
+            {
+                ticker: f"invalid {ticker}/{session}"
+                for ticker in candidate.quarantined_tickers
+            },
+        )
+
+    def get_corporate_actions(
+        self, tickers: list[str], session: date
+    ) -> list[CorporateAction]:
+        return self._research_source.get_corporate_actions(tickers, session)
+
+    def get_total_return_closes(
+        self,
+        symbols: list[str],
+        start_session: date,
+        end_session_inclusive: date,
+    ) -> dict[tuple[str, date], AdjustedClose]:
+        """Declared Yahoo adjusted series; raw SIP close is not a total return."""
+        return self._research_source.get_total_return_closes(
+            symbols, start_session, end_session_inclusive
+        )
+
+
+def build_price_source(config: Mapping[str, object]) -> PriceSource:
+    """Build the current raw SIP policy; alternate raw providers fail visibly."""
+    version = (
+        config.get("autoresearch", {})
+        .get("paper_ledger", {})
+        .get("pricing_version", SIP_PRICING_VERSION)
+    )
+    if version == SIP_PRICING_VERSION:
+        return AlpacaSIPPriceSource()
+    raise ValueError("unsupported pricing_version")
 
 
 def _session_date(value: object) -> date:

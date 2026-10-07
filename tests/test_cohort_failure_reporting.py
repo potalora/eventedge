@@ -973,8 +973,8 @@ class _FakeProc:
 
 
 _DAILY_COHORT_NAMES = tuple(cohort.name for cohort in build_default_cohorts({}))
-_DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V1="
-_DAILY_RESULT_WIRE_VERSION = 1
+_DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V2="
+_DAILY_RESULT_WIRE_VERSION = 2
 
 
 def _clean_daily_results():
@@ -984,6 +984,8 @@ def _clean_daily_results():
             "degraded": False,
             "execution_valid": True,
             "staging_valid": True,
+            "input_coverage_valid": True,
+            "source_health_failures": [],
         }
         for name in _DAILY_COHORT_NAMES
     }
@@ -1322,7 +1324,7 @@ def test_rc0_rejects_trailing_valid_looking_decoy(tmp_path):
         _worker_stdout(
             _clean_daily_results(),
             envelope={
-                "wire_version": 2,
+                "wire_version": _DAILY_RESULT_WIRE_VERSION + 1,
                 "cohort_results": _clean_daily_results(),
             },
         ),

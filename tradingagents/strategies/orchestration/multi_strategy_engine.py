@@ -1487,6 +1487,53 @@ class MultiStrategyEngine:
 
         Returns nested dict: {source_name: {data_type: data}}.
         """
+        import time
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        from tradingagents.strategies.data_sources.request_policy import provider_budget
+        from tradingagents.strategies.orchestration.source_inputs import (
+            SourceInputError, SourceInputStore, cache_identity,
+            source_configuration_fingerprint, registered_source_fingerprint,
+        )
+
+        acquisition_start = time.monotonic()
+        acquisition_cutoff = datetime.now(timezone.utc)
+        fetch_timeout_s = max(0.0, _fetch_timeout_s())
+        acquisition_deadline = acquisition_start + fetch_timeout_s
+        cache_dir = self.ar_config.get("source_cache_dir") or os.environ.get("EVENTEDGE_SOURCE_CACHE_DIR")
+        cache_store = None
+        config_fingerprint = ""
+        if cache_dir:
+            cache_store = SourceInputStore(
+                cache_dir, ttl_s=self.ar_config.get("source_cache_ttl_s", 300)
+            )
+            config_fingerprint = source_configuration_fingerprint(self.config, exclude_horizon=True)
+
+        def acquire(name, fetcher, args):
+            diagnostics = []
+            if time.monotonic() >= acquisition_deadline:
+                return {"error": "source acquisition deadline exhausted",
+                        "_coverage": {"status": "failed", "reason_code": "deadline_exhausted"}}
+            try:
+                with provider_budget(name, acquisition_deadline, diagnostics=diagnostics):
+                    if name == "finnhub":
+                        args = (args[0], min(args[1], max(0.0, acquisition_deadline - time.monotonic())))
+                    result = fetcher(*args)
+                if not isinstance(result, Mapping):
+                    raise ValueError("invalid provider payload")
+                result = dict(result)
+            except Exception as error:
+                failure = source_fetch_error("source acquisition failed", error)
+                result = dict(failure.partial_data)
+                result["error"] = str(failure)
+                result["_coverage"] = {
+                    "status": "partial" if failure.partial_data else "failed",
+                    "reason_code": failure.reason_code, "http_status": failure.http_status,
+                    "attempts": failure.attempts,
+                }
+            if diagnostics:
+                result["_request_diagnostics"] = diagnostics
+            return result
+
         self._emit("phase", phase="data_fetch", status="starting")
         data: dict[str, Any] = {}
 
@@ -1504,10 +1551,9 @@ class MultiStrategyEngine:
 
         # Fetch yfinance data (VIX + core market data for regime model)
         if "yfinance" in needed_sources and "yfinance" in available:
-            data["yfinance"] = self._fetch_yfinance_data(start_date, end_date)
+            data["yfinance"] = acquire("yfinance", self._fetch_yfinance_data, (start_date, end_date))
 
         # Fetch API-key sources in parallel (I/O bound, no dependency on each other)
-        fetch_timeout_s = _fetch_timeout_s()
         api_fetches: dict[str, tuple] = {}
         if "finnhub" in needed_sources and "finnhub" in available:
             finnhub_budget_cap_s = max(
@@ -1519,7 +1565,7 @@ class MultiStrategyEngine:
                 (end_date, finnhub_budget_cap_s),
             )
         if "regulations" in needed_sources and "regulations" in available:
-            api_fetches["regulations"] = (self._fetch_regulations_data, ())
+            api_fetches["regulations"] = (self._fetch_regulations_data, (end_date,))
         if "courtlistener" in needed_sources and "courtlistener" in available:
             api_fetches["courtlistener"] = (self._fetch_courtlistener_data, ())
         if "fred" in needed_sources and "fred" in available:
@@ -1535,14 +1581,36 @@ class MultiStrategyEngine:
 
         # Also fetch EDGAR events for paper-trade strategies
         if "edgar" in needed_sources and "edgar" in available:
-            api_fetches["edgar"] = (self._fetch_edgar_events, ())
+            api_fetches["edgar"] = (self._fetch_edgar_events, (end_date,))
         if "usaspending" in needed_sources and "usaspending" in available:
             api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
         if "cftc" in needed_sources and "cftc" in available:
             api_fetches["cftc"] = (self._fetch_cftc_data, ())
 
-        if api_fetches:
-            data.update(_gather_with_timeout(api_fetches, fetch_timeout_s))
+        pending_fetches = {}
+        cache_keys = {}
+        for name, (fetcher, args) in api_fetches.items():
+            identity = cache_identity(
+                name, start_date, end_date,
+                registered_source_fingerprint(config_fingerprint, self.registry.get(name)),
+            )
+            cache_keys[name] = identity
+            cached = cache_store.load_cached(identity, cutoff=acquisition_cutoff) if cache_store else None
+            if cached is not None:
+                data[name] = cached
+            else:
+                pending_fetches[name] = (acquire, (name, fetcher, args))
+        if pending_fetches:
+            fetched = _gather_with_timeout(
+                pending_fetches, max(0.0, acquisition_deadline - time.monotonic())
+            )
+            data.update(fetched)
+            if cache_store:
+                for name, payload in fetched.items():
+                    try:
+                        cache_store.save_cached(cache_keys[name], payload)
+                    except (OSError, SourceInputError):
+                        logger.warning("Successful source %s could not be cached", name)
 
         self._emit("phase", phase="data_fetch", status="done")
         return data
@@ -1558,6 +1626,17 @@ class MultiStrategyEngine:
             return {}
 
         result: dict[str, Any] = {}
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        failures = []
+        def acquire(operation, fn, *args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                error = source_fetch_error("Finnhub acquisition incomplete", exc)
+                failures.append(f"{operation}: {error}")
+                if operation == "peers":
+                    return error.partial_data
+                return error.partial_data.get("earnings" if operation == "earnings" else "news", [])
         deadline = source.new_workflow_deadline(
             max_budget_s=max_workflow_budget_s,
         )
@@ -1567,7 +1646,7 @@ class MultiStrategyEngine:
         date_from = (
             datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)
         ).strftime("%Y-%m-%d")
-        earnings = source.fetch_recent_earnings(
+        earnings = acquire("earnings", source.fetch_recent_earnings,
             date_from,
             date_to,
             deadline=deadline,
@@ -1580,7 +1659,7 @@ class MultiStrategyEngine:
                 edate = e.get("date", "")
                 if not symbol or not edate:
                     continue
-                news = source.fetch_earnings_news(
+                news = acquire("earnings_news", source.fetch_earnings_news,
                     symbol,
                     edate,
                     deadline=deadline,
@@ -1625,7 +1704,7 @@ class MultiStrategyEngine:
         sc_symbols = ["AAPL", "TSLA", "NVDA", "AMZN", "BA", "CAT", "DE"]
         all_news = []
         for symbol in sc_symbols:
-            news = source.fetch_company_news(
+            news = acquire("company_news", source.fetch_company_news,
                 symbol,
                 date_from,
                 date_to,
@@ -1639,7 +1718,7 @@ class MultiStrategyEngine:
 
         # Supply chain / peer relationships
         chains: dict[str, list[str]] = {}
-        peer_batches = source.fetch_supply_chains(
+        peer_batches = acquire("peers", source.fetch_supply_chains,
             sc_symbols,
             deadline=deadline,
         )
@@ -1664,7 +1743,7 @@ class MultiStrategyEngine:
         pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
         pqc_news = []
         for symbol in pqc_tickers[:6]:  # Rate limit: 6 tickers max
-            news = source.fetch_company_news(
+            news = acquire("company_news", source.fetch_company_news,
                 symbol,
                 date_from,
                 date_to,
@@ -1689,13 +1768,16 @@ class MultiStrategyEngine:
             len(result.get("supply_chains", {})),
             len(result.get("pqc_news", [])),
         )
+        if failures:
+            result["error"] = "; ".join(failures)
         return result
 
-    def _fetch_regulations_data(self) -> dict[str, Any]:
+    def _fetch_regulations_data(self, trading_date: str | None = None) -> dict[str, Any]:
         """Fetch regulations.gov data for regulatory pipeline strategy."""
         from tradingagents.strategies.learning.event_monitor import EventMonitor
 
         monitor = EventMonitor(self.registry)
+        monitor.as_of = trading_date
         result: dict[str, Any] = {}
 
         rules = monitor.poll_proposed_rules(
@@ -1708,54 +1790,33 @@ class MultiStrategyEngine:
         logger.info("Regulations.gov fetch: %d proposed rules", len(rules))
         return result
 
-    def _fetch_edgar_events(self) -> dict[str, Any]:
-        """Fetch EDGAR events for paper-trade strategies (P3, P4, P7, P8, P9)."""
+    def _fetch_edgar_events(self, trading_date: str | None = None) -> dict[str, Any]:
+        """Preserve valid EDGAR categories while exposing every failed operation."""
         from tradingagents.strategies.learning.event_monitor import EventMonitor
-
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         monitor = EventMonitor(self.registry)
-        result: dict[str, Any] = {}
-
-        # Filings for P3 (filing changes), P9 (exec comp)
-        filings = monitor.poll_edgar_filings(
-            form_types=["10-K", "10-Q", "DEF 14A", "8-K"],
-            days_back=14,
-        )
-        if filings:
-            result["filings"] = filings
-
-        # Form 4 for P4 (insider combo), P7 (10b5-1)
-        # Poll for major tickers
-        tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"]
-        form4 = monitor.poll_form4_filings(tickers, days_back=14)
-        if form4:
-            result["form4"] = form4
-
-        # 13D for B6 (activist)
-        filings_13d = monitor.poll_13d_filings(days_back=14)
-        if filings_13d:
-            result["activist_13d"] = filings_13d
-
-        # PQC keyword filings for quantum_readiness strategy
-        pqc_filings = monitor.poll_keyword_filings(
-            form_types=["8-K", "10-K", "10-Q"],
-            keywords=[
-                "post-quantum",
-                "quantum-resistant",
-                "quantum-safe",
-                "cryptographic agility",
-            ],
-            days_back=30,
-        )
-        if pqc_filings:
-            result["pqc_filings"] = pqc_filings
-
-        logger.info(
-            "EDGAR fetch: %d filings, %d form4 tickers, %d 13D, %d PQC",
-            len(result.get("filings", [])),
-            len(result.get("form4", {})),
-            len(result.get("activist_13d", [])),
-            len(result.get("pqc_filings", [])),
-        )
+        monitor.as_of = trading_date
+        result, failures = {}, []
+        operations = {
+            "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14),
+            "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
+            "activist_13d": lambda: monitor.poll_13d_filings(days_back=14),
+            "pqc_filings": lambda: monitor.poll_keyword_filings(["8-K", "10-K", "10-Q"],
+                ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30),
+        }
+        for name, operation in operations.items():
+            try:
+                result[name] = operation()
+            except Exception as exc:
+                error = source_fetch_error("EDGAR acquisition incomplete", exc)
+                partial = error.partial_data.get(name)
+                if partial is None and name == "activist_13d":
+                    partial = error.partial_data.get("filings")
+                if partial is not None:
+                    result[name] = partial
+                failures.append(f"{name}: {error}")
+        if failures:
+            result["error"] = "; ".join(failures)
         return result
 
     def _fetch_courtlistener_data(self) -> dict[str, Any]:
@@ -1773,6 +1834,7 @@ class MultiStrategyEngine:
                 dockets = monitor.poll_court_dockets(query=query, days_back=14)
             except Exception as exc:
                 safe_error = source_fetch_error("CourtListener docket fetch failed", exc)
+                result.setdefault("dockets", []).extend(safe_error.partial_data.get("dockets", []))
                 failures.append(f"{query.lower().replace(' ', '_')}: {safe_error}")
                 logger.error("%s", safe_error)
                 continue
@@ -1847,8 +1909,11 @@ class MultiStrategyEngine:
             trades = source.get_recent_trades(days_back=30, as_of=trading_date)
             result["recent_trades"] = trades
             logger.info("Congress fetch: %d recent trades", len(trades))
-        except Exception:
-            logger.error("Failed to fetch congressional trades", exc_info=True)
+        except Exception as exc:
+            from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+            error = source_fetch_error("Source acquisition failed", exc)
+            result.update(error.partial_data)
+            result["error"] = str(error)
 
         return result
 
@@ -1872,21 +1937,7 @@ class MultiStrategyEngine:
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.error("%s", safe_error)
-            return {"error": str(safe_error)}
-
-    def _fetch_cftc_data(self) -> dict[str, Any]:
-        """Fetch CFTC COT positioning data for commodity strategy."""
-        source = self.registry.get("cftc")
-        if source is None:
-            return {}
-
-        return source.fetch(
-            {
-                "method": "cot_positioning",
-                "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
-                "lookback_weeks": 52,
-            }
-        )
+            return {**safe_error.partial_data, "error": str(safe_error)}
 
     def _fetch_noaa_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
@@ -1896,29 +1947,30 @@ class MultiStrategyEngine:
 
         try:
             return source.fetch_ag_weather_summary(trading_date, lookback_days=30)
-        except Exception:
-            logger.error("Failed to fetch NOAA weather data", exc_info=True)
-            return {}
+        except Exception as exc:
+            from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+            error = source_fetch_error("Source acquisition failed", exc)
+            return {**error.partial_data, "error": str(error)}
 
     def _fetch_usda_data(self, trading_date: str) -> dict[str, Any]:
-        """Fetch USDA crop condition data for corn, soybeans, and wheat."""
+        """Preserve crops fetched before any required crop failure."""
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         source = self.registry.get("usda")
         if source is None:
             return {}
-
-        try:
-            from datetime import datetime
-
-            year = datetime.strptime(trading_date, "%Y-%m-%d").year
-            crop_progress = {}
-            for commodity in ("CORN", "SOYBEANS", "WHEAT"):
-                weeks = source.fetch_crop_progress(commodity, year)
-                if weeks:
-                    crop_progress[commodity] = weeks
-            return {"crop_progress": crop_progress}
-        except Exception:
-            logger.error("Failed to fetch USDA data", exc_info=True)
-            return {}
+        crop_progress, failures = {}, []
+        year = datetime.strptime(trading_date, "%Y-%m-%d").year
+        for commodity in ("CORN", "SOYBEANS", "WHEAT"):
+            try:
+                crop_progress[commodity] = source.fetch_crop_progress(commodity, year)
+            except Exception as exc:
+                error = source_fetch_error("USDA crop acquisition incomplete", exc)
+                crop_progress.update(error.partial_data.get("crop_progress", {}))
+                failures.append(f"{commodity}: {error}")
+        result = {"crop_progress": crop_progress}
+        if failures:
+            result["error"] = "; ".join(failures)
+        return result
 
     def _fetch_drought_data(self, trading_date: str) -> dict[str, Any]:
         """Fetch Drought Monitor severity and composite score."""
@@ -1936,9 +1988,10 @@ class MultiStrategyEngine:
             severity = source.fetch_drought_severity(start=start, end=end)
             composite = source.fetch_composite_score(date=trading_date)
             return {"composite_score": composite, "states": severity}
-        except Exception:
-            logger.error("Failed to fetch Drought Monitor data", exc_info=True)
-            return {}
+        except Exception as exc:
+            from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+            error = source_fetch_error("Source acquisition failed", exc)
+            return {**error.partial_data, "error": str(error)}
 
     def _fetch_cftc_data(self) -> dict[str, Any]:
         """Fetch CFTC COT positioning data for commodity strategy."""
@@ -1964,6 +2017,8 @@ class MultiStrategyEngine:
             return {}
 
         result: dict[str, Any] = {}
+        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        failures = []
 
         # Core market tickers for regime model and general context
         # Includes ag ETFs for weather_ag strategy
@@ -2012,7 +2067,12 @@ class MultiStrategyEngine:
         ]
 
         logger.info("Fetching prices for %d core tickers", len(core_tickers))
-        prices_df = source.fetch_prices(core_tickers, start_date, end_date)
+        try:
+            prices_df = source.fetch_prices(core_tickers, start_date, end_date)
+        except Exception as exc:
+            error = source_fetch_error("Yahoo research history failed", exc)
+            failures.append(str(error))
+            prices_df = error.partial_data.get("prices", pd.DataFrame())
 
         # Split into per-ticker DataFrames
         prices: dict[str, pd.DataFrame] = {}
@@ -2031,10 +2091,17 @@ class MultiStrategyEngine:
         self._price_cache.update(prices)
 
         # Fetch VIX for regime model
-        vix_df = source.fetch_vix(start_date, end_date)
+        try:
+            vix_df = source.fetch_vix(start_date, end_date)
+        except Exception as exc:
+            error = source_fetch_error("Yahoo VIX history failed", exc)
+            failures.append(str(error))
+            vix_df = pd.DataFrame()
         if not vix_df.empty:
             result["vix"] = vix_df
 
+        if failures:
+            result["error"] = "; ".join(failures)
         return result
 
     # ------------------------------------------------------------------

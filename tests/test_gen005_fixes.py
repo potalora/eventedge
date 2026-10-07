@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
 
 class TestTickerNormalization:
@@ -32,7 +33,7 @@ class TestTickerNormalization:
 
         source = YFinanceSource()
         with patch("yfinance.download") as mock_dl:
-            mock_dl.return_value = pd.DataFrame()
+            mock_dl.return_value = pd.DataFrame({("Close", "BRK-B"): [100.0]}, index=pd.to_datetime(["2026-04-01"]))
             source.fetch_prices(["BRK/B"], "2026-04-01", "2026-04-03")
             call_args = mock_dl.call_args
             assert "BRK-B" in call_args[0][0]
@@ -78,7 +79,7 @@ class TestNOAARetry:
         with patch("time.sleep"):
             source._session.get.side_effect = [
                 requests.exceptions.Timeout("timeout"),
-                MagicMock(status_code=200, json=lambda: {"results": [{"value": 1}]}),
+                MagicMock(status_code=200, json=lambda: {"results": [{"date": "2026-04-01", "datatype": "TMAX", "station": "TEST", "value": 1}]}),
             ]
             result = source._api_get("/data", {"datasetid": "GHCND"})
             assert result is not None
@@ -98,8 +99,8 @@ class TestNOAARetry:
         source = self._make_source()
         with patch("time.sleep"):
             source._session.get.side_effect = requests.exceptions.Timeout("timeout")
-            result = source._api_get("/data", {"datasetid": "GHCND"})
-            assert result is None
+            with pytest.raises(SourceFetchError, match="timeout"):
+                source._api_get("/data", {"datasetid": "GHCND"})
             assert source._session.get.call_count == 3  # 1 initial + 2 retries
 
     def test_timeout_uses_connect_and_read(self):
@@ -136,12 +137,12 @@ class TestUSDARetry:
         source = USDASource(api_key="test-key")
         with patch("requests.get") as mock_get:
             mock_get.side_effect = requests.exceptions.Timeout("timeout")
-            result = source.fetch_crop_progress("CORN", 2026)
-            assert result == []
-            # 1 initial + 1 retry against the QuickStats API, then 1 ESMIS
-            # landing fetch attempt (which also times out under the mock).
-            assert mock_get.call_count == 3
-            assert source._unavailable is True
+            with pytest.raises(SourceFetchError, match="timeout"):
+                source.fetch_crop_progress("CORN", 2026)
+            # Three primary attempts, then three ESMIS landing attempts under
+            # the same policy; neither failure becomes successful empty data.
+            assert mock_get.call_count == 6
+            assert not source._cache
 
 
 class TestDroughtMonitorRetry:
@@ -220,9 +221,9 @@ class TestCongressDateConsistency:
         source = CongressSource()
         source._cache["all_trades"] = [
             {"tradeDate": "2026-03-15", "ticker": "AAPL", "type": "purchase",
-             "transaction_date": "2026-03-15"},
+             "transaction_date": "2026-03-15", "publication_date": "2026-03-16"},
             {"tradeDate": "2026-02-01", "ticker": "MSFT", "type": "purchase",
-             "transaction_date": "2026-02-01"},
+             "transaction_date": "2026-02-01", "publication_date": "2026-02-02"},
         ]
         recent = source.get_recent_trades(days_back=30, as_of="2026-04-03")
         tickers = [t["ticker"] for t in recent]
@@ -323,3 +324,9 @@ class TestResolveTradingDate:
         assert isinstance(result, str)
         assert len(result) == 10
         assert result[4] == "-" and result[7] == "-"
+
+
+@pytest.fixture(autouse=True)
+def offline_source_policy(monkeypatch):
+    monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
+    monkeypatch.setattr('time.sleep', lambda _: None)

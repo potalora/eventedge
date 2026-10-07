@@ -13,6 +13,9 @@ import logging
 import os
 from typing import Any
 
+from .request_policy import provider_call
+from .fetch_errors import SourceFetchError, source_fetch_error
+
 logger = logging.getLogger(__name__)
 
 def _getfield(item: Any, field: str, default: Any = None) -> Any:
@@ -57,13 +60,13 @@ class OpenBBSource:
         if handler is None:
             return {"error": f"Unknown method '{method}'"}
         try:
-            return handler(params)
+            return provider_call("openbb", method, lambda: handler(params))
         except ImportError:
             logger.error("OpenBB SDK not installed")
             return {"error": "OpenBB SDK not installed"}
-        except Exception:
-            logger.error("OpenBBSource.fetch(%s) failed", method, exc_info=True)
-            return {"error": f"{method} fetch failed"}
+        except Exception as exc:
+            error = source_fetch_error("OpenBB enrichment failed", exc)
+            return {**error.partial_data, "error": str(error)}
 
     def is_available(self) -> bool:
         try:
@@ -358,8 +361,7 @@ class OpenBBSource:
             tickers = [_getfield(item, "symbol", "") for item in (result.results or [])]
             tickers = [t for t in tickers if t]  # Filter empty
         except Exception:
-            logger.warning("sector_tickers(%s) failed", industry, exc_info=True)
-            tickers = []
+            raise
 
         out = {"tickers": tickers, "industry": industry}
         self._cache[cache_key] = out
@@ -395,5 +397,4 @@ class OpenBBSource:
             self._cache[ckey] = result
             return result
         except Exception:
-            logger.error("Failed to fetch futures curve for %s", symbol, exc_info=True)
-            return {"error": f"futures curve fetch failed for {symbol}"}
+            raise

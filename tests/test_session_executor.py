@@ -155,6 +155,11 @@ def _bar(ticker, session=MONDAY, open_="100", close="101"):
     )
 
 
+def _sip_bar(*args, **kwargs):
+    from dataclasses import replace
+    return replace(_bar(*args, **kwargs), source="alpaca-sip-1d-raw")
+
+
 def _recovery_binding(ticker: str) -> GovernedRecoveryBinding:
     return GovernedRecoveryBinding(
         ticker=ticker,
@@ -3493,7 +3498,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         ):
             engine.screen_and_stage(
                 FRIDAY.isoformat(),
-                {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                {"_execution_reference_bars": {"AAPL": _sip_bar("AAPL", FRIDAY)}},
                 [candidate],
                 {},
                 {"profiles": {"AAPL": {"sector": "Technology"}}},
@@ -3511,7 +3516,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         ):
             result = engine.screen_and_stage(
                 FRIDAY.isoformat(),
-                {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                {"_execution_reference_bars": {"AAPL": _sip_bar("AAPL", FRIDAY)}},
                 [candidate],
                 {},
                 {"profiles": {"AAPL": {"sector": "Technology"}}},
@@ -3580,7 +3585,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         ):
             replay_engine.screen_and_stage(
                 FRIDAY.isoformat(),
-                {"_execution_reference_bars": {"AAPL": _bar("AAPL", FRIDAY)}},
+                {"_execution_reference_bars": {"AAPL": _sip_bar("AAPL", FRIDAY)}},
                 [],
                 {},
                 {},
@@ -3594,7 +3599,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
             MONDAY,
             "epoch",
             FakePriceSource(
-                {("AAPL", MONDAY): _bar("AAPL", MONDAY)},
+                {("AAPL", MONDAY): _sip_bar("AAPL", MONDAY)},
                 adjusted={
                     ("SPY", MONDAY): Decimal("650"),
                     ("BIL", MONDAY): Decimal("91.1"),
@@ -3666,7 +3671,7 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
         )
         staged = engine.screen_and_stage(
             FRIDAY.isoformat(),
-            {"_execution_reference_bars": {"MSFT": _bar("MSFT", FRIDAY)}},
+            {"_execution_reference_bars": {"MSFT": _sip_bar("MSFT", FRIDAY)}},
             [
                 {
                     "ticker": "MSFT",
@@ -3699,7 +3704,7 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
             MONDAY,
             "epoch",
             FakePriceSource(
-                {("MSFT", MONDAY): _bar("MSFT", MONDAY)},
+                {("MSFT", MONDAY): _sip_bar("MSFT", MONDAY)},
                 adjusted={
                     ("SPY", MONDAY): Decimal("650"),
                     ("BIL", MONDAY): Decimal("91.1"),

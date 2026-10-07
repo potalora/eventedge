@@ -1,6 +1,6 @@
 """CourtListener data source for federal litigation tracking.
 
-Free account token from courtlistener.com. 5,000 requests/hour.
+Free account token from courtlistener.com. 5/minute, 50/hour and 125/day on the verified account.
 Used by P10 (pre-filing litigation/investigation detection).
 """
 from __future__ import annotations
@@ -10,7 +10,9 @@ import os
 import time
 from typing import Any
 
-from .fetch_errors import SourceFetchError, source_fetch_error
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
+from .request_policy import provider_request
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ class CourtListenerSource:
         except SourceFetchError as exc:
             return {"error": str(exc)}
         except Exception:
-            logger.error("CourtListenerSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("CourtListenerSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -74,6 +76,8 @@ class CourtListenerSource:
         """
         import requests
 
+        if not self._token:
+            raise SourceFetchError("CourtListener access missing", reason_code="provider_error")
         params: dict[str, Any] = {
             "q": query,
             "type": "r",  # RECAP dockets
@@ -85,9 +89,8 @@ class CourtListenerSource:
         if date_filed_after:
             params["filed_after"] = date_filed_after
 
-        time.sleep(_RATE_DELAY)
         try:
-            resp = requests.get(
+            resp = provider_request("courtlistener", "GET",
                 f"{BASE_URL}/search/",
                 params=params,
                 headers={"Authorization": f"Token {self._token}"},
@@ -102,8 +105,11 @@ class CourtListenerSource:
                 raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
             results = []
             for item in data["results"]:
-                if not isinstance(item, dict):
-                    raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
+                if (not isinstance(item, dict) or not source_text(item.get("caseName"))
+                        or not item.get("docket_id") or not source_date(item.get("dateFiled"))
+                        or not source_text(item.get("court"))):
+                    raise SourceFetchError("CourtListener docket record invalid", reason_code="invalid_response",
+                                           partial_data={"dockets": results})
                 results.append({
                     "docket_id": item.get("docket_id", ""),
                     "case_name": item.get("caseName", ""),
@@ -129,6 +135,8 @@ class CourtListenerSource:
         """Search court opinions."""
         import requests
 
+        if not self._token:
+            raise SourceFetchError("CourtListener access missing", reason_code="provider_error")
         params: dict[str, Any] = {
             "q": query,
             "type": "o",  # opinions
@@ -138,9 +146,8 @@ class CourtListenerSource:
         if date_filed_after:
             params["filed_after"] = date_filed_after
 
-        time.sleep(_RATE_DELAY)
         try:
-            resp = requests.get(
+            resp = provider_request("courtlistener", "GET",
                 f"{BASE_URL}/search/",
                 params=params,
                 headers={"Authorization": f"Token {self._token}"},
@@ -155,8 +162,10 @@ class CourtListenerSource:
                 raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
             results = []
             for item in data["results"]:
-                if not isinstance(item, dict):
-                    raise SourceFetchError("CourtListener response invalid", reason_code="invalid_response")
+                if (not isinstance(item, dict) or not source_text(item.get("caseName"))
+                        or not item.get("id") or not source_date(item.get("dateFiled"))):
+                    raise SourceFetchError("CourtListener opinion record invalid", reason_code="invalid_response",
+                                           partial_data={"opinions": results})
                 results.append({
                     "opinion_id": item.get("id", ""),
                     "case_name": item.get("caseName", ""),

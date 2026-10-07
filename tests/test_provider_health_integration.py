@@ -148,7 +148,7 @@ def test_successful_empty_provider_is_legitimate_no_event(
 def test_usaspending_failure_is_not_cached_as_empty_success(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "requests.post",
-        Mock(side_effect=[requests.Timeout(_SECRET), _response({"results": []})]),
+        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": []})]),
     )
     source = USASpendingSource()
     _, engine = _engine(tmp_path, source)
@@ -192,7 +192,7 @@ def test_courtlistener_partial_failure_retains_other_query_results(
         if kwargs["params"]["q"] == "SEC enforcement":
             raise requests.Timeout(_SECRET)
         return _response(
-            {"results": [{"docket_id": 123, "caseName": "Fixture litigation"}]}
+            {"results": [{"docket_id": 123, "caseName": "Fixture litigation", "dateFiled": "2026-09-30", "court": "cacd"}]}
         )
 
     monkeypatch.setattr("requests.get", request)
@@ -535,3 +535,11 @@ def test_source_error_chain_cycles_and_deep_wrappers_are_bounded():
     result = source_fetch_error("FRED fetch failed", wrapped)
     assert result.reason_code == "provider_error"
     assert _SECRET not in str(result)
+
+
+@pytest.fixture(autouse=True)
+def bounded_offline_acquisition(monkeypatch):
+    # This suite verifies health propagation; policy pacing is independently
+    # tested with a fake clock in test_request_policy.py.
+    monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
+    monkeypatch.setattr('time.sleep', lambda _: None)
