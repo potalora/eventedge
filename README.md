@@ -88,6 +88,30 @@ trap, including after a governed gate or daily failure. Reporting preserves an
 existing failure status; an incomplete report makes an otherwise successful
 script exit nonzero.
 
+Clef runs an optional evidence check after all books finish staging. It samples
+up to five distinct events with retained source evidence and asks whether that
+evidence supports the candidate claim and company attribution. Its answers do
+not feed trade selection, sizing, accounting or source-health checks. The default
+budget is 20 seconds per session, with at most three seconds per request. Events
+without usable source evidence are marked insufficient without an API call.
+
+Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the production environment
+to activate hosted `@cf/cloudflare/clef`. The token needs Workers AI Read and Edit
+permissions for that account ([Cloudflare setup](https://developers.cloudflare.com/workers-ai/get-started/rest-api/)).
+Only compact public source fields and the candidate claim go to Cloudflare;
+holdings, balances and credentials are excluded. The hosted model name is an
+alias, so the recorded name does not establish an immutable weights revision.
+
+Results and pending inputs live in each generation's
+`decision_shadow/YYYY-MM-DD.json`. The operational report shows assessed events,
+answer counts, sampling limits and errors separately from financial validity.
+An attempted request is never repeated automatically, including after a timeout.
+Missing credentials and exhausted budgets leave unattempted inputs that can be
+processed later with `scripts/run_decision_shadow.py --help`, without running
+trading or fetching new evidence. A resume without every horizon records
+`incomplete_sampling` when no complete sample was saved. These observations are
+for evaluation; support probabilities do not estimate a trade's chance of profit.
+
 Evidence files use restrictive permissions and redact known credential environment
 values (including common JSON/repr escaping) and common authentication fields.
 Truncated quoted credentials and complete authorization-header lines are redacted;

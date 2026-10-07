@@ -126,6 +126,41 @@ def _report(repo):
     return build_operational_report(repo, GENERATION, SESSION, snapshot_guaranteed=True)
 
 
+@pytest.mark.parametrize('kind', ['missing', 'missing_credentials', 'corrupt', 'deeply_nested', 'wrong_identity'])
+def test_optional_clef_status_is_reported_without_changing_financial_validity(native_evidence, kind):
+    from tradingagents.strategies.orchestration.decision_shadow import evaluate_shadow
+    repo, state, wire = native_evidence
+    _attempt(repo, wire)
+    baseline = _report(repo)
+    path = state / 'decision_shadow' / f'{SESSION}.json'
+    if kind != 'missing':
+        evaluate_shadow(state_dir=state, generation=GENERATION, session=SESSION, epoch_id=EPOCH, generation_commit=COMMIT,
+            signals=[{'event_key':'docket-1','ticker':'NVDA','strategy':'litigation','direction':'short',
+                      'metadata':{'docket_id':1,'llm_analysis':{'rationale':'Company faces a patent suit.'}}}],
+            data={'courtlistener':{'dockets':[{'docket_id':1,'case_name':'Patent holder v NVDA','nature_of_suit':'Patent'}]}},
+            config={'enabled':True,'mode':'shadow'}, environ={})
+        if kind == 'corrupt':
+            path.write_text('{')
+        elif kind == 'deeply_nested':
+            path.write_text('['*1200+'0'+']'*1200)
+        elif kind == 'wrong_identity':
+            document = json.loads(path.read_text())
+            document['generation'] = 'gen_other'
+            path.write_text(json.dumps(document))
+    report = _report(repo)
+    expected = 'unavailable' if kind in {'corrupt','deeply_nested','wrong_identity'} else kind
+    assert report['decision_shadow']['status'] == expected
+    if kind == 'missing_credentials':
+        assert report['decision_shadow']['event_counts'] == {'missing_credentials':1}
+        assert report['decision_shadow']['assessed_events'] == 0
+    assert {key:value for key,value in report.items() if key!='decision_shadow'} == {
+        key:value for key,value in baseline.items() if key!='decision_shadow'}
+    assert report['outcome'] == 'clean' and report['evidence_complete']
+    markdown = render_operational_report(report)
+    assert 'Clef evidence shadow' in markdown and expected in markdown
+    assert 'does not affect trading' in markdown
+
+
 def test_multiple_daily_attempts_preserve_preflight_incident_without_tainting_clean(native_evidence):
     repo, state, wire = native_evidence
     _attempt(repo,None,outcome='failed',ordinal=1,return_code=1)

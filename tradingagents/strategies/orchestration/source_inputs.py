@@ -189,6 +189,8 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     if exclude_horizon:
         omitted.add('horizon')
     effective = dict(config)
+    # Post-staging shadow classification does not govern source observations.
+    effective.pop('decision_shadow', None)
     effective['autoresearch'] = {key: value for key, value in ar.items() if key not in omitted}
     return configuration_fingerprint(effective)
 

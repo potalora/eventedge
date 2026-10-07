@@ -2324,7 +2324,16 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 governed_bar_recoveries=summaries,
                 governed_failure_map={},
             )
-    return state.finalize()
+    finalized = state.finalize()
+    # Shadow evidence can run only after the whole session is durably staged.
+    # Its result is never inserted into the financial worker-result contract.
+    if all(isinstance(result, dict) and not result.get("error") for result in finalized.values()):
+        try:
+            from tradingagents.strategies.orchestration.decision_shadow import run_decision_shadow
+            run_decision_shadow(state)
+        except Exception:
+            logger.warning("Clef decision shadow unavailable")
+    return finalized
 
 
 @dataclass(frozen=True)
