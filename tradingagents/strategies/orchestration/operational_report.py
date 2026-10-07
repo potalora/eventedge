@@ -37,6 +37,11 @@ _PROVIDERS = frozenset({'edgar','fred','finnhub','congress','regulations','court
                         'noaa','usda','drought_monitor','usaspending','cftc','yfinance','openbb'})
 _HEALTHY = frozenset({'signals', 'legitimate_no_event'})
 _FAILURES = frozenset({'data_failure', 'strategy_defect'})
+_PREFLIGHT_LABELS = {
+    'screen': 'screen (source screening)',
+    'governed': 'governed (price readiness)',
+    'all': 'all (source screening and price readiness)',
+}
 
 
 def _safe_id(value: Any) -> bool:
@@ -162,6 +167,13 @@ def _attempts(repo: Path, generation: str, session: str, commit: str, diagnose) 
                 raise ValueError('invalid attempt timing')
             if not isinstance(item['result'], dict):
                 raise ValueError('invalid attempt result')
+            mode = item['preflight_mode']
+            if item['action'] == 'preflight':
+                if (not isinstance(mode, str) or mode not in _PREFLIGHT_LABELS or
+                        item['result'].get('preflight_mode', mode) != mode):
+                    raise ValueError('invalid preflight mode')
+            elif mode is not None:
+                raise ValueError('daily attempt has preflight mode')
             entry = {'attempt_id':path.name,'evidence_path':str(path.resolve()),'action':item['action'], 'started_at':start.astimezone(timezone.utc).isoformat(),
                      'finished_at':end.astimezone(timezone.utc).isoformat(),'process_return_code':item['process_return_code'],
                      'process_status':item['process_status'], 'outcome':item['result'].get('outcome'),
@@ -190,6 +202,7 @@ def _attempts(repo: Path, generation: str, session: str, commit: str, diagnose) 
                         item['process_return_code'] not in ({0} if outcome == 'clean' else {0,2})):
                     diagnose('attempt_process_conflict', path.name)
             else:
+                entry['preflight_mode'] = mode
                 entry['preflight_ok'] = item['result'].get('success')
                 entry['screen_failure_count'] = item['result'].get('screen_failure_count')
                 entry['failures'] = _preflight_failures(item)
@@ -572,6 +585,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['attempts'] = [{key:value for key,value in row.items() if key not in {'wire','result','failures'}} for row in attempts]
         report['preflight_incidents'] = [
             {'attempt_id':row['attempt_id'],'process_return_code':row['process_return_code'],
+             'preflight_mode':row['preflight_mode'],
              'screen_failure_count':row['screen_failure_count'],'failures':row['failures']}
             for row in attempts if row['action']=='preflight' and (row['preflight_ok'] is not True or row['failures'])
         ]
@@ -647,6 +661,14 @@ def render_operational_report(report: dict) -> str:
         for attempt in report['attempts']:
             if attempt['action']=='daily':
                 lines.append(f"- {attempt['attempt_id']}: {attempt['outcome']}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
+    preflights = [row for row in report['attempts'] if row['action'] == 'preflight']
+    if preflights:
+        lines.extend(['', '## Preflight attempt evidence', '',
+            'Preflight modes are independent; a successful governed price check does not establish source recovery.', ''])
+        for attempt in preflights:
+            label = _PREFLIGHT_LABELS.get(attempt.get('preflight_mode'), 'unknown mode')
+            status = 'passed' if attempt.get('preflight_ok') is True else 'failed'
+            lines.append(f"- {attempt['attempt_id']}: {label}; {status}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:
@@ -665,7 +687,8 @@ def render_operational_report(report: dict) -> str:
     if report['preflight_incidents']:
         lines.extend(['','## Preflight incidents',''])
         for item in report['preflight_incidents']:
-            lines.append(f"- {item['attempt_id']}: return code {item['process_return_code']}; " + '; '.join(f"{row['source']} {row['reason_code']} HTTP {row['http_status'] or 'unknown'}" for row in item['failures']))
+            label = _PREFLIGHT_LABELS.get(item.get('preflight_mode'), 'unknown mode')
+            lines.append(f"- {item['attempt_id']}: {label}; return code {item['process_return_code']}; " + '; '.join(f"{row['source']} {row['reason_code']} HTTP {row['http_status'] or 'unknown'}" for row in item['failures']))
     if 'decision_shadow' in report:
         shadow = report['decision_shadow']
         counts = ', '.join(f'{status}: {count}' for status,count in sorted(shadow['event_counts'].items())) or 'no recorded events'

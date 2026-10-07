@@ -287,12 +287,16 @@ class CongressSource:
                         invalid_rows = True
                         continue
                     if not source_text(item.get("symbol")):
-                        # These valid disclosures have no exchange-traded asset.
+                        # Valid symbol-free bond/private-asset disclosures are
+                        # outside the stock-trading scope of this adapter.
                         # Missing/ill-typed symbols on other assets remain errors.
                         if (isinstance(item.get("symbol"), str)
                                 and not item["symbol"].strip()
                                 and isinstance(item.get("assetType"), str)
-                                and item.get("assetType") in {"Other", "Non-Public Stock"}
+                                and item.get("assetType") in {
+                                    "Other", "Non-Public Stock",
+                                    "Government Securities", "Other Securities",
+                                }
                                 and source_text(item.get("assetDescription"))):
                             continue
                         invalid_rows = True
