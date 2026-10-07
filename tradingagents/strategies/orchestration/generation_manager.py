@@ -391,7 +391,7 @@ def normalize_preflight_report(
         return None
     wire_keys = {"ok", "preflight_mode"}
     if mode in {"screen", "all"}:
-        wire_keys.update({"screen_ok", "screen_failure_count"})
+        wire_keys.update({"screen_ok", "screen_failure_count", "screen_source_failures"})
     if mode in {"governed", "all"}:
         wire_keys.update(
             {
@@ -432,11 +432,28 @@ def normalize_preflight_report(
             screen_failures = report.get("screen_failures", report["failures"])
             if not isinstance(screen_failures, list):
                 return None
-            failure_count = min(
-                len(screen_failures), _MAX_GOVERNED_REPORT_ITEMS
-            )
+            failure_count = len(screen_failures)
+            if failure_count > _MAX_GOVERNED_REPORT_ITEMS:
+                return None
+        from tradingagents.strategies.orchestration.preflight import (
+            canonical_screen_source_failures,
+        )
+        source_failures = canonical_screen_source_failures(
+            report.get("screen_source_failures")
+        )
+        if (
+            source_failures is None
+            or len(source_failures) > failure_count
+            or screen_ok is not (failure_count == 0)
+            or (not is_wire_report and len(source_failures) != sum(
+                isinstance(row, dict) and row.get("strategy") == "source_health"
+                for row in screen_failures
+            ))
+        ):
+            return None
         normalized["screen_ok"] = screen_ok
         normalized["screen_failure_count"] = failure_count
+        normalized["screen_source_failures"] = source_failures
     if mode in {"governed", "all"}:
         state_status = report.get("state_status")
         probe_status = report.get("governed_probe_status")

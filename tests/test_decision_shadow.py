@@ -104,7 +104,7 @@ def test_api_fault_is_durable_sanitized_and_never_retried(tmp_path, fault):
         if fault == "missing_option": del answer["probabilities"]["insufficient"]
         if fault == "wrong_model": payload["result"]["model"] = "untrusted-model"
         if fault == "bad_sum": answer["probabilities"]["supported"] = .3
-        if fault == "bad_confidence": answer["confidence"] = .1
+        if fault == "bad_confidence": answer["confidence"] = 1.1
         if fault == "negative_usage": payload["result"]["usage"]["input_tokens"] = -2
         if fault == "wrong_type": answer["type"] = "noul"
         if fault == "extra_question": payload["result"]["answers"]["private"] = "PRIVATE"
@@ -259,3 +259,47 @@ def test_deeply_nested_corrupt_sidecar_is_unavailable_and_preserved(tmp_path):
     result = shadow.read_shadow_summary(path, generation='gen_018', session='2026-10-02')
     assert result == {'status': 'unavailable', 'events': []}
     assert path.read_text() == payload
+
+
+def test_hosted_clef_confidence_can_differ_from_selected_probability(tmp_path):
+    """Captured Cloudflare HTTP200 response: confidence is an independent value."""
+    payload = {
+        'result': {
+            'model': 'clef',
+            'answers': {'support': {
+                'type': 'choice', 'choice': 'supported', 'confidence': 0.932,
+                'probabilities': {'supported': 0.9769, 'contradicted': 0.0116,
+                                  'insufficient': 0.0115}}},
+            'usage': {'input_tokens': 252, 'output_tokens': 0}},
+        'success': True, 'errors': [], 'messages': []}
+    result = run(tmp_path, post=lambda *a, **kw: response(payload))
+    entry = result['events'][0]
+    assert entry['status'] == 'ok'
+    assert entry['answer']['confidence'] == 0.932
+    assert entry['answer']['probabilities']['supported'] == 0.9769
+    assert entry['usage'] == {'input_tokens': 252, 'output_tokens': 0}
+    assert run(tmp_path, post=lambda *a, **kw: pytest.fail('repeat paid call')) == result
+
+
+@pytest.mark.parametrize('confidence', [0.0, 0.1, 1.0])
+def test_valid_independent_confidence_does_not_change_selected_choice(tmp_path, confidence):
+    payload = response().json()
+    payload['result']['answers']['support']['confidence'] = confidence
+    result = run(tmp_path, post=lambda *a, **kw: response(payload))
+    assert result['events'][0]['status'] == 'ok'
+    assert result['events'][0]['answer']['choice'] == 'supported'
+
+
+@pytest.mark.parametrize('confidence', [float('nan'), float('inf'), -0.1, 1.1, True])
+def test_independent_confidence_must_remain_a_finite_probability(tmp_path, confidence):
+    payload = response().json()
+    payload['result']['answers']['support']['confidence'] = confidence
+    result = run(tmp_path, post=lambda *a, **kw: response(payload))
+    assert result['events'][0]['status'] == 'invalid_response'
+
+
+def test_choice_must_still_match_highest_option_probability(tmp_path):
+    payload = response().json()
+    payload['result']['answers']['support'].update(choice='contradicted', confidence=0.8)
+    result = run(tmp_path, post=lambda *a, **kw: response(payload))
+    assert result['events'][0]['status'] == 'invalid_response'

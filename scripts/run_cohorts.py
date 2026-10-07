@@ -370,6 +370,15 @@ def _run_preflight(config: dict, trading_date: str, mode: str) -> None:
         print(rendered)
         return
     print(rendered, file=sys.stderr)
+    if normalized is not None:
+        for failure in normalized.get("screen_source_failures", []):
+            status = failure["http_status"] or "unknown"
+            print(
+                f"PREFLIGHT SOURCE FAILED: {failure['source']} "
+                f"{failure['reason_code']}; HTTP {status}; "
+                f"attempts {failure['attempts']}; operations {failure['operation_count']}",
+                file=sys.stderr,
+            )
     raise SystemExit(exit_code)
 
 

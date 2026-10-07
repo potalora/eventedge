@@ -104,6 +104,12 @@ def _wire_outcome(wire: dict) -> str:
 
 
 def _preflight_failures(artifact: dict) -> list[dict]:
+    if 'screen_source_failures' in artifact['result']:
+        from tradingagents.strategies.orchestration.preflight import canonical_screen_source_failures
+        failures = canonical_screen_source_failures(artifact['result']['screen_source_failures'])
+        if failures is None:
+            raise ValueError('invalid native preflight source diagnostics')
+        return failures
     failures = []
     structured = artifact['result'].get('failures', [])
     for failure in structured if isinstance(structured, list) else []:

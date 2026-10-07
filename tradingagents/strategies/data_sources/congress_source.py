@@ -281,9 +281,20 @@ class CongressSource:
                 invalid_rows = False
                 for item in payload:
                     representative = item.get("office") or " ".join(str(item.get(key) or "") for key in ("firstName", "lastName"))
-                    if (not all(source_text(item.get(key)) for key in ("symbol", "type", "amount"))
+                    if (not all(source_text(item.get(key)) for key in ("type", "amount"))
                             or not source_text(representative)
                             or not all(source_date(item.get(key)) for key in ("transactionDate", "disclosureDate"))):
+                        invalid_rows = True
+                        continue
+                    if not source_text(item.get("symbol")):
+                        # These valid disclosures have no exchange-traded asset.
+                        # Missing/ill-typed symbols on other assets remain errors.
+                        if (isinstance(item.get("symbol"), str)
+                                and not item["symbol"].strip()
+                                and isinstance(item.get("assetType"), str)
+                                and item.get("assetType") in {"Other", "Non-Public Stock"}
+                                and source_text(item.get("assetDescription"))):
+                            continue
                         invalid_rows = True
                         continue
                     trades.append(_normalize_fmp_trade(item, chamber))

@@ -95,8 +95,9 @@ def _answer(result):
     # Released Clef rounds each of three probabilities to four decimal places.
     if abs(sum(values) - 1) > .0002 or answer["choice"] not in probs:
         raise ValueError("invalid probability sum")
-    confidence = _probability(answer["confidence"])
-    if abs(confidence - probs[answer["choice"]]) > .0001 or confidence < max(values) - .0001:
+    # Hosted Clef confidence is independent of its per-option distribution.
+    _probability(answer["confidence"])
+    if probs[answer["choice"]] < max(values):
         raise ValueError("invalid chosen probability")
     usage = result.get("usage", {})
     if not isinstance(usage, dict):

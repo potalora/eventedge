@@ -18,12 +18,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.connection import create_connection as _orig_create_connection
 
-from .request_policy import provider_request
+from .request_policy import provider_request, provider_budget, current_provider_deadline
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.ncei.noaa.gov/cdo-web/api/v2"
+MAX_STATE_OBSERVATIONS = 100_000
 
 # Key US agricultural states (Corn Belt + Plains)
 AG_STATES = {
@@ -174,14 +175,16 @@ class NOAASource:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
+        if current_provider_deadline("noaa") is None:
+            with provider_budget("noaa", time.monotonic() + 60):
+                return self.fetch_state_daily(state_fips, start, end, datatypes)
+
         all_results: list[dict] = []
+        seen_observations: set[tuple[str, str, str]] = set()
         offset = 1
-        max_pages = 5  # Cap pagination to avoid hanging on huge queries
-        page = 0
         expected_total = None
 
-        while page < max_pages:
-            page += 1
+        while True:
             try:
                 data = self._api_get("/data", {
                     "datasetid": "GHCND",
@@ -197,12 +200,29 @@ class NOAASource:
                 exc.partial_data = {"observations": all_results + exc.partial_data.get("observations", [])}
                 raise
             results = data["results"]
-            all_results.extend(results)
-            metadata = data.get("metadata", {}).get("resultset", {})
+            for row in results:
+                identity = (row["date"], row["datatype"], row["station"])
+                if identity in seen_observations:
+                    raise SourceFetchError("NOAA pagination repeated observations", reason_code="invalid_response",
+                                           partial_data={"observations": all_results})
+                seen_observations.add(identity)
+                all_results.append(row)
+            envelope = data.get("metadata")
+            metadata = envelope.get("resultset") if isinstance(envelope, dict) else None
+            if not isinstance(metadata, dict):
+                raise SourceFetchError("NOAA pagination metadata invalid", reason_code="invalid_response",
+                                       partial_data={"observations": all_results})
             total = metadata.get("count")
+            if type(total) is int and total > MAX_STATE_OBSERVATIONS:
+                raise SourceFetchError("NOAA pagination coverage exceeds resource limit", reason_code="invalid_response",
+                                       partial_data={"observations": all_results})
             if (type(total) is not int or total < 0
                     or (expected_total is not None and total != expected_total)
-                    or ("offset" in metadata and metadata["offset"] != offset)
+                    or ("offset" in metadata and (type(metadata["offset"]) is not int or metadata["offset"] != offset))
+                    or ("limit" in metadata and (type(metadata["limit"]) is not int
+                        or not 1 <= metadata["limit"] <= 1000 or len(results) > metadata["limit"]))
+                    or len(results) > 1000
+                    or len(all_results) > MAX_STATE_OBSERVATIONS
                     or len(all_results) > total
                     or (not results and len(all_results) < total)):
                 raise SourceFetchError("NOAA pagination inconsistent", reason_code="invalid_response",
@@ -211,10 +231,6 @@ class NOAASource:
             if len(all_results) == total:
                 break
             offset += len(results)
-        if expected_total is None or len(all_results) < expected_total:
-            raise SourceFetchError("NOAA pagination coverage incomplete", reason_code="invalid_response",
-                                   partial_data={"observations": all_results})
-
         self._cache[cache_key] = all_results
         return all_results
 
@@ -232,6 +248,9 @@ class NOAASource:
         - avg_temp_anomaly_f: average temperature departure from seasonal mean
         - states_reporting: number of states with data
         """
+        if current_provider_deadline("noaa") is None:
+            with provider_budget("noaa", time.monotonic() + 60):
+                return self.fetch_ag_weather_summary(date, lookback_days)
         try:
             end_date = datetime.strptime(date, "%Y-%m-%d")
         except ValueError:

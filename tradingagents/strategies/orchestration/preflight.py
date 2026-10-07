@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,90 @@ _PREFLIGHT_MODES = frozenset({"screen", "governed", "all"})
 _MAX_RECOVERY_SUMMARIES = 64
 _MAX_REPORT_TEXT = 4_096
 _LOWER_HEX = frozenset("0123456789abcdef")
+_SCREEN_SOURCES = frozenset({
+    "yfinance", "edgar", "usaspending", "congress", "fred", "finnhub",
+    "regulations", "courtlistener", "noaa", "usda", "drought_monitor", "cftc",
+})
+_SOURCE_FAILURE_REASONS = frozenset({
+    "timeout", "transport_error", "http_error", "invalid_response",
+    "provider_error", "batch_failure", "deadline_exhausted",
+})
+_SOURCE_FAILURE_KEYS = frozenset({
+    "source", "reason_code", "http_status", "attempts", "operation_count",
+})
+_MAX_SOURCE_OPERATIONS = 256
+
+
+def canonical_screen_source_failures(value: object) -> list[dict[str, Any]] | None:
+    """Accept only fixed source/reason identities and bounded request metadata."""
+    if not isinstance(value, list) or len(value) > len(_SCREEN_SOURCES):
+        return None
+    sources: list[str] = []
+    for row in value:
+        if not isinstance(row, dict) or set(row) != _SOURCE_FAILURE_KEYS:
+            return None
+        source, reason = row["source"], row["reason_code"]
+        status = row["http_status"]
+        if (
+            not isinstance(source, str) or source not in _SCREEN_SOURCES
+            or not isinstance(reason, str) or reason not in _SOURCE_FAILURE_REASONS
+            or (status is not None and not (
+                type(status) is int and 400 <= status <= 599
+            ))
+            or type(row["attempts"]) is not int or not 0 <= row["attempts"] <= 5
+            or type(row["operation_count"]) is not int
+            or not 0 <= row["operation_count"] <= _MAX_SOURCE_OPERATIONS
+        ):
+            return None
+        sources.append(source)
+    if sources != sorted(set(sources)):
+        return None
+    return [dict(row) for row in value]
+
+
+def _screen_source_failure(source: str, payload: object) -> dict[str, Any]:
+    """Extract safe metadata, never interpret opaque provider error messages."""
+    if source not in _SCREEN_SOURCES:
+        raise ValueError("unknown preflight source identity")
+    payload = payload if isinstance(payload, Mapping) else {}
+    coverage = payload.get("_coverage")
+    coverage = coverage if isinstance(coverage, Mapping) else {}
+    reason = coverage.get("reason_code")
+    if not isinstance(reason, str) or reason not in _SOURCE_FAILURE_REASONS:
+        reason = "provider_error"
+    diagnostics = payload.get("_request_diagnostics", [])
+    if not isinstance(diagnostics, list):
+        raise ValueError("invalid preflight source request diagnostics")
+
+    def failed_status(value: object) -> int | None:
+        if type(value) is int and 400 <= value <= 599:
+            return value
+        return None
+
+    status = failed_status(coverage.get("http_status"))
+    attempts = coverage.get("attempts")
+    attempts = attempts if type(attempts) is int and 0 <= attempts <= 5 else 0
+    # Complete paginated acquisitions can exceed the wire's operation bound.
+    # Keep the terminal failure metadata and saturate the summary count.
+    for event in diagnostics[-_MAX_SOURCE_OPERATIONS:]:
+        if not isinstance(event, Mapping):
+            continue
+        count = event.get("attempts")
+        if type(count) is int and 0 <= count <= 5:
+            attempts = max(attempts, count)
+        event_reason = event.get("reason_code")
+        if isinstance(event_reason, str) and event_reason in _SOURCE_FAILURE_REASONS:
+            if reason == "provider_error":
+                reason = event_reason
+            if status is None:
+                status = failed_status(event.get("http_status"))
+    return {
+        "source": source,
+        "reason_code": reason,
+        "http_status": status,
+        "attempts": attempts,
+        "operation_count": min(len(diagnostics), _MAX_SOURCE_OPERATIONS),
+    }
 
 
 def run_preflight(
@@ -551,6 +636,7 @@ def _run_screen_preflight(
             "horizons": {},
             "failures": [],
             "source_warnings": [],
+            "screen_source_failures": [],
         }
 
         # Fetchers preserve provider failures separately from successful empty
@@ -577,6 +663,9 @@ def _run_screen_preflight(
                     {"source": source, "error": "optional enrichment unavailable"}
                 )
                 continue
+            report["screen_source_failures"].append(
+                _screen_source_failure(source, shared_data.get(source))
+            )
             report["failures"].append(
                 {
                     "horizon": "shared",
