@@ -176,6 +176,62 @@ def test_multiple_daily_attempts_preserve_preflight_incident_without_tainting_cl
     assert report['accounting_valid'] is True
 
 
+def test_native_source_failures_reach_report_without_process_error_logs(native_evidence):
+    repo, state, wire = native_evidence
+    path = _attempt(repo, None, action='preflight', ordinal=1, return_code=1)
+    artifact = json.loads(path.read_text())
+    failures = [{'source': source, 'reason_code': 'invalid_response',
+                 'http_status': None, 'attempts': 1, 'operation_count': count}
+                for source, count in (('congress', 2), ('noaa', 150), ('usda', 3))]
+    artifact['result'].update(screen_failure_count=3, screen_source_failures=failures)
+    artifact['stdout'] = artifact['stderr'] = ''
+    path.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=2)
+    report = _report(repo)
+    assert report['outcome'] == 'clean' and report['evidence_complete']
+    assert report['preflight_incidents'][0]['failures'] == failures
+    markdown = render_operational_report(report)
+    for source in ('congress', 'noaa', 'usda'):
+        assert f'{source} invalid_response HTTP unknown' in markdown
+
+
+def test_native_clean_source_diagnostics_do_not_infer_failures_from_logs(native_evidence):
+    repo, state, wire = native_evidence
+    path = _attempt(repo, None, action='preflight', ordinal=1)
+    artifact = json.loads(path.read_text())
+    artifact['result'].update(success=True, screen_ok=True,
+                              screen_failure_count=0, screen_source_failures=[])
+    # A successful retry or incidental log mention is not a failed source.
+    artifact['stderr'] = 'edgar recovered after HTTP 500'
+    path.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=2)
+    report = _report(repo)
+    assert report['outcome'] == 'clean' and report['evidence_complete']
+    assert report['preflight_incidents'] == []
+
+
+@pytest.mark.parametrize('damage', ['unknown_source', 'secret_field', 'successful_http'])
+def test_report_rejects_malformed_native_source_diagnostics(native_evidence, damage):
+    repo, state, wire = native_evidence
+    path = _attempt(repo, None, action='preflight', ordinal=1, return_code=1)
+    artifact = json.loads(path.read_text())
+    failure = {'source': 'noaa', 'reason_code': 'invalid_response',
+               'http_status': None, 'attempts': 1, 'operation_count': 1}
+    if damage == 'unknown_source':
+        failure['source'] = 'PRIVATE_SECRET'
+    elif damage == 'secret_field':
+        failure['raw_exception'] = 'PRIVATE_SECRET'
+    else:
+        failure['http_status'] = 200
+    artifact['result']['screen_source_failures'] = [failure]
+    artifact['stderr'] = ''
+    path.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=2)
+    report = _report(repo)
+    assert any(row['code'] == 'attempt_unreadable' for row in report['diagnostics'])
+    assert 'PRIVATE_SECRET' not in render_operational_report(report)
+
+
 def test_degraded_coverage_keeps_completed_valid_accounting(native_evidence):
     repo, state, wire = native_evidence
     with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:

@@ -314,6 +314,7 @@ class TestGenerationDailyRun:
 
         report = {
             "ok": True,
+            "screen_source_failures": [],
             "screen_ok": True,
             "screen_failures": [],
             "failures": [],
@@ -701,6 +702,7 @@ class TestGenerationDailyRun:
 
         report = {
             "ok": False,
+            "screen_source_failures": [],
             "screen_ok": False,
             "screen_failures": ["horizon_30d"],
             "failures": ["screen failed"],

@@ -41,8 +41,12 @@ An interrupted session that resumes without every horizon records
 source evidence is explicit and does not trigger a model call. The operational
 report keeps these statuses separate from financial validity.
 
-No live Cloudflare call or semantic-quality evaluation was performed for this
-verification. Credentials, entitlement, deployed response shape and latency still
-require a credentialed check. The hosted model alias is recorded but does not
-pin an immutable weights revision. These observations establish safe integration,
-not better trade decisions or returns.
+The initial verification above used mocked transport. A subsequent credentialed
+check reached Clef and exposed a response-contract defect: confidence is distinct
+from the chosen option's probability. The repaired adapter passed a live request
+in 0.514 seconds with 250 input tokens. See the
+[live contract verification](2026-10-07-live-source-contracts.md) for the repairs
+and source checks. No semantic-quality or return evaluation has been performed.
+The hosted model alias is recorded but does not pin an immutable weights revision.
+These observations establish integration readiness, not better trade decisions
+or returns.

@@ -155,7 +155,7 @@ class USDASource:
 
         Args:
             commodity: CORN, SOYBEANS, or WHEAT.
-            year: Calendar year.
+            year: NASS reporting year (winter wheat can begin in the prior year).
             states: Comma-separated state alpha codes (default: AG_STATES).
 
         Returns:
@@ -219,8 +219,21 @@ class USDASource:
             state = record.get("state_alpha", "")
             crop_class = record.get("class_desc", "ALL CLASSES")
             unit = record.get("unit_desc", "")
+            # NASS labels fall winter-wheat observations with the following
+            # reporting year. Keep their actual dates and crop classes intact.
+            reporting_year = record.get("year")
+            year_matches = (
+                (type(reporting_year) is int and reporting_year == year)
+                or (isinstance(reporting_year, str) and reporting_year == str(year))
+            ) if "year" in record else (isinstance(week, str) and week.startswith(f"{year}-"))
+            observation_year_matches = isinstance(week, str) and (
+                week.startswith(f"{year}-")
+                or (commodity.upper() == "WHEAT" and crop_class == "WINTER"
+                    and "year" in record and year_matches
+                    and week.startswith(f"{year - 1}-"))
+            )
             if (not source_date(week) or not all(source_text(value) for value in (state, crop_class, unit))
-                    or state not in requested_states or not week.startswith(str(year))):
+                    or state not in requested_states or not year_matches or not observation_year_matches):
                 invalid_records = True
                 continue
             field = CONDITION_CATEGORIES.get(unit)

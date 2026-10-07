@@ -1266,6 +1266,7 @@ class TestGenerationManagerPreflight:
             "ok": False,
             "failures": [],
             "horizons": {},
+            "screen_source_failures": [],
             "screen_ok": False,
             "governed_ok": True,
             "state_status": "ready",
@@ -1354,6 +1355,7 @@ def test_run_cohorts_preflight_exit_contract_is_mode_specific():
             "failures": [],
             "horizons": {},
             "trading_date": "2026-08-06",
+            "screen_source_failures": [],
             "screen_ok": True,
             "screen_failures": [],
         },
@@ -1365,6 +1367,7 @@ def test_run_cohorts_preflight_exit_contract_is_mode_specific():
             "failures": [{}],
             "horizons": {},
             "trading_date": "2026-08-06",
+            "screen_source_failures": [],
             "screen_ok": False,
             "screen_failures": [{}],
         },
@@ -1439,7 +1442,7 @@ def test_direct_preflight_wire_round_trips_through_manager_parser(
         "trading_date": "2026-08-06",
     }
     if mode in {"screen", "all"}:
-        report.update({"screen_ok": True, "screen_failures": []})
+        report.update({"screen_ok": True, "screen_failures": [], "screen_source_failures": []})
     if mode in {"governed", "all"}:
         report.update(
             {
@@ -1533,6 +1536,7 @@ def test_direct_run_cohorts_preflight_holds_shared_lock_during_probe(
         assert mode == "screen"
         return {
             "ok": True,
+            "screen_source_failures": [],
             "screen_ok": True,
             "screen_failures": [],
             "failures": [],
