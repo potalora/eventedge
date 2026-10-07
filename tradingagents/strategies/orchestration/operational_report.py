@@ -499,6 +499,30 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose) 
     return result
 
 
+def _decision_shadow(state: Path, generation: str, session: str, epoch: str | None, commit: str) -> dict:
+    """Summarize optional semantic observations independently of run validity."""
+    unavailable = {'status':'unavailable','mode':'shadow','affects_trading':False,
+                   'model':'@cf/cloudflare/clef','event_counts':{},'assessed_events':0,
+                   'choices':{},'skipped_events':0,'selection_truncated':False}
+    try:
+        from collections import Counter
+        from tradingagents.strategies.orchestration.decision_shadow import read_shadow_summary
+        document = read_shadow_summary(state/'decision_shadow'/f'{session}.json',
+            generation=generation, session=session, epoch_id=epoch, generation_commit=commit)
+        events = document.get('events', [])
+        return {'status':document['status'], 'mode':'shadow', 'affects_trading':False,
+                'model':document.get('model','@cf/cloudflare/clef'),
+                'event_counts':dict(sorted(Counter(row['status'] for row in events).items())),
+                'assessed_events':sum(row['status']=='ok' for row in events),
+                'choices':dict(sorted(Counter(row['answer']['choice'] for row in events if row['status']=='ok').items())),
+                'skipped_events':document.get('skipped_events',0),
+                'selection_truncated':document.get('selection_truncated',False)}
+    except Exception:
+        # Optional classifier corruption or failure must not suppress the
+        # authoritative financial report, including parser recursion failures.
+        return unavailable
+
+
 def build_operational_report(repo_root: str | Path, generation: str, session: str, *, snapshot_guaranteed: bool = False) -> dict:
     """Read one stable generation/session; caller may attest an immutable snapshot.
 
@@ -547,6 +571,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         ]
         epoch,health = _metrics(state,generation,session,commit,diagnose)
         report['epoch_id'] = epoch
+        report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
         report['cohorts'] = {name:_book(state,name,generation,session,epoch,diagnose) for name in EXPECTED_COHORTS}
         report['accounting_valid'] = all(row['accounting_valid'] for row in report['cohorts'].values())
         report['staging_complete'] = all(row['staging_complete'] for row in report['cohorts'].values())
@@ -635,6 +660,16 @@ def render_operational_report(report: dict) -> str:
         lines.extend(['','## Preflight incidents',''])
         for item in report['preflight_incidents']:
             lines.append(f"- {item['attempt_id']}: return code {item['process_return_code']}; " + '; '.join(f"{row['source']} {row['reason_code']} HTTP {row['http_status'] or 'unknown'}" for row in item['failures']))
+    if 'decision_shadow' in report:
+        shadow = report['decision_shadow']
+        counts = ', '.join(f'{status}: {count}' for status,count in sorted(shadow['event_counts'].items())) or 'no recorded events'
+        lines.extend(['','## Clef evidence shadow','',
+            f"Status: {shadow['status']}; assessed events: {shadow['assessed_events']}; {counts}.",
+            'This optional evidence check does not affect trading, accounting validity or source coverage. Its probabilities describe evidence support, not trading returns.'])
+        if shadow['choices']:
+            lines.append('Answers: '+', '.join(f'{choice}: {count}' for choice,count in sorted(shadow['choices'].items()))+'.')
+        if shadow['selection_truncated']:
+            lines.append(f"Session sampling cap excluded {shadow['skipped_events']} additional events.")
     if report['diagnostics']:
         lines.extend(['','## Evidence diagnostics',''])
         lines.extend(f"- {row['code']}" + (f" ({row['scope']})" if 'scope' in row else '') for row in report['diagnostics'])

@@ -7,6 +7,15 @@ DEFAULT_CONFIG = {
         os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
         "dataflows/data_cache",
     ),
+    # Evidence-only comparison after staging; excluded from trading decisions.
+    "decision_shadow": {
+        "enabled": True,
+        "mode": "shadow",
+        "max_events": 5,
+        "session_budget_seconds": 20,
+        "request_timeout_seconds": 3,
+        "max_evidence_chars": 6000,
+    },
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.2",
