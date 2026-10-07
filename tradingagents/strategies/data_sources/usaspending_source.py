@@ -4,7 +4,9 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from .fetch_errors import SourceFetchError, source_fetch_error
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
+from .request_policy import provider_request
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,7 @@ class USASpendingSource:
         except SourceFetchError as exc:
             return {"error": str(exc)}
         except Exception:
-            logger.error("USASpendingSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("USASpendingSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -148,7 +150,7 @@ class USASpendingSource:
         }
 
         try:
-            resp = requests.post(
+            resp = provider_request("usaspending", "POST",
                 f"{BASE_URL}search/spending_by_award/",
                 json=payload,
                 timeout=30,
@@ -162,8 +164,11 @@ class USASpendingSource:
                 raise SourceFetchError("USASpending response invalid", reason_code="invalid_response")
             results: list[dict[str, Any]] = []
             for row in data["results"]:
-                if not isinstance(row, dict):
-                    raise SourceFetchError("USASpending response invalid", reason_code="invalid_response")
+                if (not isinstance(row, dict) or not all(source_text(row.get(key)) for key in ("Award ID", "Recipient Name"))
+                        or not source_number(row.get("Award Amount"), minimum=0)
+                        or not source_date(_normalize_award_date(row.get("Start Date")))):
+                    raise SourceFetchError("USASpending award record invalid", reason_code="invalid_response",
+                                           partial_data={"contracts": results})
                 results.append(
                     {
                         "award_id": row.get("Award ID", ""),

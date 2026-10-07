@@ -1,8 +1,8 @@
 """Read-only, fail-closed historical SIP evidence for an exact US equity session.
 
-Only this adapter's explicit SIP/raw request is trusted; it has no IEX, latest,
-SDK-default, trading, retry, or persistence path. The result is evidence for a
-caller to govern, not authorization to replace a primary provider automatically.
+Only this adapter's explicit SIP/raw request is trusted. Transient transport
+failures use the common bounded request policy; malformed prices are terminal.
+The adapter has no alternative-feed, trading or persistence path.
 
 Provider contract:
 https://docs.alpaca.markets/us/reference/stockbarsingle-1
@@ -22,15 +22,17 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+from tradingagents.strategies.data_sources.request_policy import provider_request
 from tradingagents.strategies.execution.models import MarketBar
-from tradingagents.strategies.metrics.calendar import XNYSCalendar
+from tradingagents.strategies.orchestration.trading_calendar import session_close
 
 SOURCE = "alpaca-sip-1d-raw"
 FEED = "sip"
 ADJUSTMENT = "raw"
 TIMEFRAME = "1Day"
 HISTORICAL_DELAY = timedelta(minutes=15)
-REQUEST_TIMEOUT = (5.0, 20.0)  # connect/read; no retries or redirects
+REQUEST_TIMEOUT = (5.0, 20.0)  # connect/read, clipped to remaining budget
 _ET = ZoneInfo("America/New_York")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,15}\Z")
 
@@ -75,7 +77,7 @@ def _price(value: object) -> Decimal:
 
 
 class AlpacaHistoricalSIPSource:
-    """One bounded historical request per symbol; credentials come from env."""
+    """Validated historical observations; credentials come from env."""
 
     def __init__(self, *, get: Callable | None = None) -> None:
         self._get = get or requests.get
@@ -101,7 +103,7 @@ class AlpacaHistoricalSIPSource:
                 or fetched_at.utcoffset() is None
             ):
                 raise ValueError("invalid request")
-            close_at = XNYSCalendar().session_close(session)
+            close_at = session_close(session)
             start = datetime.combine(session, time.min, _ET)
             next_midnight = datetime.combine(session + timedelta(days=1), time.min, _ET)
             end = min(
@@ -121,8 +123,10 @@ class AlpacaHistoricalSIPSource:
         if not key or not secret:
             return fail(AlpacaBarFailure.MISSING_CREDENTIALS)
         try:
-            response = self._get(
+            response = provider_request(
+                "alpaca", "GET",
                 f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
+                operation="raw_daily_bar", transport=self._get,
                 params={
                     "feed": FEED,
                     "adjustment": ADJUSTMENT,
@@ -138,6 +142,9 @@ class AlpacaHistoricalSIPSource:
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
             )
+        except SourceFetchError as error:
+            return fail(AlpacaBarFailure.HTTP_ERROR if error.http_status is not None
+                        else AlpacaBarFailure.TRANSPORT_ERROR)
         except Exception:
             # Provider exceptions may contain URLs, headers or body text. Never
             # retain, interpolate, log or chain them into persisted evidence.

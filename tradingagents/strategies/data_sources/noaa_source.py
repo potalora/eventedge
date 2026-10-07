@@ -18,6 +18,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.connection import create_connection as _orig_create_connection
 
+from .request_policy import provider_request
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.ncei.noaa.gov/cdo-web/api/v2"
@@ -137,8 +140,10 @@ class NOAASource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("NOAASource.fetch(%s) failed", method, exc_info=True)
+            logger.error("NOAASource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -173,33 +178,42 @@ class NOAASource:
         offset = 1
         max_pages = 5  # Cap pagination to avoid hanging on huge queries
         page = 0
+        expected_total = None
 
         while page < max_pages:
             page += 1
-            data = self._api_get("/data", {
-                "datasetid": "GHCND",
-                "locationid": state_fips,
-                "datatypeid": ",".join(datatypes),
-                "startdate": start,
-                "enddate": end,
-                "units": "standard",
-                "limit": 1000,
-                "offset": offset,
-            })
-            if data is None:
-                break
-
-            results = data.get("results", [])
-            if not results:
-                break
-
+            try:
+                data = self._api_get("/data", {
+                    "datasetid": "GHCND",
+                    "locationid": state_fips,
+                    "datatypeid": ",".join(datatypes),
+                    "startdate": start,
+                    "enddate": end,
+                    "units": "standard",
+                    "limit": 1000,
+                    "offset": offset,
+                })
+            except SourceFetchError as exc:
+                exc.partial_data = {"observations": all_results + exc.partial_data.get("observations", [])}
+                raise
+            results = data["results"]
             all_results.extend(results)
-
             metadata = data.get("metadata", {}).get("resultset", {})
-            total = metadata.get("count", 0)
-            if offset + len(results) > total:
+            total = metadata.get("count")
+            if (type(total) is not int or total < 0
+                    or (expected_total is not None and total != expected_total)
+                    or ("offset" in metadata and metadata["offset"] != offset)
+                    or len(all_results) > total
+                    or (not results and len(all_results) < total)):
+                raise SourceFetchError("NOAA pagination inconsistent", reason_code="invalid_response",
+                                       partial_data={"observations": all_results})
+            expected_total = total
+            if len(all_results) == total:
                 break
             offset += len(results)
+        if expected_total is None or len(all_results) < expected_total:
+            raise SourceFetchError("NOAA pagination coverage incomplete", reason_code="invalid_response",
+                                   partial_data={"observations": all_results})
 
         self._cache[cache_key] = all_results
         return all_results
@@ -236,8 +250,15 @@ class NOAASource:
         all_prcp: list[float] = []
         states_with_data = 0
 
+        failures, statuses = {}, {}
         for state, fips in AG_STATES.items():
-            obs = self.fetch_state_daily(fips, start, end)
+            try:
+                obs = self.fetch_state_daily(fips, start, end)
+            except SourceFetchError as exc:
+                obs = exc.partial_data.get("observations", [])
+                failures[state] = exc.reason_code
+                if exc.http_status is not None:
+                    statuses[state] = exc.http_status
             if not obs:
                 continue
 
@@ -278,7 +299,7 @@ class NOAASource:
         else:
             precip_deficit_pct = 0.0
 
-        return {
+        summary = {
             "heat_stress_days": heat_days,
             "precip_deficit_pct": round(precip_deficit_pct, 1),
             "frost_events": frost_events,
@@ -291,61 +312,39 @@ class NOAASource:
             "observations": len(all_tmax) + len(all_prcp),
         }
 
+        if failures:
+            raise SourceFetchError("NOAA state coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data=summary if states_with_data else {"states_reporting": 0, "observations": 0})
+        return summary
+
     def clear_cache(self) -> None:
         self._cache.clear()
 
     def _api_get(self, endpoint: str, params: dict) -> dict | None:
         """Make a rate-limited GET request to the NOAA CDO API with retry."""
-        url = f"{BASE_URL}{endpoint}"
-        headers = {"token": self._token}
-        max_retries = 2
-        base_delay = 3.0
-
-        session = self._get_session()
-
-        for attempt in range(max_retries + 1):
-            # Rate limit: 5 req/sec
-            elapsed = time.time() - self._last_request_time
-            if elapsed < 0.22:
-                time.sleep(0.22 - elapsed)
-
-            try:
-                self._last_request_time = time.time()
-                # (connect_timeout=5s, read_timeout=10s)
-                resp = session.get(url, headers=headers, params=params,
-                                   timeout=(5, 10))
-                if resp.status_code == 200:
-                    return resp.json()
-                elif resp.status_code == 429:
-                    if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning("NOAA rate limit (attempt %d/%d), retrying in %.0fs", attempt + 1, max_retries, delay)
-                        time.sleep(delay)
-                        continue
-                    return None
-                elif resp.status_code >= 500:
-                    if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt)
-                        logger.warning("NOAA %s returned %d (attempt %d/%d), retrying in %.0fs", endpoint, resp.status_code, attempt + 1, max_retries, delay)
-                        time.sleep(delay)
-                        continue
-                    logger.warning("NOAA API %s returned %d after %d retries", endpoint, resp.status_code, max_retries)
-                    return None
-                else:
-                    logger.warning("NOAA API %s returned %d", endpoint, resp.status_code)
-                    return None
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-                if attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning("NOAA request failed (attempt %d/%d): %s, retrying in %.0fs", attempt + 1, max_retries, exc, delay)
-                    time.sleep(delay)
-                    continue
-                logger.error("NOAA API request failed after %d retries", max_retries, exc_info=True)
-                return None
-            except requests.RequestException:
-                logger.error("NOAA API request failed", exc_info=True)
-                return None
-        return None
+        if not self._token:
+            raise SourceFetchError("NOAA access missing", reason_code="provider_error")
+        response = provider_request("noaa", "GET", f"{BASE_URL}{endpoint}",
+                                    transport=self._get_session().get, operation="daily_observations",
+                                    headers={"token": self._token}, params=params, timeout=(5, 10))
+        try:
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get("results"), list) or not all(isinstance(row, dict) for row in data["results"]):
+                raise ValueError("invalid observations schema")
+        except Exception:
+            raise SourceFetchError("NOAA observations invalid", reason_code="invalid_response") from None
+        valid_rows, invalid = [], False
+        for row in data["results"]:
+            if (not source_date(row.get("date")) or not source_text(row.get("datatype"))
+                    or not source_text(row.get("station")) or not source_number(row.get("value"))):
+                invalid = True
+            else:
+                valid_rows.append(row)
+        if invalid:
+            raise SourceFetchError("NOAA observation records invalid", reason_code="invalid_response",
+                                   partial_data={"observations": valid_rows})
+        return data
 
     def _dispatch_ag_summary(self, params: dict[str, Any]) -> dict[str, Any]:
         date = params.get("date", datetime.now().strftime("%Y-%m-%d"))

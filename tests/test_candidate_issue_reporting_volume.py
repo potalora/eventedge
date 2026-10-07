@@ -41,6 +41,8 @@ def carriers(references):
             "degraded": True,
             "execution_valid": True,
             "staging_valid": False,
+            "input_coverage_valid": True,
+            "source_health_failures": [],
             "candidate_bar_quarantines": [],
             "candidate_input_issues": [
                 deepcopy(ref) for ref in references if cohort in ref["affected_cohorts"]

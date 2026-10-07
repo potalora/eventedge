@@ -173,10 +173,16 @@ def _validate_governed_resolution(
     snapshot: Any,
     session: date,
     processed_at: datetime,
+    pricing_version: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     from tradingagents.strategies.execution.models import MarketBar
     from tradingagents.strategies.execution.price_source import (
+        SIP_PRICING_VERSION,
         validate_required_bars,
+    )
+    from tradingagents.strategies.execution.alpaca_daily_bar import (
+        HISTORICAL_DELAY,
+        SOURCE,
     )
     from tradingagents.strategies.metrics.models import (
         GOVERNED_BAR_RECOVERY_CONTRACT,
@@ -187,6 +193,10 @@ def _validate_governed_resolution(
         GovernedRecoveryBinding,
     )
     from tradingagents.strategies.orchestration.trading_calendar import session_close
+
+    if pricing_version not in {None, SIP_PRICING_VERSION}:
+        raise ValueError("unsupported governed pricing_version")
+    primary_sip = pricing_version == SIP_PRICING_VERSION
 
     if type(resolution) is not GovernedInputResolution:
         raise ValueError("governed resolution type is invalid")
@@ -209,12 +219,26 @@ def _validate_governed_resolution(
         bar = resolution.bars[ticker]
         if type(bar) is not MarketBar or bar.ticker != ticker or bar.session != session:
             raise ValueError("governed bar identity is invalid")
-        if bar.source not in {"yfinance", "yfinance-60m-reconstruction", "alpaca-sip-1d-raw"}:
+        allowed_sources = (
+            {SOURCE}
+            if primary_sip
+            else {"yfinance", "yfinance-60m-reconstruction", SOURCE}
+        )
+        if bar.source not in allowed_sources:
             raise ValueError("governed bar source is invalid")
-        if bar.fetched_at < session_close(session):
+        cutoff = session_close(session) + (
+            HISTORICAL_DELAY if primary_sip else timedelta(0)
+        )
+        if bar.fetched_at < cutoff:
             raise ValueError("governed bar predates the session close")
         raw_bars[(ticker, session)] = bar
     validate_required_bars(raw_bars, bars, session, processed_at)
+    if primary_sip:
+        if resolution.recovery_bindings or resolution.recovery_summaries:
+            raise ValueError(
+                "primary SIP inputs cannot have retrospective recovery bindings"
+            )
+        return [], dict(sorted(resolution.failure_map.items()))
     recovered = {
         ticker
         for ticker in bars
@@ -272,15 +296,21 @@ def _governed_snapshot_report(
     now: datetime,
     price_source: Any | None,
     resolve: Any,
+    config: dict[str, Any],
 ) -> dict[str, Any]:
     from tradingagents.strategies.orchestration.governed_market_data import (
         GovernedMarketDataError,
-        resolve_governed_bars,
     )
     from tradingagents.strategies.orchestration.preflight_state import (
         PreflightStateError,
     )
     from tradingagents.strategies.orchestration.trading_calendar import session_close
+    from tradingagents.strategies.execution.alpaca_daily_bar import HISTORICAL_DELAY
+    from tradingagents.strategies.execution.price_source import (
+        AlpacaSIPPriceSource,
+        SIP_PRICING_VERSION,
+        build_price_source,
+    )
 
     base["state_status"] = snapshot.state_status
     base["governed_tickers"] = list(snapshot.governed_tickers)
@@ -295,17 +325,24 @@ def _governed_snapshot_report(
             }
         )
         return base
-    if now < session_close(session):
+    runtime_source = price_source is None
+    primary_sip = runtime_source or isinstance(price_source, AlpacaSIPPriceSource)
+    if now < session_close(session) + (
+        HISTORICAL_DELAY if primary_sip else timedelta(0)
+    ):
         base["governed_probe_status"] = "not_ready"
         base["ok"] = True
         return base
 
-    runtime_source = price_source is None
-    if runtime_source:
-        from tradingagents.strategies.execution.price_source import YFinancePriceSource
-
-        price_source = YFinancePriceSource()
     try:
+        if runtime_source:
+            price_source = build_price_source(config)
+        base["price_source_policy"] = (
+            SIP_PRICING_VERSION if primary_sip else "injected-fixture"
+        )
+        base["yahoo_dependencies"] = (
+            list(AlpacaSIPPriceSource.yahoo_dependencies) if primary_sip else []
+        )
         resolve_args = dict(
             price_source=price_source,
             metric_store=metric_store,
@@ -316,10 +353,6 @@ def _governed_snapshot_report(
             processed_at=now,
             persist=False,
         )
-        if runtime_source and resolve is resolve_governed_bars:
-            from tradingagents.strategies.execution.alpaca_daily_bar import AlpacaHistoricalSIPSource
-
-            resolve_args["alpaca_sip_source"] = AlpacaHistoricalSIPSource()
         resolution = resolve(**resolve_args)
         # Provider evidence is timestamped when retrieval completes, not when
         # the probe started. Validate it against the completion boundary so a
@@ -330,6 +363,7 @@ def _governed_snapshot_report(
             snapshot=snapshot,
             session=session,
             processed_at=validated_at,
+            pricing_version=SIP_PRICING_VERSION if primary_sip else None,
         )
     except GovernedMarketDataError as error:
         recoveries = []
@@ -432,6 +466,7 @@ def _run_governed_preflight(
                 now=now,
                 price_source=price_source,
                 resolve=resolve,
+                config=config,
             )
         return result
     except PreflightStateError as error:

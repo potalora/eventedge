@@ -10,6 +10,9 @@ import os
 import time
 from typing import Any
 
+from .request_policy import provider_request
+from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.regulations.gov/v4"
@@ -37,8 +40,10 @@ class RegulationsSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("RegulationsSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("RegulationsSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -72,6 +77,8 @@ class RegulationsSource:
         """
         import requests
 
+        if not self._api_key:
+            raise SourceFetchError("Regulations access missing", reason_code="provider_error")
         params: dict[str, Any] = {
             "filter[documentType]": document_type,
             "page[size]": page_size,
@@ -86,9 +93,8 @@ class RegulationsSource:
         # agency queries come back empty. We sort newest-first and filter by date
         # client-side below instead.
 
-        time.sleep(_RATE_DELAY)
         try:
-            resp = requests.get(
+            resp = provider_request("regulations", "GET",
                 f"{BASE_URL}/documents",
                 params=params,
                 headers={"X-Api-Key": self._api_key},
@@ -99,9 +105,17 @@ class RegulationsSource:
                 raise RuntimeError(f"regulations.gov returned {resp.status_code}")
 
             data = resp.json()
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list) or not all(isinstance(row, dict) and isinstance(row.get("attributes"), dict) for row in data["data"]):
+                raise SourceFetchError("Regulations response invalid", reason_code="invalid_response")
             results = []
+            invalid = False
             for item in data.get("data", []):
                 attrs = item.get("attributes", {})
+                if (not source_text(item.get("id"))
+                        or not all(source_text(attrs.get(key)) for key in ("title", "agencyId", "documentType"))
+                        or not source_date(attrs.get("postedDate"))):
+                    invalid = True
+                    continue
                 results.append({
                     "document_id": item.get("id", ""),
                     "title": attrs.get("title", ""),
@@ -117,35 +131,46 @@ class RegulationsSource:
                     r for r in results
                     if (r["posted_date"] or "")[:10] >= posted_date_from
                 ]
+            if invalid:
+                raise SourceFetchError("Regulations document records invalid", reason_code="invalid_response",
+                                       partial_data={"proposed_rules": results})
             return results
-        except Exception:
-            logger.error("search_documents failed", exc_info=True)
-            raise
+        except Exception as exc:
+            raise source_fetch_error("Regulations search failed", exc) from None
 
     def get_recent_proposed_rules(
         self,
         agencies: list[str] | None = None,
         days_back: int = 30,
+        *, as_of: str | None = None,
     ) -> list[dict]:
         """Get recently proposed rules, optionally filtered by agency."""
         from datetime import datetime, timedelta
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_from = ((datetime.fromisoformat(as_of) if as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         results = []
 
-        if agencies:
-            for agency in agencies:
-                docs = self.search_documents(
-                    agency_id=agency,
-                    document_type="Proposed Rule",
-                    posted_date_from=date_from,
-                )
+        failures, statuses = {}, {}
+        for agency in agencies or [None]:
+            try:
+                docs = self.search_documents(agency_id=agency, document_type="Proposed Rule",
+                                             posted_date_from=date_from)
+                if as_of:
+                    docs = [row for row in docs if (row.get("posted_date") or "")[:10] <= as_of]
                 results.extend(docs)
-        else:
-            results = self.search_documents(
-                document_type="Proposed Rule",
-                posted_date_from=date_from,
-            )
+            except SourceFetchError as exc:
+                partial = exc.partial_data.get("proposed_rules", [])
+                if as_of:
+                    partial = [row for row in partial if (row.get("posted_date") or "")[:10] <= as_of]
+                results.extend(partial)
+                identity = agency or "all_agencies"
+                failures[identity] = exc.reason_code
+                if exc.http_status is not None:
+                    statuses[identity] = exc.http_status
+        if failures:
+            raise SourceFetchError("Regulations agency coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data={"proposed_rules": results})
 
         return results
 

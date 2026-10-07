@@ -7,6 +7,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
 
 @pytest.fixture()
@@ -88,16 +89,14 @@ class TestFetchDroughtSeverity:
         mock_resp.status_code = 500
 
         with patch("requests.get", return_value=mock_resp):
-            result = source.fetch_drought_severity(["IA"], "2025-06-03", "2025-06-10")
-
-        assert result == {}
+            with pytest.raises(SourceFetchError):
+                source.fetch_drought_severity(["IA"], "2025-06-03", "2025-06-10")
 
     def test_graceful_degradation_on_network_error(self, source):
         import requests as req
         with patch("requests.get", side_effect=req.RequestException("timeout")):
-            result = source.fetch_drought_severity(["IA"], "2025-06-03", "2025-06-10")
-
-        assert result == {}
+            with pytest.raises(SourceFetchError):
+                source.fetch_drought_severity(["IA"], "2025-06-03", "2025-06-10")
 
 
 # ---------------------------------------------------------------------------
@@ -124,16 +123,13 @@ class TestFetchCompositeScore:
         mock_resp.json.return_value = []
 
         with patch("requests.get", return_value=mock_resp):
-            score = source.fetch_composite_score(["IA"], "2025-06-10")
-
-        assert score == 0.0
+            assert source.fetch_composite_score(["IA"], "2025-06-10") == 0.0
 
     def test_returns_zero_on_failure(self, source):
         import requests as req
         with patch("requests.get", side_effect=req.RequestException("fail")):
-            score = source.fetch_composite_score(["IA"], "2025-06-10")
-
-        assert score == 0.0
+            with pytest.raises(SourceFetchError):
+                source.fetch_composite_score(["IA"], "2025-06-10")
 
 
 # ---------------------------------------------------------------------------
@@ -171,3 +167,9 @@ class TestFetchDispatch:
 
         assert "composite_score" in result
         assert isinstance(result["composite_score"], float)
+
+
+@pytest.fixture(autouse=True)
+def offline_request_policy(monkeypatch):
+    monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
+    monkeypatch.setattr('time.sleep', lambda _: None)

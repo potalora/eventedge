@@ -118,6 +118,7 @@ def _run_staging_matrix(
     *,
     refetch_histories=None,
     signal_tickers=("CANDIDATE",),
+    signal_horizons=None,
     open_tickers=("OPEN",),
     pending_tickers=("PENDING",),
     governed_reference_tickers=(),
@@ -177,14 +178,18 @@ def _run_staging_matrix(
         }
         for ticker in signal_tickers
     ]
-    monkeypatch.setattr(
-        orchestrator,
-        "_screen_for_horizon",
-        lambda _data, _trading_date, _horizon: (deepcopy(signals), {}, []),
-    )
-    monkeypatch.setattr(
-        orchestrator, "_persist_horizon_health", lambda *_args, **_kwargs: True
-    )
+    from tradingagents.strategies.metrics.health import classify_strategy_run
+
+    def screen_fixture(_data, trading_date, horizon):
+        health = [classify_strategy_run(
+            epoch_id=orchestrator._epoch_id, session=date.fromisoformat(trading_date),
+            policy_id=orchestrator._policy_id_for_horizon(horizon), strategy=strategy,
+            data_sources=(), candidates=[], provider_errors={}, exception=None,
+        ) for strategy in sorted(orchestrator._active_strategy_names)]
+        selected = signals if signal_horizons is None or horizon in signal_horizons else []
+        return deepcopy(selected), {}, health
+
+    monkeypatch.setattr(orchestrator, "_screen_for_horizon", screen_fixture)
     monkeypatch.setattr(
         orchestrator,
         "_fetch_openbb_enrichment",
@@ -1045,7 +1050,49 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
             cohort["ledger"].close()
 
 
-def test_completed_cohort_projection_governs_unfinished_candidate_volatility(
+def test_completed_only_horizon_quarantine_survives_other_horizon_resume(
+    tmp_path, monkeypatch
+) -> None:
+    histories = {
+        "OPEN": _history(0.021),
+        "PENDING": _history(0.027),
+        "UI": pd.DataFrame({"Close": []}, index=pd.DatetimeIndex([])),
+    }
+    unfinished = "horizon_3m_size_5k"
+    orchestrator, first, fetch_calls = _run_staging_matrix(
+        tmp_path, monkeypatch, histories,
+        signal_tickers=("UI",), signal_horizons={"30d"},
+        fail_stage_once_name=unfinished,
+    )
+    try:
+        assert [name for name, result in first.items() if result["error"]] == [unfinished]
+        issues = orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, SESSION
+        )
+        assert len(issues) == 1
+        assert all(name.startswith("horizon_30d_") for name in issues[0].affected_cohorts)
+        accepted = {
+            path: path.read_bytes() for path in (tmp_path / "source_inputs").rglob("*.json")
+        }
+        before_fetches = list(fetch_calls)
+        replay = orchestrator.run_daily(SESSION.isoformat())
+        assert replay[unfinished]["error"] is False, replay[unfinished]
+        assert all(result["error"] is False for result in replay.values())
+        assert fetch_calls == before_fetches
+        assert all(path.read_bytes() == content for path, content in accepted.items())
+        assert orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, SESSION
+        ) == issues
+        assert all(
+            replay[name]["candidate_input_issues"] == [issues[0].reference()]
+            for name in issues[0].affected_cohorts
+        )
+    finally:
+        for cohort in orchestrator.cohorts:
+            cohort["ledger"].close()
+
+
+def test_completed_projection_resume_retains_accepted_volatility_history(
     tmp_path, monkeypatch
 ) -> None:
     histories = {
@@ -1088,17 +1135,20 @@ def test_completed_cohort_projection_governs_unfinished_candidate_volatility(
             )
             for cohort in orchestrator.cohorts
         }
+        frozen_path = next((tmp_path / "source_inputs").glob("*.json"))
+        accepted_bytes = frozen_path.read_bytes()
         histories["UI"] = pd.DataFrame(
             {"Close": []}, index=pd.DatetimeIndex([])
         )
         first_fetch_count = len(missing_fetch_calls)
         replay = orchestrator.run_daily(SESSION.isoformat())
 
-        assert [call[0] for call in missing_fetch_calls[first_fetch_count:]] == [
-            ("UI",)
-        ]
-        assert replay[unfinished_name]["error"] is True
-        assert "volatility" in replay[unfinished_name]["invalid_reason"].lower()
+        assert missing_fetch_calls[first_fetch_count:] == []
+        assert replay[unfinished_name]["error"] is False
+        assert frozen_path.read_bytes() == accepted_bytes
+        pd.testing.assert_frame_equal(
+            orchestrator.cohorts[0]["engine"]._price_cache["UI"], _history(0.031)
+        )
         assert orchestrator._metric_store.read_candidate_input_issues(
             orchestrator._epoch_id, SESSION
         ) == ()
@@ -1111,7 +1161,16 @@ def test_completed_cohort_projection_governs_unfinished_candidate_volatility(
             )
             for cohort in orchestrator.cohorts
         }
-        assert after == before
+        assert all(after[name] == counts for name, counts in before.items() if name != unfinished_name)
+        orchestrator.run_daily(SESSION.isoformat())
+        repeated = {
+            cohort["config"].name: tuple(
+                cohort["ledger"]._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("signals", "order_intents", "fills", "marks")
+            )
+            for cohort in orchestrator.cohorts
+        }
+        assert repeated == after
     finally:
         for cohort in orchestrator.cohorts:
             cohort["ledger"].close()
@@ -1169,7 +1228,7 @@ def test_stored_candidate_volatility_issue_becoming_governed_fails_before_fetch(
             cohort["ledger"].close()
 
 
-def test_stored_candidate_issue_does_not_reclassify_governed_volatility_failure(
+def test_stored_candidate_issue_resume_retains_accepted_governed_history(
     tmp_path, monkeypatch
 ) -> None:
     histories = {
@@ -1187,24 +1246,23 @@ def test_stored_candidate_issue_does_not_reclassify_governed_volatility_failure(
 
     try:
         issue_reference = next(iter(first.values()))["candidate_input_issues"][0]
+        frozen_path = next((tmp_path / "source_inputs").glob("*.json"))
+        accepted_bytes = frozen_path.read_bytes()
         histories["OPEN"] = pd.DataFrame(
             {"Close": []}, index=pd.DatetimeIndex([])
         )
         first_fetch_count = len(missing_fetch_calls)
         replay = orchestrator.run_daily(SESSION.isoformat())
 
-        assert [call[0] for call in missing_fetch_calls[first_fetch_count:]] == [
-            ("OPEN",)
-        ]
-        failed = [result for result in replay.values() if result["error"] is True]
-        assert failed
+        assert missing_fetch_calls[first_fetch_count:] == []
+        assert frozen_path.read_bytes() == accepted_bytes
+        pd.testing.assert_frame_equal(
+            orchestrator.cohorts[0]["engine"]._price_cache["OPEN"], _history(0.021)
+        )
+        assert all(result["error"] is False for result in replay.values())
         assert all(
-            result["invalid_reason"].startswith(
-                "shared staging volatility evidence failed:"
-            )
-            and "OPEN" in result["invalid_reason"]
-            and result["candidate_input_issues"] == [issue_reference]
-            for result in failed
+            result["candidate_input_issues"] == [issue_reference]
+            for result in replay.values()
         )
     finally:
         for cohort in orchestrator.cohorts:

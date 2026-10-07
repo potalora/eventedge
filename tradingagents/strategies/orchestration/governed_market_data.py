@@ -4,18 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 
 from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
 from tradingagents.strategies.execution.alpaca_daily_bar import (
+    HISTORICAL_DELAY,
     SOURCE as ALPACA_SIP_SOURCE,
     AlpacaDailyBarResult,
     AlpacaHistoricalSIPSource,
 )
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.execution.price_source import (
+    AlpacaSIPPriceSource,
     GovernedBarRecoveryEvidence,
     GovernedDailyBarResolution,
     PriceSource,
@@ -401,6 +403,7 @@ def _validate_provider_resolution(
     expected_tickers: tuple[str, ...],
     session: date,
     processed_at: datetime,
+    primary_sip: bool = False,
 ) -> None:
     expected = set(expected_tickers)
     bars = set(resolution.bars)
@@ -408,6 +411,8 @@ def _validate_provider_resolution(
     recoveries = set(resolution.recoveries)
     failures = set(resolution.failure_map)
     close_at = XNYSCalendar().session_close(session)
+    if primary_sip and recoveries:
+        raise ValueError("primary SIP prices cannot be retrospective recoveries")
     if (
         attempts != expected
         or not bars.issubset(expected)
@@ -449,11 +454,13 @@ def _validate_provider_resolution(
             validate_required_bars(
                 {(ticker, session): bar}, {ticker}, session, processed_at
             )
-            if bar.fetched_at < close_at:
+            if bar.fetched_at < close_at + (
+                HISTORICAL_DELAY if primary_sip else timedelta(0)
+            ):
                 raise ValueError("governed provider bar predates session close")
         if recovery is None and bar is not None and (
-            bar.source != "yfinance"
-            or attempt.source != "yfinance"
+            bar.source != (ALPACA_SIP_SOURCE if primary_sip else "yfinance")
+            or attempt.source != bar.source
             or attempt.validation_error is not None
             or attempt.fetched_at != bar.fetched_at
             or not _healthy_attempt_binds_bar(attempt.raw_ohlc, bar)
@@ -506,6 +513,7 @@ def resolve_governed_bars(
 
     bars: dict[str, MarketBar] = {}
     records: dict[str, GovernedBarRecoveryRecord] = {}
+    primary_sip = isinstance(price_source, AlpacaSIPPriceSource)
     unresolved: list[str] = []
     for ticker in canonical_tickers:
         if metric_store is None:
@@ -523,6 +531,9 @@ def resolve_governed_bars(
         if record is None:
             unresolved.append(ticker)
             continue
+        if primary_sip:
+            # A policy cutover cannot reinterpret accepted legacy observations.
+            raise _fail_closed((ticker,), session)
         if record.contract_version not in {
             GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
         }:
@@ -566,6 +577,7 @@ def resolve_governed_bars(
                 expected_tickers=tuple(unresolved),
                 session=session,
                 processed_at=validation_at,
+                primary_sip=primary_sip,
             )
         except Exception:
             provider_invariant_failed = True
@@ -602,7 +614,7 @@ def resolve_governed_bars(
                 raise _fail_closed((ticker,), session)
             records[ticker] = record
             bars[ticker] = provider_bar
-        if alpaca_sip_source is not None:
+        if alpaca_sip_source is not None and not primary_sip:
             for ticker in tuple(sorted(failures)):
                 yahoo_recovery = provider_resolution.recoveries.get(ticker)
                 if (

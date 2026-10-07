@@ -514,3 +514,12 @@ class TestLatestValueSeriesHandling:
         # Should return a bool without raising, regardless of veto outcome.
         result = strat._macro_vetoes("gold", "long", fred)
         assert isinstance(result, bool)
+
+
+def test_request_diagnostics_do_not_become_commodity_observations():
+    from tradingagents.strategies.modules.commodity_macro import CommodityMacroStrategy
+    strategy = CommodityMacroStrategy()
+    assert strategy.screen(
+        {'cftc': {'_request_diagnostics': [{'provider': 'cftc', 'attempts': 1}]}},
+        '2026-10-06', {'eligible_instruments': ['GLD']},
+    ) == []

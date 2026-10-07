@@ -52,15 +52,17 @@ def _snapshot(state):
 
 
 def _envelope():
-    return "EVENTEDGE_DAILY_RESULT_V1=" + json.dumps(
+    return "EVENTEDGE_DAILY_RESULT_V2=" + json.dumps(
         {
-            "wire_version": 1,
+            "wire_version": 2,
             "cohort_results": {
                 cohort.name: {
                     "error": False,
                     "degraded": False,
                     "execution_valid": True,
                     "staging_valid": True,
+                    "input_coverage_valid": True,
+                    "source_health_failures": [],
                 }
                 for cohort in build_default_cohorts({})
             },

@@ -12,6 +12,9 @@ from typing import Any
 
 import pandas as pd
 
+from .request_policy import provider_call
+from .fetch_errors import SourceFetchError, source_date, source_number, source_text
+
 logger = logging.getLogger(__name__)
 
 # Column names in the cot_reports library output (disaggregated report)
@@ -51,8 +54,10 @@ class CFTCSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("CFTCSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("CFTCSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -86,7 +91,16 @@ class CFTCSource:
         from datetime import datetime
 
         year = datetime.now().year
-        df = cot.cot_year(year, cot_report_type=cot_type)
+        df = provider_call("cftc", "cot_report", lambda: cot.cot_year(year, cot_report_type=cot_type))
+        if not isinstance(df, pd.DataFrame) or not {COL_MARKET, COL_DATE, COL_MM_LONG, COL_MM_SHORT}.issubset(df.columns):
+            raise SourceFetchError("CFTC report invalid", reason_code="invalid_response")
+        valid = df[COL_MARKET].map(source_text) & df[COL_DATE].map(lambda value: source_date(str(value)))
+        for column in (COL_MM_LONG, COL_MM_SHORT):
+            values = pd.to_numeric(df[column], errors="coerce")
+            valid &= values.map(lambda value: source_number(value, minimum=0))
+        if not valid.all():
+            raise SourceFetchError("CFTC report records invalid", reason_code="invalid_response",
+                                   partial_data={"raw_report": df[valid].copy()})
 
         self._cache[report_type] = df
         return df
@@ -100,20 +114,26 @@ class CFTCSource:
         commodities = params.get("commodities", list(COMMODITY_CODES.keys()))
         lookback_weeks = params.get("lookback_weeks", 52)
 
-        df = self._fetch_raw_report("disaggregated_futures")
-
         results: dict[str, dict[str, Any]] = {}
+        failures = {}
+        try:
+            df = self._fetch_raw_report("disaggregated_futures")
+        except SourceFetchError as exc:
+            df = exc.partial_data.get("raw_report")
+            if not isinstance(df, pd.DataFrame):
+                raise
+            failures["cot_report"] = exc.reason_code
         for commodity in commodities:
             code = COMMODITY_CODES.get(commodity)
             if code is None:
-                logger.warning("Unknown commodity: %s", commodity)
+                failures[commodity] = "invalid_response"
                 continue
 
             mask = df[COL_MARKET].str.contains(code, na=False)
             commodity_df = df[mask].copy()
 
             if commodity_df.empty:
-                logger.warning("No COT data for %s (%s)", commodity, code)
+                failures[commodity] = "invalid_response"
                 continue
 
             commodity_df["date"] = pd.to_datetime(commodity_df[COL_DATE])
@@ -121,11 +141,7 @@ class CFTCSource:
             commodity_df = commodity_df.tail(lookback_weeks)
 
             if len(commodity_df) < 4:
-                logger.warning(
-                    "Insufficient COT data for %s: %d weeks",
-                    commodity,
-                    len(commodity_df),
-                )
+                failures[commodity] = "invalid_response"
                 continue
 
             commodity_df["net_spec"] = commodity_df[COL_MM_LONG].astype(
@@ -161,6 +177,9 @@ class CFTCSource:
                 "window_end": report_date,
             }
 
+        if failures:
+            raise SourceFetchError("CFTC commodity coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, partial_data=results)
         return results
 
     def clear_cache(self) -> None:

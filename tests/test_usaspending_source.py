@@ -106,13 +106,13 @@ class TestSearchContractsNormalization:
         assert contract["award_id"] == "AWARD-1"
         assert contract["recipient_name"] == "LOCKHEED MARTIN CORP"
 
-    def test_missing_date_fields_become_empty(self, source):
+    def test_missing_required_award_fields_fail_visibly(self, source):
+        from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
         row = {"Award ID": "AWARD-2", "Recipient Name": "BOEING CO"}
         with patch("requests.post", return_value=_api_response([row])):
-            results = source.search_contracts()
-
-        assert results[0]["last_modified_date"] == ""
-        assert results[0]["start_date"] == ""
+            with pytest.raises(SourceFetchError, match="invalid_response"):
+                source.search_contracts()
+        assert not source._cache
 
     def test_recent_large_contracts_normalized(self, source):
         with patch("requests.post", return_value=_api_response([API_ROW])):
@@ -179,3 +179,9 @@ class TestGovtContractsStagingRegression:
                     "last_modified_date": "2026-07-07 17:57:06",
                 },
             )
+
+
+@pytest.fixture(autouse=True)
+def offline_request_policy(monkeypatch):
+    monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
+    monkeypatch.setattr('time.sleep', lambda _: None)

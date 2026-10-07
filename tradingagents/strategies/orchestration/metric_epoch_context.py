@@ -35,6 +35,8 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "execution",
         "schema_version",
         "pricing_contract",
+        "price_source_policy",
+        "benchmark_price_source_policy",
         "execution_clock_contract",
         "cost_model_contract",
         "calendar",
@@ -150,13 +152,20 @@ def _validate_execution_policy_schema(policy: object) -> None:
         raise ValueError(
             f"unexpected execution_policy key {sorted(unexpected)[0]!r}"
         )
-    # The field is optional only for historical/legacy policy documents. New
-    # profile-bound executors always emit it (as a document, never implicitly).
-    missing = (_EXECUTION_POLICY_KEYS - {"portfolio_policy"}) - actual
+    # Explicitly injected fixture documents may omit runtime provider policy.
+    optional = {
+        "portfolio_policy", "price_source_policy", "benchmark_price_source_policy"
+    }
+    missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
         )
+    source_keys = {"price_source_policy", "benchmark_price_source_policy"}
+    if actual & source_keys and not source_keys.issubset(actual):
+        raise ValueError("execution_policy price source policy pair is incomplete")
+    for key in actual & source_keys:
+        _required_text(f"execution_policy.{key}", policy[key])
     for container, allowed in _NESTED_POLICY_KEYS.items():
         nested = policy[container]
         if not isinstance(nested, dict):
@@ -281,6 +290,12 @@ def build_epoch_context(
         raise ValueError("duplicate cohort name")
 
     sorted_policies = tuple(sorted(cohort_policies, key=lambda row: row.name))
+    source_versions = {
+        row.execution_policy.get("price_source_policy", PRICING_VERSION)
+        for row in sorted_policies
+    }
+    if len(source_versions) > 1:
+        raise ValueError("cohort price source policies conflict")
     policy_document = [asdict(policy) for policy in sorted_policies]
     behavior_hash = stable_id(
         "metric_behavior",
@@ -296,6 +311,6 @@ def build_epoch_context(
         behavior_hash=behavior_hash,
         config_hash=config_hash,
         execution_clock_version=EXECUTION_CLOCK_VERSION,
-        pricing_version=PRICING_VERSION,
+        pricing_version=next(iter(source_versions), PRICING_VERSION),
         cost_model_version=COST_MODEL_VERSION,
     )

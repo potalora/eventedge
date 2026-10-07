@@ -201,7 +201,7 @@ DEFAULT_CONFIG = {
         "paper_ledger": {
             "schema_version": 1,
             "calendar": "XNYS",
-            "pricing_version": "raw-yfinance-v1",
+            "pricing_version": "raw-alpaca-sip-v1",
             "execution_clock_version": "next-xnys-open-v1",
             "cost_model_version": "equity-10bps-v1",
             "slippage_bps": "10",

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tradingagents.strategies.data_sources.usda_source import USDASource
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
 
@@ -25,8 +26,17 @@ def test_source_invalid_latest_prompt_does_not_impute_zero_or_old_decline(latest
         records.extend([dict(records[-1], unit_desc="PCT GOOD", Value=value) for value in ["10", "20"]])
     response = MagicMock(status_code=200)
     response.json.return_value = {"data": records}
+    source = USDASource(api_key="test-only")
     with patch("requests.get", return_value=response):
-        rows = USDASource(api_key="test-only").fetch_crop_progress("CORN", 2026, "IA")
+        with pytest.raises(SourceFetchError) as failure:
+            source.fetch_crop_progress("CORN", 2026, "IA")
+    assert failure.value.reason_code == "invalid_response"
+    rows = failure.value.partial_data["crop_progress"]["CORN"]
+    assert source._cache == {}
+    latest_row = next(row for row in rows if row["week_ending"] == "2026-09-20")
+    assert latest_row["condition_valid"] is False
+    assert "good_pct" not in latest_row and "excellent_pct" not in latest_row
+    assert [row["good_pct"] for row in rows[:-1]] == [80, 60]
     text = prompt(rows)
     assert "2026-09-20" in text
     assert "IA" in text

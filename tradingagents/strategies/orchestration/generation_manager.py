@@ -135,6 +135,8 @@ def _daily_history_entry(result: dict, trading_date: str) -> dict:
         history_entry["degraded"] = True
     for key in (
         "execution_valid",
+        "input_coverage_valid",
+        "source_health_failures",
         "candidate_bar_quarantines",
         "error",
         "evidence_path",
@@ -196,6 +198,7 @@ def _valid_daily_cohort_results(
     from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
     )
+    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         build_default_cohorts,
     )
@@ -207,6 +210,7 @@ def _valid_daily_cohort_results(
         candidate_issues = aggregate_candidate_input_issues(
             cohort_results, trading_date
         )
+        aggregate_source_health_failures(cohort_results, trading_date, require_coverage=True)
     except ValueError:
         return False
     affected_by_issue = {
@@ -947,6 +951,7 @@ class GenerationManager:
         env["PYTHONPATH"] = str(Path(gen_data["worktree_path"]).resolve())
         env["EVENTEDGE_GENERATION_ID"] = gen_data["gen_id"]
         env["EVENTEDGE_GENERATION_COMMIT"] = gen_data["git_commit"]
+        env.setdefault("EVENTEDGE_SOURCE_CACHE_DIR", str(Path(getattr(self, "_repo_root", gen_data["worktree_path"])) / "data" / "source_cache"))
         pass_fds: tuple[int, ...] = ()
         if inherited_lock is not None:
             inherited_fd = int(getattr(inherited_lock, "fd"))
@@ -1079,6 +1084,8 @@ class GenerationManager:
                         failure["governed_failure_map"] = governed_failures
                     if candidate_issues:
                         failure["candidate_input_issues"] = candidate_issues
+                    failure["input_coverage_valid"] = summary.input_coverage_valid
+                    failure["source_health_failures"] = list(summary.source_health_failures)
                     return failure
 
                 if n_degraded:
@@ -1110,6 +1117,8 @@ class GenerationManager:
                         degraded_result["governed_failure_map"] = governed_failures
                     if candidate_issues:
                         degraded_result["candidate_input_issues"] = candidate_issues
+                    degraded_result["input_coverage_valid"] = summary.input_coverage_valid
+                    degraded_result["source_health_failures"] = list(summary.source_health_failures)
                     return degraded_result
 
             if proc.returncode != 0:
@@ -1138,6 +1147,9 @@ class GenerationManager:
             return {
                 "outcome": RunOutcome.CLEAN.value,
                 "success": True,
+                "execution_valid": summary.execution_valid,
+                "input_coverage_valid": summary.input_coverage_valid,
+                "source_health_failures": list(summary.source_health_failures),
                 "elapsed_s": round(elapsed, 2),
             }
 

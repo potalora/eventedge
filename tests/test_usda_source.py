@@ -7,6 +7,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
 
 @pytest.fixture()
@@ -147,16 +148,14 @@ class TestFetchCropProgress:
         mock_resp.status_code = 500
 
         with patch("requests.get", return_value=mock_resp):
-            result = source.fetch_crop_progress("CORN", 2025)
-
-        assert result == []
+            with pytest.raises(SourceFetchError):
+                source.fetch_crop_progress("CORN", 2025)
 
     def test_graceful_degradation_on_network_error(self, source):
         import requests as req
         with patch("requests.get", side_effect=req.RequestException("timeout")):
-            result = source.fetch_crop_progress("CORN", 2025)
-
-        assert result == []
+            with pytest.raises(SourceFetchError):
+                source.fetch_crop_progress("CORN", 2025)
 
     def test_handles_missing_value_field(self, source):
         response = {"data": [{
@@ -171,14 +170,16 @@ class TestFetchCropProgress:
         mock_resp.json.return_value = response
 
         with patch("requests.get", return_value=mock_resp):
-            result = source.fetch_crop_progress("CORN", 2025)
+            with pytest.raises(SourceFetchError) as exc:
+                source.fetch_crop_progress("CORN", 2025)
+            result = exc.value.partial_data["crop_progress"]["CORN"]
 
         # Non-numeric values should be skipped gracefully
         assert isinstance(result, list)
 
     def test_no_key_returns_empty(self, source_no_key):
-        result = source_no_key.fetch_crop_progress("CORN", 2025)
-        assert result == []
+        with pytest.raises(SourceFetchError):
+            source_no_key.fetch_crop_progress("CORN", 2025)
 
 
 # ---------------------------------------------------------------------------
@@ -207,24 +208,29 @@ class TestIncidentRegression:
         response = MagicMock(status_code=200)
         response.json.return_value = MOCK_NASS_RESPONSE
         with patch("requests.get", return_value=response) as get:
-            source.fetch_crop_progress("CORN", 2026, "IA,IL")
+            source.fetch_crop_progress("CORN", 2025, "IA,IL")
         params = get.call_args.kwargs["params"]
         assert params["state_alpha"] == ["IA", "IL"]
         assert "unit_desc" not in params
         assert params["agg_level_desc"] == "STATE"
 
     def test_cache_respects_requested_states(self, source):
-        response = MagicMock(status_code=200)
-        response.json.return_value = MOCK_NASS_RESPONSE
-        with patch("requests.get", return_value=response) as get:
+        def request(url, **kwargs):
+            response = MagicMock(status_code=200)
+            state = kwargs["params"]["state_alpha"][0]
+            response.json.return_value = {"data": [dict(row, state_alpha=state, week_ending="2026-06-15") for row in MOCK_NASS_RESPONSE["data"]]}
+            return response
+        with patch("requests.get", side_effect=request) as get:
             source.fetch_crop_progress("CORN", 2026, "IA")
             source.fetch_crop_progress("CORN", 2026, "IL")
         assert get.call_count == 2
 
     def test_primary_failure_still_falls_back_for_next_crop(self, source):
-        source._unavailable = True
-        with patch.object(source, "_esmis_fallback", return_value=[{"state": "IA"}]) as fallback:
-            assert source.fetch_crop_progress("SOYBEANS", 2026) == [{"state": "IA"}]
+        import requests
+        with patch("requests.get", side_effect=requests.Timeout("offline")), patch.object(source, "_esmis_fallback", return_value=[{"state": "IA"}]) as fallback:
+            with pytest.raises(SourceFetchError) as exc:
+                source.fetch_crop_progress("SOYBEANS", 2026)
+        assert exc.value.partial_data["crop_progress"]["SOYBEANS"] == [{"state": "IA"}]
         fallback.assert_called_once()
 
     def test_esmis_singular_soybean_and_default_state_scope(self, source):
@@ -248,7 +254,7 @@ class TestIncidentRegression:
             dict(MOCK_NASS_RESPONSE["data"][1], class_desc="SPRING", Value="40"),
         ]}
         with patch("requests.get", return_value=response):
-            rows = source.fetch_crop_progress("WHEAT", 2026, "IA")
+            rows = source.fetch_crop_progress("WHEAT", 2025, "IA")
         assert {(r["crop_class"], r["excellent_pct"]) for r in rows} == {("WINTER", 10), ("SPRING", 30)}
 
     @pytest.mark.parametrize("latest_good", [None, "(D)", "not-a-number", "-1", "101"])
@@ -265,7 +271,9 @@ class TestIncidentRegression:
         response = MagicMock(status_code=200)
         response.json.return_value = {"data": rows}
         with patch("requests.get", return_value=response):
-            observations = source.fetch_crop_progress("CORN", 2026, "IA")
+            with pytest.raises(SourceFetchError) as exc:
+                source.fetch_crop_progress("CORN", 2026, "IA")
+            observations = exc.value.partial_data["crop_progress"]["CORN"]
         assert len(observations) == 2
         assert observations[-1]["condition_valid"] is False
         assert "good_pct" not in observations[-1]
@@ -285,7 +293,9 @@ class TestIncidentRegression:
         response = MagicMock(status_code=200)
         response.json.return_value = {"data": rows}
         with patch("requests.get", return_value=response):
-            observations = source.fetch_crop_progress("CORN", 2026, "IA")
+            with pytest.raises(SourceFetchError) as exc:
+                source.fetch_crop_progress("CORN", 2026, "IA")
+            observations = exc.value.partial_data["crop_progress"]["CORN"]
         assert len(observations) == 2
         assert observations[-1]["condition_valid"] is False
         assert "good_pct" not in observations[-1]
@@ -311,9 +321,17 @@ class TestIncidentRegression:
             for week, unit, value in observations
         ]}
         with patch("requests.get", return_value=response):
-            rows = source.fetch_crop_progress("CORN", 2026, "IA")
+            with pytest.raises(SourceFetchError) as exc:
+                source.fetch_crop_progress("CORN", 2026, "IA")
+            rows = exc.value.partial_data["crop_progress"]["CORN"]
         assert WeatherAgStrategy._check_crop_decline({"crop_progress": {"CORN": rows}}) == 0
         assert rows[-1]["week_ending"] == "2026-09-20"
         assert rows[-1]["condition_valid"] is False
         assert "good_pct" not in rows[-1]
         assert "excellent_pct" not in rows[-1]
+
+
+@pytest.fixture(autouse=True)
+def offline_request_policy(monkeypatch):
+    monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
+    monkeypatch.setattr('time.sleep', lambda _: None)

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
 from tradingagents.strategies.data_sources.finnhub_source import FinnhubSource
 
@@ -168,9 +169,9 @@ def test_malformed_earnings_date_degrades_without_starting_request(caplog):
     )
 
     with caplog.at_level("INFO"):
-        result = src.fetch_earnings_news("AAPL", "not-a-date")
+        with pytest.raises(SourceFetchError):
+            result = src.fetch_earnings_news("AAPL", "not-a-date")
 
-    assert result == []
     assert session.calls == []
     assert "error_type=ValueError" in caplog.text
     assert "error_message=" in caplog.text
@@ -292,16 +293,16 @@ def test_earnings_retry_exhaustion_returns_empty_and_logs_final_state(caplog):
     )
 
     with caplog.at_level("INFO"):
-        result = src.fetch_recent_earnings("2026-07-23", "2026-07-30")
+        with pytest.raises(SourceFetchError):
+            result = src.fetch_recent_earnings("2026-07-23", "2026-07-30")
 
-    assert result == []
     assert len(session.calls) == 3
     assert sum(clock.sleeps) == 3.0
     assert "exhausted strategy=earnings_call endpoint=earnings_calendar" in caplog.text
     assert "attempt=3/3" in caplog.text
     assert "degraded" in caplog.text
     assert "error_type=ReadTimeout" in caplog.text
-    assert "error_message=three token=<redacted>" in caplog.text
+    assert "Finnhub acquisition failed [timeout]" in caplog.text
     assert "token=not-real" not in caplog.text
 
 
@@ -318,14 +319,14 @@ def test_permanent_4xx_is_not_retried_and_degrades_gracefully(caplog):
     )
 
     with caplog.at_level("INFO"):
-        result = src.fetch_supply_chain("AAPL")
+        with pytest.raises(SourceFetchError):
+            result = src.fetch_supply_chain("AAPL")
 
-    assert result == []
     assert len(session.calls) == 1
     assert clock.sleeps == []
     assert "non_retryable strategy=supply_chain endpoint=company_peers" in caplog.text
     assert "status=400" in caplog.text
-    assert "error_type=HTTPError error_message=status 400" in caplog.text
+    assert "http_error; http_status=400" in caplog.text
 
 
 def test_attempts_and_backoff_are_bounded_by_policy():
@@ -347,7 +348,8 @@ def test_attempts_and_backoff_are_bounded_by_policy():
         http_session=session,
     )
 
-    assert src.fetch_recent_earnings("2026-07-23", "2026-07-30") == []
+    with pytest.raises(SourceFetchError):
+        src.fetch_recent_earnings("2026-07-23", "2026-07-30")
     assert src._policies["earnings_calendar"].max_attempts == 4
     assert len(session.calls) == 4
     assert clock.sleeps == [3.0, 3.0, 3.0]
@@ -390,7 +392,9 @@ def test_supply_chain_batch_continues_after_symbol_failure():
         http_session=session,
     )
 
-    result = src.fetch_supply_chains(["AAPL", "AMZN", "BA"])
+    with pytest.raises(SourceFetchError) as exc:
+        result = src.fetch_supply_chains(["AAPL", "AMZN", "BA"])
+    result = exc.value.partial_data
 
     assert list(result) == ["AAPL", "BA"]
     assert [call["params"]["symbol"] for call in session.calls] == [
@@ -432,7 +436,9 @@ def test_batch_retains_success_and_starts_no_retry_or_request_after_deadline(cap
     )
 
     with caplog.at_level("INFO"):
-        result = src.fetch_supply_chains(["AAPL", "AMZN", "BA", "CAT"])
+        with pytest.raises(SourceFetchError) as exc:
+            result = src.fetch_supply_chains(["AAPL", "AMZN", "BA", "CAT"])
+        result = exc.value.partial_data
 
     assert result == {
         "AAPL": [{"ticker": "MSFT", "relationship": "peer"}],
@@ -457,12 +463,10 @@ def test_expired_shared_deadline_starts_no_request():
         http_session=session,
     )
 
-    assert src.fetch_recent_earnings(
-        "2026-07-23",
-        "2026-07-30",
-        deadline=clock.now,
-    ) == []
-    assert src.fetch_supply_chains(["AAPL"], deadline=clock.now) == {}
+    with pytest.raises(SourceFetchError):
+        src.fetch_recent_earnings("2026-07-23", "2026-07-30", deadline=clock.now)
+    with pytest.raises(SourceFetchError):
+        src.fetch_supply_chains(["AAPL"], deadline=clock.now)
     assert session.calls == []
     assert clock.sleeps == []
 
@@ -497,6 +501,7 @@ def test_aggregate_finnhub_fetch_uses_one_deadline_and_preserves_results():
             "headline": "Guidance raised",
             "summary": "Demand remains strong",
             "source": "wire",
+            "datetime": 1785412800,
         }]
 
     session = _FakeSession(

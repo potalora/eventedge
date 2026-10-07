@@ -27,6 +27,27 @@ fi
 
 LOG_FILE="$LOG_DIR/daily_${TODAY}.log"
 
+# Read the finalized evidence even when the governed gate or daily command fails.
+# A reporting failure is visible without rewriting the ledger or worker outcome.
+write_operational_report() {
+    local run_status=$?
+    trap - EXIT
+    echo "=== Operational report: $TODAY ===" >> "$LOG_FILE"
+    if "$VENV_PYTHON" "$REPO_ROOT/scripts/generate_operational_report.py" \
+        --repo-root "$REPO_ROOT" --all-active --date "$TODAY" \
+        --output-dir "$REPO_ROOT/docs/reports" >> "$LOG_FILE" 2>&1; then
+        :
+    else
+        local report_status=$?
+        echo "OPERATIONAL REPORT INCOMPLETE for $TODAY (exit $report_status)" >> "$LOG_FILE"
+        if [ "$run_status" -eq 0 ]; then
+            run_status=$report_status
+        fi
+    fi
+    exit "$run_status"
+}
+trap write_operational_report EXIT
+
 # Prevent the Mac from sleeping mid-run. On battery the system enters
 # "Maintenance Sleep" and suspends this process: that suspended the run for
 # most of its window on 2026-06-15 (killed by the 3600s wall) and 2026-06-16
@@ -58,7 +79,4 @@ else
     "${RUN_CMD[@]}" >> "$LOG_FILE" 2>&1
 fi
 
-# Daily report is intentionally NOT generated here. Per project convention,
-# Codex writes the report from ledger-derived JSON projections under
-# data/generations/gen_NNN/horizon_*/ into docs/reports/YYYY-MM-DD-genNNN-daily-report.md.
-echo "=== Done (report written separately by Codex): $(date) ===" >> "$LOG_FILE"
+echo "=== Daily command completed: $(date) ===" >> "$LOG_FILE"

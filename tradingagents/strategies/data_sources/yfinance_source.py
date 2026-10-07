@@ -7,6 +7,9 @@ from typing import Any
 
 import pandas as pd
 
+from .request_policy import provider_call, provider_timeout
+from .fetch_errors import SourceFetchError, source_fetch_error, source_number
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,8 +61,10 @@ class YFinanceSource:
             return {"error": f"Unknown method '{method}'"}
         try:
             return handler(params)
+        except SourceFetchError as exc:
+            return {**exc.partial_data, "error": str(exc)}
         except Exception:
-            logger.error("YFinanceSource.fetch(%s) failed", method, exc_info=True)
+            logger.error("YFinanceSource.fetch(%s) failed", method)
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
@@ -89,7 +94,7 @@ class YFinanceSource:
 
         Returns:
             DataFrame with MultiIndex columns (Price, Ticker) or single-level
-            columns for a single ticker.  Returns empty DataFrame on failure.
+            columns for a single ticker. Failures retain usable partial history.
         """
         cache_key = f"prices|{'_'.join(sorted(tickers))}|{start}|{end}"
         if cache_key in self._cache:
@@ -99,17 +104,18 @@ class YFinanceSource:
 
         try:
             yf_tickers = normalize_tickers(tickers)
-            df = yf.download(
+            df = provider_call("yfinance", "history", lambda: yf.download(
                 yf_tickers,
                 start=start,
                 end=end,
                 auto_adjust=False,
                 progress=False,
-                timeout=30,
-            )
-            if df.empty:
-                logger.warning("yfinance returned empty DataFrame for %s", tickers)
-                return df
+                timeout=provider_timeout("yfinance", 30),
+            ))
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                # yfinance also returns an empty frame for swallowed HTTP failures;
+                # research history needs explicit usable observations.
+                raise SourceFetchError("Yahoo research history unavailable", reason_code="invalid_response")
 
             # Remap normalized ticker names back to original names so callers
             # can continue using original ticker symbols (e.g. BRK/B).
@@ -123,14 +129,25 @@ class YFinanceSource:
             elif len(tickers) == 1:
                 df.columns = pd.MultiIndex.from_product([df.columns, tickers])
 
-            # Drop NaN-only rows
-            df = df.dropna(how="all")
-
+            partial_frames, failures = [], {}
+            for ticker in tickers:
+                try:
+                    close = df[("Close", ticker)]
+                    usable = close.map(lambda value: source_number(value, minimum=0) and value > 0)
+                    if usable.any():
+                        partial_frames.append(df.loc[usable, df.columns.get_level_values(1) == ticker])
+                    if not usable.any() or (close.notna() & ~usable).any() or not usable.iloc[-1]:
+                        raise ValueError("unusable Close")
+                except (KeyError, ValueError, TypeError):
+                    failures[ticker] = "invalid_response"
+            if failures:
+                partial = pd.concat(partial_frames, axis=1) if partial_frames else pd.DataFrame()
+                raise SourceFetchError("Yahoo symbol history incomplete", reason_code="invalid_response",
+                                       failed_operations=failures, partial_data={"prices": partial})
             self._cache[cache_key] = df
             return df
-        except Exception:
-            logger.error("fetch_prices failed for %s", tickers, exc_info=True)
-            return pd.DataFrame()
+        except Exception as exc:
+            raise source_fetch_error("Yahoo research history failed", exc) from None
 
     def fetch_etf_returns(
         self,
@@ -174,7 +191,7 @@ class YFinanceSource:
         """Get ^VIX history between *start* and *end*.
 
         Returns:
-            DataFrame with OHLCV columns for VIX, or empty DataFrame.
+            DataFrame with validated VIX closes; failures remain explicit.
         """
         cache_key = f"vix|{start}|{end}"
         if cache_key in self._cache:
@@ -183,22 +200,29 @@ class YFinanceSource:
         import yfinance as yf
 
         try:
-            df = yf.download(
+            df = provider_call("yfinance", "history", lambda: yf.download(
                 "^VIX",
                 start=start,
                 end=end,
                 auto_adjust=False,
                 progress=False,
-                timeout=30,
-            )
+                timeout=provider_timeout("yfinance", 30),
+            ))
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                raise SourceFetchError("Yahoo VIX history unavailable", reason_code="invalid_response")
             # Flatten MultiIndex if present (single ticker)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
+            if "Close" not in df:
+                raise SourceFetchError("Yahoo VIX observations invalid", reason_code="invalid_response")
+            usable = df["Close"].map(lambda value: source_number(value, minimum=0) and value > 0)
+            if not usable.any() or (df["Close"].notna() & ~usable).any() or not usable.iloc[-1]:
+                raise SourceFetchError("Yahoo VIX observations invalid", reason_code="invalid_response",
+                                       partial_data={"vix": df.loc[usable]})
             self._cache[cache_key] = df
             return df
-        except Exception:
-            logger.error("fetch_vix failed", exc_info=True)
-            return pd.DataFrame()
+        except Exception as exc:
+            raise source_fetch_error("Yahoo VIX history failed", exc) from None
 
     def fetch_earnings_dates(
         self, tickers: list[str]
@@ -219,10 +243,11 @@ class YFinanceSource:
         import yfinance as yf
 
         results: dict[str, list[dict[str, Any]]] = {}
+        failures, statuses = {}, {}
         for ticker in tickers:
             try:
                 tk = yf.Ticker(normalize_ticker(ticker))
-                cal = tk.get_earnings_dates(limit=8)
+                cal = provider_call("yfinance", "earnings_dates", lambda: tk.get_earnings_dates(limit=8))
                 if cal is None or cal.empty:
                     results[ticker] = []
                     continue
@@ -235,12 +260,15 @@ class YFinanceSource:
                         "surprise_pct": _safe_float(row.get("Surprise(%)")),
                     })
                 results[ticker] = records
-            except Exception:
-                logger.warning("earnings_dates failed for %s", ticker, exc_info=True)
-                results[ticker] = []
-            # Rate-limit between tickers
-            time.sleep(0.15)
-
+            except Exception as exc:
+                error = source_fetch_error("Yahoo earnings dates failed", exc)
+                failures[ticker] = error.reason_code
+                if error.http_status is not None:
+                    statuses[ticker] = error.http_status
+        if failures:
+            raise SourceFetchError("Yahoo earnings coverage incomplete", reason_code="batch_failure",
+                                   failed_operations=failures, failed_http_statuses=statuses,
+                                   partial_data={"earnings_dates": results})
         self._cache[cache_key] = results
         return results
 

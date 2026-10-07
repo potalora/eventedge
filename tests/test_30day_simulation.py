@@ -491,7 +491,7 @@ def _authoritative_orchestrator(
             price_source=source,
         )
     for cohort in orchestrator.cohorts:
-        cohort["engine"]._fetch_all_data = lambda start, end: {}
+        cohort["engine"]._fetch_all_data = lambda start, end: {"yfinance": {}}
     orchestrator._fetch_openbb_enrichment = lambda signals: {}
     return orchestrator, source
 
@@ -1446,6 +1446,8 @@ class TestIdempotencyDoubleRun:
         assert result["cohort_0"] == {
             "error": True,
             "invalid_reason": "candidate reference-bar validation failed",
+            "input_coverage_valid": True,
+            "source_health_failures": [],
             "degraded": True,
             "execution_valid": True,
             "staging_valid": False,

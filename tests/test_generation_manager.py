@@ -101,7 +101,7 @@ def _init_empty_git_repo(path: Path) -> None:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
 
 
-_DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V1="
+_DAILY_RESULT_PREFIX = "EVENTEDGE_DAILY_RESULT_V2="
 
 
 def _valid_daily_results():
@@ -115,6 +115,8 @@ def _valid_daily_results():
             "degraded": False,
             "execution_valid": True,
             "staging_valid": True,
+            "input_coverage_valid": True,
+            "source_health_failures": [],
         }
         for cohort in build_default_cohorts({})
     }
@@ -133,7 +135,7 @@ def _candidate_issue_reference(*, affected_cohorts):
 
 
 def _valid_daily_stdout(*, log_line=""):
-    envelope = {"wire_version": 1, "cohort_results": _valid_daily_results()}
+    envelope = {"wire_version": 2, "cohort_results": _valid_daily_results()}
     return f"{log_line}{_DAILY_RESULT_PREFIX}{json.dumps(envelope)}\n"
 
 
@@ -653,6 +655,9 @@ class TestGenerationDailyRun:
         assert result == {
             "outcome": "clean",
             "success": True,
+            "execution_valid": True,
+            "input_coverage_valid": True,
+            "source_health_failures": [],
             "elapsed_s": result["elapsed_s"],
             "evidence_error": "archive unavailable: token=<redacted>",
         }
@@ -1064,6 +1069,8 @@ class TestGenerationDailyRun:
                 "degraded": True,
                 "execution_valid": False,
                 "staging_valid": False,
+                "input_coverage_valid": True,
+                "source_health_failures": [],
                 "candidate_input_issues": [dict(reference)],
             }
         process = MagicMock(
@@ -1071,7 +1078,7 @@ class TestGenerationDailyRun:
             stdout=(
                 _DAILY_RESULT_PREFIX
                 + json.dumps(
-                    {"wire_version": 1, "cohort_results": cohort_results}
+                    {"wire_version": 2, "cohort_results": cohort_results}
                 )
                 + "\n"
             ),
@@ -1107,7 +1114,7 @@ class TestGenerationDailyRun:
             stdout=(
                 _DAILY_RESULT_PREFIX
                 + json.dumps(
-                    {"wire_version": 1, "cohort_results": cohort_results}
+                    {"wire_version": 2, "cohort_results": cohort_results}
                 )
             ),
             stderr="",
@@ -1138,6 +1145,8 @@ class TestGenerationDailyRun:
             "degraded": False,
             "execution_valid": True,
             "staging_valid": False,
+            "input_coverage_valid": True,
+            "source_health_failures": [],
             "candidate_bar_quarantines": [],
         }
         process = MagicMock(
@@ -1145,7 +1154,7 @@ class TestGenerationDailyRun:
             stdout=(
                 _DAILY_RESULT_PREFIX
                 + json.dumps(
-                    {"wire_version": 1, "cohort_results": cohort_results}
+                    {"wire_version": 2, "cohort_results": cohort_results}
                 )
             ),
             stderr="",

@@ -59,7 +59,7 @@ def test_fmp_latest_fetches_both_chambers_and_normalizes():
 
 def test_fmp_results_are_cached_without_more_api_calls():
     source = CongressSource(fmp_api_key="test-key")
-    payload = [{"symbol": "AAPL", "transactionDate": "2026-07-08"}]
+    payload = [{"symbol": "AAPL", "transactionDate": "2026-07-08", "disclosureDate": "2026-07-13", "office": "Jane Doe", "type": "Purchase", "amount": "$1,001 - $15,000"}]
 
     with patch("requests.get", side_effect=[_response(payload), _response([])]) as get:
         first = source.fetch_all_trades()
@@ -72,8 +72,8 @@ def test_fmp_results_are_cached_without_more_api_calls():
 def test_recent_trades_excludes_records_after_as_of_date():
     source = CongressSource()
     source._cache["all_trades"] = [
-        {"ticker": "PAST", "transaction_date": "2026-03-15"},
-        {"ticker": "FUTURE", "transaction_date": "2026-04-05"},
+        {"ticker": "PAST", "transaction_date": "2026-03-15", "publication_date": "2026-03-16"},
+        {"ticker": "FUTURE", "transaction_date": "2026-04-05", "publication_date": "2026-04-06"},
     ]
 
     recent = source.get_recent_trades(days_back=30, as_of="2026-04-03")
