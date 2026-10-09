@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
-from .request_policy import provider_request
+from .evidence import current_session_date, CoverageRecords, collection_envelope
+from .request_policy import provider_request, provider_budget, current_provider_deadline
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +93,43 @@ class USASpendingSource:
     # Public data methods
     # ------------------------------------------------------------------
 
-    def search_contracts(
+    def search_contracts(self, keywords: list[str] | None = None, recipient: str | None = None,
+                         date_from: str | None = None, date_to: str | None = None,
+                         min_amount: float | None = None) -> list[dict[str, Any]]:
+        """Exhaust contract windows; budget failures retain incomplete evidence."""
+        if current_provider_deadline("usaspending") is None:
+            with provider_budget("usaspending", time.monotonic() + 60):
+                return self.search_contracts(keywords, recipient, date_from, date_to, min_amount)
+        records, seen, page = [], set(), 1
+        while True:
+            try:
+                rows = self._search_contracts_page(keywords, recipient, date_from, date_to, min_amount, page)
+            except SourceFetchError as exc:
+                exc.partial_data = {"contracts":records + exc.partial_data.get("contracts",[]),
+                                    "coverage":{"mode":"exhaustive_window", "complete":False}}
+                raise
+            for row in rows:
+                if row["award_id"] in seen:
+                    raise SourceFetchError("USASpending pagination repeated awards", reason_code="invalid_response",
+                                           partial_data={"contracts":records})
+                seen.add(row["award_id"])
+                records.append(row)
+            if not rows.coverage['has_next']:
+                return CoverageRecords(records, coverage={"mode":"exhaustive_window", "complete":True,
+                    "returned":len(records), "date_from":date_from, "date_to":date_to, "pages":page})
+            if not rows or page >= 200:
+                raise SourceFetchError("USASpending window incomplete", reason_code="invalid_response",
+                                       partial_data={"contracts":records})
+            page += 1
+
+    def _search_contracts_page(
         self,
         keywords: list[str] | None = None,
         recipient: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         min_amount: float | None = None,
+        page: int = 1,
     ) -> list[dict[str, Any]]:
         """Search for federal contract awards.
 
@@ -143,7 +175,7 @@ class USASpendingSource:
                 "Last Modified Date",
                 "Description",
             ],
-            "page": 1,
+            "page": page,
             "limit": 50,
             "sort": "Award Amount",
             "order": "desc",
@@ -182,7 +214,12 @@ class USASpendingSource:
                         "description": row.get("Description", ""),
                     }
                 )
-            return results
+            metadata = data.get('page_metadata', {})
+            has_next = metadata.get('hasNext') if isinstance(metadata, dict) else None
+            if type(has_next) is not bool or (metadata.get('page', page) != page):
+                raise SourceFetchError("USASpending pagination metadata invalid", reason_code="invalid_response",
+                                       partial_data={"contracts":results})
+            return CoverageRecords(results, coverage={'has_next':has_next})
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.error("%s", safe_error)
@@ -208,7 +245,7 @@ class USASpendingSource:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now()
+        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.fromisoformat(current_session_date())
         date_from = (ref_date - timedelta(days=days_back)).strftime("%Y-%m-%d")
         date_to = ref_date.strftime("%Y-%m-%d")
 
@@ -233,20 +270,12 @@ class USASpendingSource:
     # ------------------------------------------------------------------
 
     def _dispatch_search_contracts(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "data": self.search_contracts(
-                keywords=params.get("keywords"),
-                recipient=params.get("recipient"),
-                date_from=params.get("date_from"),
-                date_to=params.get("date_to"),
-                min_amount=params.get("min_amount"),
-            )
-        }
+        return collection_envelope(self.search_contracts(
+            keywords=params.get("keywords"), recipient=params.get("recipient"),
+            date_from=params.get("date_from"), date_to=params.get("date_to"),
+            min_amount=params.get("min_amount")))
 
     def _dispatch_recent_large(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "data": self.get_recent_large_contracts(
-                min_amount=params.get("min_amount", 100_000_000),
-                days_back=params.get("days_back", 30),
-            )
-        }
+        return collection_envelope(self.get_recent_large_contracts(
+            min_amount=params.get("min_amount",100_000_000),
+            days_back=params.get("days_back",30), as_of=params.get("as_of")))

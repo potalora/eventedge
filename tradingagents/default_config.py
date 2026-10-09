@@ -93,6 +93,7 @@ DEFAULT_CONFIG = {
     },
     # Autoresearch configuration
     "autoresearch": {
+        "disabled_strategies": {"state_economics": "unsupported_state_event_proxy"},
         "max_generations": 15,
         "strategies_per_generation": 4,
         "tickers_per_strategy": 3,
@@ -211,8 +212,8 @@ DEFAULT_CONFIG = {
             "schema_version": 1,
             "calendar": "XNYS",
             "pricing_version": "raw-alpaca-sip-v1",
-            "execution_clock_version": "next-xnys-open-v1",
-            "cost_model_version": "equity-10bps-v1",
+            "execution_clock_version": "causal-xnys-open-stops-v2",
+            "cost_model_version": "equity-10bps-act365-v2",
             "slippage_bps": "10",
             "commission_per_fill": "0",
             "other_fee_per_fill": "0",

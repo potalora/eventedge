@@ -284,6 +284,15 @@ class CohortOrchestrator:
         if len(set(strategy_names)) != len(strategy_names):
             raise ValueError("duplicate strategy name")
         self._active_strategy_names = frozenset(strategy_names)
+        self._disabled_strategies = {
+            strategy.name: strategy.retirement_reason
+            for strategy in strategies if getattr(strategy, "retirement_reason", None)
+        }
+        self._disabled_strategies.update(ar_config.get("disabled_strategies", {}))
+        if not set(self._disabled_strategies).issubset(self._active_strategy_names) or any(
+            not isinstance(reason, str) or not reason for reason in self._disabled_strategies.values()
+        ):
+            raise ValueError("invalid disabled strategy policy")
         cohort_names = [cfg.name for cfg in cohort_configs]
         if any(not isinstance(name, str) or not name.strip() for name in cohort_names):
             raise ValueError("cohort names must be non-empty text")
@@ -398,6 +407,7 @@ class CohortOrchestrator:
             models=models,
             strategies=strategy_names,
             cohort_policies=cohort_policies,
+            disabled_strategies=self._disabled_strategies,
         )
 
         self._base_config = base_config
@@ -856,7 +866,9 @@ class CohortOrchestrator:
         )
 
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+
+            trading_date = exchange_date().isoformat()
         session = date.fromisoformat(trading_date)
         processed_at = datetime.now(timezone.utc)
         if not is_session(session):

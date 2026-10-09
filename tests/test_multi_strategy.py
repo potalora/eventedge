@@ -70,6 +70,10 @@ class TestStrategyModules:
 
     def test_build_propose_prompt(self, strategies):
         for s in strategies:
+            if getattr(s, "retirement_reason", None):
+                with pytest.raises(RuntimeError, match=s.retirement_reason):
+                    s.build_propose_prompt({"current_params": s.get_default_params()})
+                continue
             prompt = s.build_propose_prompt({"current_params": s.get_default_params()})
             assert isinstance(prompt, str), f"{s.name} prompt not str"
             assert len(prompt) > 50, f"{s.name} prompt too short"
@@ -986,7 +990,7 @@ class TestSignalJournalFailures:
                 score=0.8,
                 llm_conviction=0.9,
                 entry_price=100.0,
-                return_5d=0.05,  # Wrong! Short but price went up
+                return_5d=-0.05,  # Direction-signed loss on the short
             ),
             JournalEntry(
                 timestamp="2024-06-02",
@@ -996,7 +1000,7 @@ class TestSignalJournalFailures:
                 score=0.7,
                 llm_conviction=0.8,
                 entry_price=200.0,
-                return_5d=-0.03,  # Correct
+                return_5d=0.03,  # Direction-signed profit on the short
             ),
             JournalEntry(
                 timestamp="2024-06-03",
@@ -1006,7 +1010,7 @@ class TestSignalJournalFailures:
                 score=0.6,
                 llm_conviction=0.3,
                 entry_price=150.0,
-                return_5d=0.02,  # Wrong but low conviction
+                return_5d=-0.02,  # Direction-signed loss, but low conviction
             ),
         ]
         journal.log_signals(entries)
@@ -1390,7 +1394,7 @@ class TestEdgarDataFlow:
         """LLM prompt for Form 4 analysis includes transaction_code explanations."""
         from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
 
-        analyzer = LLMAnalyzer.__new__(LLMAnalyzer)
+        analyzer = LLMAnalyzer()
         # Mock _call_llm to capture the prompt
         calls = []
         analyzer._call_llm = lambda system, user: (
@@ -1404,6 +1408,8 @@ class TestEdgarDataFlow:
                 {
                     "transaction_type": "buy",
                     "transaction_code": "P",
+                    "acquired_disposed": "A",
+                    "open_market": True,
                     "shares": 1000,
                     "price_per_share": 50.0,
                     "owner_name": "Jane CEO",

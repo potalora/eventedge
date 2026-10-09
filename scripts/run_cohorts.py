@@ -251,7 +251,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--preflight-mode requires --preflight")
     if args.compare:
         return ""
-    requested = args.date or date.today().isoformat()
+    from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+    requested = args.date or exchange_date().isoformat()
     try:
         trading_session = date.fromisoformat(requested)
     except ValueError:
@@ -390,18 +391,48 @@ def _run_compare(
         CohortComparison,
     )
 
-    orchestrator = _build_orchestrator(args, config, generation_id, generation_commit)
-    ledgers = {
-        cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
-    }
-    service = MetricsService(
-        config["autoresearch"]["state_dir"], ledgers, read_only=True
-    )
-    print(
-        json.dumps(
-            CohortComparison(metrics_service=service).compare(), indent=2, default=str
-        )
-    )
+    from pathlib import Path
+    import shutil
+    import tempfile
+    from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+    def operation():
+        root = Path(config["autoresearch"]["state_dir"])
+        cohorts = build_default_cohorts(config)
+        # SQLite mode=ro may still create WAL/SHM sidecars. Copy DB plus committed
+        # WAL under the shared runtime lock, then let SQLite read the disposable
+        # snapshot. Never use immutable=1 on a live DB: it ignores committed WAL.
+        with tempfile.TemporaryDirectory(prefix="eventedge-compare-") as temporary:
+            snapshot = Path(temporary)
+            paths = {"metrics_v2.sqlite3": root / "metrics_v2.sqlite3"}
+            paths.update({f"{c.name}/portfolio.db": Path(c.state_dir) / "portfolio.db" for c in cohorts})
+            for relative, source in paths.items():
+                if not source.is_file():
+                    raise FileNotFoundError(source)
+                target = snapshot / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                wal = Path(str(source) + "-wal")
+                if wal.is_file():
+                    shutil.copyfile(wal, Path(str(target) + "-wal"))
+            ledgers = {}
+            try:
+                for cohort in cohorts:
+                    ledgers[cohort.name] = PortfolioLedger.open_existing(snapshot / cohort.name / "portfolio.db")
+                service = MetricsService(snapshot, ledgers, read_only=True)
+                epoch = service.store.current_epoch()
+                if epoch is not None and (
+                    epoch.generation_id != generation_id
+                    or epoch.generation_commit != generation_commit
+                ):
+                    raise ValueError("comparison generation identity mismatch")
+                print(json.dumps(CohortComparison(metrics_service=service).compare(), indent=2, default=str))
+            finally:
+                for ledger in ledgers.values():
+                    ledger.close()
+
+    _run_locked(False, operation)
 
 
 def _run_daily(

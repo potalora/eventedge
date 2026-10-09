@@ -353,6 +353,7 @@ class TestCommodityMacroStrategy:
             "cftc": {
                 "gold": {
                     "net_position": 80_000,
+                    "report_id": "gold-2026-10-06", "window_end": "2026-10-06",
                     "percentile": 0.50,
                     "wow_change": 0,
                     "direction_signal": "neutral",

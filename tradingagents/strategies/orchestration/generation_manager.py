@@ -15,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
+from functools import wraps
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_evidence import (
@@ -582,6 +583,22 @@ class GenerationInfo:
     run_history: list[dict] = field(default_factory=list)
 
 
+class GenerationManifestError(ValueError):
+    """An existing generation roster cannot be safely interpreted."""
+
+
+def _lifecycle_locked(operation):
+    """Serialize the complete read/modify/write operation with daily workers."""
+    @wraps(operation)
+    def locked(self, *args, **kwargs):
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        with runtime_lock(self._runtime_lock_path, exclusive=True):
+            return operation(self, *args, **kwargs)
+
+    return locked
+
+
 class GenerationManager:
     """Manage multiple frozen code generations via git worktrees."""
 
@@ -613,6 +630,7 @@ class GenerationManager:
     # Public API
     # ------------------------------------------------------------------
 
+    @_lifecycle_locked
     def start_generation(self, description: str) -> GenerationInfo:
         """Create a new generation from current HEAD.
 
@@ -707,7 +725,9 @@ class GenerationManager:
                       "success": bool, "elapsed_s": float, "error"?: str}}
         """
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+
+            trading_date = exchange_date().isoformat()
 
         from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
 
@@ -761,7 +781,9 @@ class GenerationManager:
         if mode not in _PREFLIGHT_MODES:
             raise ValueError(f"invalid preflight mode {mode!r}")
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+
+            trading_date = exchange_date().isoformat()
 
         from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
 
@@ -801,6 +823,7 @@ class GenerationManager:
 
         return results
 
+    @_lifecycle_locked
     def pause_generation(self, gen_id: str) -> None:
         """Set a generation's status to 'paused'."""
         manifest = self._load_manifest()
@@ -813,6 +836,7 @@ class GenerationManager:
         self._save_manifest(manifest)
         logger.info("Paused generation %s", gen_id)
 
+    @_lifecycle_locked
     def resume_generation(self, gen_id: str) -> None:
         """Resume a paused generation back to 'active'."""
         manifest = self._load_manifest()
@@ -827,6 +851,7 @@ class GenerationManager:
         self._save_manifest(manifest)
         logger.info("Resumed generation %s", gen_id)
 
+    @_lifecycle_locked
     def retire_generation(
         self,
         gen_id: str,
@@ -1258,18 +1283,34 @@ class GenerationManager:
         return None
 
     def _load_manifest(self) -> dict:
-        """Load manifest.json. Returns empty structure if not found."""
-        if not self._manifest_path.exists():
-            return {"generations": []}
+        """An absent roster is initial state; corrupt existing state fails closed."""
         try:
-            with open(self._manifest_path) as f:
-                data = json.load(f)
-            if "generations" not in data:
-                data["generations"] = []
-            return data
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load manifest: %s", e)
+            with self._manifest_path.open() as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
             return {"generations": []}
+        except (ValueError, OSError) as error:
+            raise GenerationManifestError("generation manifest is unreadable or malformed") from error
+        if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
+            raise GenerationManifestError("generation manifest requires a generations list")
+        required = {item.name for item in fields(GenerationInfo)}
+        seen = set()
+        for row in data["generations"]:
+            if not isinstance(row, dict) or not required.issubset(row):
+                raise GenerationManifestError("generation manifest has an incomplete record")
+            if any(not isinstance(row[key], str) for key in required - {"run_history"}):
+                raise GenerationManifestError("generation manifest has invalid field types")
+            identity = row["gen_id"]
+            if not re.fullmatch(r"gen_[0-9]{3,}", identity) or identity in seen:
+                raise GenerationManifestError("generation manifest has invalid or duplicate identities")
+            if row["status"] not in {"active", "paused", "retired"}:
+                raise GenerationManifestError("generation manifest has an invalid status")
+            if not isinstance(row["run_history"], list) or any(
+                not isinstance(entry, dict) for entry in row["run_history"]
+            ):
+                raise GenerationManifestError("generation manifest has an invalid run history")
+            seen.add(identity)
+        return data
 
     def _save_manifest(self, data: dict) -> None:
         """Atomic write of manifest.json."""

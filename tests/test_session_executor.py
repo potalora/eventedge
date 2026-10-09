@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +43,7 @@ from tradingagents.strategies.trading.portfolio_committee import TradeRecommenda
 from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicyDecision
 from tradingagents.strategies.orchestration.trading_calendar import (
     next_session,
+    previous_session,
     session_close,
 )
 from tradingagents.strategies.state.portfolio_ledger import (
@@ -81,6 +83,10 @@ class FakePriceSource:
             for key, value in values.items()
             for symbol, session in [key if isinstance(key, tuple) else (key, MONDAY)]
         }
+        self.adjusted = {
+            key: replace(value, previous_session=previous_session(value.session), previous_close=value.close)
+            for key, value in self.adjusted.items()
+        }
         self.raw_requests: list[tuple[tuple[str, ...], date, date, bool]] = []
 
     def get_daily_bars(
@@ -103,11 +109,13 @@ class FakePriceSource:
         ]
 
     def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
-        return {
-            key: value
-            for key, value in self.adjusted.items()
-            if key[0] in symbols and start_session <= key[1] <= end_session_inclusive
-        }
+        result = {}
+        for symbol in symbols:
+            current = self.adjusted.get((symbol, end_session_inclusive))
+            if current is not None:
+                result[(symbol, end_session_inclusive)] = current
+                result[(symbol, start_session)] = replace(current, session=start_session, close=current.previous_close)
+        return result
 
 
 def _config(**risk_overrides):
@@ -2002,11 +2010,11 @@ def test_benchmarks_are_adjusted_separate_from_raw_marks_and_phases_are_exact(tm
         assert snapshot.valid
         assert snapshot.snapshot is not None
         assert [(item.symbol, item.close) for item in observations] == [
-            ("BIL", Decimal("91.10")),
-            ("SPY", Decimal("650.25")),
+            ("BIL", Decimal("100")),
+            ("SPY", Decimal("100")),
         ]
         assert all(
-            item.return_basis == "total_return_adjusted" for item in observations
+            item.return_basis == "paired_total_return_index_v2" for item in observations
         )
         assert observations[1].close != Decimal("601")
         assert tuple(row["phase"] for row in phase_rows) == PHASES
@@ -2983,6 +2991,7 @@ def test_production_usaspending_availability_stages_real_candidate(tmp_path):
     response = MagicMock()
     response.status_code = 200
     response.json.return_value = {
+        "page_metadata": {"page": 1, "hasNext": False},
         "results": [
             {
                 "Award ID": "AWARD-1",

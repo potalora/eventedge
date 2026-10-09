@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -194,7 +195,8 @@ class ExecutionBridge:
             raise ValueError(f"intent is already terminal: {stored.status}")
         if stored != intent:
             raise ValueError("supplied intent does not match persisted intent")
-        if marked_account != self.ledger.account_state():
+        admission_prices = risk_context.get("opening_prices") if self.ledger.session_execution_context(opening_bar.session) is not None else None
+        if marked_account != self.ledger.account_state(admission_prices):
             raise ValueError("marked_account does not match authoritative ledger")
 
         signals = self.ledger.signals_for_intent(intent.intent_id)
@@ -236,6 +238,9 @@ class ExecutionBridge:
         if reference_price is None:
             return FillResult("pending", None, "resting stop not triggered")
 
+        if risk_context.get("intraday"):
+            effective_at = session_close(opening_bar.session)
+        fill = cost_model.fill(intent, reference_price, effective_at, processing_at)
         direction = "short" if intent.side == "short" else "long"
         if intent.side in {"buy", "short"}:
             borrow_rate = risk_context.get("borrow_rate")
@@ -279,7 +284,35 @@ class ExecutionBridge:
                         else 0.0,
                     )
                 )
+            costs = fill.slippage + fill.commission + fill.other_fees
+            # Exposure is marked at the causal open; costs reduce equity and cash.
             position_value = reference_price * intent.requested_qty
+            risk_account = replace(
+                marked_account,
+                cash=marked_account.cash - costs,
+                buying_power=marked_account.buying_power - costs,
+                net_equity=marked_account.net_equity - costs,
+            )
+            if risk_account.buying_power < 0 or risk_account.net_equity <= 0:
+                return self._reject(intent, processing_at, "collateral_deficiency: insufficient costed buying power")
+            opening_equity = self.ledger.opening_equity(opening_bar.session, opening_prices)
+            cooldown = int(self.config.get("autoresearch", {}).get("risk_discipline", {}).get("reentry_cooldown_days", 0))
+            self.risk_gate.set_cooling_tickers(self.ledger.cooling_tickers(opening_bar.session, cooldown))
+            policy_context = risk_context.get("portfolio_context")
+            recommendation = risk_context.get("recommendation")
+            if policy_context is not None:
+                # Existing exposure and reservations remain exact notionals when
+                # the proposed fill's costs lower the equity denominator.
+                equity_scale = policy_context.portfolio_value / float(risk_account.net_equity)
+                policy_context = replace(
+                    policy_context,
+                    cash=float(risk_account.cash),
+                    portfolio_value=float(risk_account.net_equity),
+                    positions=tuple(replace(position, weight=position.weight * equity_scale) for position in policy_context.positions),
+                    pending_positions=tuple(replace(position, weight=position.weight * equity_scale) for position in policy_context.pending_positions),
+                )
+                if recommendation is not None:
+                    recommendation = replace(recommendation, position_size_pct=float(position_value / risk_account.net_equity))
             passed, reason = self.risk_gate.check(
                 opening_bar.ticker,
                 direction,
@@ -288,7 +321,9 @@ class ExecutionBridge:
                 risk_context.get("open_trades"),
                 risk_context.get("earnings_dates"),
                 risk_context.get("short_interest"),
-                authoritative_account=marked_account,
+                authoritative_account=risk_account,
+                daily_loss_equity=float(opening_equity),
+                session_realized_net=float(self.ledger.session_realized_net(opening_bar.session)),
                 pending_entries=tuple(pending_risk_entries),
                 proposed_margin=(
                     float(position_value * cost_model.margin_requirement)
@@ -296,8 +331,8 @@ class ExecutionBridge:
                     else 0.0
                 ),
                 policy_enabled=bool(risk_context.get("policy_enabled", False)),
-                recommendation=risk_context.get("recommendation"),
-                portfolio_context=risk_context.get("portfolio_context"),
+                recommendation=recommendation,
+                portfolio_context=policy_context,
             )
             if not passed:
                 return self._reject(intent, processing_at, reason)
@@ -311,12 +346,6 @@ class ExecutionBridge:
         else:
             borrow_rate = None
 
-        fill = cost_model.fill(
-            intent,
-            reference_price,
-            effective_at,
-            processing_at,
-        )
         self.ledger.apply_fill(intent, fill, borrow_rate=borrow_rate)
         persisted = [
             item

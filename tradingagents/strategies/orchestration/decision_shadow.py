@@ -39,6 +39,9 @@ MAX_FILE_BYTES = 100_000
 _STATUSES = {"ok", "attempt_pending", "missing_credentials", "insufficient_evidence",
              "budget_exhausted", "timeout", "http_error", "invalid_response", "request_error"}
 _RETRYABLE = {"missing_credentials", "budget_exhausted"}
+_STRATEGY_PROVIDERS = {"litigation": {"courtlistener"}, "filing_analysis": {"edgar"},
+    "earnings_call": {"finnhub"}, "regulatory_pipeline": {"regulations"},
+    "supply_chain": {"finnhub"}, "govt_contracts": {"usaspending"}}
 _PROVIDERS = {"courtlistener", "edgar", "finnhub", "regulations", "usaspending", "openbb"}
 _IDENTIFIERS = ("docket_id", "accession_number", "document_id", "article_id", "award_id", "file_url", "url")
 _PUBLIC_FIELDS = set(_IDENTIFIERS) | {
@@ -153,7 +156,7 @@ def _original_evidence(signal, data, limit):
                     truncated = True
                     break
                 walk(item, provider, depth + 1)
-    for provider in sorted(_PROVIDERS & set(data)):
+    for provider in sorted(_STRATEGY_PROVIDERS.get(signal.get("strategy"), set()) & set(data)):
         walk(data[provider], provider)
     # Identifier-only records do not substantiate a claim.
     records = [r for r in records if set(r["record"]) - set(_IDENTIFIERS) - {"ticker", "symbol", "date", "year", "quarter"}]
@@ -171,19 +174,37 @@ def _entries(signals, data, settings):
             "identity": {k: metadata[k] for k in _IDENTIFIERS + ("year", "quarter") if k in metadata}}))[:512]
         evidence, truncated = _original_evidence(signal, data, settings["max_evidence_chars"])
         analysis = metadata.get("llm_analysis") or {}
-        claim = analysis.get("rationale", "") if isinstance(analysis, dict) else ""
+        claim = (analysis.get("evidence_claim") or analysis.get("rationale") or analysis.get("reasoning") or "") if isinstance(analysis, dict) else ""
         if not isinstance(claim, str): claim = ""
         claim = claim[:1500]
         public_input = {"ticker": str(signal.get("ticker", ""))[:32],
             "strategy": str(signal.get("strategy", ""))[:80],
             "direction": str(signal.get("direction", ""))[:16],
             "claim": claim, "original_source_evidence": evidence}
+        if signal.get("strategy") not in _STRATEGY_PROVIDERS:
+            reason = "unsupported_strategy_scope"
+        elif not claim:
+            reason = "missing_generated_claim"
+        elif not evidence:
+            reason = "missing_original_evidence"
+        elif not analysis.get("evidence_claim"):
+            reason = "unstructured_generated_claim"
+        elif truncated:
+            reason = "truncated_evidence"
+        else:
+            reason = "retained_atomic_claim_and_source"
         entry = {"event_key": key, "input": public_input, "input_hash": _hash(public_input),
+            "coverage_reason": reason, "claim_scope": "source_support_only_not_return_accuracy",
             "evidence_truncated": truncated, "attempted": False,
-            "status": "missing_credentials" if evidence and claim else "insufficient_evidence"}
-        old = unique.get(key)
-        if old is None or (entry["status"] == "missing_credentials", entry["input_hash"]) > (old["status"] == "missing_credentials", old["input_hash"]):
-            unique[key] = entry
+            "status": "missing_credentials" if reason == "retained_atomic_claim_and_source" else "insufficient_evidence"}
+        unique[(key, entry["input_hash"])] = entry
+    # Conflicting horizon/direction/claim variants remain separate audit inputs.
+    counts = {}
+    for key, _ in unique:
+        counts[key] = counts.get(key, 0) + 1
+    for (key, digest), entry in unique.items():
+        if counts[key] > 1:
+            entry["event_key"] = key[:440] + ":claim:" + digest
     selected = sorted(unique.values(), key=lambda e: (e["status"] != "missing_credentials", e["event_key"]))
     return selected[:settings["max_events"]], max(0, len(selected) - settings["max_events"])
 
@@ -332,7 +353,15 @@ def evaluate_shadow(*, state_dir, generation, session, epoch_id, signals=(), dat
                     "generation": generation, "generation_commit": generation_commit, "session": session, "epoch_id": epoch_id,
                     "questions": QUESTIONS, "config": settings, "config_hash": _hash(settings), "events": entries,
                     "skipped_events": skipped, "selection_truncated": bool(skipped),
-                    "status": "complete" if sampling_complete else "incomplete_sampling"}
+                    "status": "complete" if sampling_complete else "incomplete_sampling",
+                    "interpretation": "descriptive_source_support_not_prediction_accuracy",
+                    "supported_strategy_scope": sorted(_STRATEGY_PROVIDERS),
+                    "coverage_by_strategy": {strategy: {
+                        "observed_signals": sum(1 for signal in signals if signal.get("strategy") == strategy),
+                        "retained_claims": sum(1 for entry in entries if entry["input"]["strategy"] == strategy),
+                        "supported_scope": strategy in _STRATEGY_PROVIDERS,
+                        "reasons": sorted({entry["coverage_reason"] for entry in entries if entry["input"]["strategy"] == strategy}),
+                    } for strategy in sorted({signal.get("strategy", "") for signal in signals if isinstance(signal, dict)})}}
                 if not sampling_complete:
                     _save(path, document)
                     return document

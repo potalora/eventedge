@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 _HEALTHY = frozenset({'signals', 'legitimate_no_event'})
+_DISABLED = 'disabled_by_policy'
 _FAILURES = frozenset({'data_failure', 'strategy_defect', 'missing_health'})
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}')
 _KEYS = frozenset({'health_id', 'epoch_id', 'session', 'policy_id', 'strategy', 'status', 'sources', 'affected_cohorts'})
@@ -27,12 +28,20 @@ def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
     records = () if state.epoch_id is None else owner._metric_store.read_strategy_health(
         state.epoch_id, session=state.session, limit=1000
     )
+    disabled = getattr(owner, '_disabled_strategies', {})
     by_scope: dict[tuple[str, str], Any] = {}
     for record in records:
         key = (record.policy_id, record.strategy)
         if (record.epoch_id != state.epoch_id or record.session != state.session
-                or key in by_scope or record.status not in _HEALTHY | _FAILURES - {'missing_health'}):
+                or key in by_scope or record.status not in _HEALTHY | (_FAILURES - {'missing_health'}) | {_DISABLED}):
             raise ValueError('source coverage durable health is invalid')
+        if record.status == _DISABLED and (
+            disabled.get(record.strategy) != record.evidence.get('reason')
+            or record.strategy not in disabled or record.signal_count != 0
+        ):
+            raise ValueError('disabled strategy health does not match configured policy')
+        if record.strategy in disabled and record.status != _DISABLED:
+            raise ValueError('disabled strategy health is missing its policy exclusion')
         by_scope[key] = record
     cohorts_by_policy: dict[str, list[str]] = {}
     for cohort in owner.cohorts:
@@ -43,7 +52,7 @@ def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
         references = []
         for strategy in sorted(strategies):
             record = by_scope.get((policy, strategy))
-            if record is not None and record.status in _HEALTHY:
+            if record is not None and record.status in _HEALTHY | {_DISABLED}:
                 continue
             if state.epoch_id is None:
                 continue
@@ -64,6 +73,8 @@ def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
                 continue
             result['input_coverage_valid'] = state.epoch_id is not None and not references
             result['source_health_failures'] = references
+            if disabled:
+                result['disabled_strategies'] = dict(sorted(disabled.items()))
             if references and result.get('execution_valid') is True:
                 result['degraded'] = True
     for result in results.values():

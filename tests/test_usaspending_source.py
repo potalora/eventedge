@@ -31,7 +31,7 @@ def _api_response(rows):
     """Build a mocked spending_by_award response with raw API field names."""
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"results": rows}
+    mock_resp.json.return_value = {"results": rows, "page_metadata":{"page":1,"hasNext":False}}
     return mock_resp
 
 

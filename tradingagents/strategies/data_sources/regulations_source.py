@@ -10,6 +10,7 @@ import os
 import time
 from typing import Any
 
+from .evidence import current_session_date, CoverageRecords, bounded_coverage, collection_envelope
 from .request_policy import provider_request
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -123,7 +124,7 @@ class RegulationsSource:
                     "document_type": attrs.get("documentType", ""),
                     "posted_date": attrs.get("postedDate", ""),
                     "comment_end_date": attrs.get("commentEndDate", ""),
-                    "summary": attrs.get("summary", "")[:500],
+                    "summary": (attrs.get("summary") or "")[:500],
                     "docket_id": attrs.get("docketId", ""),
                 })
             if posted_date_from:
@@ -134,7 +135,10 @@ class RegulationsSource:
             if invalid:
                 raise SourceFetchError("Regulations document records invalid", reason_code="invalid_response",
                                        partial_data={"proposed_rules": results})
-            return results
+            meta = data.get('meta') if isinstance(data.get('meta'), dict) else {}
+            return CoverageRecords(results, coverage=bounded_coverage(returned=len(results), limit=page_size,
+                total=meta.get('totalElements'), has_next=(meta['totalPages'] > 1) if type(meta.get('totalPages')) is int else None,
+                agency=agency_id, posted_date_from=posted_date_from))
         except Exception as exc:
             raise source_fetch_error("Regulations search failed", exc) from None
 
@@ -147,14 +151,15 @@ class RegulationsSource:
         """Get recently proposed rules, optionally filtered by agency."""
         from datetime import datetime, timedelta
 
-        date_from = ((datetime.fromisoformat(as_of) if as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_from = ((datetime.fromisoformat(as_of) if as_of else datetime.fromisoformat(current_session_date())) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         results = []
 
-        failures, statuses = {}, {}
+        failures, statuses, coverages = {}, {}, {}
         for agency in agencies or [None]:
             try:
                 docs = self.search_documents(agency_id=agency, document_type="Proposed Rule",
                                              posted_date_from=date_from)
+                coverages[agency or "all_agencies"] = getattr(docs, "coverage", {})
                 if as_of:
                     docs = [row for row in docs if (row.get("posted_date") or "")[:10] <= as_of]
                 results.extend(docs)
@@ -170,23 +175,25 @@ class RegulationsSource:
         if failures:
             raise SourceFetchError("Regulations agency coverage incomplete", reason_code="batch_failure",
                                    failed_operations=failures, failed_http_statuses=statuses,
-                                   partial_data={"proposed_rules": results})
+                                   partial_data={"proposed_rules": results, "coverage":{"mode":"bounded_sample", "complete":False, "samples":coverages}})
 
-        return results
+        return CoverageRecords(results, coverage={"mode":"bounded_sample", "complete":False, "samples":coverages, "as_of":as_of})
 
     def clear_cache(self) -> None:
         self._cache.clear()
 
     def _dispatch_search(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.search_documents(
+        return collection_envelope(self.search_documents(
             search_term=params.get("search_term"),
             agency_id=params.get("agency_id"),
             document_type=params.get("document_type", "Proposed Rule"),
             posted_date_from=params.get("posted_date_from"),
-        )}
+            page_size=params.get("page_size",100),
+        ))
 
     def _dispatch_recent_proposed(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.get_recent_proposed_rules(
+        return collection_envelope(self.get_recent_proposed_rules(
             agencies=params.get("agencies"),
             days_back=params.get("days_back", 30),
-        )}
+            as_of=params.get("as_of"),
+        ))

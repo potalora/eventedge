@@ -144,10 +144,11 @@ def _executor_fixture(tmp_path):
     config = _config()
     config["autoresearch"]["paper_ledger"]["pricing_version"] = "raw-alpaca-sip-v1"
     ledger = _ledger(tmp_path)
-    benchmark = prices.AdjustedClose("SPY", SESSION, Decimal("650"), "yfinance-adjusted", NOW)
+    from tradingagents.strategies.orchestration.trading_calendar import previous_session
+    benchmark = prices.AdjustedClose("SPY", SESSION, Decimal("650"), "yfinance-adjusted", NOW, previous_session(SESSION), Decimal("650"))
     bundle = SessionInputBundle(SESSION, ("AYI",), {
         ("AYI", SESSION): prices.MarketBar("AYI", SESSION, *map(Decimal, OBSERVED["AYI", SESSION]), SOURCE, NOW, False)
-    }, (), {("SPY", SESSION): benchmark, ("BIL", SESSION): replace(benchmark, symbol="BIL", close=Decimal("91"))})
+    }, (), {("SPY", SESSION): benchmark, ("BIL", SESSION): replace(benchmark, symbol="BIL", close=Decimal("91"), previous_close=Decimal("91"))})
     return ledger, config, bundle, SessionExecutor
 
 

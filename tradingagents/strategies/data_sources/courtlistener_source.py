@@ -12,6 +12,7 @@ from typing import Any
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
+from .evidence import CoverageRecords, bounded_coverage, collection_envelope
 from .request_policy import provider_request
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class CourtListenerSource:
         court: str | None = None,
         date_filed_after: str | None = None,
         page_size: int = 20,
+        *, date_filed_before: str | None = None,
     ) -> list[dict]:
         """Search federal court dockets.
 
@@ -88,6 +90,8 @@ class CourtListenerSource:
             params["court"] = court
         if date_filed_after:
             params["filed_after"] = date_filed_after
+        if date_filed_before:
+            params["filed_before"] = date_filed_before
 
         try:
             resp = provider_request("courtlistener", "GET",
@@ -120,7 +124,9 @@ class CourtListenerSource:
                     "nature_of_suit": item.get("suitNature", ""),
                     "jury_demand": item.get("juryDemand", ""),
                 })
-            return results
+            return CoverageRecords(results, coverage=bounded_coverage(returned=len(results), limit=page_size,
+                total=data.get('count'), has_next=bool(data['next']) if 'next' in data else None,
+                query=query, date_filed_after=date_filed_after, date_filed_before=date_filed_before))
         except Exception as exc:
             safe_error = source_fetch_error("CourtListener search_dockets failed", exc)
             logger.error("%s", safe_error)
@@ -131,6 +137,7 @@ class CourtListenerSource:
         query: str,
         date_filed_after: str | None = None,
         page_size: int = 20,
+        *, date_filed_before: str | None = None,
     ) -> list[dict]:
         """Search court opinions."""
         import requests
@@ -145,6 +152,8 @@ class CourtListenerSource:
         }
         if date_filed_after:
             params["filed_after"] = date_filed_after
+        if date_filed_before:
+            params["filed_before"] = date_filed_before
 
         try:
             resp = provider_request("courtlistener", "GET",
@@ -173,7 +182,9 @@ class CourtListenerSource:
                     "court": item.get("court", ""),
                     "type": item.get("type", ""),
                 })
-            return results
+            return CoverageRecords(results, coverage=bounded_coverage(returned=len(results), limit=page_size,
+                total=data.get('count'), has_next=bool(data['next']) if 'next' in data else None,
+                query=query, date_filed_after=date_filed_after, date_filed_before=date_filed_before))
         except Exception as exc:
             safe_error = source_fetch_error("CourtListener search_opinions failed", exc)
             logger.error("%s", safe_error)
@@ -183,14 +194,18 @@ class CourtListenerSource:
         self._cache.clear()
 
     def _dispatch_search_dockets(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.search_dockets(
+        return collection_envelope(self.search_dockets(
             query=params.get("query", ""),
             court=params.get("court"),
             date_filed_after=params.get("date_filed_after"),
-        )}
+            page_size=params.get("page_size",20),
+            date_filed_before=params.get("date_filed_before"),
+        ))
 
     def _dispatch_search_opinions(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.search_opinions(
+        return collection_envelope(self.search_opinions(
             query=params.get("query", ""),
             date_filed_after=params.get("date_filed_after"),
-        )}
+            page_size=params.get("page_size",20),
+            date_filed_before=params.get("date_filed_before"),
+        ))

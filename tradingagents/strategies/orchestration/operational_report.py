@@ -249,6 +249,16 @@ def _manifest_history(metadata: dict, attempts: list[dict], latest: dict | None,
         diagnose('manifest_session_latest_missing')
 
 
+def _declared_exclusion(row: dict) -> bool:
+    reason = next((getattr(strategy, 'retirement_reason', None)
+                   for strategy in get_paper_trade_strategies()
+                   if strategy.name == row.get('strategy')), None)
+    evidence = row.get('evidence')
+    return (row.get('status') == 'disabled_by_policy' and reason is not None
+            and row.get('signal_count') == 0 and isinstance(evidence, dict)
+            and evidence.get('reason') == reason)
+
+
 def _metrics(state: Path, generation: str, session: str, commit: str, diagnose) -> tuple[str | None, list[dict]]:
     path = state / 'metrics_v2.sqlite3'
     if not path.exists():
@@ -276,7 +286,7 @@ def _metrics(state: Path, generation: str, session: str, commit: str, diagnose) 
                     diagnose('health_identity_conflict', row['health_id'])
                     continue
                 if (not all(_safe_id(value.get(key)) for key in ('health_id','policy_id','strategy')) or
-                        value.get('status') not in _HEALTHY | _FAILURES or
+                        (value.get('status') not in _HEALTHY | _FAILURES and not _declared_exclusion(value)) or
                         not isinstance(value.get('evidence'),dict)):
                     diagnose('health_contract_invalid', row['health_id'])
                     continue
@@ -395,7 +405,7 @@ def _health_coverage(health: list[dict], epoch: str | None, session: str, diagno
         affected = [name for name in EXPECTED_COHORTS if name.startswith('horizon_'+horizon+'_')]
         for strategy in sorted(strategies):
             row = scoped.get((policy,strategy))
-            if row is not None and row['status'] in _HEALTHY:
+            if row is not None and (row['status'] in _HEALTHY or _declared_exclusion(row)):
                 continue
             if row is None:
                 diagnose('health_missing', policy+':'+strategy)
@@ -602,6 +612,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
         report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose)
+        report['disabled_strategies'] = {row['strategy']: row['evidence']['reason'] for row in health if _declared_exclusion(row)}
         report['input_coverage_valid'] = epoch is not None and not report['source_health_failures']
         report['sources'] = _sources(state,generation,session,commit,diagnose)
         report['volatility'] = _volatility(state,generation,session,commit,report['sources'],report['candidate_input_issues'],report['cohorts'],diagnose)
@@ -612,7 +623,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         for item in report['sources']['unresolved']:
             source=item['provider']
             for strategy in get_paper_trade_strategies():
-                if source=='openbb' or source not in strategy.data_sources:
+                if source=='openbb' or source not in strategy.data_sources or strategy.name in report['disabled_strategies']:
                     continue
                 for horizon in ('30d','3m','6m','1y'):
                     failures=[failure for failure in report['source_health_failures'] if failure['strategy']==strategy.name and
@@ -669,6 +680,8 @@ def render_operational_report(report: dict) -> str:
             label = _PREFLIGHT_LABELS.get(attempt.get('preflight_mode'), 'unknown mode')
             status = 'passed' if attempt.get('preflight_ok') is True else 'failed'
             lines.append(f"- {attempt['attempt_id']}: {label}; {status}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
+    if report.get('disabled_strategies'):
+        lines.extend(['', 'Policy exclusions: ' + ', '.join(f'{name} ({reason})' for name, reason in sorted(report['disabled_strategies'].items())) + '.'])
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:

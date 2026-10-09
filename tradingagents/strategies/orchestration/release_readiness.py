@@ -222,12 +222,29 @@ def _candidate_and_health(
         for horizon in ("30d", "3m", "6m", "1y")
         for strategy in get_paper_trade_strategies()
     }
+    retired = {
+        strategy.name: strategy.retirement_reason
+        for strategy in get_paper_trade_strategies()
+        if getattr(strategy, "retirement_reason", None)
+    }
+    def classified(row):
+        if row.get("status") in HEALTHY_STRATEGY_STATUSES:
+            return True
+        evidence = row.get("evidence")
+        return (
+            row.get("status") == "disabled_by_policy"
+            and row.get("strategy") in retired
+            and row.get("signal_count") == 0
+            and isinstance(evidence, dict)
+            and evidence.get("reason") == retired[row["strategy"]]
+        )
+
     quarantined = any(row.get("outcome") == "quarantined" for row in recovery_rows)
     identities = {(row.get("policy_id"), row.get("strategy")) for row in health}
     health_complete = (
         len(health) == 48
         and identities == expected
-        and all(row.get("status") in HEALTHY_STRATEGY_STATUSES for row in health)
+        and all(classified(row) for row in health)
     )
     return not issues and not quarantined and bool(health), health_complete
 

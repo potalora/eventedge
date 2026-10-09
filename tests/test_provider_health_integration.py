@@ -129,7 +129,7 @@ def test_successful_empty_provider_is_legitimate_no_event(
 ):
     monkeypatch.setattr(
         "requests.post" if provider == "usaspending" else "requests.get",
-        lambda *args, **kwargs: _response({"results": []}),
+        lambda *args, **kwargs: _response({"results": [], "page_metadata": {"page": 1, "hasNext": False}}),
     )
     source = (
         USASpendingSource()
@@ -148,14 +148,16 @@ def test_successful_empty_provider_is_legitimate_no_event(
 def test_usaspending_failure_is_not_cached_as_empty_success(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "requests.post",
-        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": []})]),
+        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": [], "page_metadata": {"page": 1, "hasNext": False}})]),
     )
     source = USASpendingSource()
     _, engine = _engine(tmp_path, source)
     failed = engine._fetch_usaspending_data("2026-10-01")
     recovered = engine._fetch_usaspending_data("2026-10-01")
     assert failed.get("error")
-    assert recovered == {"data": {"contracts": []}}
+    assert not recovered.get("error")
+    assert recovered["data"]["contracts"] == []
+    assert recovered["coverage"]["complete"] is True
 
 
 def test_fred_partial_failure_keeps_valid_series_and_reaches_health(
@@ -225,7 +227,8 @@ def test_fred_generic_batch_retains_partial_data_and_safe_error(monkeypatch):
 
     monkeypatch.setattr("fredapi.Fred.get_series", series)
     result = FREDSource(api_key="offline").fetch(
-        {"method": "multi_series", "series_ids": ["CPIAUCSL", "UNRATE"]}
+        {"method": "multi_series", "series_ids": ["CPIAUCSL", "UNRATE"],
+         "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"}
     )
     assert result.get("error")
     assert result["data"]["UNRATE"] == {"2026-09-01": 3.0}
@@ -302,6 +305,9 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
                 "heat_stress_days": 0,
                 "precip_deficit_pct": 0,
                 "frost_events": 0,
+                "coverage": {"complete": True},
+                "observation_date": "2026-09-30",
+                "available_at": "2026-10-01T20:00:00+00:00",
             },
         )
     )
@@ -310,15 +316,21 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
             SimpleNamespace(
                 name="usda",
                 is_available=lambda: True,
-                fetch_crop_progress=lambda *a, **kw: [],
+                fetch_crop_progress=lambda *a, **kw: [{
+                    "week_ending": "2026-09-27", "state": "IA", "good_pct": 50,
+                    "excellent_pct": 20, "available_at": "2026-10-01T20:00:00+00:00",
+                }],
             )
         )
     registry.register(
         SimpleNamespace(
             name="drought_monitor",
             is_available=lambda: True,
-            fetch_drought_severity=lambda *a, **kw: {},
-            fetch_composite_score=lambda *a, **kw: 0.0,
+            fetch_drought_severity=lambda *a, **kw: {"IA": {
+                "None": 0, "D0": 0, "D1": 0, "D2": 100, "D3": 0, "D4": 0,
+                "observation_date": "2026-09-29", "available_at": "2026-10-01T20:00:00+00:00",
+            }},
+            fetch_composite_score=lambda *a, **kw: 2.0,
         )
     )
     config = {"autoresearch": {"state_dir": str(tmp_path)}}
@@ -328,7 +340,11 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
         strategies=[WeatherAgStrategy()],
         use_llm=False,
     )
-    engine._analyzer = SimpleNamespace(analyze_ag_weather=lambda *a, **kw: {})
+    engine._analyzer = SimpleNamespace(analyze_ag_weather=lambda *a, **kw: {
+        "direction": "long", "conviction": 0.8,
+        "rationale": "Iowa severe drought creates an agricultural supply disruption.",
+        "evidence_claim": "Iowa reports D2 drought across 100 percent of its area.",
+    })
     data = engine._fetch_all_data("2026-07-01", "2026-10-01")
     signals, _, health = engine.screen_and_enrich(
         "2026-10-01",
@@ -339,7 +355,9 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
     assert signals, "real weather screen must exercise its configured universe"
     assert health[0].status == ("data_failure" if missing_required else "signals")
     if missing_required:
-        assert set(health[0].evidence["provider_errors"]) == {"usda"}
+        assert set(health[0].evidence["provider_errors"]) == {"usda", "analysis"}
+        assert health[0].evidence["non_actionable_reasons"] == ["incomplete_environmental_inputs"]
+        assert all(signal["journal_only"] for signal in signals)
     report = run_preflight(config, "2026-10-01", engine=engine)
     assert report["ok"] is (not missing_required)
     assert report["source_warnings"] == [
@@ -425,7 +443,7 @@ def test_generic_dispatch_preserves_safe_reason(provider, monkeypatch):
             "fredapi.Fred.get_series", Mock(side_effect=requests.Timeout(_SECRET))
         )
         result = FREDSource(api_key="offline").fetch(
-            {"method": "series", "series_id": "CPIAUCSL"}
+            {"method": "series", "series_id": "CPIAUCSL", "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"}
         )
     else:
         monkeypatch.setattr(
@@ -449,10 +467,10 @@ def test_fred_direct_diagnostic_retains_safe_series_identity(monkeypatch):
         "fredapi.Fred.get_series", Mock(side_effect=URLError(TimeoutError(_SECRET)))
     )
     source = FREDSource(api_key="offline")
-    result = source.fetch({"method": "series", "series_id": "CPIAUCSL"})
+    result = source.fetch({"method": "series", "series_id": "CPIAUCSL", "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"})
     assert "CPIAUCSL:timeout" in result["error"]
     assert _SECRET not in result["error"]
-    unsafe_identity = source.fetch({"method": "series", "series_id": _SECRET})
+    unsafe_identity = source.fetch({"method": "series", "series_id": _SECRET, "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"})
     assert _SECRET not in unsafe_identity["error"]
 
 

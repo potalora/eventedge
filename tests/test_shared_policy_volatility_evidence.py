@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -186,6 +187,12 @@ def _run_staging_matrix(
             policy_id=orchestrator._policy_id_for_horizon(horizon), strategy=strategy,
             data_sources=(), candidates=[], provider_errors={}, exception=None,
         ) for strategy in sorted(orchestrator._active_strategy_names)]
+        health = [
+            replace(record, status="disabled_by_policy", evidence={
+                "reason": orchestrator._disabled_strategies[record.strategy]
+            }) if record.strategy in orchestrator._disabled_strategies else record
+            for record in health
+        ]
         selected = signals if signal_horizons is None or horizon in signal_horizons else []
         return deepcopy(selected), {}, health
 
@@ -367,7 +374,7 @@ def test_missing_required_measured_volatility_fails_closed(
 
 
 def test_shared_measured_volatility_rotates_policy_document_version() -> None:
-    assert POLICY_DOCUMENT_VERSION == "execution-policy-v3"
+    assert POLICY_DOCUMENT_VERSION == "execution-policy-v4"
 
 
 def test_insufficient_cached_history_is_refetched_once_for_all_cohorts(

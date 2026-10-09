@@ -33,10 +33,13 @@ from tradingagents.strategies.execution.price_source import (
     YFinancePriceSource,
     SIP_PRICING_VERSION,
     validate_adjusted_closes,
+    paired_adjusted_closes,
+    validate_benchmark_pairs,
     validate_required_bars,
 )
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
+    previous_session,
     session_close,
     session_open,
 )
@@ -71,11 +74,12 @@ from tradingagents.strategies.trading.portfolio_committee import TradeRecommenda
 
 PHASES = (
     "validate_market_data",
+    "accrue_borrow",
+    "accrue_financing",
     "apply_corporate_actions",
     "execute_exits",
     "execute_entries",
-    "accrue_borrow",
-    "accrue_financing",
+    "execute_intraday_stops",
     "mark_positions",
     "record_benchmarks",
     "snapshot_account",
@@ -549,7 +553,7 @@ class SessionExecutor:
         return tuple(sorted(tickers))
 
     def outcome_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
-        """Return signal tickers requiring an exact raw entry or exit bar today."""
+        """Keep every active outcome ticker under continuous action coverage."""
         tickers: set[str] = set()
         earliest_reference = session
         for _ in range(max(OUTCOME_WINDOWS)):
@@ -563,16 +567,9 @@ class SessionExecutor:
             entry_session = self.outcome_calculator.calendar.next_session(
                 metric_signal.reference_session
             )
-            if entry_session == session:
+            last_session = self.outcome_calculator.calendar.held_session(entry_session, max(OUTCOME_WINDOWS))
+            if entry_session <= session <= last_session:
                 tickers.add(metric_signal.ticker)
-                continue
-            for window in OUTCOME_WINDOWS:
-                if (
-                    self.outcome_calculator.calendar.held_session(entry_session, window)
-                    == session
-                ):
-                    tickers.add(metric_signal.ticker)
-                    break
         return tuple(sorted(tickers))
 
     @staticmethod
@@ -633,8 +630,21 @@ class SessionExecutor:
             bars = dict(raw_bars)
             if self.ledger.session_execution_context(entry_session) is not None:
                 bars.update(self.persisted_input_bundle(entry_session).bars)
-            outcome = self.outcome_calculator.build(signal, window, bars)
-            forced_reason = forced_reasons.get(signal.ticker)
+            actions: list[CorporateAction] = []
+            coverage_reason = ""
+            action_session = self.outcome_calculator.calendar.next_session(entry_session)
+            while action_session <= session:
+                if self.ledger.session_execution_context(action_session) is None:
+                    coverage_reason = f"missing_action_coverage:{signal.ticker}/{action_session}"
+                    break
+                bound = self.persisted_input_bundle(action_session)
+                if signal.ticker not in bound.tickers:
+                    coverage_reason = f"missing_action_coverage:{signal.ticker}/{action_session}"
+                    break
+                actions.extend(a for a in bound.actions if a.ticker == signal.ticker)
+                action_session = self.outcome_calculator.calendar.next_session(action_session)
+            outcome = self.outcome_calculator.build(signal, window, bars, corporate_actions=tuple(actions))
+            forced_reason = forced_reasons.get(signal.ticker) or coverage_reason
             if (
                 forced_reason
                 and not outcome.invalid_reason.endswith("entry_bar")
@@ -812,8 +822,10 @@ class SessionExecutor:
             else ()
         )
         try:
-            benchmarks = price_source.get_total_return_closes(
-                list(benchmark_symbols), session, session
+            benchmarks = paired_adjusted_closes(
+                price_source.get_total_return_closes(
+                    list(benchmark_symbols), previous_session(session), session
+                ), benchmark_symbols, session,
             )
         except Exception:
             benchmarks = {}
@@ -957,6 +969,8 @@ class SessionExecutor:
                 datetime.fromisoformat(
                     str(provenance["benchmarks"][str(item["symbol"])])
                 ),
+                date.fromisoformat(str(item["previous_session"])) if item.get("previous_session") else None,
+                Decimal(str(item["previous_close"])) if item.get("previous_close") is not None else None,
             )
             for item in market.get("benchmarks", [])
         }
@@ -1122,7 +1136,7 @@ class SessionExecutor:
         borrow_rates: dict[str, Decimal | None],
         processed_at: datetime,
     ) -> SessionExecutionResult:
-        """Execute the exact nine phases, resuming only at committed boundaries."""
+        """Execute the causal phases, resuming only at committed boundaries."""
         self._validate_clock(session, epoch_id, processed_at)
         existing = self.ledger.read_snapshots(session, session)
         if existing and existing[0].epoch_id != epoch_id:
@@ -1373,6 +1387,24 @@ class SessionExecutor:
         )
         self._phase(
             session,
+            "accrue_borrow",
+            processed_at,
+            lambda: self.ledger.accrue_borrow(
+                session, bars, borrow_rates, processed_at, carried_calendar=True, validated_at=market_validated_at
+            ),
+            completed,
+        )
+        self._phase(
+            session,
+            "accrue_financing",
+            processed_at,
+            lambda: self.ledger.accrue_financing(
+                session, self.cost_model.margin_financing_rate, processed_at, carried_calendar=True
+            ),
+            completed,
+        )
+        self._phase(
+            session,
             "apply_corporate_actions",
             processed_at,
             lambda: self.ledger.apply_corporate_actions(
@@ -1414,22 +1446,11 @@ class SessionExecutor:
             completed,
         )
         self._phase(
-            session,
-            "accrue_borrow",
-            processed_at,
-            lambda: self.ledger.accrue_borrow(
-                session, bars, borrow_rates, processed_at
-            ),
-            completed,
-        )
-        self._phase(
-            session,
-            "accrue_financing",
-            processed_at,
-            lambda: self.ledger.accrue_financing(
-                session, self.cost_model.margin_financing_rate, processed_at
-            ),
-            completed,
+            session, "execute_intraday_stops", processed_at,
+            lambda: self._execute_intents(
+                session, {"sell", "cover"}, bridge, bars, opening_prices,
+                borrow_rates, processed_at, market_validated_at, intraday=True,
+            ), completed,
         )
         self._phase(
             session,
@@ -1536,6 +1557,8 @@ class SessionExecutor:
                     "symbol": symbol,
                     "close": format(benchmarks[symbol].close, "f"),
                     "source": benchmarks[symbol].source,
+                    "previous_session": benchmarks[symbol].previous_session.isoformat() if benchmarks[symbol].previous_session else None,
+                    "previous_close": format(benchmarks[symbol].previous_close, "f") if benchmarks[symbol].previous_close is not None else None,
                 }
                 for symbol in sorted(benchmarks)
             ],
@@ -1595,6 +1618,12 @@ class SessionExecutor:
             "benchmark_symbols": list(self.benchmark_symbols),
             "cost_model": cost_model,
             "risk_gate": asdict(RiskGateConfig.from_dict(self.config)),
+            "risk_discipline": {"reentry_cooldown_days": int(self.ar_config.get("risk_discipline", {}).get("reentry_cooldown_days", 0))},
+            "carrying_cost_clock": "prior-accepted-close-calendar-days;new-positions-accrue-next-session",
+            "corporate_action_terms": "split-before-post-split-per-share-dividend",
+            "daily_loss_basis": "net-realized-plus-known-charges/pre-entry-opening-equity",
+            "signal_return_basis": "next_open_total_shareholder_return_gross_v2",
+            "benchmark_return_basis": "paired_total_return_index_v2",
             "short_selling": {
                 "borrow_cost_reject_above": format(self.borrow_reject_above, "f"),
             },
@@ -1605,7 +1634,7 @@ class SessionExecutor:
             # source-policy substitution.
             semantic_inputs["price_source_policy"] = self.pricing_version
             semantic_inputs["benchmark_price_source_policy"] = (
-                "yfinance-total-return-adjusted-v1"
+                "yfinance-adjacent-same-vintage-index-v2"
             )
         if policy_document is not None:
             semantic_inputs["portfolio_policy"] = policy_document
@@ -1628,8 +1657,8 @@ class SessionExecutor:
         """Bind one post-exit baseline, then validate every entry against it."""
         portfolio_context = None
         if self.portfolio_policy_config is not None:
-            account = self.ledger.account_state()
-            current = self.ledger.policy_open_lot_projection(session)
+            account = self.ledger.account_state(opening_prices)
+            current = self.ledger.policy_open_lot_projection(session, prices=opening_prices)
             pending = self._policy_pending_with_execution_prices(
                 session, self.ledger.policy_pending_entry_projection(), opening_prices
             )
@@ -1724,13 +1753,13 @@ class SessionExecutor:
         """Rebuild the prospective view after each prior fill/rejection."""
         if self.portfolio_policy_config is None:
             raise LedgerConflictError("portfolio policy config is unavailable")
-        current = self.ledger.policy_open_lot_projection(session)
+        current = self.ledger.policy_open_lot_projection(session, prices=opening_prices)
         pending = self._policy_pending_with_execution_prices(
             session,
             self.ledger.policy_pending_entry_projection(exclude_intent_id=intent_id),
             opening_prices,
         )
-        account = self.ledger.account_state()
+        account = self.ledger.account_state(opening_prices)
         sectors = dict(baseline.sectors)
         sectors.update(
             {
@@ -1797,6 +1826,7 @@ class SessionExecutor:
         market_validated_at: datetime,
         *,
         portfolio_context: PortfolioRiskContext | None = None,
+        intraday: bool = False,
     ) -> None:
         intents = sorted(
             (
@@ -1816,6 +1846,15 @@ class SessionExecutor:
             if len(tickers) != 1:
                 raise ValueError(f"ambiguous ticker for intent {intent.intent_id}")
             ticker = next(iter(tickers))
+            if intent.side in {"sell", "cover"}:
+                gap = intent.price_rule != "resting_stop" or (
+                    intent.stop_price is not None and (
+                        (intent.side == "sell" and bars[ticker].open <= intent.stop_price)
+                        or (intent.side == "cover" and bars[ticker].open >= intent.stop_price)
+                    )
+                )
+                if intraday == gap:
+                    continue
             recommendation = None
             intent_context = portfolio_context
             if self.policy_enabled and intent.side in {"buy", "short"}:
@@ -1870,11 +1909,12 @@ class SessionExecutor:
             bridge.execute_due_intent(
                 intent,
                 bars[ticker],
-                self.ledger.account_state(),
+                self.ledger.account_state(opening_prices),
                 {
                     "processing_at": processed_at,
                     "bar_validation_at": market_validated_at,
                     "opening_prices": opening_prices,
+                    "intraday": intraday,
                     "borrow_rate": borrow_rates.get(ticker),
                     "open_trades": [
                         {
@@ -1903,8 +1943,16 @@ class SessionExecutor:
         epoch_id: str,
         benchmarks: dict[str, AdjustedClose],
     ) -> None:
+        previous = previous_session(session)
+        prior = {row.symbol: row for row in self.ledger.read_benchmark_observations(previous, previous, epoch_id)}
         for symbol in sorted(benchmarks):
             adjusted = benchmarks[symbol]
+            if adjusted.previous_session != previous or adjusted.previous_close is None:
+                raise ValueError(f"missing same-vintage benchmark pair {symbol}/{session}")
+            prior_row = prior.get(symbol)
+            if prior_row is not None and prior_row.return_basis != "paired_total_return_index_v2":
+                raise ValueError("legacy_unpaired_benchmark_basis: start a new metric epoch")
+            index = (prior_row.close * adjusted.close / adjusted.previous_close) if prior_row else Decimal(100)
             self.ledger.record_benchmark_observation(
                 BenchmarkObservation(
                     stable_id(
@@ -1918,8 +1966,8 @@ class SessionExecutor:
                     epoch_id,
                     session,
                     symbol,
-                    adjusted.close,
-                    "total_return_adjusted",
+                    index,
+                    "paired_total_return_index_v2",
                     adjusted.source,
                     adjusted.fetched_at,
                     True,
@@ -1973,6 +2021,7 @@ class SessionExecutor:
             validation_at,
             max_age,
         )
+        validate_benchmark_pairs(bundle.benchmarks, set(self.benchmark_symbols), session)
         cutoff = session_close(session)
         for ticker in bundle.tickers:
             if bundle.bars[(ticker, session)].fetched_at < cutoff:

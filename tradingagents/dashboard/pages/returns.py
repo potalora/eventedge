@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard.charts import make_equity_curves_facet
 from tradingagents.dashboard.data_loaders import (
@@ -18,7 +19,7 @@ STRESS_TEST_LABEL = "$5k/$10k/$50k concentration stress tests"
 SHARPE_LABEL = "Annualized daily net Sharpe"
 INFORMATION_RATIO_LABEL = "Annualized matched-benchmark information ratio"
 ACCURACY_LABEL = "Directional accuracy (5 XNYS sessions)"
-INSUFFICIENT_HISTORY = "Insufficient history (<30 valid sessions)"
+INSUFFICIENT_HISTORY = RATIO_REQUIREMENTS
 
 
 def _rows(books: dict[str, dict]) -> list[dict[str, object]]:
@@ -26,12 +27,8 @@ def _rows(books: dict[str, dict]) -> list[dict[str, object]]:
         {
             "Book": name,
             "Net return": book.get("total_return"),
-            SHARPE_LABEL: book.get("annualized_daily_net_sharpe")
-            if book.get("annualized_daily_net_sharpe") is not None
-            else INSUFFICIENT_HISTORY,
-            INFORMATION_RATIO_LABEL: book.get("annualized_matched_information_ratio")
-            if book.get("annualized_matched_information_ratio") is not None
-            else INSUFFICIENT_HISTORY,
+            SHARPE_LABEL: ratio_display(book, "annualized_daily_net_sharpe"),
+            INFORMATION_RATIO_LABEL: ratio_display(book, "annualized_matched_information_ratio"),
             ACCURACY_LABEL: book.get("directional_accuracy_5d"),
             "Valid sessions": book.get("valid_sessions"),
         }

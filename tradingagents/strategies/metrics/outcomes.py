@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable, Mapping
 
-from tradingagents.strategies.execution.models import MarketBar
+from tradingagents.strategies.execution.models import CorporateAction, MarketBar
 
 from .calendar import XNYSCalendar
 from .identity import _stable_id
@@ -29,6 +29,8 @@ class OutcomeCalculator:
         signal: SignalMetricRecord,
         holding_sessions: int,
         bars: Mapping[tuple[str, object], MarketBar],
+        *,
+        corporate_actions: Iterable[CorporateAction] = (),
     ) -> OutcomeRecord:
         entry_session = self.calendar.next_session(signal.reference_session)
         exit_session = self.calendar.held_session(entry_session, holding_sessions)
@@ -57,8 +59,35 @@ class OutcomeCalculator:
             reason = "invalid_exit_price"
         raw_return: Decimal | None = None
         signed_return: Decimal | None = None
+        shares = Decimal(1)
+        distributions = Decimal(0)
+        seen: dict[str, CorporateAction] = {}
+        dividend_sessions: set[object] = set()
+        for action in sorted(corporate_actions, key=lambda a: (a.session, a.action_type != "split", a.action_id)):
+            if action.ticker != signal.ticker or not (entry_session < action.session <= exit_session):
+                continue
+            if action.action_id in seen:
+                if seen[action.action_id] != action:
+                    reason = reason or "conflicting_corporate_action"
+                continue
+            seen[action.action_id] = action
+            if not action.verified or not action.source or not self.calendar.is_session(action.session):
+                reason = reason or "unverified_corporate_action"
+            elif action.action_type == "split":
+                if action.ratio is None or not action.ratio.is_finite() or action.ratio <= 0 or action.cash_per_share is not None:
+                    reason = reason or "invalid_split_terms"
+                else:
+                    shares *= action.ratio
+            elif action.action_type == "cash_dividend":
+                if action.session in dividend_sessions or action.cash_per_share is None or not action.cash_per_share.is_finite() or action.cash_per_share < 0 or action.ratio is not None:
+                    reason = reason or "invalid_dividend_terms"
+                else:
+                    distributions += shares * action.cash_per_share
+                    dividend_sessions.add(action.session)
+            else:
+                reason = reason or "unsupported_corporate_action"
         if not reason:
-            raw_return = (exit_price - entry_price) / entry_price
+            raw_return = (exit_price * shares + distributions - entry_price) / entry_price
             if signal.direction == "long":
                 signed_return = raw_return
             elif signal.direction == "short":
@@ -81,6 +110,7 @@ class OutcomeCalculator:
             signed_return=signed_return,
             status="invalid" if reason else "valid",
             invalid_reason=reason,
+            return_basis="next_open_total_shareholder_return_gross_v2",
         )
 
     @staticmethod

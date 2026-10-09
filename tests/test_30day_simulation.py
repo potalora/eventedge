@@ -137,7 +137,7 @@ class FakeStrategy:
         ]
 
     def check_exit(
-        self, ticker, entry_price, current_price, holding_days, params, data
+        self, ticker, entry_price, current_price, holding_days, params, data, direction="long"
     ):
         hold = params.get("hold_days", self._hold_days)
         if holding_days >= hold:
@@ -184,7 +184,7 @@ class _HealthPaddingStrategy:
         return []
 
     def check_exit(
-        self, ticker, entry_price, current_price, holding_days, params, data
+        self, ticker, entry_price, current_price, holding_days, params, data, direction="long"
     ):
         return False, ""
 
@@ -414,19 +414,12 @@ class AuthoritativePriceSource:
         return []
 
     def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
-        assert start_session == end_session_inclusive
-        session = start_session
-        self.benchmark_calls.append(session)
+        from tradingagents.strategies.orchestration.trading_calendar import previous_session
+        self.benchmark_calls.append(end_session_inclusive)
         fetched_at = datetime.now(timezone.utc)
         return {
-            (symbol, session): AdjustedClose(
-                symbol,
-                session,
-                Decimal("650") if symbol == "SPY" else Decimal("91"),
-                "fixture-adjusted",
-                fetched_at,
-            )
-            for symbol in symbols
+            (symbol, session): AdjustedClose(symbol, session, Decimal("650") if symbol == "SPY" else Decimal("91"), "fixture-adjusted", fetched_at, previous_session(session), Decimal("650") if symbol == "SPY" else Decimal("91"))
+            for symbol in symbols for session in (start_session, end_session_inclusive)
         }
 
 
@@ -3170,7 +3163,7 @@ class TestReactivatedStrategies:
             assert c.score > 0
 
     def test_govt_contracts_momentum_fallback(self):
-        """govt_contracts falls back to momentum when no contract data."""
+        """Missing awards cannot be replaced by contractor price momentum."""
         from tradingagents.strategies.modules.govt_contracts import (
             GovtContractsStrategy,
         )
@@ -3197,12 +3190,7 @@ class TestReactivatedStrategies:
         }
 
         candidates = strategy.screen(data, "2026-03-25", strategy.get_default_params())
-        # LMT should appear (positive momentum), BA should not (negative)
-        if candidates:
-            tickers = [c.ticker for c in candidates]
-            assert "LMT" in tickers
-            for c in candidates:
-                assert c.metadata.get("source") == "momentum_fallback"
+        assert candidates == []
 
     def test_govt_contracts_exit_logic(self):
         """govt_contracts exit logic works correctly."""
@@ -3269,14 +3257,14 @@ class TestReactivatedStrategies:
         }
 
         candidates = strategy.screen(data, "2026-03-15", strategy.get_default_params())
-        assert len(candidates) > 0
+        assert candidates == []
         # KRE should get econ_boost from declining unemployment
         kre_candidates = [c for c in candidates if c.ticker == "KRE"]
         if kre_candidates:
             assert kre_candidates[0].metadata.get("econ_boost", 0) > 0
 
     def test_state_economics_momentum_only_fallback(self):
-        """state_economics falls back to pure momentum when no FRED data."""
+        """Retired state event proxy cannot fall back to momentum."""
         from tradingagents.strategies.modules.state_economics import (
             StateEconomicsStrategy,
         )
@@ -3296,7 +3284,7 @@ class TestReactivatedStrategies:
         }
 
         candidates = strategy.screen(data, "2026-03-15", strategy.get_default_params())
-        assert len(candidates) > 0
+        assert candidates == []
         for c in candidates:
             assert c.metadata.get("econ_boost", 0) == 0.0  # No boost without FRED
 

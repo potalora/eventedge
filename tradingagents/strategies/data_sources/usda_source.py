@@ -22,6 +22,7 @@ from typing import Any
 
 import requests
 
+from .evidence import current_session_date, require_current_as_of, acquisition_time
 from .request_policy import provider_request
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -150,6 +151,7 @@ class USDASource:
         commodity: str,
         year: int,
         states: str | None = None,
+        *, as_of: str | None = None,
     ) -> list[dict]:
         """Fetch weekly crop condition ratings from NASS.
 
@@ -163,6 +165,8 @@ class USDASource:
             Each dict has: week_ending, commodity, state, excellent_pct,
             good_pct, fair_pct, poor_pct, very_poor_pct.
         """
+        as_of = as_of or current_session_date()
+        require_current_as_of(as_of, current_session_date())
         if not self._api_key:
             raise SourceFetchError("USDA access missing", reason_code="provider_error")
 
@@ -170,7 +174,7 @@ class USDASource:
             state.strip().upper()
             for state in (states or AG_STATES).split(",") if state.strip()
         })
-        cache_key = f"{commodity.upper()}|{year}|{','.join(requested_states)}"
+        cache_key = f"{commodity.upper()}|{year}|{','.join(requested_states)}|{as_of}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -212,10 +216,13 @@ class USDASource:
         grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
         invalid_groups: set[tuple[str, str, str]] = set()
         invalid_records = False
+        acquired_at = acquisition_time()
         for record in data.get("data", []):
             if not isinstance(record, dict):
                 continue
             week = record.get("week_ending", "")
+            if source_date(week) and week[:10] > as_of:
+                continue
             state = record.get("state_alpha", "")
             crop_class = record.get("class_desc", "ALL CLASSES")
             unit = record.get("unit_desc", "")
@@ -247,6 +254,10 @@ class USDASource:
                     "commodity": commodity.upper(),
                     "crop_class": crop_class,
                     "state": state,
+                    "observation_date": week,
+                    "acquired_at": acquired_at,
+                    "available_at": acquired_at,
+                    "availability_basis": "current_acquisition_no_historical_vintage",
                 }
             try:
                 value = int(record.get("Value", "").strip())
@@ -279,6 +290,11 @@ class USDASource:
             observations,
             key=lambda row: (row["week_ending"], row["state"], row["crop_class"]),
         )
+        missing = set(requested_states) - {row["state"] for row in weeks}
+        if missing:
+            raise SourceFetchError("USDA requested state observations unavailable", reason_code="invalid_response",
+                partial_data={"crop_progress":{commodity.upper():weeks},
+                              "coverage":{"complete":False, "missing_states":sorted(missing)}})
         if invalid_records:
             # Invalid latest-week markers prevent older valid rows masquerading
             # as a current comparison. They carry no numerical observations.
@@ -293,9 +309,9 @@ class USDASource:
 
     def _dispatch_crop_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         commodity = params.get("commodity", "CORN")
-        year = params.get("year", 2025)
+        year = params.get("year", int(current_session_date()[:4]))
         states = params.get("states")
-        weeks = self.fetch_crop_progress(commodity, year, states)
+        weeks = self.fetch_crop_progress(commodity, year, states, as_of=params.get("as_of"))
         return {"weeks": weeks, "count": len(weeks)}
 
     # ------------------------------------------------------------------
@@ -393,14 +409,17 @@ class USDASource:
             if name in _STATE_NAMES_TO_CODES:
                 code = _STATE_NAMES_TO_CODES[name]
                 vals = []
+                valid = True
                 for raw in mline.group(2, 3, 4, 5, 6):
                     if raw == "-":
-                        vals.append(0)
+                        vals.append(None)
+                        valid = False
                     else:
                         try:
                             vals.append(int(raw))
                         except ValueError:
-                            vals.append(0)
+                            vals.append(None)
+                            valid = False
                 rows.append({
                     "week_ending": week_iso,
                     "state": code,
@@ -409,6 +428,7 @@ class USDASource:
                     "fair_pct": vals[2],
                     "good_pct": vals[3],
                     "excellent_pct": vals[4],
+                    "condition_valid": valid and all(value is not None and 0 <= value <= 100 for value in vals),
                 })
         return rows
 

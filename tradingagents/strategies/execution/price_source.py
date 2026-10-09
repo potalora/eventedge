@@ -58,6 +58,8 @@ class AdjustedClose:
     close: Decimal
     source: str
     fetched_at: datetime
+    previous_session: date | None = None
+    previous_close: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.close, Decimal):
@@ -262,6 +264,42 @@ def validate_adjusted_closes(
             errors.append(f"stale {symbol}/{session}")
     if errors:
         raise BarValidationError("; ".join(errors))
+
+
+def paired_adjusted_closes(
+    closes: dict[tuple[str, date], AdjustedClose], symbols: tuple[str, ...], session: date
+) -> dict[tuple[str, date], AdjustedClose]:
+    """Bind adjacent observations acquired together in one adjustment vintage."""
+    from dataclasses import replace
+    from tradingagents.strategies.orchestration.trading_calendar import previous_session
+
+    prior = previous_session(session)
+    pairs: dict[tuple[str, date], AdjustedClose] = {}
+    for symbol in symbols:
+        current = closes.get((symbol, session))
+        previous = closes.get((symbol, prior))
+        if current is None or previous is None:
+            raise BarValidationError(f"missing paired benchmark {symbol}/{prior}/{session}")
+        if current.symbol != symbol or current.session != session or previous.symbol != symbol or previous.session != prior:
+            raise BarValidationError(f"mismatched paired benchmark {symbol}/{session}")
+        if current.source != previous.source or current.fetched_at != previous.fetched_at:
+            raise BarValidationError(f"mixed-vintage benchmark {symbol}/{session}")
+        if not previous.close.is_finite() or previous.close <= 0:
+            raise BarValidationError(f"invalid paired benchmark {symbol}/{prior}")
+        pairs[(symbol, session)] = replace(current, previous_session=prior, previous_close=previous.close)
+    return pairs
+
+
+def validate_benchmark_pairs(
+    closes: dict[tuple[str, date], AdjustedClose], symbols: set[str], session: date
+) -> None:
+    from tradingagents.strategies.orchestration.trading_calendar import previous_session
+
+    prior = previous_session(session)
+    for symbol in symbols:
+        current = closes[(symbol, session)]
+        if current.previous_session != prior or not isinstance(current.previous_close, Decimal) or not current.previous_close.is_finite() or current.previous_close <= 0:
+            raise BarValidationError(f"missing_or_invalid_same_vintage_benchmark_pair {symbol}/{session}")
 
 
 class YFinancePriceSource:
@@ -1503,12 +1541,9 @@ def _optional_action_decimal(
     value: object, ticker: str, session: date, field: str
 ) -> Decimal | None:
     if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
+        raise CorporateActionValidationError(f"missing action evidence {ticker}/{session} {field}")
+    if pd.isna(value):
+        raise CorporateActionValidationError(f"missing action evidence {ticker}/{session} {field}")
     try:
         decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

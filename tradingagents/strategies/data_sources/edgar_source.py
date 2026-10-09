@@ -4,7 +4,8 @@ import logging
 import time
 from typing import Any
 
-from .request_policy import provider_request
+from .evidence import current_session_date, CoverageRecords, collection_envelope
+from .request_policy import provider_request, provider_budget, current_provider_deadline
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 logger = logging.getLogger(__name__)
@@ -101,13 +102,52 @@ class EDGARSource:
     # Public data methods
     # ------------------------------------------------------------------
 
-    def search_filings(
+    def search_filings(self, form_type: str, date_from: str | None = None,
+                       date_to: str | None = None, ticker: str | None = None,
+                       keyword: str | None = None) -> list[dict[str, Any]]:
+        """Exhaust the requested EFTS window under the shared provider budget.
+
+        EFTS may cap a query at 10,000 hits; such windows fail explicitly and
+        must be narrowed rather than silently claiming complete coverage.
+        """
+        if current_provider_deadline("edgar") is None:
+            with provider_budget("edgar", time.monotonic() + 60):
+                return self.search_filings(form_type, date_from, date_to, ticker, keyword)
+        records, seen, offset, expected = [], set(), 0, None
+        while True:
+            try:
+                page = self._search_filings_page(form_type, date_from, date_to, ticker, keyword, offset)
+            except SourceFetchError as exc:
+                exc.partial_data = {"filings": records + exc.partial_data.get("filings", []),
+                                    "coverage": {"mode": "exhaustive_window", "complete": False}}
+                raise
+            total = page.coverage["provider_total"]
+            if expected is not None and total != expected:
+                raise SourceFetchError("EDGAR search total changed", reason_code="invalid_response",
+                                       partial_data={"filings": records})
+            expected = total
+            for row in page:
+                identity = (row['adsh'], tuple(row['ciks']))
+                # Full-text hits can include multiple documents per filing.
+                if identity not in seen:
+                    seen.add(identity)
+                    records.append(row)
+            offset += len(page)
+            if offset >= total:
+                return CoverageRecords(records, coverage={"mode":"exhaustive_window", "complete":True,
+                    "provider_total":total, "returned":len(records), "date_from":date_from, "date_to":date_to})
+            if not page or offset >= 10000:
+                raise SourceFetchError("EDGAR search window incomplete", reason_code="invalid_response",
+                                       partial_data={"filings":records, "coverage":{"mode":"exhaustive_window", "complete":False}})
+
+    def _search_filings_page(
         self,
         form_type: str,
         date_from: str | None = None,
         date_to: str | None = None,
         ticker: str | None = None,
         keyword: str | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Search EDGAR full-text search for filings.
 
@@ -124,11 +164,11 @@ class EDGARSource:
         """
         import requests
 
-        params: dict[str, Any] = {"forms": form_type, "q": keyword or ""}
+        params: dict[str, Any] = {"forms": form_type, "q": keyword or "", "from": offset, "size": 100}
         if ticker:
             cik = self.ticker_to_cik(ticker)
             if not cik:
-                return []
+                return CoverageRecords([], coverage={"provider_total":0})
             params["ciks"] = cik.zfill(10)
         if date_from:
             params["startdt"] = date_from
@@ -181,7 +221,13 @@ class EDGARSource:
                 "ciks": ciks,
                 "adsh": adsh,
             })
-        return results
+        total_payload = hits_container.get("total")
+        total = total_payload.get("value") if isinstance(total_payload, dict) else total_payload
+        relation = total_payload.get("relation", "eq") if isinstance(total_payload, dict) else "eq"
+        if type(total) is not int or total < offset + len(hits) or relation != "eq":
+            raise SourceFetchError("EDGAR search total unavailable", reason_code="invalid_response",
+                                   partial_data={"filings":results})
+        return CoverageRecords(results, coverage={"provider_total":total})
 
     def get_company_filings(
         self,
@@ -237,9 +283,55 @@ class EDGARSource:
             })
             if len(results) >= count:
                 break
-        return results
+        matching_total = sum(1 for form in forms if not form_types or form in form_types)
+        archive_files = data.get("filings", {}).get("files")
+        coverage = {"mode":"bounded_sample", "complete":False, "limit":count,
+                    "count":len(results), "returned":len(results), "source_total":matching_total,
+                    "source_recent_total":len(forms), "has_more":matching_total > len(results),
+                    "archived_possible":bool(archive_files) if isinstance(archive_files,list) else True,
+                    "scope":"latest_matching_forms_in_current_submissions", "cik":cik}
+        return CoverageRecords(results, coverage=coverage)
 
-    def get_filing_text(self, url: str) -> str:
+    def get_primary_document_url(self, url: str, form_type: str | None = None) -> str:
+        """Resolve the matching main filing document, independently of identity URL."""
+        from bs4 import BeautifulSoup
+        from urllib.parse import urljoin, urlparse, parse_qs
+        if not re.search(r"-index\.html?$", url):
+            return url
+        key = f"primary_document|{url}|{form_type}"
+        if key in self._session_cache:
+            return self._session_cache[key]
+        resp = provider_request("edgar", "GET", url, headers={"User-Agent":self._user_agent},
+                                timeout=15, operation="filing_detail")
+        candidates = []
+        for row in BeautifulSoup(resp.text, "html.parser").select("table.tableFile tr"):
+            cells = row.find_all("td")
+            if len(cells) < 4 or not cells[2].find("a"):
+                continue
+            record_form = cells[3].get_text(strip=True)
+            if (form_type and record_form != form_type) or (not form_type and cells[0].get_text(strip=True) != "1"):
+                continue
+            href = cells[2].find("a").get("href", "")
+            candidate = urljoin(url, href)
+            parsed = urlparse(candidate)
+            if parsed.path in ("/ix", "/ixviewer/doc/action"):
+                documents = parse_qs(parsed.query).get("doc", [])
+                if len(documents) != 1:
+                    continue
+                candidate = urljoin(url, documents[0])
+                parsed = urlparse(candidate)
+            if not parsed.path.startswith(urlparse(url).path.rsplit("/",1)[0] + "/"):
+                continue
+            if parsed.netloc != "www.sec.gov" or not parsed.path.startswith("/Archives/edgar/data/") or re.search(r"-index\.html?$", candidate):
+                continue
+            candidates.append(candidate)
+        if len(set(candidates)) != 1:
+            raise SourceFetchError("EDGAR primary document ambiguous or unavailable", reason_code="invalid_response")
+        document = candidates[0]
+        self._session_cache[key] = document
+        return document
+
+    def get_filing_text(self, url: str, *, form_type: str | None = None) -> str:
         """Download the text content of a filing document.
 
         Args:
@@ -250,6 +342,7 @@ class EDGARSource:
         """
         import requests
 
+        url = self.get_primary_document_url(url, form_type)
         resp = provider_request("edgar", "GET", url,
                                 headers={"User-Agent": self._user_agent}, timeout=30,
                                 operation="filing_text")
@@ -280,8 +373,13 @@ class EDGARSource:
 
         filings = self.get_company_filings(cik, form_types=["4", "4/A"], count=40)
 
-        cutoff = ((datetime.fromisoformat(as_of) if as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        recent = [f for f in filings if f.get("filing_date", "") >= cutoff and (as_of is None or f.get("filing_date", "") <= as_of)]
+        as_of = as_of or current_session_date()
+        cutoff = (datetime.fromisoformat(as_of) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        recent = [f for f in filings if cutoff <= f.get("filing_date", "") <= as_of]
+        coverage = {**getattr(filings,"coverage",{}), "mode":"bounded_sample", "complete":False,
+                    "limit":40, "ticker":ticker, "date_from":cutoff, "date_to":as_of,
+                    "prefilter_returned":len(filings), "returned_filings":len(recent),
+                    "scope":"latest_40_form4_filings_per_issuer_then_date_filter"}
 
         # Enrich with parsed transaction details
         enriched: list[dict[str, Any]] = []
@@ -289,7 +387,8 @@ class EDGARSource:
             try:
                 transactions = self._parse_form4_xml(cik, filing)
             except SourceFetchError as exc:
-                exc.partial_data = {"form4_filings": enriched}
+                exc.partial_data = {"form4_filings": CoverageRecords(enriched, coverage={**coverage,"returned_transactions":len(enriched)}),
+                                    "coverage":{**coverage,"returned_transactions":len(enriched)}}
                 raise
             if transactions:
                 for txn in transactions:
@@ -297,7 +396,7 @@ class EDGARSource:
             else:
                 enriched.append(filing)
 
-        return enriched
+        return CoverageRecords(enriched, coverage={**coverage,"returned_transactions":len(enriched)})
 
     def _parse_form4_xml(
         self, cik: str, filing: dict[str, Any]
@@ -364,6 +463,8 @@ class EDGARSource:
 
         # Extract transactions
         transactions: list[dict[str, Any]] = []
+        owner_cik_el = root.find(f".//{ns}reportingOwnerId/{ns}rptOwnerCik")
+        owner_cik = (owner_cik_el.text or "").strip() if owner_cik_el is not None else ""
         for txn_tag in (f"{ns}nonDerivativeTransaction", f"{ns}derivativeTransaction"):
             for txn_el in root.findall(f".//{txn_tag}"):
                 coding_el = txn_el.find(f".//{ns}transactionCoding")
@@ -373,16 +474,8 @@ class EDGARSource:
                     if code_el is not None and code_el.text:
                         tx_code = code_el.text.strip()
 
-                # P = open market purchase (strongest buy signal)
-                # A/J/M/I = other acquisition types
-                # S/F/D = sale/disposition types
-                if tx_code in ("P", "A", "J", "M", "I"):
-                    transaction_type = "buy"
-                elif tx_code in ("S", "F", "D"):
-                    transaction_type = "sell"
-                else:
-                    transaction_type = "other"
-
+                transaction_type = "other"
+                acquired_disposed = ""
                 shares = 0.0
                 price = 0.0
                 amounts_el = txn_el.find(f".//{ns}transactionAmounts")
@@ -400,17 +493,23 @@ class EDGARSource:
                         except ValueError:
                             pass
 
-                    # Fallback: A/D code
                     ad_el = amounts_el.find(f".//{ns}transactionAcquiredDisposedCode/{ns}value")
-                    if ad_el is not None and ad_el.text and transaction_type == "other":
-                        if ad_el.text.strip() == "A":
-                            transaction_type = "buy"
-                        elif ad_el.text.strip() == "D":
-                            transaction_type = "sell"
+                    acquired_disposed = (ad_el.text or "").strip() if ad_el is not None else ""
+                if acquired_disposed in ("A", "D"):
+                    transaction_type = "buy" if acquired_disposed == "A" else "sell"
+                # Contradictory P/S direction cannot establish a market trade.
+                if (tx_code == "P" and acquired_disposed != "A") or (tx_code == "S" and acquired_disposed != "D"):
+                    transaction_type = "other"
+                open_market = txn_tag == f"{ns}nonDerivativeTransaction" and (
+                    (tx_code == "P" and acquired_disposed == "A") or (tx_code == "S" and acquired_disposed == "D"))
 
                 transactions.append({
                     "transaction_type": transaction_type,
                     "transaction_code": tx_code,
+                    "acquired_disposed": acquired_disposed,
+                    "open_market": open_market,
+                    "owner_cik": owner_cik,
+                    "transaction_id": f"{accession}:{txn_tag.rsplit('}', 1)[-1]}:{len(transactions)}",
                     "shares": shares,
                     "price_per_share": price,
                     "owner_name": owner_name,
@@ -421,7 +520,7 @@ class EDGARSource:
 
         return transactions
 
-    def get_recent_13d(self, days_back: int = 60) -> list[dict[str, Any]]:
+    def get_recent_13d(self, days_back: int = 60, *, as_of: str | None = None) -> list[dict[str, Any]]:
         """Get recent SC 13D (activist) filings.
 
         Args:
@@ -432,8 +531,9 @@ class EDGARSource:
         """
         from datetime import datetime, timedelta
 
-        date_from = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        date_to = datetime.now().strftime("%Y-%m-%d")
+        reference = datetime.fromisoformat(as_of) if as_of else datetime.fromisoformat(current_session_date())
+        date_from = (reference - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = reference.strftime("%Y-%m-%d")
         return self.search_filings("SC 13D", date_from=date_from, date_to=date_to)
 
     def _normalize_name(self, name: str) -> str:
@@ -610,32 +710,30 @@ class EDGARSource:
     # ------------------------------------------------------------------
 
     def _dispatch_search_filings(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.search_filings(
+        return collection_envelope(self.search_filings(
             form_type=params.get("form_type", "10-K"),
             date_from=params.get("date_from"),
             date_to=params.get("date_to"),
             ticker=params.get("ticker"),
             keyword=params.get("keyword"),
-        )}
+        ))
 
     def _dispatch_company_filings(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.get_company_filings(
+        return collection_envelope(self.get_company_filings(
             cik=params.get("cik", ""),
             form_types=params.get("form_types"),
             count=params.get("count", 10),
-        )}
+        ))
 
     def _dispatch_filing_text(self, params: dict[str, Any]) -> dict[str, Any]:
         return {"data": self.get_filing_text(url=params.get("url", ""))}
 
     def _dispatch_recent_form4(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.get_recent_form4(
-            ticker=params.get("ticker", ""),
-            days_back=params.get("days_back", 30),
-        )}
+        return collection_envelope(self.get_recent_form4(
+            ticker=params.get("ticker", ""), days_back=params.get("days_back", 30), as_of=params.get("as_of")))
 
     def _dispatch_recent_13d(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"data": self.get_recent_13d(days_back=params.get("days_back", 60))}
+        return collection_envelope(self.get_recent_13d(days_back=params.get("days_back", 60), as_of=params.get("as_of")))
 
     def _dispatch_ticker_to_cik(self, params: dict[str, Any]) -> dict[str, Any]:
         cik = self.ticker_to_cik(params.get("ticker", ""))

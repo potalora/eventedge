@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eventedge"
 version = "0.4.0"
-description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 12 strategies, with LLM-powered portfolio committee."
+description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 11 enabled strategies, with LLM-powered portfolio committee."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

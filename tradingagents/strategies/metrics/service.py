@@ -523,7 +523,8 @@ class MetricsService:
             not item.get("metrics_available", True) for item in headline.values()
         )
         if not missing and unavailable_headline:
-            panel_unavailable_reason = "insufficient_history"
+            reasons = {str(item.get("unavailable_reason")) for item in headline.values() if not item.get("metrics_available", True)}
+            panel_unavailable_reason = next(iter(reasons)) if len(reasons) == 1 else "unavailable_headline_metrics"
         elif not missing and len(headline_windows) == 1:
             panel = {
                 "label": "equal-weighted dependent $100k scenario panel",
@@ -573,6 +574,11 @@ class MetricsService:
         series = self._cohort_series_from_inputs(inputs)
         if len(inputs[0]) < 2:
             return self._insufficient_book(cohort_id, epoch_id, inputs, outcomes), series
+        if series.get("benchmark_unavailable_reason"):
+            book = self._insufficient_book(cohort_id, epoch_id, inputs, outcomes)
+            reason = str(series["benchmark_unavailable_reason"])
+            book.update(unavailable_reason=reason, sharpe_unavailable_reason=reason, information_ratio_unavailable_reason=reason)
+            return book, series
         report = self._book_payload(
             self._portfolio_from_inputs(cohort_id, epoch_id, inputs)
         )
@@ -652,8 +658,10 @@ class MetricsService:
             "matched_excess_return": None,
             "annualized_daily_net_sharpe": None,
             "sharpe_return_count": 0,
+            "sharpe_unavailable_reason": "insufficient_return_count",
             "annualized_matched_information_ratio": None,
             "information_ratio_return_count": 0,
+            "information_ratio_unavailable_reason": "insufficient_return_count",
             "max_drawdown": None,
             "long_weight": (
                 float(latest.long_market_value) / equity if equity else None
@@ -709,7 +717,12 @@ class MetricsService:
             ]
             for symbol in ("SPY", "BIL")
         }
-        matched = matched_benchmark_returns(snapshots, benchmark_rows)
+        benchmark_unavailable_reason = None
+        if any(row.return_basis != "paired_total_return_index_v2" for row in benchmark_rows):
+            matched = ()
+            benchmark_unavailable_reason = "legacy_unpaired_benchmark_basis"
+        else:
+            matched = matched_benchmark_returns(snapshots, benchmark_rows)
         first_equity = float(snapshots[0].net_equity)
         return {
             "net_equity_history": [
@@ -733,6 +746,7 @@ class MetricsService:
                 for row in snapshots
             ],
             "benchmarks": by_symbol,
+            "benchmark_unavailable_reason": benchmark_unavailable_reason,
             "matched_benchmark_returns": [
                 {"session": row.session.isoformat(), "return": row.value}
                 for row in matched

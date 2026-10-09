@@ -157,6 +157,7 @@ class PortfolioCommittee:
             List of TradeRecommendation sorted by confidence descending.
         """
         self.last_policy_decisions = ()
+        signals = [s for s in signals if not s.get("journal_only") and not (s.get("metadata") or {}).get("non_actionable_reason")]
         if not signals:
             return []
 
@@ -194,6 +195,9 @@ class PortfolioCommittee:
             return []
 
         attributed = self._derive_attribution(ranked, signals)
+        attributed = [rec for rec in attributed if rec.direction != "short" or self._short_passes_gate(
+            [signal for signal in signals if signal.get("ticker") == rec.ticker and signal.get("direction") == "short"],
+            self._short_conviction_threshold)]
 
         def recommendation_key(
             recommendation: TradeRecommendation,
@@ -420,6 +424,7 @@ class PortfolioCommittee:
             # Multi-strategy convergence is inherently strong. Single-strategy
             # shorts need high LLM conviction (>= threshold); single-strategy longs
             # need a meaningful weighted score.
+            strategies = sorted({s.get("strategy", "unknown") for s in sigs if s.get("direction") == direction})
             num_strategies = len(strategies)
             if num_strategies < 2:
                 if direction == "short":

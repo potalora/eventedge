@@ -155,7 +155,7 @@ class YFinanceSource:
         start: str,
         end: str,
     ) -> dict[str, float]:
-        """Compute trailing total returns for a map of ETFs.
+        """Compute trailing unadjusted Close price returns (excludes cash dividends).
 
         Args:
             etf_map: Mapping of label -> ticker (e.g. {"sp500": "SPY"}).
@@ -163,9 +163,9 @@ class YFinanceSource:
             end: End date string.
 
         Returns:
-            Dict mapping label to total return over the period (as a decimal).
+            Dict mapping label to price return over the period (as a decimal).
         """
-        cache_key = f"etf_returns|{start}|{end}"
+        cache_key = f"etf_returns|{start}|{end}|{tuple(sorted((label, normalize_ticker(ticker)) for label, ticker in etf_map.items()))}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 

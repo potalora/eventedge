@@ -2959,6 +2959,7 @@ class PortfolioLedger:
         session: date,
         *,
         limit: int = 256,
+        prices: Mapping[str, Decimal] | None = None,
     ) -> tuple[dict[str, object], ...]:
         """Return marked open lots using only persisted raw ledger evidence."""
         session = self._require_exact_date(session, "session")
@@ -2998,7 +2999,13 @@ class PortfolioLedger:
                 raise LedgerConflictError(
                     f"missing intent policy provenance {row['intent_id']}"
                 )
-            if row["mark_close"] is None:
+            if prices is not None:
+                mark = prices.get(str(row["ticker"]))
+                if not isinstance(mark, Decimal):
+                    raise MissingMarkError(f"missing exact opening mark for {row['ticker']}")
+                mark_session = session
+                mark_source = "bound_session_open"
+            elif row["mark_close"] is None:
                 if opened_session != session:
                     raise MissingMarkError(
                         f"missing persisted raw mark for {row['ticker']}/{session}"
@@ -3808,7 +3815,7 @@ class PortfolioLedger:
         errors: list[str] = []
         unique_actions: list[CorporateAction] = []
         seen_actions: dict[str, CorporateAction] = {}
-        for action in sorted(actions, key=lambda item: item.action_id):
+        for action in sorted(actions, key=lambda item: (item.action_type != "split", item.ticker, item.action_id)):
             existing_action = seen_actions.get(action.action_id)
             if existing_action is not None:
                 if existing_action != action:
@@ -3902,7 +3909,12 @@ class PortfolioLedger:
             self.corporate_action_batch_state_errors(session, actions)
         )
         seen: dict[str, CorporateAction] = {}
+        terms: dict[tuple[str, str], str] = {}
         for action in actions:
+            key = (action.ticker, action.action_type)
+            if action.action_type == "cash_dividend" and key in terms and terms[key] != action.action_id:
+                errors.append(f"ambiguous corporate action terms {action.ticker}/{action.action_type}")
+            terms[key] = action.action_id
             if action.action_id in seen and seen[action.action_id] != action:
                 errors.append(f"conflicting corporate action {action.action_id}")
             seen[action.action_id] = action
@@ -4284,6 +4296,9 @@ class PortfolioLedger:
         close_marks: dict[str, MarketBar],
         rates: dict[str, Decimal | None],
         valuation_at: datetime,
+        *,
+        carried_calendar: bool = False,
+        validated_at: datetime | None = None,
     ) -> LedgerEvent:
         """Accrue ACT/365 borrow once per short ticker at that session close."""
         self._require_timezone_aware(valuation_at, "valuation_at")
@@ -4291,7 +4306,7 @@ class PortfolioLedger:
             lots = self._open_lots_for_direction("short")
             tickers = sorted({lot["ticker"] for lot in lots})
             marks = self._validate_accrual_marks(
-                session, close_marks, tickers, valuation_at
+                session, close_marks, tickers, validated_at or valuation_at
             )
             events: list[LedgerEvent] = []
             for ticker in tickers:
@@ -4316,9 +4331,27 @@ class PortfolioLedger:
                     ),
                     Decimal("0"),
                 )
-                amount = self._cost_model.borrow_charge(
-                    quantity * marks[ticker].close, annual_rate
-                )
+                notional = quantity * marks[ticker].close
+                days = 1
+                if carried_calendar:
+                    previous = self._connection.execute(
+                        "SELECT session FROM account_snapshots WHERE cohort_id=? AND session<? AND valid=1 ORDER BY session DESC LIMIT 1",
+                        (self.cohort_id, session.isoformat()),
+                    ).fetchone()
+                    if previous is None:
+                        # No preceding accepted close: newly created book has no carried interval.
+                        days = 0
+                    else:
+                        prior_session = _date(previous["session"])
+                        days = (session - prior_session).days
+                        mark = self._connection.execute(
+                            "SELECT close FROM marks WHERE cohort_id=? AND ticker=? AND session=? AND adjusted=0",
+                            (self.cohort_id, ticker, prior_session.isoformat()),
+                        ).fetchone()
+                        if mark is None:
+                            raise MissingMarkError(f"missing carried mark {ticker}/{prior_session}")
+                        notional = quantity * _decimal(mark["close"])
+                amount = self._cost_model.borrow_charge(notional * days, annual_rate)
                 accrual_id = stable_id("borrow", self.cohort_id, session, ticker)
                 event = LedgerEvent(
                     accrual_id,
@@ -4399,6 +4432,8 @@ class PortfolioLedger:
         session: date,
         annual_rate: Decimal,
         processed_at: datetime | None = None,
+        *,
+        carried_calendar: bool = False,
     ) -> LedgerEvent:
         """Accrue debit-cash financing once; positive idle cash has a zero yield."""
         if (
@@ -4438,7 +4473,15 @@ class PortfolioLedger:
                     "debit financing ACT/365",
                 )
             debit_balance = max(-self._accounting_summary()["cash"], Decimal("0"))
-            amount = self._cost_model.financing_charge(debit_balance, annual_rate)
+            days = 1
+            if carried_calendar:
+                previous = self._connection.execute(
+                    "SELECT session, cash FROM account_snapshots WHERE cohort_id=? AND session<? AND valid=1 ORDER BY session DESC LIMIT 1",
+                    (self.cohort_id, session.isoformat()),
+                ).fetchone()
+                days = (session - _date(previous["session"])).days if previous else 0
+                debit_balance = max(-_decimal(previous["cash"]), Decimal(0)) if previous else Decimal(0)
+            amount = self._cost_model.financing_charge(debit_balance * days, annual_rate)
             event = LedgerEvent(
                 accrual_id,
                 session,
@@ -4524,7 +4567,7 @@ class PortfolioLedger:
                 ]
             unique_actions = {
                 action.action_id: action
-                for action in sorted(actions, key=lambda item: item.action_id)
+                for action in sorted(actions, key=lambda item: (item.action_type != "split", item.ticker, item.action_id))
             }
             for action in unique_actions.values():
                 existing = self._connection.execute(
@@ -4741,8 +4784,8 @@ class PortfolioLedger:
         """Persist one conflict-safe adjusted benchmark observation."""
         if observation.cohort_id != self.cohort_id:
             raise ValueError("benchmark cohort_id does not match ledger")
-        if observation.return_basis != "total_return_adjusted":
-            raise ValueError("benchmark return basis must be total_return_adjusted")
+        if observation.return_basis not in {"total_return_adjusted", "paired_total_return_index_v2"}:
+            raise ValueError("unsupported benchmark return basis")
         if (
             not observation.close.is_finite()
             or observation.close <= 0
@@ -4794,7 +4837,55 @@ class PortfolioLedger:
                 values,
             )
 
-    def account_state(self) -> AccountState:
+    def session_realized_net(self, session: date) -> Decimal:
+        """Net realized P&L known so far; fills already embed adverse slippage."""
+        rows = self._connection.execute(
+            "SELECT c.realized_pnl FROM lot_closures c JOIN fills f ON f.fill_id=c.fill_id WHERE f.session=?",
+            (session.isoformat(),),
+        ).fetchall()
+        pnl = sum((_decimal(r["realized_pnl"]) for r in rows), Decimal(0))
+        for fill in self.read_fills(session, session):
+            pnl -= fill.commission + fill.other_fees
+        rows = self._connection.execute(
+            "SELECT amount FROM cash_events WHERE cohort_id=? AND session=? AND event_type IN ('borrow','financing','dividend')",
+            (self.cohort_id, session.isoformat()),
+        ).fetchall()
+        return pnl + sum((_decimal(r["amount"]) for r in rows), Decimal(0))
+
+    def cooling_tickers(self, session: date, sessions: int) -> set[str]:
+        """Stops cool a ticker for N exchange sessions, including its exit day."""
+        if sessions <= 0:
+            return set()
+        from tradingagents.strategies.orchestration.trading_calendar import previous_session
+        start = session
+        for _ in range(sessions - 1):
+            start = previous_session(start)
+        rows = self._connection.execute(
+            "SELECT DISTINCT f.intent_id FROM fills f JOIN order_intents i ON i.intent_id=f.intent_id "
+            "WHERE f.session>=? AND f.session<=? AND i.price_rule='resting_stop'",
+            (start.isoformat(), session.isoformat()),
+        ).fetchall()
+        return {self._ticker_for_intent(str(r["intent_id"])) for r in rows}
+
+    def opening_equity(self, session: date, prices: Mapping[str, Decimal]) -> Decimal:
+        """Immutable pre-entry opening equity from the bound pre-action state."""
+        context = self.session_execution_context(session)
+        if context is None:
+            return self.account_state().net_equity
+        payload = json.loads(str(context["economic_inputs_json"]))
+        state = payload["starting_state"]
+        equity = Decimal(str(state["account"]["cash"]))
+        actions = tuple({a["action_id"]: a for a in payload["market"]["corporate_actions"]}.values())
+        for lot in state["open_lots"]:
+            quantity = Decimal(str(lot["quantity"]))
+            for action in actions:
+                if action["ticker"] == lot["ticker"] and action["action_type"] == "split":
+                    quantity *= Decimal(str(action["ratio"]))
+            sign = Decimal(1) if lot["direction"] == "long" else Decimal(-1)
+            equity += sign * quantity * prices[str(lot["ticker"])]
+        return equity
+
+    def account_state(self, prices: Mapping[str, Decimal] | None = None) -> AccountState:
         """Return bounded cohort state, using a lot's entry until its first mark."""
         open_lots = self._open_lots(include_latest_mark=True)
         summary = self._accounting_summary()
@@ -4807,12 +4898,16 @@ class PortfolioLedger:
                 if lot["mark_close"] is not None
                 else _decimal(lot["entry_price"])
             )
+            if prices is not None:
+                mark = prices.get(str(lot["ticker"]))
+                if not isinstance(mark, Decimal) or not mark.is_finite() or mark <= 0:
+                    raise MissingMarkError(f"missing exact opening mark for {lot['ticker']}")
             value = _decimal(lot["open_qty"]) * mark
             if lot["direction"] == "long":
                 long_value += value
             else:
                 short_liability += value
-                margin_used += _decimal(lot["margin_reserved"])
+                margin_used += max(_decimal(lot["margin_reserved"]), value * self._cost_model.margin_requirement)
         net_equity = summary["cash"] + long_value - short_liability
         return AccountState(
             self.cohort_id,
@@ -5673,7 +5768,7 @@ class PortfolioLedger:
             else:
                 short_liability += quantity * close
                 unrealized_pnl += (entry - close) * quantity
-                margin_used += _decimal(lot["margin_reserved"])
+                margin_used += max(_decimal(lot["margin_reserved"]), quantity * close * self._cost_model.margin_requirement)
         net_equity = summary["cash"] + long_market_value - short_liability
         gross_exposure = long_market_value + short_liability
         net_exposure = long_market_value - short_liability

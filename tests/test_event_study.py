@@ -177,7 +177,7 @@ def test_yfinance_price_fn_extracts_close_series():
         def fetch_prices(self, tickers, start, end):
             idx = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
             cols = pd.MultiIndex.from_tuples(
-                [("Close", "AAPL"), ("Open", "AAPL")]
+                [("Adj Close", "AAPL"), ("Open", "AAPL")]
             )
             return pd.DataFrame(
                 [[10.0, 9.0], [11.0, 10.0], [12.0, 11.0]], index=idx, columns=cols

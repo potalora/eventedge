@@ -1477,6 +1477,53 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
     return _record_due_outcomes(state, state.valid)
 
 
+def _include_retained_late_signals(
+    state: DailyRunState, horizon: str, signals: list[dict], health: list[Any],
+) -> tuple[list[dict], list[Any]]:
+    """Put frozen late observations through the normal candidate input checks."""
+    from tradingagents.strategies.orchestration.event_identity import (
+        ACTIVE_STRATEGY_NAMES, canonical_event_key,
+    )
+
+    def identity(signal: dict) -> tuple[str, str]:
+        strategy = signal["strategy"]
+        metadata = signal.get("metadata", {})
+        key = metadata.get("event_key") if strategy not in ACTIVE_STRATEGY_NAMES else None
+        return strategy, str(key or canonical_event_key(
+            strategy, signal["ticker"], metadata, state.session,
+        ))
+
+    retained: dict[tuple[str, str], dict] = {}
+    evidence: dict[tuple[str, str], str] = {}
+    for cohort in [*state.valid, *state.completed]:
+        if cohort["config"].horizon != horizon:
+            continue
+        for signal in cohort["engine"].pending_late_signals(state.session, state.epoch_id):
+            key = identity(signal)
+            original = {**signal, "metadata": {
+                name: value for name, value in signal["metadata"].items()
+                if name != "retained_from_signal_id"
+            }}
+            serialized = json.dumps(original, sort_keys=True, default=str)
+            if key in evidence and evidence[key] != serialized:
+                raise ValueError("conflicting retained candidate evidence across cohort books")
+            evidence[key] = serialized
+            retained.setdefault(key, signal)
+    if not retained:
+        return signals, health
+    # The original accepted thesis wins over fresh analysis of the same event.
+    # New daily windows remain distinct observations with their own source clock.
+    combined = [retained[key] for key in sorted(retained)]
+    combined.extend(signal for signal in signals if identity(signal) not in retained)
+    counts: dict[str, int] = {}
+    for strategy, _ in retained:
+        counts[strategy] = counts.get(strategy, 0) + 1
+    health = [replace(record, evidence={
+        **record.evidence, "retained_late_candidates": counts[record.strategy],
+    }) if record.strategy in counts else record for record in health]
+    return combined, health
+
+
 def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     """Run each required horizon once and merge governed reference bars."""
     owner, session = state.owner, state.session
@@ -1509,6 +1556,11 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         signals, regime, health = owner._screen_for_horizon(
             state.shared_data, state.trading_date, horizon
         )
+        try:
+            signals, health = _include_retained_late_signals(state, horizon, signals, health)
+        except (KeyError, TypeError, ValueError):
+            logger.error("Retained candidate evidence invalid for %s/%s", state.trading_date, horizon)
+            return state.fail_candidates("retained_candidate_evidence_invalid")
         if not owner._persist_horizon_health(
             health, session, owner._policy_id_for_horizon(horizon)
         ):

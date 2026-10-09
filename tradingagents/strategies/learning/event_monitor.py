@@ -7,10 +7,12 @@ strategies can analyze for trading signals.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from tradingagents.strategies.orchestration.trading_calendar import exchange_date
 from typing import Any
 
 from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError, source_fetch_error
+from tradingagents.strategies.data_sources.evidence import CoverageRecords
 
 logger = logging.getLogger(__name__)
 
@@ -51,60 +53,63 @@ class EventMonitor:
         if not source.is_available():
             raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        date_from = ((datetime.fromisoformat(self.as_of) if self.as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        date_to = self.as_of or datetime.now().strftime("%Y-%m-%d")
+        date_from = (datetime.fromisoformat(self.as_of or exchange_date().isoformat()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = self.as_of or exchange_date().isoformat()
 
         all_filings = []
-        failures, statuses = {}, {}
+        failures, statuses, scopes = {}, {}, {}
         for index, form_type in enumerate(form_types):
             operation = f"form_{index}"
             try:
                 filings = source.search_filings(form_type=form_type, date_from=date_from, date_to=date_to)
                 all_filings.extend(filings)
+                if hasattr(filings, "coverage"):
+                    scopes[form_type] = filings.coverage
             except SourceFetchError as exc:
                 all_filings.extend(exc.partial_data.get("filings", []))
                 failures[operation] = exc.reason_code
                 if exc.http_status is not None:
                     statuses[operation] = exc.http_status
 
-        # Fetch filing text for LLM analysis
-        try:
-            if fetch_text and source:
-                text_forms = {"10-K", "10-Q", "DEF 14A"}
-                fetched = 0
-                for filing in all_filings:
-                    if fetched >= max_text_fetches:
-                        break
-                    form = filing.get("form_type", "")
-                    url = filing.get("file_url", "")
-                    if form not in text_forms or not url:
-                        continue
-
+        # Count attempts against the budget and isolate each filing failure.
+        text_forms = {"10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"}
+        attempted = 0
+        if fetch_text:
+            for index, filing in enumerate(all_filings):
+                form = filing.get("form_type", "")
+                url = filing.get("primary_document_url") or filing.get("file_url", "")
+                if form not in text_forms:
+                    continue
+                if not url or attempted >= max_text_fetches:
+                    filing["text_status"] = "missing_document_url" if not url else "text_budget_exhausted"
+                    continue
+                attempted += 1
+                try:
+                    if hasattr(source, "get_primary_document_url"):
+                        url = source.get_primary_document_url(url, form_type=form)
+                        filing["primary_document_url"] = url
                     raw_text = source.get_filing_text(url)
-                    if raw_text:
-                        # Strip HTML tags for cleaner LLM input
-                        clean_text = self._strip_html(raw_text)
-                        if form == "DEF 14A":
-                            filing["proxy_text"] = clean_text[:5000]
-                        else:
-                            filing["current_text"] = clean_text[:5000]
-                            # Fetch prior filing of same type for comparison
-                            filing["prior_text"] = self._fetch_prior_filing_text(
-                                source, filing, form,
-                            )
-                        fetched += 1
-                        logger.debug("Fetched text for %s %s (%d chars)", form, filing.get("ticker", "?"), len(clean_text))
-
-        except SourceFetchError as exc:
-            failures["filing_text"] = exc.reason_code
-            if exc.http_status is not None:
-                statuses["filing_text"] = exc.http_status
+                    clean_text = self._strip_html(raw_text) if raw_text else ""
+                    filing["text_status"] = "available" if clean_text else "unavailable"
+                    if form == "DEF 14A":
+                        filing["proxy_text"] = clean_text[:5000]
+                    else:
+                        filing["current_text"] = clean_text[:5000]
+                        if form in {"10-K", "10-Q"} and clean_text:
+                            filing["prior_text"] = self._fetch_prior_filing_text(source, filing, form)
+                except Exception as exc:
+                    error = source_fetch_error("EDGAR filing text unavailable", exc)
+                    filing["text_status"] = "unavailable"
+                    failures[f"filing_text_{index}"] = error.reason_code
+                    if error.http_status is not None:
+                        statuses[f"filing_text_{index}"] = error.http_status
+        all_filings = CoverageRecords(all_filings, coverage={"mode": "exhaustive_windows", "complete": not failures, "windows": scopes})
         if failures:
             raise SourceFetchError("EDGAR filing coverage incomplete", reason_code="batch_failure",
                                    failed_operations=failures, failed_http_statuses=statuses,
                                    partial_data={"filings": all_filings})
 
-        self._last_poll["edgar"] = datetime.now().isoformat()
+        self._last_poll["edgar"] = datetime.now(timezone.utc).isoformat()
         logger.info("EDGAR poll: %d filings found for %s", len(all_filings), form_types)
         return all_filings
 
@@ -226,13 +231,13 @@ class EventMonitor:
         if not source.is_available():
             raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        date_from = ((datetime.fromisoformat(self.as_of) if self.as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        date_to = self.as_of or datetime.now().strftime("%Y-%m-%d")
+        date_from = (datetime.fromisoformat(self.as_of or exchange_date().isoformat()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_to = self.as_of or exchange_date().isoformat()
 
         seen_urls: set[str] = set()
         all_filings: list[dict] = []
 
-        failures, statuses = {}, {}
+        failures, statuses, scopes = {}, {}, {}
         for form_index, form_type in enumerate(form_types):
             for keyword_index, keyword in enumerate(keywords):
                 operation = f"keyword_{form_index}_{keyword_index}"
@@ -244,6 +249,8 @@ class EventMonitor:
                     failures[operation] = exc.reason_code
                     if exc.http_status is not None:
                         statuses[operation] = exc.http_status
+                if hasattr(filings, "coverage"):
+                    scopes[operation] = filings.coverage
                 for f in filings:
                     url = f.get("file_url", "")
                     if url and url not in seen_urls:
@@ -251,25 +258,29 @@ class EventMonitor:
                         f["matched_keyword"] = keyword
                         all_filings.append(f)
 
-        # Fetch filing text for LLM analysis
-        try:
-            if fetch_text and source:
-                fetched = 0
-                for filing in all_filings:
-                    if fetched >= max_text_fetches:
-                        break
-                    url = filing.get("file_url", "")
-                    if not url:
-                        continue
+        attempted = 0
+        if fetch_text:
+            for index, filing in enumerate(all_filings):
+                if attempted >= max_text_fetches:
+                    filing["text_status"] = "text_budget_exhausted"
+                    continue
+                url = filing.get("primary_document_url") or filing.get("file_url", "")
+                if not url:
+                    filing["text_status"] = "missing_document_url"
+                    continue
+                attempted += 1
+                try:
+                    if hasattr(source, "get_primary_document_url"):
+                        url = source.get_primary_document_url(url, form_type=filing.get("form_type"))
+                        filing["primary_document_url"] = url
                     raw_text = source.get_filing_text(url)
-                    if raw_text:
-                        filing["filing_text"] = self._strip_html(raw_text)[:5000]
-                        fetched += 1
-
-        except SourceFetchError as exc:
-            failures["filing_text"] = exc.reason_code
-            if exc.http_status is not None:
-                statuses["filing_text"] = exc.http_status
+                    filing["filing_text"] = self._strip_html(raw_text)[:5000] if raw_text else ""
+                    filing["text_status"] = "available" if filing["filing_text"] else "unavailable"
+                except Exception as exc:
+                    error = source_fetch_error("EDGAR keyword text unavailable", exc)
+                    filing["text_status"] = "unavailable"
+                    failures[f"filing_text_{index}"] = error.reason_code
+        all_filings = CoverageRecords(all_filings, coverage={"mode": "exhaustive_windows", "complete": not failures, "windows": scopes})
         if failures:
             raise SourceFetchError("EDGAR keyword coverage incomplete", reason_code="batch_failure",
                                    failed_operations=failures, failed_http_statuses=statuses,
@@ -295,7 +306,13 @@ class EventMonitor:
         if not source.is_available():
             raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        results: dict[str, list[dict]] = {}
+        from tradingagents.strategies.data_sources.evidence import CoverageMapping
+
+        issuer_coverage = {}
+        results = CoverageMapping(coverage={
+            "mode": "bounded_sample", "complete": False,
+            "requested_tickers": list(tickers), "issuers": issuer_coverage,
+        })
         failures, statuses = {}, {}
         for ticker in tickers:
             try:
@@ -303,12 +320,18 @@ class EventMonitor:
                     filings = source.get_recent_form4(ticker, days_back=days_back, as_of=self.as_of)
                 else:
                     filings = source.get_recent_form4(ticker, days_back=days_back)
+                issuer_coverage[ticker] = dict(getattr(filings, "coverage", {
+                    "mode": "unavailable", "complete": False,
+                }))
                 if filings:
                     results[ticker] = filings
             except SourceFetchError as exc:
                 partial = exc.partial_data.get("form4_filings")
                 if partial:
                     results[ticker] = partial
+                issuer_coverage[ticker] = dict(getattr(partial, "coverage", {
+                    "mode": "unavailable", "complete": False, "reason": exc.reason_code,
+                }))
                 failures[ticker] = exc.reason_code
                 if exc.http_status is not None:
                     statuses[ticker] = exc.http_status
@@ -354,7 +377,7 @@ class EventMonitor:
         if self.as_of:
             options["as_of"] = self.as_of
         rules = source.get_recent_proposed_rules(**options)
-        self._last_poll["regulations"] = datetime.now().isoformat()
+        self._last_poll["regulations"] = datetime.now(timezone.utc).isoformat()
         logger.info("Regulations.gov poll: %d proposed rules", len(rules))
         return rules
 
@@ -368,11 +391,12 @@ class EventMonitor:
         if not source.is_available():
             raise SourceFetchError("Required source access unavailable", reason_code="provider_error")
 
-        date_from = ((datetime.fromisoformat(self.as_of) if self.as_of else datetime.now()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        date_from = (datetime.fromisoformat(self.as_of or exchange_date().isoformat()) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         dockets = source.search_dockets(
             query=query, date_filed_after=date_from,
+            date_filed_before=self.as_of or exchange_date().isoformat(),
         )
-        self._last_poll["courtlistener"] = datetime.now().isoformat()
+        self._last_poll["courtlistener"] = datetime.now(timezone.utc).isoformat()
         logger.info("CourtListener poll: %d dockets", len(dockets))
         return dockets
 

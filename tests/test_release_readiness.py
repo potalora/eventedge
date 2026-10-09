@@ -485,3 +485,16 @@ def test_script_imports_checkout_from_unrelated_cwd(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "--expected-commit" in result.stdout
+
+
+@pytest.mark.parametrize('reason', ['unsupported_state_event_proxy', 'invented_exception'])
+def test_readiness_distinguishes_explicit_retirement_from_missing_coverage(tmp_path, reason):
+    repo, state, _ = _fixture(tmp_path)
+    with _db(state / 'metrics_v2.sqlite3') as connection:
+        connection.execute(
+            "UPDATE strategy_health SET payload_json = json_set(payload_json, "
+            "'$.status', 'disabled_by_policy', '$.signal_count', 0, '$.evidence', json(?)) "
+            "WHERE json_extract(payload_json, '$.strategy') = 'state_economics'",
+            (json.dumps({'reason': reason}),),
+        )
+    assert _assess(repo)['ready'] is (reason == 'unsupported_state_event_proxy')

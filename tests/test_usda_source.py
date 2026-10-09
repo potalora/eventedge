@@ -206,7 +206,7 @@ class TestFetchDispatch:
 class TestIncidentRegression:
     def test_request_uses_repeated_states_and_condition_units(self, source):
         response = MagicMock(status_code=200)
-        response.json.return_value = MOCK_NASS_RESPONSE
+        response.json.return_value = {"data": MOCK_NASS_RESPONSE["data"] + [dict(row, state_alpha="IL") for row in MOCK_NASS_RESPONSE["data"]]}
         with patch("requests.get", return_value=response) as get:
             source.fetch_crop_progress("CORN", 2025, "IA,IL")
         params = get.call_args.kwargs["params"]
@@ -335,3 +335,4 @@ class TestIncidentRegression:
 def offline_request_policy(monkeypatch):
     monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
     monkeypatch.setattr('time.sleep', lambda _: None)
+    monkeypatch.setattr('tradingagents.strategies.data_sources.usda_source.AG_STATES', 'IA')

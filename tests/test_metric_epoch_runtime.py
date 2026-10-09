@@ -165,10 +165,10 @@ def _executor(tmp_path: Path, name: str, config_changes: dict | None = None):
 
 
 def test_contract_versions_are_centralized_exact_values() -> None:
-    assert POLICY_DOCUMENT_VERSION == "execution-policy-v3"
-    assert EXECUTION_CLOCK_VERSION == "exact-next-xnys-open-v1"
+    assert POLICY_DOCUMENT_VERSION == "execution-policy-v4"
+    assert EXECUTION_CLOCK_VERSION == "causal-xnys-open-stops-v2"
     assert PRICING_VERSION == "raw-unadjusted-daily-ohlc-v1"
-    assert COST_MODEL_VERSION == "adverse-equity-fill-v1"
+    assert COST_MODEL_VERSION == "equity-10bps-act365-v2"
 
 
 def test_epoch_context_is_stable_across_order_and_state_paths(tmp_path) -> None:
@@ -640,3 +640,12 @@ def test_nontext_policy_id_fails_before_any_state_creation(tmp_path) -> None:
             generation_commit="test-commit",
         )
     assert not state.exists()
+
+
+def test_disabling_strategy_is_a_bound_semantic_epoch_change():
+    baseline = _context()
+    assert _context(disabled_strategies={}).config_hash == baseline.config_hash
+    changed = _context(disabled_strategies={'filing_analysis': 'missing_evidence_contract'})
+    assert changed.config_hash != baseline.config_hash
+    with pytest.raises(ValueError, match='disabled'):
+        _context(disabled_strategies={'unknown': 'missing_evidence_contract'})

@@ -358,6 +358,15 @@ class MultiStrategyEngine:
         health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
             self._emit("strategy_start", name=strategy.name, track="paper_trade")
+            disabled_reason = self.ar_config.get("disabled_strategies", {}).get(strategy.name) or getattr(strategy, "retirement_reason", None)
+            if disabled_reason:
+                from tradingagents.strategies.metrics.identity import _stable_id
+                health.append(StrategyHealthRecord(
+                    health_id=_stable_id("health", epoch_id, date.fromisoformat(trading_date), policy_id, strategy.name),
+                    epoch_id=epoch_id, session=date.fromisoformat(trading_date), policy_id=policy_id,
+                    strategy=strategy.name, status="disabled_by_policy", signal_count=0,
+                    evidence={"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}))
+                continue
             try:
                 params = strategy.get_default_params(horizon=horizon)
                 candidates = strategy.screen(data, trading_date, params)
@@ -366,22 +375,26 @@ class MultiStrategyEngine:
                 candidates = []
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
-            health.append(
-                classify_strategy_run(
-                    epoch_id=epoch_id,
-                    session=date.fromisoformat(trading_date),
-                    policy_id=policy_id,
-                    strategy=strategy.name,
-                    data_sources=tuple(strategy.data_sources),
-                    candidates=candidates,
-                    provider_errors=_provider_errors(data, strategy.data_sources),
-                    exception=error,
-                )
-            )
             if candidates:
-                candidates = self._enrich_with_llm(
-                    candidates, strategy.name, regime_context=regime_model
-                )
+                candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model)
+            provider_errors = _provider_errors(data, strategy.data_sources)
+            non_actionable = sorted({c.metadata["non_actionable_reason"] for c in candidates if c.metadata.get("non_actionable_reason")})
+            if non_actionable:
+                provider_errors = dict(provider_errors, analysis="required_evidence_unavailable")
+            if error is None and any(str(c.metadata.get("analysis_failure_reason", "")).startswith("unsupported_required_analysis:") for c in candidates):
+                error = ValueError("unsupported_required_analysis")
+            health_record = classify_strategy_run(
+                epoch_id=epoch_id, session=date.fromisoformat(trading_date),
+                policy_id=policy_id, strategy=strategy.name,
+                data_sources=tuple(strategy.data_sources), candidates=candidates,
+                provider_errors=provider_errors, exception=error)
+            if non_actionable:
+                health_record.evidence["non_actionable_reasons"] = non_actionable
+                health_record.evidence["actionable_candidate_count"] = sum(not c.journal_only for c in candidates)
+            source_coverage = {source: data[source]["coverage"] for source in strategy.data_sources if isinstance(data.get(source), dict) and "coverage" in data[source]}
+            if source_coverage:
+                health_record.evidence["source_coverage"] = source_coverage
+            health.append(health_record)
             for c in candidates:
                 all_signals.append(
                     {
@@ -419,6 +432,58 @@ class MultiStrategyEngine:
                 logger.info("Blocked %d signals for tickers: %s", removed, blocked)
 
         return deduped_signals, regime_model, health
+
+    def pending_late_signals(self, session: date, epoch_id: str) -> list[dict]:
+        """Return frozen actionable observations awaiting their first timely offer.
+
+        Callers include these candidates before pricing and quarantine filtering.
+        Today's rows cannot consume the queue: replay must reconstruct the same
+        initial candidate set, even after staging today's timely observation.
+        """
+        from tradingagents.strategies.orchestration.trading_calendar import session_close
+
+        if self.ledger is None:
+            raise ValueError("pending_late_signals requires an authoritative ledger")
+        horizon = str(self.ar_config.get("horizon", "30d"))
+        policy_id = str(self.ar_config.get("paper_ledger", {}).get("policy_id", f"foundation-{horizon}"))
+        disabled = set(self.ar_config.get("disabled_strategies", {}))
+        disabled.update(strategy.name for strategy in self.paper_trade_strategies
+                        if getattr(strategy, "retirement_reason", None))
+        consumed = set()
+        pending = {}
+        for record in self.ledger.read_signals(end_session=session, epoch_id=epoch_id, policy_id=policy_id):
+            if record.reference_session >= session:
+                continue
+            identity = (record.event_key, record.strategy)
+            observation = self.ledger.signal_observation(record.signal_id)
+            if observation is None:
+                # Lower-level accounting/outcome callers may record a bare
+                # signal. It cannot prove a deferred actionable thesis.
+                consumed.add(identity)
+                continue
+            _, context, journal = observation
+            if journal.get("status", "timely") != "cutoff-late":
+                consumed.add(identity)
+                continue
+            signal = context.get("signal")
+            if not isinstance(signal, dict):
+                raise ValueError(f"signal {record.signal_id} lacks canonical committee context")
+            metadata = signal.get("metadata", {})
+            if (record.strategy in disabled or signal.get("journal_only")
+                    or record.direction not in {"long", "short"}
+                    or not isinstance(metadata, dict) or metadata.get("non_actionable_reason")
+                    or (metadata.get("needs_llm_analysis")
+                        and metadata.get("analysis_status") != "validated"
+                        and not metadata.get("deterministic_evidence_complete"))
+                    or record.observed_at > session_close(session)):
+                continue
+            # read_signals is session ordered; retain the first accepted thesis,
+            # rather than substituting a newly acquired source or model analysis.
+            if identity not in pending:
+                retained = dict(signal)
+                retained["metadata"] = {**metadata, "retained_from_signal_id": record.signal_id}
+                pending[identity] = retained
+        return [pending[key] for key in sorted(pending) if key not in consumed]
 
     def screen_and_stage(
         self,
@@ -705,6 +770,10 @@ class MultiStrategyEngine:
         policy_provenance_specs: dict[str, dict[str, object]] = {}
         late_ids: list[str] = []
         seen_signal_ids: set[str] = set()
+        prior_by_event = {}
+        for row in self.ledger.read_signals(end_session=session, epoch_id=epoch_id, policy_id=policy_id):
+            if row.reference_session < session:
+                prior_by_event.setdefault((row.event_key, row.strategy), []).append(row)
         for signal in shared_signals:
             ticker = str(signal.get("ticker", "")).strip().upper()
             strategy = str(signal.get("strategy", "")).strip()
@@ -745,6 +814,17 @@ class MultiStrategyEngine:
             signal_id = metric_signal_id(
                 epoch_id, strategy, policy_id, direction, event_key
             )
+            # A late observation is immutable. Offer the same event once at its
+            # first eligible session, irrespective of a later direction flip.
+            prior_events = prior_by_event.get((event_key, strategy), [])
+            prior_timely = [row for row in prior_events
+                            if (prior_observation := self.ledger.signal_observation(row.signal_id)) is None
+                            or prior_observation[2].get("status", "timely") != "cutoff-late"]
+            if prior_timely:
+                continue
+            if prior_events:
+                signal_id = metric_signal_id(epoch_id, strategy, policy_id, direction,
+                                             stable_id("eligible_event", event_key, session))
             if signal_id in seen_signal_ids:
                 continue
             seen_signal_ids.add(signal_id)
@@ -1229,6 +1309,7 @@ class MultiStrategyEngine:
                     holding_days=(session - position["opened_session"]).days,
                     params=strategy.get_default_params(horizon=horizon),
                     data=data,
+                    direction=position["direction"],
                 )
                 if should_exit:
                     break
@@ -1323,33 +1404,20 @@ class MultiStrategyEngine:
     def _build_regime_model(self, data: dict) -> dict:
         """Build regime model from available data (VIX, credit spreads, yield curve)."""
         vix_data = data.get("yfinance", {}).get("vix")
-        vix_level = 0.0
+        vix_level = None
         if vix_data is not None and not vix_data.empty:
             vix_level = float(vix_data["Close"].iloc[-1])
 
         fred = data.get("fred", {})
-        hy_spread = fred.get("hy_spread")
-        credit_bps = 0.0
-        if hy_spread is not None and hasattr(hy_spread, "iloc") and len(hy_spread) > 0:
-            credit_bps = (
-                float(hy_spread.iloc[-1]) * 100
-                if not pd.isna(hy_spread.iloc[-1])
-                else 0.0
-            )
+        from tradingagents.strategies.modules.commodity_macro import _latest_value
+        hy_level = _latest_value(fred.get("hy_spread", fred.get("BAMLH0A0HYM2")))
+        credit_bps = None if hy_level is None else hy_level * 100
+        yc_slope = _latest_value(fred.get("yield_curve", fred.get("T10Y2Y")))
 
-        yield_curve = fred.get("yield_curve")
-        yc_slope = 0.0
-        if (
-            yield_curve is not None
-            and hasattr(yield_curve, "iloc")
-            and len(yield_curve) > 0
-        ):
-            yc_slope = (
-                float(yield_curve.iloc[-1])
-                if not pd.isna(yield_curve.iloc[-1])
-                else 0.0
-            )
-
+        if vix_level is None:
+            vix_level = _latest_value(fred.get("VIXCLS"))
+        if vix_level is not None and not math.isfinite(vix_level):
+            vix_level = None
         overall = self._classify_regime(vix_level, credit_bps, yc_slope)
         stressed_vix = self.ar_config.get("risk_discipline", {}).get(
             "regime_vix_stressed", 25.0
@@ -1357,7 +1425,7 @@ class MultiStrategyEngine:
 
         return {
             "vix_level": vix_level,
-            "vix_regime": "crisis"
+            "vix_regime": "unknown" if vix_level is None else "crisis"
             if vix_level > 35
             else "elevated"
             if vix_level > stressed_vix
@@ -1365,13 +1433,13 @@ class MultiStrategyEngine:
             if vix_level > 15
             else "low",
             "credit_spread_bps": credit_bps,
-            "credit_regime": "crisis"
+            "credit_regime": "unknown" if credit_bps is None else "crisis"
             if credit_bps > 600
             else "stressed"
             if credit_bps > 400
             else "normal",
             "yield_curve_slope": yc_slope,
-            "yield_regime": "inverted"
+            "yield_regime": "unknown" if yc_slope is None else "inverted"
             if yc_slope < -0.2
             else "flat"
             if yc_slope < 0.5
@@ -1392,6 +1460,8 @@ class MultiStrategyEngine:
         stressed_vix = self.ar_config.get("risk_discipline", {}).get(
             "regime_vix_stressed", 25.0
         )
+        if any(value is None for value in (vix, credit_bps, yc_slope)):
+            return "unknown"
         crisis_signals = 0
         if vix > 35:
             crisis_signals += 1
@@ -1567,7 +1637,7 @@ class MultiStrategyEngine:
         if "regulations" in needed_sources and "regulations" in available:
             api_fetches["regulations"] = (self._fetch_regulations_data, (end_date,))
         if "courtlistener" in needed_sources and "courtlistener" in available:
-            api_fetches["courtlistener"] = (self._fetch_courtlistener_data, ())
+            api_fetches["courtlistener"] = (self._fetch_courtlistener_data, (end_date,))
         if "fred" in needed_sources and "fred" in available:
             api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
@@ -1585,7 +1655,7 @@ class MultiStrategyEngine:
         if "usaspending" in needed_sources and "usaspending" in available:
             api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
         if "cftc" in needed_sources and "cftc" in available:
-            api_fetches["cftc"] = (self._fetch_cftc_data, ())
+            api_fetches["cftc"] = (self._fetch_cftc_data, (end_date,))
 
         pending_fetches = {}
         cache_keys = {}
@@ -1784,8 +1854,9 @@ class MultiStrategyEngine:
             agencies=["SEC", "EPA", "FDA", "FTC", "DOL", "CFPB"],
             days_back=14,
         )
-        if rules:
-            result["proposed_rules"] = rules
+        result["proposed_rules"] = list(rules)
+        if hasattr(rules, "coverage"):
+            result["coverage"] = rules.coverage
 
         logger.info("Regulations.gov fetch: %d proposed rules", len(rules))
         return result
@@ -1800,26 +1871,32 @@ class MultiStrategyEngine:
         operations = {
             "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14),
             "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
-            "activist_13d": lambda: monitor.poll_13d_filings(days_back=14),
+            "activist_13d": lambda: monitor.poll_edgar_filings(["SC 13D"], days_back=14),
+            "passive_13g": lambda: monitor.poll_edgar_filings(["SC 13G"], days_back=14),
             "pqc_filings": lambda: monitor.poll_keyword_filings(["8-K", "10-K", "10-Q"],
                 ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30),
         }
         for name, operation in operations.items():
             try:
                 result[name] = operation()
+                if hasattr(result[name], "coverage"):
+                    result.setdefault("coverage", {})[name] = result[name].coverage
+                    result[name] = dict(result[name]) if isinstance(result[name], dict) else list(result[name])
             except Exception as exc:
                 error = source_fetch_error("EDGAR acquisition incomplete", exc)
                 partial = error.partial_data.get(name)
-                if partial is None and name == "activist_13d":
+                if partial is None and name in {"activist_13d", "passive_13g"}:
                     partial = error.partial_data.get("filings")
                 if partial is not None:
-                    result[name] = partial
+                    result[name] = list(partial) if isinstance(partial, list) else partial
+                    if hasattr(partial, "coverage"):
+                        result.setdefault("coverage", {})[name] = partial.coverage
                 failures.append(f"{name}: {error}")
         if failures:
             result["error"] = "; ".join(failures)
         return result
 
-    def _fetch_courtlistener_data(self) -> dict[str, Any]:
+    def _fetch_courtlistener_data(self, trading_date: str | None = None) -> dict[str, Any]:
         """Fetch CourtListener data for litigation strategy."""
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
@@ -1828,6 +1905,7 @@ class MultiStrategyEngine:
         result: dict[str, Any] = {}
         failures: list[str] = []
 
+        monitor.as_of = trading_date
         # Search for securities-related cases
         for query in ["securities class action", "SEC enforcement", "antitrust"]:
             try:
@@ -1838,6 +1916,8 @@ class MultiStrategyEngine:
                 failures.append(f"{query.lower().replace(' ', '_')}: {safe_error}")
                 logger.error("%s", safe_error)
                 continue
+            if hasattr(dockets, "coverage"):
+                result.setdefault("coverage", {})[query] = dockets.coverage
             existing = result.get("dockets", [])
             existing.extend(dockets)
             result["dockets"] = existing
@@ -1855,6 +1935,7 @@ class MultiStrategyEngine:
         from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
         source = self.registry.get("fred")
+        start_date = min(start_date, (pd.Timestamp(end_date) - pd.DateOffset(months=18)).date().isoformat())
         if source is None:
             return {}
 
@@ -1888,6 +1969,8 @@ class MultiStrategyEngine:
         if failures:
             result["error"] = "; ".join(failures)
 
+        # Plain metadata survives the immutable bundle codec (Series.attrs does not).
+        result["vintage"] = {"as_of": end_date, "realtime_start": end_date, "realtime_end": end_date}
         # Map friendly names for strategies that use them
         from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
 
@@ -1907,7 +1990,9 @@ class MultiStrategyEngine:
         result: dict[str, Any] = {}
         try:
             trades = source.get_recent_trades(days_back=30, as_of=trading_date)
-            result["recent_trades"] = trades
+            result["recent_trades"] = list(trades)
+            if hasattr(trades, "coverage"):
+                result["coverage"] = trades.coverage
             logger.info("Congress fetch: %d recent trades", len(trades))
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
@@ -1931,9 +2016,11 @@ class MultiStrategyEngine:
                 days_back=30,
                 as_of=trading_date,
             )
-            result = {"contracts": contracts}
+            result = {"contracts": list(contracts)}
+            if hasattr(contracts, "coverage"):
+                result["coverage"] = contracts.coverage
             logger.info("USASpending fetch: %d large contracts", len(contracts))
-            return {"data": result}
+            return {"data": result, **({"coverage": contracts.coverage} if hasattr(contracts, "coverage") else {})}
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.error("%s", safe_error)
@@ -1962,12 +2049,16 @@ class MultiStrategyEngine:
         year = datetime.strptime(trading_date, "%Y-%m-%d").year
         for commodity in ("CORN", "SOYBEANS", "WHEAT"):
             try:
-                crop_progress[commodity] = source.fetch_crop_progress(commodity, year)
+                crop_progress[commodity] = source.fetch_crop_progress(commodity, year, as_of=trading_date)
             except Exception as exc:
                 error = source_fetch_error("USDA crop acquisition incomplete", exc)
                 crop_progress.update(error.partial_data.get("crop_progress", {}))
                 failures.append(f"{commodity}: {error}")
+        acquisition_times = [str(row["available_at"]) for weeks in crop_progress.values() for row in weeks if isinstance(row, dict) and row.get("available_at")]
         result = {"crop_progress": crop_progress}
+        if acquisition_times:
+            acquired = max(acquisition_times)
+            result.update(available_at=acquired, acquired_at=acquired)
         if failures:
             result["error"] = "; ".join(failures)
         return result
@@ -1979,21 +2070,24 @@ class MultiStrategyEngine:
             return {}
 
         try:
-            from datetime import datetime, timedelta
-
             end = trading_date
             start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime(
                 "%Y-%m-%d"
             )
             severity = source.fetch_drought_severity(start=start, end=end)
             composite = source.fetch_composite_score(date=trading_date)
-            return {"composite_score": composite, "states": severity}
+            result = {"composite_score": composite, "states": severity}
+            acquisition_times = [str(row["available_at"]) for row in severity.values() if isinstance(row, dict) and row.get("available_at")]
+            if acquisition_times:
+                acquired = max(acquisition_times)
+                result.update(available_at=acquired, acquired_at=acquired)
+            return result
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
             error = source_fetch_error("Source acquisition failed", exc)
             return {**error.partial_data, "error": str(error)}
 
-    def _fetch_cftc_data(self) -> dict[str, Any]:
+    def _fetch_cftc_data(self, trading_date: str | None = None) -> dict[str, Any]:
         """Fetch CFTC COT positioning data for commodity strategy."""
         source = self.registry.get("cftc")
         if source is None:
@@ -2004,6 +2098,7 @@ class MultiStrategyEngine:
                 "method": "cot_positioning",
                 "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
                 "lookback_weeks": 52,
+                "as_of": trading_date,
             }
         )
 
@@ -2123,8 +2218,20 @@ class MultiStrategyEngine:
 
             analysis_type = c.metadata.get("analysis_type", "")
             llm_result = {}
+            optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
 
             try:
+                required_text_fields = {
+                    "earnings_call": ("analysis_text", "transcript_text"),
+                    "filing_change": ("current_text",), "exec_comp": ("proxy_text",),
+                    "material_event": ("current_text",), "activist_stake": ("current_text",),
+                    "passive_stake": ("current_text",), "quantum_readiness": ("analysis_text",),
+                    "supply_chain": ("headline", "summary"), "regulation": ("title", "summary"),
+                    "litigation": ("case_name", "nature_of_suit", "cause"),
+                }
+                fields = required_text_fields.get(analysis_type)
+                if fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
+                    raise ValueError("missing_source_text")
                 if analysis_type == "earnings_call":
                     llm_result = self._analyzer.analyze_earnings_call(
                         c.metadata.get(
@@ -2178,6 +2285,22 @@ class MultiStrategyEngine:
                         c.ticker,
                         regime_context=regime_context,
                     )
+                elif analysis_type in {"material_event", "activist_stake", "passive_stake"}:
+                    text = c.metadata.get("current_text", "")
+                    if not isinstance(text, str) or not text.strip():
+                        raise ValueError("missing_source_text")
+                    llm_result = self._analyzer.analyze_filing_change(text, "", c.ticker, regime_context=regime_context)
+                elif analysis_type == "quantum_readiness":
+                    text = c.metadata.get("analysis_text", "")
+                    if not isinstance(text, str) or not text.strip():
+                        raise ValueError("missing_source_text")
+                    llm_result = self._analyzer.analyze_quantum_readiness(text, c.ticker, text_source="news", regime_context=regime_context)
+                elif analysis_type == "commodity_macro":
+                    llm_result = self._analyzer.analyze_commodity_macro(
+                        ticker=c.ticker, commodity_name=c.metadata.get("commodity", ""),
+                        cot_context=c.metadata.get("cot_evidence", {}),
+                        macro_context=c.metadata.get("macro_evidence", {}),
+                        regime_context=regime_context)
                 elif analysis_type == "exec_comp":
                     llm_result = self._analyzer.analyze_exec_comp(
                         c.metadata.get("proxy_text", ""),
@@ -2195,62 +2318,79 @@ class MultiStrategyEngine:
                             "usda_data": c.metadata.get("usda_data", {}),
                         },
                         trailing_return=c.metadata.get("trailing_return", 0),
-                        hold_days=21,
+                        hold_days=c.metadata.get("hold_days", 21),
                         regime_context=regime_context,
                     )
-                # A parsed JSON response can still violate the numeric score
-                # contract. Validate before changing any candidate fields, so
-                # malformed analysis uses the same rule-based fallback as an
-                # unavailable analyzer rather than poisoning every cohort.
-                if llm_result:
-                    if not isinstance(llm_result, dict):
-                        raise ValueError("LLM analysis must be an object")
-                    llm_result = dict(llm_result)
-                    score_key = (
-                        "conviction" if "conviction" in llm_result else "score"
-                    )
-                    if score_key in llm_result:
-                        value = llm_result[score_key]
-                        if isinstance(value, bool):
-                            raise ValueError("LLM score must be numeric")
-                        score = float(value)
-                        if not math.isfinite(score) or not 0 <= score <= 1:
-                            raise ValueError("LLM score must be between zero and one")
-                        llm_result[score_key] = score
-            except Exception:
-                llm_result = {}
-                logger.error(
-                    "LLM analysis failed for %s/%s",
-                    strategy_name,
-                    c.ticker,
-                    exc_info=True,
-                )
-
-            if llm_result:
-                # Update candidate with LLM results
-                c.direction = llm_result.get("direction", c.direction)
-                c.score = llm_result.get("conviction", llm_result.get("score", c.score))
-                c.metadata["llm_analysis"] = llm_result
-                # SEC's company list validates newly inferred companies. It
-                # does not cover the strategy's configured ETF universe.
-                resolved_by_llm = False
-                if not c.ticker and llm_result.get("defendant_ticker"):
-                    c.ticker = llm_result["defendant_ticker"]
-                    resolved_by_llm = True
-                if not c.ticker and llm_result.get("affected_tickers"):
-                    c.ticker = llm_result["affected_tickers"][0]
-                    resolved_by_llm = True
-
-                if resolved_by_llm and c.ticker:
+                else:
+                    raise ValueError(f"unsupported_required_analysis:{analysis_type}")
+                if not isinstance(llm_result, dict) or not llm_result:
+                    raise ValueError("analysis_unavailable")
+                llm_result = dict(llm_result)
+                if llm_result.get("direction") not in {"long", "short", "neutral"}:
+                    raise ValueError("invalid_direction")
+                score_key = "conviction" if "conviction" in llm_result else "score"
+                value = llm_result.get(score_key)
+                if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                    raise ValueError("invalid_score")
+                score = float(value)
+                if not math.isfinite(score) or not 0 <= score <= 1:
+                    raise ValueError("invalid_score")
+                llm_result[score_key] = score
+                for key in ("defendant_ticker", "primary_ticker"):
+                    if key in llm_result and (not isinstance(llm_result[key], str) or len(llm_result[key]) > 16):
+                        raise ValueError(f"invalid_{key}")
+                for key in ("affected_tickers", "secondary_tickers"):
+                    if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(t, str) or not t.strip() or len(t) > 16 for t in llm_result[key])):
+                        raise ValueError(f"invalid_{key}")
+                if not optional and not any(isinstance(llm_result.get(key), str) and llm_result[key].strip() for key in ("rationale", "reasoning", "evidence_claim")):
+                    raise ValueError("missing_analysis_explanation")
+                for key in ("rationale", "reasoning", "evidence_claim"):
+                    if key in llm_result and not isinstance(llm_result[key], str):
+                        raise ValueError(f"invalid_{key}")
+                for key in ("tone_assessment", "primary_impact", "duration_estimate", "impact_assessment", "case_type", "pqc_readiness", "crypto_dependency"):
+                    if key in llm_result and not isinstance(llm_result[key], str):
+                        raise ValueError(f"invalid_{key}")
+                for key in ("changes", "red_flags", "comp_changes", "guidance_changes", "notable_insiders", "affected_sectors"):
+                    if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(item, str) for item in llm_result[key])):
+                        raise ValueError(f"invalid_{key}")
+                if "severity" in llm_result and llm_result["severity"] not in {"low", "medium", "high", "critical"}:
+                    raise ValueError("invalid_severity")
+                if "regime_signal" in llm_result and llm_result["regime_signal"] not in {"bull", "bear", "neutral", "accelerating", "stalling"}:
+                    raise ValueError("invalid_regime_signal")
+                if "regime_confidence" in llm_result:
+                    value = llm_result["regime_confidence"]
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                        raise ValueError("invalid_regime_confidence")
+                if "cluster_size" in llm_result and (type(llm_result["cluster_size"]) is not int or llm_result["cluster_size"] < 0):
+                    raise ValueError("invalid_cluster_size")
+                if "secondary_impacts" in llm_result:
+                    impacts = llm_result["secondary_impacts"]
+                    if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
+                        raise ValueError("invalid_secondary_impacts")
+                ticker = c.ticker
+                if not ticker:
+                    ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
+                    ticker = ticker.strip().upper()
                     edgar = self.registry.get("edgar")
-                    if edgar and hasattr(edgar, "validate_ticker"):
-                        if not edgar.validate_ticker(c.ticker):
-                            logger.warning(
-                                "LLM returned invalid ticker %s for %s, dropping",
-                                c.ticker,
-                                strategy_name,
-                            )
-                            c.ticker = ""
+                    if not ticker or edgar is None or not edgar.validate_ticker(ticker):
+                        raise ValueError("unresolved_issuer")
+                # Commit fields only after full schema and entity validation.
+                c.ticker, c.direction, c.score = ticker, llm_result["direction"], score
+                c.metadata["llm_analysis"] = llm_result
+                c.metadata["analysis_status"] = "validated"
+                if c.metadata.get("non_actionable_reason") == "missing_source_text":
+                    c.metadata.pop("non_actionable_reason", None)
+                    c.journal_only = False
+            except Exception as exc:
+                c.metadata["analysis_status"] = "failed"
+                reason = str(exc)
+                if not isinstance(exc, ValueError) or not reason.startswith(("invalid_", "missing_", "unsupported_required_analysis:", "analysis_unavailable", "unresolved_issuer")):
+                    reason = "analysis_unavailable"
+                c.metadata["analysis_failure_reason"] = reason[:160]
+                if not optional:
+                    c.journal_only = True
+                    c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
+                logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
 
             enriched.append(c)
 

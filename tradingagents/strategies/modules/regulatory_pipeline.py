@@ -33,9 +33,7 @@ class RegulatoryPipelineStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 5),
-            "days_lookback": (7, 30),
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
@@ -46,9 +44,7 @@ class RegulatoryPipelineStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
             "max_positions": 3,
-            "days_lookback": 14,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -113,6 +109,7 @@ class RegulatoryPipelineStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         hold_days = params.get("hold_days", 30)
         if holding_days >= hold_days:
@@ -131,8 +128,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (target ~30 days)
-- min_conviction: 0.3-0.8
 - max_positions: 2-5
-- days_lookback: 7-30
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

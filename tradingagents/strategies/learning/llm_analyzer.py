@@ -103,7 +103,7 @@ Keys: direction ("long"/"short"/"neutral"), score (0.0-1.0), reasoning (1-2 sent
 Keep ALL string values under 100 characters.""",
     "quantum_readiness": """You are analyzing signals related to post-quantum cryptography migration.
 
-Context: NIST finalized PQC standards (ML-KEM, ML-DSA, SLH-DSA). CRQCs could break RSA/ECC by 2029.
+Context: PQC migration is a research theme. Infer no CRQC arrival date or probability without retained source evidence.
 Three regimes exist: (1) CRQC accelerating -- timeline compression, (2) CRQC stalling -- physics
 bottleneck, (3) migration manageable -- priced in. Assess which regime a signal supports AND
 whether the specific company is a winner or loser in that regime.
@@ -144,7 +144,10 @@ class LLMAnalyzer:
         """Return the active system prompt for a strategy."""
         if strategy_name in self._prompt_overrides and self._prompt_overrides[strategy_name]:
             return self._prompt_overrides[strategy_name]
-        return _DEFAULT_PROMPTS.get(strategy_name, "")
+        alias = {"weather_ag": "ag_weather", "ag_weather": "weather_ag"}.get(strategy_name)
+        if alias in self._prompt_overrides:
+            return self._prompt_overrides[alias]
+        return _DEFAULT_PROMPTS.get(strategy_name, _DEFAULT_PROMPTS.get(alias, ""))
 
     def set_prompt_override(self, strategy_name: str, prompt: str) -> None:
         """Override the system prompt for a strategy (empty string = revert to default)."""
@@ -243,7 +246,8 @@ PRIOR FILING (excerpt):
 
 Analyze material changes and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("filing_change", self._prompt_overrides.get("filing_analysis", system)), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -291,7 +295,8 @@ Recent Form 4 filings:
 
 Analyze insider trading patterns and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("insider_activity", system), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -327,7 +332,8 @@ Recent Form 4 filings (check for 10b5-1 plan indicators):
 
 Analyze for red flags and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("insider_activity", system), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -364,7 +370,8 @@ DEF 14A Proxy Statement (excerpt):
 
 Analyze executive compensation signals and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("exec_comp", self._prompt_overrides.get("filing_analysis", system)), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -415,7 +422,8 @@ Keep ALL string values under 100 characters."""
 
 Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("earnings_call", system), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -449,7 +457,8 @@ Rule Summary:
 
 Identify affected companies and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("regulatory_pipeline", system), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -477,7 +486,7 @@ duration_estimate (string), rationale (1 sentence).
 Keep ALL string values under 80 characters."""
 
         user = f"""Source company: {source_ticker}
-Known peers/supply chain: {', '.join(peer_tickers[:15])}
+Known peer companies (not verified supplier/customer edges): {', '.join(peer_tickers[:15])}
 
 NEWS:
 Headline: {headline}
@@ -485,7 +494,8 @@ Summary: {summary[:2000]}
 
 Analyze supply chain impact and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("supply_chain", system), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -519,7 +529,8 @@ Cause: {cause}
 
 Identify the defendant, assess severity, and return JSON.""" + self._regime_suffix(regime_context)
 
-        result = self._call_llm(system, user)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(self._prompt_overrides.get("litigation", system), user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -563,12 +574,26 @@ Source type: {text_source}
 
 Analyze for PQC regime signal and trading direction. Return JSON.""" + self._regime_suffix(regime_context)
 
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
         result = self._call_llm(system, user)
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
     # Agricultural weather analysis (ag_weather)
     # ------------------------------------------------------------------
+
+    def analyze_commodity_macro(self, ticker: str, commodity_name: str,
+                                cot_context: dict, macro_context: dict,
+                                regime_context: dict | None = None) -> dict[str, Any]:
+        """Optional context only; complete deterministic COT rules remain authority."""
+        system = self._prompt_overrides.get("commodity_macro", """Analyze retained COT positioning and macro observations.
+Do not invent releases or infer commodity evidence from unrelated headlines.
+Return JSON: direction (long/short/neutral), score (0-1), reasoning (source-grounded context), evidence_claim (one factual catalyst claim; no future-return prediction).""")
+        user = json.dumps({"ticker": ticker, "commodity": commodity_name,
+                           "cot": cot_context, "macro": macro_context}, default=str)
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
+        result = self._call_llm(system, user + self._regime_suffix(regime_context))
+        return _parse_json_response(result) if result else {}
 
     def analyze_ag_weather(
         self,
@@ -632,7 +657,7 @@ WEATHER (NOAA, last 30 days):
 
 DROUGHT (US Drought Monitor):
 - Composite score: {drought_score}/4.0
-- States in severe+ drought: {', '.join(severe_states) if severe_states else 'none'}
+- States in severe+ drought: {', '.join(severe_states) if severe_states else 'none in retained observations' if drought_states else 'unavailable'}
 
 CROP CONDITIONS (USDA):
 {chr(10).join(crop_lines) if crop_lines else '- No data available'}
@@ -643,6 +668,7 @@ PRICE ACTION:
 Assess probability that ag supply disruption drives {ticker} higher over {hold_days} days.
 Return JSON.""" + self._regime_suffix(regime_context)
 
+        system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
         result = self._call_llm(system, user)
         return _parse_json_response(result) if result else {}
 

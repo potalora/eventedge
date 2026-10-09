@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 from typing import Any, Iterable
+from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard import data_loaders as dl
 
@@ -17,7 +18,7 @@ STRESS_TEST_LABEL = "$5k/$10k/$50k concentration stress tests"
 SHARPE_LABEL = "Annualized daily net Sharpe"
 INFORMATION_RATIO_LABEL = "Annualized matched-benchmark information ratio"
 ACCURACY_LABEL = "Directional accuracy (5 XNYS sessions)"
-INSUFFICIENT_HISTORY = "Insufficient history (<30 valid sessions)"
+INSUFFICIENT_HISTORY = RATIO_REQUIREMENTS
 
 
 def _pct(value: Any) -> str:
@@ -37,8 +38,8 @@ def _book_rows(books: dict[str, Any]) -> str:
             "<tr>"
             f"<td>{escape(cohort_id)}</td>"
             f"<td>{_pct(book.get('total_return'))}</td>"
-            f"<td>{_metric(book.get('annualized_daily_net_sharpe'), insufficient=True)}</td>"
-            f"<td>{_metric(book.get('annualized_matched_information_ratio'), insufficient=True)}</td>"
+            f"<td>{escape(ratio_display(book, 'annualized_daily_net_sharpe'))}</td>"
+            f"<td>{escape(ratio_display(book, 'annualized_matched_information_ratio'))}</td>"
             f"<td>{_pct(book.get('directional_accuracy_5d'))}</td>"
             f"<td>{escape(str(book.get('valid_sessions', '—')))}</td>"
             "</tr>"

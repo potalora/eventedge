@@ -82,6 +82,14 @@ def annualized_sharpe(
     return statistics.mean(values) / deviation * math.sqrt(252)
 
 
+def ratio_unavailable_reason(values: Sequence[float]) -> str | None:
+    if len(values) < 30:
+        return "insufficient_return_count"
+    if statistics.stdev(values) == 0:
+        return "zero_variance"
+    return None
+
+
 def matched_return(
     gross_weight: float,
     net_weight: float,
@@ -198,8 +206,8 @@ def _benchmark_index(
         if not row.valid:
             epoch_rows[key] = row
             continue
-        if row.return_basis != "total_return_adjusted":
-            raise ValueError("benchmark must be total_return_adjusted")
+        if row.return_basis != "paired_total_return_index_v2":
+            raise ValueError("legacy_unpaired_benchmark_basis: same-vintage paired evidence unavailable")
         _finite(row.close, name="benchmark close", positive=True)
         epoch_rows[key] = row
     return output
@@ -520,6 +528,8 @@ def portfolio_metrics(
         ),
         missing_mark_count=0,
         stale_mark_count=0,
+        sharpe_unavailable_reason=ratio_unavailable_reason(risk_free_excess),
+        information_ratio_unavailable_reason=ratio_unavailable_reason(matched_excess),
     )
 
 

@@ -1846,20 +1846,19 @@ class MetricStore:
         return self._outcome(row[0])
 
     def read_outcomes(
-        self, epoch_id: str, *, limit: int = 1_000
+        self, epoch_id: str, *, limit: int | None = None
     ) -> tuple[OutcomeRecord, ...]:
-        self._validate_limit(limit)
+        """Read the complete epoch by default; explicit limits are opt-in views."""
+        if limit is not None:
+            self._validate_limit(limit)
+        sql = """SELECT payload_json FROM outcomes WHERE epoch_id = ?
+                 ORDER BY json_extract(payload_json, '$.exit_session'), outcome_id"""
+        parameters: tuple[object, ...] = (epoch_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters += (limit,)
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT payload_json
-                FROM outcomes
-                WHERE epoch_id = ?
-                ORDER BY json_extract(payload_json, '$.exit_session'), outcome_id
-                LIMIT ?
-                """,
-                (epoch_id, limit),
-            ).fetchall()
+            rows = connection.execute(sql, parameters).fetchall()
         return tuple(self._outcome(row[0]) for row in rows)
 
     def save_strategy_health(self, health: StrategyHealthRecord) -> None:

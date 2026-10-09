@@ -89,8 +89,7 @@ class GovtContractsStrategy:
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
         """Screen for government contractor opportunities.
 
-        Uses USASpending contract data when available, falls back to
-        defense contractor momentum. Enriches with OpenBB profile/estimates.
+        Requires a source-native USASpending award; no momentum substitute. Enriches with OpenBB profile/estimates.
         """
         candidates = []
 
@@ -142,40 +141,6 @@ class GovtContractsStrategy:
                         },
                     )
                 )
-        else:
-            # Fallback: all defense contractors with available price data
-            prices = data.get("yfinance", {}).get("prices", {})
-            if prices:
-                for name, ticker in CONTRACTOR_TICKERS.items():
-                    df = prices.get(ticker)
-                    if df is None or df.empty:
-                        continue
-                    df = df.loc[:date]
-                    if len(df) < 30:
-                        continue
-                    close = df["Close"]
-                    momentum = (close.iloc[-1] / close.iloc[-30]) - 1.0
-                    observation = df.index[-1]
-                    observation_date = (
-                        observation.date().isoformat()
-                        if hasattr(observation, "date")
-                        else str(observation)
-                    )
-                    candidates.append(
-                        Candidate(
-                            ticker=ticker,
-                            date=date,
-                            direction="long",
-                            score=max(momentum, 0.01),  # Floor score at 1%
-                            metadata={
-                                "contractor": name,
-                                "momentum_30d": momentum,
-                                "source": "momentum_fallback",
-                                "observation_date": observation_date,
-                            },
-                        )
-                    )
-
         # Enrich with OpenBB data
         openbb_data = data.get("openbb", {})
         profile = openbb_data.get("profile", {})
@@ -199,6 +164,7 @@ class GovtContractsStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period, profit target, or stop loss."""
         hold_days = params.get("hold_days", 30)
@@ -206,7 +172,7 @@ class GovtContractsStrategy:
         profit_target = params.get("profit_target_pct", 0.15)
 
         if entry_price > 0:
-            pnl_pct = (current_price - entry_price) / entry_price
+            pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
             if pnl_pct >= profit_target:
                 return True, "profit_target"
             if pnl_pct <= -stop_loss:

@@ -19,6 +19,7 @@ Data sources: EDGAR (PQC-keyword filings), Finnhub (PQC news), OpenBB (profiles)
 from __future__ import annotations
 
 import logging
+import json
 from typing import Any
 
 from .base import Candidate
@@ -103,10 +104,7 @@ class QuantumReadinessStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 6),
-            "filing_lookback_days": (7, 30),
-            "news_lookback_days": (3, 14),
             "regime_threshold": (0.2, 0.5),
         }
 
@@ -118,10 +116,7 @@ class QuantumReadinessStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
             "max_positions": 4,
-            "filing_lookback_days": 14,
-            "news_lookback_days": 7,
             "regime_threshold": 0.3,
         }
 
@@ -142,6 +137,16 @@ class QuantumReadinessStrategy:
 
         finnhub_data = data.get("finnhub", {})
         pqc_news = finnhub_data.get("pqc_news", [])
+
+        def distinct(records, fields):
+            retained = {}
+            for record in sorted(records, key=lambda item: json.dumps(item, sort_keys=True, default=str)):
+                identity = next((str(record[k]) for k in fields if record.get(k)), None)
+                if identity:
+                    retained.setdefault(identity, record)
+            return [retained[key] for key in sorted(retained)]
+        pqc_filings = distinct(pqc_filings, ("accession_number", "adsh", "file_url", "url"))
+        pqc_news = distinct(pqc_news, ("article_id", "id", "url"))
 
         source_ids: set[str] = set()
         for filing in pqc_filings:
@@ -198,6 +203,10 @@ class QuantumReadinessStrategy:
             if filing.get("file_date") or filing.get("filing_date")
         )
         for candidate in candidates:
+            candidate.metadata["analysis_text"] = "\n".join(
+                str(f.get("current_text") or f.get("filing_text") or "") for f in pqc_filings
+            ) + "\n" + "\n".join(str(a.get("headline", "")) + " " + str(a.get("summary", "")) for a in pqc_news)
+            candidate.metadata["evidence_interpretation"] = "heuristic_timeline_evidence_not_probability"
             if published_times:
                 candidate.metadata["published_at"] = published_times[-1]
             if filing_dates:
@@ -286,7 +295,7 @@ class QuantumReadinessStrategy:
             if symbol in PQC_VENDORS:
                 mentioned_vendors.add(symbol)
 
-        for ticker in mentioned_vendors:
+        for ticker in sorted(mentioned_vendors):
             candidates.append(
                 Candidate(
                     ticker=ticker,
@@ -390,14 +399,15 @@ class QuantumReadinessStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         hold_days = params.get("hold_days", 25)
         if holding_days >= hold_days:
             return True, "hold_period"
 
-        pnl_pct = (current_price - entry_price) / entry_price
+        pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
         # Take profit at 10% (structural shift = larger moves)
-        if abs(pnl_pct) > 0.10:
+        if pnl_pct > 0.10:
             return True, "take_profit"
         # Stop loss at 7%
         if pnl_pct < -0.07:
@@ -425,10 +435,7 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45
-- min_conviction: 0.3-0.8
 - max_positions: 2-6
-- filing_lookback_days: 7-30
-- news_lookback_days: 3-14
 - regime_threshold: 0.2-0.5
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

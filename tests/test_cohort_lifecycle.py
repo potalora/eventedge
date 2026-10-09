@@ -96,12 +96,14 @@ class FakeStrategy:
         ]
 
     def check_exit(
-        self, ticker, entry_price, current_price, holding_days, params, data
+        self, ticker, entry_price, current_price, holding_days, params, data,
+        direction="long",
     ):
         hold = params.get("hold_days", self._hold_days)
         if holding_days >= hold:
             return True, "hold_period"
-        if entry_price > 0 and (current_price - entry_price) / entry_price <= -0.10:
+        signed_return = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+        if (signed_return if direction == "long" else -signed_return) <= -0.10:
             return True, "stop_loss"
         return False, ""
 

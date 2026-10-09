@@ -136,7 +136,7 @@ def test_optional_clef_status_is_reported_without_changing_financial_validity(na
     if kind != 'missing':
         evaluate_shadow(state_dir=state, generation=GENERATION, session=SESSION, epoch_id=EPOCH, generation_commit=COMMIT,
             signals=[{'event_key':'docket-1','ticker':'NVDA','strategy':'litigation','direction':'short',
-                      'metadata':{'docket_id':1,'llm_analysis':{'rationale':'Company faces a patent suit.'}}}],
+                      'metadata':{'docket_id':1,'llm_analysis':{'evidence_claim':'NVDA faces a patent suit.'}}}],
             data={'courtlistener':{'dockets':[{'docket_id':1,'case_name':'Patent holder v NVDA','nature_of_suit':'Patent'}]}},
             config={'enabled':True,'mode':'shadow'}, environ={})
         if kind == 'corrupt':

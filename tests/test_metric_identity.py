@@ -149,6 +149,7 @@ def test_metric_record_fields_and_schema_constants_are_exact() -> None:
         "signed_return",
         "status",
         "invalid_reason",
+        "return_basis",
     )
     assert tuple(field.name for field in fields(StrategyHealthRecord)) == (
         "health_id",
@@ -190,6 +191,8 @@ def test_metric_record_fields_and_schema_constants_are_exact() -> None:
         "closed_trades",
         "missing_mark_count",
         "stale_mark_count",
+        "sharpe_unavailable_reason",
+        "information_ratio_unavailable_reason",
     )
     assert tuple(field.name for field in fields(PairedComparison)) == (
         "candidate_epoch_id",

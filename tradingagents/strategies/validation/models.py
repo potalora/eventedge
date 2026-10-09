@@ -55,9 +55,10 @@ class WindowStats:
     n_events: int
     mean_car: float
     std_car: float
-    t_stat: float
-    p_value: float
-    ci: BootstrapCI
+    t_stat: float | None
+    p_value: float | None
+    ci: BootstrapCI | None
+    inference_unavailable_reason: str = ""
 
 
 @dataclass

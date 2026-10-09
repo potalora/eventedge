@@ -368,33 +368,5 @@ class OpenBBSource:
         return out
 
     def _commodity_futures_curve(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Fetch futures term structure for a commodity underlying."""
-        symbol = params.get("symbol", "")
-        if not symbol:
-            return {"error": "commodity_futures_curve requires 'symbol'"}
-
-        ckey = f"commodity_futures_curve|{symbol}"
-        if ckey in self._cache:
-            return self._cache[ckey]
-
-        try:
-            obb = self._get_obb()
-            resp = obb.derivatives.futures.historical(symbol=symbol, provider="yfinance")
-            results = resp.results or []
-            if len(results) < 2:
-                return {"error": f"insufficient futures data for {symbol}"}
-
-            front = _getfield(results[0], "close", 0.0) or 0.0
-            second = _getfield(results[1], "close", 0.0) or 0.0
-            contango_pct = round((second - front) / front * 100, 2) if front else 0.0
-
-            result = {
-                "symbol": symbol,
-                "front_month": front,
-                "second_month": second,
-                "contango_pct": contango_pct,
-            }
-            self._cache[ckey] = result
-            return result
-        except Exception:
-            raise
+        """Retired: historical prices do not identify contracts or maturities."""
+        return {"error": "unsupported futures curve: maturity-identified curve evidence required"}

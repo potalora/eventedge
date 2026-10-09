@@ -510,6 +510,7 @@ class CongressionalTradesStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period or stop loss."""
         hold_days = params.get("hold_days", 28)

@@ -28,7 +28,7 @@ def _enrich(tmp_path, result):
     engine._analyzer = SimpleNamespace(analyze_supply_chain=lambda *args, **kwargs: result)
     candidate = Candidate(
         ticker="DAL", date="2026-09-10", direction="long", score=0.7,
-        metadata={"needs_llm_analysis": True, "analysis_type": "supply_chain"},
+        metadata={"needs_llm_analysis": True, "analysis_type": "supply_chain", "headline": "Factory closes"},
     )
     enriched = engine._enrich_with_llm([candidate], "supply_chain")
     assert enriched == [candidate]
@@ -45,6 +45,7 @@ def test_invalid_llm_score_preserves_unmodified_rule_candidate(tmp_path, field, 
     assert candidate.score == 0.7
     assert candidate.direction == "long"
     assert "llm_analysis" not in candidate.metadata
+    assert candidate.journal_only
 
 
 @pytest.mark.parametrize("invalid", [[{"conviction": 0.9}], "analysis unavailable"])
@@ -53,12 +54,13 @@ def test_non_object_analysis_uses_existing_failure_fallback(tmp_path, invalid):
     assert candidate.score == 0.7
     assert candidate.direction == "long"
     assert "llm_analysis" not in candidate.metadata
+    assert candidate.journal_only
 
 
 @pytest.mark.parametrize("field", ["conviction", "score"])
 @pytest.mark.parametrize("value", [0, 1, 0.8, "0.8"])
 def test_valid_llm_score_is_numeric_in_candidate_and_journal_metadata(tmp_path, field, value):
-    result = {"direction": "short", field: value}
+    result = {"direction": "short", field: value, "rationale": "Factory closes"}
     candidate = _enrich(tmp_path, result)
     assert candidate.score == float(value)
     assert candidate.direction == "short"

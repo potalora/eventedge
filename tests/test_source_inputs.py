@@ -137,7 +137,7 @@ def test_queued_source_deadline_starts_at_acquisition_not_worker_start(tmp_path,
 def _daily_state(tmp_path, fetcher):
     from types import SimpleNamespace
     from tradingagents.strategies.orchestration.daily_pipeline import DailyRunState
-    engine = SimpleNamespace(_fetch_all_data=fetcher)
+    engine = SimpleNamespace(_fetch_all_data=fetcher, pending_late_signals=lambda *args: [])
     cohort = {'engine': engine, 'config': SimpleNamespace(horizon='30d'),
               'executor': SimpleNamespace(validated_execution_reference_bars=lambda *args: {})}
     screened = []

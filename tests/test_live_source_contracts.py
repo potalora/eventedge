@@ -188,8 +188,11 @@ def test_noaa_direct_summary_uses_one_deadline_for_all_states(monkeypatch):
     def get(*args, **kwargs):
         calls.append(kwargs["params"]["locationid"])
         clock[0] += 35
-        return response({"results": [observation(len(calls))],
-                         "metadata": {"resultset": {"count": 1}}})
+        import pandas as pd
+        days = pd.date_range(end="2026-10-06", periods=30)
+        rows = [{"date":str(day.date())+"T00:00:00","datatype":dtype,"station":"GHCND:TEST","value":value}
+                for day in days for dtype,value in [("TMAX",80),("TMIN",50),("PRCP",.12)]]
+        return response({"results":rows, "metadata":{"resultset":{"count":len(rows)}}})
     source = NOAASource(token="offline")
     source._session = SimpleNamespace(get=get)
     with pytest.raises(SourceFetchError) as exc:
@@ -234,3 +237,9 @@ def test_usda_future_corn_weeks_cannot_create_twenty_point_decline(monkeypatch):
         source.fetch_crop_progress("CORN", 2026, "KS")
     assert exc.value.reason_code == "invalid_response"
     assert not source._cache
+
+
+@pytest.fixture(autouse=True)
+def current_noaa_fixture_date(monkeypatch):
+    # These are current acquisitions on the fixture date, not vintage replays.
+    monkeypatch.setattr("tradingagents.strategies.data_sources.noaa_source.current_session_date",lambda:"2026-10-06")

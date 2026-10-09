@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .evidence import current_session_date, CoverageRecords, bounded_coverage
 from .request_policy import provider_request
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -312,7 +313,9 @@ class CongressSource:
         if failures:
             raise SourceFetchError("FMP congressional coverage incomplete", reason_code="batch_failure",
                 failed_operations=failures, failed_http_statuses=statuses,
-                partial_data={"recent_trades": trades})
+                partial_data={"recent_trades": trades, "coverage":bounded_coverage(returned=len(trades),limit=2*FMP_FREE_LIMIT)})
+        trades = CoverageRecords(trades, coverage=bounded_coverage(returned=len(trades), limit=2 * FMP_FREE_LIMIT,
+            chambers=["House", "Senate"], pages_per_chamber=1, ordering="latest_disclosures", has_next=None))
         self._cache["fmp_latest"] = trades
         return trades
 
@@ -338,7 +341,7 @@ class CongressSource:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now()
+        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.fromisoformat(current_session_date())
         cutoff = ref_date - timedelta(days=days_back)
         def in_window(trades):
             recent = []
@@ -351,9 +354,10 @@ class CongressSource:
         try:
             all_trades = self.fetch_all_trades()
         except SourceFetchError as exc:
-            exc.partial_data = {"recent_trades": in_window(exc.partial_data.get("recent_trades", []))}
+            exc.partial_data = {**exc.partial_data, "recent_trades": in_window(exc.partial_data.get("recent_trades", []))}
             raise
-        recent = in_window(all_trades)
+        recent = CoverageRecords(in_window(all_trades), coverage={**getattr(all_trades,"coverage",{}),
+            "as_of":as_of, "days_back":days_back, "scope":"latest_disclosure_sample_filtered_by_transaction_and_publication_dates"})
 
         self._cache[cache_key] = recent
         return recent
@@ -380,6 +384,7 @@ class CongressSource:
             if trade_ticker == ticker_upper:
                 matches.append(trade)
 
+        matches = CoverageRecords(matches, coverage={**getattr(all_trades,"coverage",{}), "ticker":ticker_upper})
         self._cache[cache_key] = matches
         return matches
 
@@ -417,14 +422,14 @@ class CongressSource:
 
     def _dispatch_all_trades(self, params: dict[str, Any]) -> dict[str, Any]:
         trades = self.fetch_all_trades()
-        return {"data": trades, "count": len(trades)}
+        return {"data": trades, "count": len(trades), "coverage":getattr(trades,"coverage",{})}
 
     def _dispatch_recent_trades(self, params: dict[str, Any]) -> dict[str, Any]:
         days_back = params.get("days_back", 30)
         trades = self.get_recent_trades(days_back=days_back, as_of=params.get("as_of"))
-        return {"data": trades, "count": len(trades)}
+        return {"data": trades, "count": len(trades), "coverage":getattr(trades,"coverage",{})}
 
     def _dispatch_trades_by_ticker(self, params: dict[str, Any]) -> dict[str, Any]:
         ticker = params.get("ticker", "")
         trades = self.get_trades_by_ticker(ticker)
-        return {"data": trades, "count": len(trades)}
+        return {"data": trades, "count": len(trades), "coverage":getattr(trades,"coverage",{})}
