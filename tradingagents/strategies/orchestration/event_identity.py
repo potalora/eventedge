@@ -216,7 +216,7 @@ def canonical_event_key(
         source = _required(metadata, "source", strategy)
         if source == "usaspending":
             family = "federal_award"
-            payload = _required(metadata, "award_id", strategy)
+            payload = metadata.get("award_key") or _required(metadata, "award_id", strategy)
         elif source == "momentum_fallback":
             family = "daily_contract_proxy_state"
             payload = {

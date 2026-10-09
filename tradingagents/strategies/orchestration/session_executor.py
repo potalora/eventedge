@@ -132,8 +132,11 @@ class SessionInputBundle:
     )
     governed_failure_map: Mapping[str, str] = field(default_factory=dict)
     governed_recovery_summaries: tuple[Mapping[str, object], ...] = ()
+    continuity_actions: tuple[CorporateAction, ...] = ()
+    action_coverage: Mapping[date, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "action_coverage", MappingProxyType({day: tuple(sorted(set(tickers))) for day, tickers in self.action_coverage.items()}))
         object.__setattr__(
             self,
             "governed_recoveries",
@@ -171,6 +174,8 @@ class SessionInputBundle:
                 action for action in self.actions if action.ticker in selected
             ),
             benchmarks=self.benchmarks,
+            continuity_actions=tuple(a for a in self.continuity_actions if a.ticker in selected),
+            action_coverage={day: tuple(t for t in tickers if t in selected) for day, tickers in self.action_coverage.items()},
             governed_recoveries={
                 ticker: binding
                 for ticker, binding in self.governed_recoveries.items()
@@ -216,6 +221,15 @@ class CorporateActionBatchError(ValueError):
         self.actions = actions
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+class SessionInputAcquisitionError(RuntimeError):
+    """Keep accepted raw acquisition when a later action request fails."""
+
+    def __init__(self, bundle: SessionInputBundle, action_failures: dict[str, str], error: Exception):
+        self.bundle = bundle
+        self.action_failures = action_failures
+        super().__init__(str(error))
 
 
 class _GovernedRecoveryConflictError(LedgerConflictError):
@@ -539,41 +553,31 @@ class SessionExecutor:
         return EpochManager(self.metric_store).invalidate_current(session, reason)
 
     def required_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
-        """Bounded union of execution and exact outcome tickers."""
-        tickers = {str(position["ticker"]) for position in self.ledger.open_positions()}
-        for intent in self.ledger.pending_intents(session):
-            signals = self.ledger.signals_for_intent(intent.intent_id)
-            provenance = {signal.ticker for signal in signals}
-            if len(provenance) != 1:
-                raise ValueError(
-                    f"intent {intent.intent_id} has ambiguous ticker provenance"
-                )
-            tickers.update(provenance)
-        tickers.update(self.outcome_tickers(session, epoch_id))
-        return tuple(sorted(tickers))
+        """Portfolio-critical dependencies; diagnostic evidence has its own scope."""
+        from .market_dependencies import portfolio_tickers
+        return portfolio_tickers(self.ledger, session)
+
+    def outcome_dependency_plan(self, session: date) -> dict[str, dict[str, bool]]:
+        plan: dict[str, dict[str, bool]] = {}
+        earliest = session
+        for _ in range(max(OUTCOME_WINDOWS)):
+            earliest = self.outcome_calculator.calendar.previous_session(earliest)
+        for signal in self.ledger.read_signals(earliest, session):
+            entry = self.outcome_calculator.calendar.next_session(signal.reference_session)
+            exits = {self.outcome_calculator.calendar.held_session(entry, n) for n in OUTCOME_WINDOWS}
+            if entry <= session <= max(exits):
+                row = plan.setdefault(signal.ticker, {"price": False, "actions": False})
+                row["price"] |= session == entry or session in exits
+                row["actions"] |= session > entry
+        return plan
 
     def outcome_tickers(self, session: date, epoch_id: str) -> tuple[str, ...]:
-        """Keep every active outcome ticker under continuous action coverage."""
-        tickers: set[str] = set()
-        earliest_reference = session
-        for _ in range(max(OUTCOME_WINDOWS)):
-            earliest_reference = self.outcome_calculator.calendar.previous_session(
-                earliest_reference
-            )
-        for signal in self.ledger.read_signals(
-            earliest_reference, session, epoch_id=epoch_id
-        ):
-            metric_signal = self._metric_signal(signal)
-            entry_session = self.outcome_calculator.calendar.next_session(
-                metric_signal.reference_session
-            )
-            last_session = self.outcome_calculator.calendar.held_session(entry_session, max(OUTCOME_WINDOWS))
-            if entry_session <= session <= last_session:
-                tickers.add(metric_signal.ticker)
-        return tuple(sorted(tickers))
+        return tuple(sorted(self.outcome_dependency_plan(session)))
 
-    @staticmethod
-    def _metric_signal(signal: SignalRecord) -> SignalMetricRecord:
+    def _metric_signal(self, signal: SignalRecord) -> SignalMetricRecord:
+        from tradingagents.strategies.metrics.populations import signal_eligibility
+        observation = self.ledger.signal_observation(signal.signal_id)
+        eligibility = signal_eligibility(observation[1], observation[2]) if observation else signal_eligibility(None)
         return SignalMetricRecord(
             event_key=signal.event_key,
             signal_id=signal.signal_id,
@@ -584,6 +588,7 @@ class SessionExecutor:
             direction=signal.direction,
             decision_at=signal.decision_at,
             reference_session=signal.reference_session,
+            **eligibility,
         )
 
     def due_outcome_signals(
@@ -591,23 +596,14 @@ class SessionExecutor:
     ) -> tuple[tuple[SignalMetricRecord, int], ...]:
         """Convert authoritative ledger signals whose exact outcome closes today."""
         due: list[tuple[SignalMetricRecord, int]] = []
-        earliest_reference = session
-        for _ in range(max(OUTCOME_WINDOWS)):
-            earliest_reference = self.outcome_calculator.calendar.previous_session(
-                earliest_reference
-            )
-        for signal in self.ledger.read_signals(
-            earliest_reference, session, epoch_id=epoch_id
-        ):
+        completed = self.metric_store.outcome_ids()
+        for signal in self.ledger.read_signals(end_session=session):
             metric_signal = self._metric_signal(signal)
-            entry_session = self.outcome_calculator.calendar.next_session(
-                metric_signal.reference_session
-            )
+            entry_session = self.outcome_calculator.calendar.next_session(metric_signal.reference_session)
             for window in OUTCOME_WINDOWS:
-                if (
-                    self.outcome_calculator.calendar.held_session(entry_session, window)
-                    == session
-                ):
+                exit_session = self.outcome_calculator.calendar.held_session(entry_session, window)
+                outcome_id = self.outcome_calculator.outcome_id(metric_signal, window)
+                if exit_session == session or (exit_session < session and outcome_id not in completed):
                     due.append((metric_signal, window))
         return tuple(due)
 
@@ -621,50 +617,53 @@ class SessionExecutor:
         preserve_existing_valid: bool = False,
     ) -> int:
         """Persist due outcomes from shared current bars and durable entry bars only."""
+        from .outcome_evidence import decode_actions, decode_bar
         written = 0
         forced_reasons = invalid_reasons or {}
         for signal, window in self.due_outcome_signals(session, epoch_id):
-            entry_session = self.outcome_calculator.calendar.next_session(
-                signal.reference_session
-            )
+            if preserve_existing_valid:
+                try:
+                    self.metric_store.load_outcome(self.outcome_calculator.outcome_id(signal, window))
+                except KeyError:
+                    pass
+                else:
+                    continue
+            entry_session = self.outcome_calculator.calendar.next_session(signal.reference_session)
+            exit_session = self.outcome_calculator.calendar.held_session(entry_session, window)
             bars = dict(raw_bars)
-            if self.ledger.session_execution_context(entry_session) is not None:
-                bars.update(self.persisted_input_bundle(entry_session).bars)
+            for price_session in (entry_session, exit_session):
+                evidence = self.metric_store.load_outcome_input(signal.ticker, price_session)
+                if evidence is not None:
+                    bars.pop((signal.ticker, price_session), None)
+                    bar = decode_bar(evidence.get("bar"))
+                    if bar is not None:
+                        bars[(signal.ticker, price_session)] = bar
+                elif self.ledger.session_execution_context(price_session) is not None:
+                    bars.update(self.persisted_input_bundle(price_session).bars)
             actions: list[CorporateAction] = []
             coverage_reason = ""
             action_session = self.outcome_calculator.calendar.next_session(entry_session)
-            while action_session <= session:
-                if self.ledger.session_execution_context(action_session) is None:
+            while action_session <= exit_session:
+                evidence = self.metric_store.load_outcome_input(signal.ticker, action_session)
+                if evidence is not None:
+                    if not evidence.get("actions") or evidence.get("action_error"):
+                        coverage_reason = f"missing_action_coverage:{signal.ticker}/{action_session}"
+                        break
+                    actions.extend(decode_actions(evidence["actions_data"]))
+                elif self.ledger.session_execution_context(action_session) is not None:
+                    bound = self.persisted_input_bundle(action_session)
+                    if signal.ticker not in bound.tickers:
+                        coverage_reason = f"missing_action_coverage:{signal.ticker}/{action_session}"
+                        break
+                    actions.extend(a for a in bound.actions if a.ticker == signal.ticker)
+                else:
                     coverage_reason = f"missing_action_coverage:{signal.ticker}/{action_session}"
                     break
-                bound = self.persisted_input_bundle(action_session)
-                if signal.ticker not in bound.tickers:
-                    coverage_reason = f"missing_action_coverage:{signal.ticker}/{action_session}"
-                    break
-                actions.extend(a for a in bound.actions if a.ticker == signal.ticker)
                 action_session = self.outcome_calculator.calendar.next_session(action_session)
             outcome = self.outcome_calculator.build(signal, window, bars, corporate_actions=tuple(actions))
             forced_reason = forced_reasons.get(signal.ticker) or coverage_reason
-            if (
-                forced_reason
-                and not outcome.invalid_reason.endswith("entry_bar")
-                and not outcome.invalid_reason.endswith("entry_price")
-            ):
-                outcome = replace(
-                    outcome,
-                    exit_price=None,
-                    raw_return=None,
-                    signed_return=None,
-                    status="invalid",
-                    invalid_reason=forced_reason,
-                )
-            if preserve_existing_valid:
-                try:
-                    existing = self.metric_store.load_outcome(outcome.outcome_id)
-                except KeyError:
-                    existing = None
-                if existing is not None and existing.status == "valid":
-                    continue
+            if forced_reason and not outcome.invalid_reason.endswith(("entry_bar", "entry_price")):
+                outcome = replace(outcome, raw_return=None, signed_return=None, status="invalid", invalid_reason=forced_reason)
             self.metric_store.upsert_outcome(outcome)
             written += 1
         return written
@@ -678,40 +677,11 @@ class SessionExecutor:
         preserve_existing: bool = True,
     ) -> int:
         """Recover due invalid outcomes without current-session market input."""
-        written = 0
-        for signal, window in self.due_outcome_signals(session, epoch_id):
-            outcome_id = self.outcome_calculator.outcome_id(signal, window)
-            if preserve_existing:
-                try:
-                    self.metric_store.load_outcome(outcome_id)
-                except KeyError:
-                    pass
-                else:
-                    continue
-            entry_session = self.outcome_calculator.calendar.next_session(
-                signal.reference_session
-            )
-            bars: dict[tuple[str, date], MarketBar] = {}
-            if self.ledger.session_execution_context(entry_session) is not None:
-                bars.update(self.persisted_input_bundle(entry_session).bars)
-            outcome = self.outcome_calculator.build(signal, window, bars)
-            forced_reason = invalid_reasons.get(
-                signal.ticker, "critical_market_data_gap"
-            )
-            if not outcome.invalid_reason.endswith("entry_bar") and not (
-                outcome.invalid_reason.endswith("entry_price")
-            ):
-                outcome = replace(
-                    outcome,
-                    exit_price=None,
-                    raw_return=None,
-                    signed_return=None,
-                    status="invalid",
-                    invalid_reason=forced_reason,
-                )
-            self.metric_store.upsert_outcome(outcome)
-            written += 1
-        return written
+        # An accounting gap does not erase healthy independently frozen outcome
+        # inputs. Legacy markers without that evidence retain explicit failure.
+        forced = {ticker: reason for ticker, reason in invalid_reasons.items()
+                  if self.metric_store.load_outcome_input(ticker, session) is None}
+        return self.record_due_outcomes(session, epoch_id, {}, forced, preserve_existing_valid=preserve_existing)
 
     def validated_outcome_bars(
         self,
@@ -767,6 +737,7 @@ class SessionExecutor:
         cohort_ids_by_ticker: Mapping[str, tuple[str, ...]] | None = None,
         processed_at: datetime | None = None,
         persist: bool = True,
+        continuity_requirements: Mapping[date, tuple[str, ...]] | None = None,
     ) -> SessionInputBundle:
         """Fetch the raw/action/adjusted set once for any number of cohorts."""
         routing_fields = (
@@ -816,11 +787,30 @@ class SessionExecutor:
             recoveries = {}
             recovery_summaries = ()
             failure_map = {}
-        actions = (
-            tuple(price_source.get_corporate_actions(list(tickers), session))
-            if tickers
-            else ()
-        )
+        actions = ()
+        continuity_actions = []
+        action_coverage = {}
+        current_actions_accepted = False
+        try:
+            actions = (
+                tuple(price_source.get_corporate_actions(list(tickers), session))
+                if tickers else ()
+            )
+            current_actions_accepted = True
+            for day, held_tickers in sorted((continuity_requirements or {}).items()):
+                if day >= session or not set(held_tickers).issubset(tickers):
+                    raise ValueError("invalid inventory continuity request")
+                continuity_actions.extend(price_source.get_corporate_actions(list(held_tickers), day))
+                action_coverage[day] = tuple(held_tickers)
+        except Exception as error:
+            partial = SessionInputBundle(
+                session, tuple(sorted(tickers)), bars, actions, {}, recoveries,
+                failure_map, recovery_summaries,
+            )
+            action_failures = {} if current_actions_accepted else {
+                ticker: type(error).__name__ for ticker in tickers
+            }
+            raise SessionInputAcquisitionError(partial, action_failures, error) from error
         try:
             benchmarks = paired_adjusted_closes(
                 price_source.get_total_return_closes(
@@ -869,6 +859,8 @@ class SessionExecutor:
             recoveries,
             failure_map,
             recovery_summaries,
+            tuple(continuity_actions),
+            action_coverage,
         )
 
     def validate_execution_input_bundle(
@@ -882,7 +874,7 @@ class SessionExecutor:
         self._validate_clock(session, epoch_id, processed_at)
         required = self.required_tickers(session, epoch_id)
         _, actions, _ = self._validate_bundle(bundle, required, session, processed_at)
-        state_errors = self.ledger.corporate_action_batch_state_errors(session, actions)
+        state_errors = self.ledger.corporate_action_batch_errors(session, actions, processed_at, allow_prior=True)
         if state_errors:
             raise CorporateActionBatchError(actions, state_errors)
 
@@ -944,7 +936,7 @@ class SessionExecutor:
             CorporateAction(
                 str(item["action_id"]),
                 str(item["ticker"]),
-                session,
+                date.fromisoformat(str(item.get("session", session.isoformat()))),
                 str(item["action_type"]),
                 Decimal(str(item["ratio"])) if item.get("ratio") is not None else None,
                 (
@@ -957,6 +949,7 @@ class SessionExecutor:
                     str(provenance["corporate_actions"][str(item["action_id"])])
                 ),
                 bool(item["verified"]),
+                date.fromisoformat(str(item["payment_date"])) if item.get("payment_date") else None,
             )
             for item in market.get("corporate_actions", [])
         )
@@ -990,11 +983,13 @@ class SessionExecutor:
                 )
             ),
             bars,
-            actions,
+            tuple(a for a in actions if a.session == session),
             benchmarks,
             governed_recoveries,
             {},
             recovery_summaries,
+            tuple(a for a in actions if a.session < session),
+            {date.fromisoformat(day): tuple(tickers) for day, tickers in market.get("action_coverage", {}).items()},
             validated_at=context["bound_at"],
         )
 
@@ -1254,6 +1249,10 @@ class SessionExecutor:
                     required,
                     price_source,
                     self.benchmark_symbols,
+                    continuity_requirements=(
+                        {date.fromisoformat(day): tuple(tickers) for day, tickers in bound_market.get("action_coverage", {}).items()}
+                        if bound_context is not None else self.ledger.inventory_action_requirements(session)
+                    ),
                 )
             bars, actions, benchmarks = self._validate_bundle(
                 bundle, required, session, processed_at
@@ -1268,8 +1267,8 @@ class SessionExecutor:
                 self.ledger.cancel_overdue_next_open_intents(
                     session, session_open(session)
                 )
-                state_errors = self.ledger.corporate_action_batch_state_errors(
-                    session, actions
+                state_errors = self.ledger.corporate_action_batch_errors(
+                    session, actions, processed_at, allow_prior=True
                 )
                 if state_errors:
                     raise CorporateActionBatchError(actions, state_errors)
@@ -1284,6 +1283,8 @@ class SessionExecutor:
                     bundle.governed_recoveries,
                 )
             )
+            coverage = self.ledger.inventory_action_requirements(session) if bound_context is None else bundle.action_coverage
+            market_inputs["action_coverage"] = {day.isoformat(): list(tickers) for day, tickers in sorted(coverage.items())}
             if bound_context is None:
                 starting_state = self.ledger.execution_starting_state(session)
                 economic_inputs = {
@@ -1324,8 +1325,8 @@ class SessionExecutor:
                 json.dumps(borrow_inputs, sort_keys=True, separators=(",", ":")),
             )
             if bound_context is not None:
-                state_errors = self.ledger.corporate_action_batch_state_errors(
-                    session, actions
+                state_errors = self.ledger.corporate_action_batch_errors(
+                    session, actions, processed_at, allow_prior=True
                 )
                 if state_errors:
                     raise CorporateActionBatchError(actions, state_errors)
@@ -1407,9 +1408,7 @@ class SessionExecutor:
             session,
             "apply_corporate_actions",
             processed_at,
-            lambda: self.ledger.apply_corporate_actions(
-                session, list(actions), processed_at
-            ),
+            lambda: self._apply_inventory_actions(session, actions, processed_at),
             completed,
         )
         self._phase(
@@ -1537,6 +1536,8 @@ class SessionExecutor:
             "corporate_actions": [
                 {
                     "action_id": action.action_id,
+                    "session": action.session.isoformat(),
+                    "payment_date": action.payment_date.isoformat() if action.payment_date else None,
                     "ticker": action.ticker,
                     "action_type": action.action_type,
                     "ratio": (
@@ -1975,6 +1976,12 @@ class SessionExecutor:
                 )
             )
 
+    def _apply_inventory_actions(self, session: date, actions: tuple[CorporateAction, ...], processed_at: datetime) -> None:
+        events = self.ledger.apply_corporate_actions(session, list(actions), processed_at, allow_prior=True)
+        if any(event.flagged for event in events):
+            raise ValueError("inventory action application failed")
+        self.ledger.settle_dividends(session, processed_at)
+
     def _validate_bundle(
         self,
         bundle: SessionInputBundle,
@@ -2011,6 +2018,23 @@ class SessionExecutor:
             validation_at,
             max_age,
         )
+        context = self.ledger.session_execution_context(session)
+        requirements = (
+            {date.fromisoformat(day): tuple(tickers) for day, tickers in json.loads(str(context["economic_inputs_json"]))["market"].get("action_coverage", {}).items()}
+            if context is not None else self.ledger.inventory_action_requirements(session)
+        )
+        for day, tickers in requirements.items():
+            if not set(tickers).issubset(bundle.action_coverage.get(day, ())):
+                raise ValueError(f"missing inventory action continuity {day}/{','.join(tickers)}")
+        for day, tickers in bundle.action_coverage.items():
+            if day >= session or not set(tickers).issubset(bundle.tickers):
+                raise ValueError("inventory action coverage scope mismatch")
+            historical = tuple(a for a in bundle.continuity_actions if a.session == day)
+            self._validate_actions(historical, tickers, day, validation_at, max_age)
+        if any(a.session not in bundle.action_coverage for a in bundle.continuity_actions):
+            raise ValueError("uncovered inventory corporate action")
+        actions += tuple(a for a in bundle.continuity_actions if a.ticker in requirements.get(a.session, ()))
+        actions = tuple(sorted(actions, key=lambda a: (a.session, a.action_type != "split", a.ticker, a.action_id)))
         validate_required_bars(
             bundle.bars, set(bundle.tickers), session, validation_at, max_age
         )
@@ -2105,6 +2129,8 @@ class SessionExecutor:
                     errors.append(f"invalid dividend {action.action_id}")
             else:
                 errors.append(f"unsupported corporate action {action.action_id}")
+            if action.payment_date is not None and (action.action_type != "cash_dividend" or action.payment_date < action.session):
+                errors.append(f"invalid dividend payment date {action.action_id}")
         if errors:
             raise CorporateActionBatchError(actions, tuple(sorted(set(errors))))
 

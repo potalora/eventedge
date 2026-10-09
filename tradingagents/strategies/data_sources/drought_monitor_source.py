@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://usdmdataservices.unl.edu/api/StateStatistics/GetDroughtSeverityStatisticsByAreaPercent"
 
 # Default agricultural states (same as NOAA/USDA sources)
+STATE_FIPS = {"IA":"19", "IL":"17", "KS":"20", "NE":"31", "MN":"27",
+              "IN":"18", "OH":"39", "SD":"46", "ND":"38", "MO":"29"}
 DEFAULT_AG_STATES = ["IA", "IL", "KS", "NE", "MN", "IN", "OH", "SD", "ND", "MO"]
 
 
@@ -73,7 +75,9 @@ class DroughtMonitorSource:
             {state: {"None": pct, "D0": pct, ..., "D4": pct,
                      "observation_date": date, "acquired_at": timestamp, "available_at": timestamp}}
         """
-        states = states or DEFAULT_AG_STATES
+        states = list(dict.fromkeys(state.upper() for state in (states or DEFAULT_AG_STATES)))
+        if any(state not in STATE_FIPS for state in states):
+            raise SourceFetchError("Drought Monitor unsupported state", reason_code="invalid_response")
         if end is None:
             end = current_session_date()
         if start is None:
@@ -86,7 +90,7 @@ class DroughtMonitorSource:
         end_fmt = datetime.strptime(end, "%Y-%m-%d").strftime("%-m/%-d/%Y")
 
         params = {
-            "aoi": ",".join(states),
+            "aoi": ",".join(STATE_FIPS[state] for state in states),
             "startdate": start_fmt,
             "enddate": end_fmt,
             "statisticsType": 2,  # Disjoint categorical areas, not cumulative exceedances
@@ -106,6 +110,12 @@ class DroughtMonitorSource:
         latest_dates = {}
         invalid = False
         for record in data:
+            # Live JSON uses camel case; retain explicit legacy-field support.
+            record = {key: record.get(native, record.get(key)) for key, native in {
+                "StateAbbreviation":"stateAbbreviation", "MapDate":"mapDate",
+                "StatisticFormatID":"statisticFormatID", "None":"none",
+                **{f"D{i}":f"d{i}" for i in range(5)},
+            }.items()}
             state = record.get("StateAbbreviation")
             map_date = record.get("MapDate")
             if isinstance(map_date, str) and len(map_date) == 8 and map_date.isdigit():
@@ -113,7 +123,7 @@ class DroughtMonitorSource:
             categories = ("None", "D0", "D1", "D2", "D3", "D4")
             if (not source_text(state) or not source_date(map_date)
                     or not all(source_number(record.get(key), minimum=0, maximum=100) for key in categories)
-                    or record.get("StatisticFormatID", 2) != 2
+                    or record.get("StatisticFormatID") != 2
                     or abs(sum(float(record[key]) for key in categories) - 100) > 0.2):
                 invalid = True
                 continue

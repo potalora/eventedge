@@ -915,7 +915,8 @@ class TestCandidateBarLifecycle:
 
         assert all(
             item["error"] is True
-            and item["degraded"] is False
+            and item["degraded"] is True
+            and item["outcome_coverage_valid"] is False
             and item["execution_valid"] is False
             and item["staging_valid"] is False
             and item["candidate_bar_quarantines"] == []

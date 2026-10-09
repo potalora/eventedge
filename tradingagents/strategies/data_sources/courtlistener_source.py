@@ -139,7 +139,7 @@ class CourtListenerSource:
         page_size: int = 20,
         *, date_filed_before: str | None = None,
     ) -> list[dict]:
-        """Search court opinions."""
+        """Search opinion clusters, retaining their distinct nested opinion references."""
         import requests
 
         if not self._token:
@@ -172,11 +172,24 @@ class CourtListenerSource:
             results = []
             for item in data["results"]:
                 if (not isinstance(item, dict) or not source_text(item.get("caseName"))
-                        or not item.get("id") or not source_date(item.get("dateFiled"))):
+                        or type(item.get("cluster_id")) is not int or item["cluster_id"] <= 0
+                        or not source_date(item.get("dateFiled"))
+                        or not isinstance(item.get("opinions"), list) or not item["opinions"]
+                        or not all(isinstance(opinion, dict) and type(opinion.get("id")) is int
+                                   and opinion["id"] > 0 for opinion in item["opinions"])
+                        or len({opinion["id"] for opinion in item["opinions"]}) != len(item["opinions"])):
                     raise SourceFetchError("CourtListener opinion record invalid", reason_code="invalid_response",
                                            partial_data={"opinions": results})
                 results.append({
-                    "opinion_id": item.get("id", ""),
+                    "cluster_id": item["cluster_id"],
+                    "docket_id": item.get("docket_id"),
+                    "opinion_ids": [opinion["id"] for opinion in item["opinions"]],
+                    "opinions": [{"opinion_id": opinion["id"], "type": opinion.get("type", ""),
+                                  "snippet": opinion.get("snippet", ""),
+                                  "download_url": opinion.get("download_url"),
+                                  "local_path": opinion.get("local_path"),
+                                  "author_id": opinion.get("author_id")}
+                                 for opinion in item["opinions"]],
                     "case_name": item.get("caseName", ""),
                     "date_filed": item.get("dateFiled", ""),
                     "court": item.get("court", ""),
@@ -184,7 +197,8 @@ class CourtListenerSource:
                 })
             return CoverageRecords(results, coverage=bounded_coverage(returned=len(results), limit=page_size,
                 total=data.get('count'), has_next=bool(data['next']) if 'next' in data else None,
-                query=query, date_filed_after=date_filed_after, date_filed_before=date_filed_before))
+                query=query, date_filed_after=date_filed_after, date_filed_before=date_filed_before,
+                unit='opinion_clusters'))
         except Exception as exc:
             safe_error = source_fetch_error("CourtListener search_opinions failed", exc)
             logger.error("%s", safe_error)

@@ -61,7 +61,7 @@ class TransportFixture:
     def response(payload, status=200, *, headers=None):
         response = requests.Response()
         response.status_code = status
-        response._content = json.dumps(payload).encode()
+        response._content = (payload if isinstance(payload, str) else json.dumps(payload)).encode()
         response._content_consumed = True
         response.headers.update(headers or {})
         return response
@@ -142,28 +142,47 @@ class TransportFixture:
             return self.response({"results": [], "count": 0, "next": None})
         if "api.usaspending.gov" in url:
             return self.response({"results": [], "page_metadata": {"page":1,"hasNext": False}})
-        if "ncei.noaa.gov" in url:
-            days = pd.date_range(params["startdate"], params["enddate"], freq="D")
-            rows = [{"date":str(day.date()) + "T00:00:00", "datatype":datatype,
-                     "station":"GHCND:USC00130001", "value":value, "attributes":",,,"}
-                    for day in days for datatype,value in [("TMAX",85),("TMIN",55),("PRCP",0.12)]]
-            offset = params.get("offset",1)
-            return self.response({"metadata":{"resultset":{"count":len(rows),"offset":offset,"limit":1000}},
-                                  "results":rows[offset-1:offset-1+1000]})
+        if "ncei.noaa.gov/pub/data/ghcn/daily" in url:
+            from tradingagents.strategies.data_sources.noaa_source import AG_STATES
+            stations = {f"USC{i:08}": state for i, state in enumerate(AG_STATES, 1)}
+            if url.endswith("ghcnd-stations.txt"):
+                # Native GHCN catalog fixed columns: ID 1-11, state 39-40.
+                return self.response("\n".join(f"{station:<11}{'':27}{state} OFFLINE STATION"
+                                                for station, state in stations.items()))
+            assert url.endswith("ghcnd-inventory.txt")
+            # Native inventory: element 32-35, first year 37-40, last 42-45.
+            return self.response("\n".join(f"{station:<11}{'':20}{dtype} 2020 2026"
+                for station in stations for dtype in ("TMAX", "TMIN", "PRCP")))
+        if "ncei.noaa.gov/access/services/data/v1" in url:
+            assert params["dataset"] == "daily-summaries"
+            assert params["units"] == "standard" and params["includeAttributes"] == "true"
+            assert params["dataTypes"] == "TMAX,TMIN,PRCP"
+            days = pd.date_range(params["startDate"], params["endDate"], freq="D")
+            stations = params["stations"].split(",")
+            assert 1 <= len(stations) <= 100
+            return self.response([{"STATION": station, "DATE": str(day.date()),
+                "TMAX": "85", "TMIN": "55", "PRCP": "0.12",
+                "TMAX_ATTRIBUTES": ",,W", "TMIN_ATTRIBUTES": ",,W", "PRCP_ATTRIBUTES": ",,W"}
+                for station in stations for day in days])
         if "quickstats.nass.usda.gov" in url:
+            from tradingagents.strategies.data_sources.usda_source import condition_scope
             prior_sunday = self.session - timedelta(days=(self.session.weekday()+1)%7)
+            scope = condition_scope(params["commodity_desc"], str(self.session))
             return self.response({"data":[{"commodity_desc":params["commodity_desc"],
-                "year":params["year"], "state_alpha":state, "class_desc":"ALL CLASSES",
+                "year":params["year"], "state_alpha":state, "class_desc":crop_class,
                 "week_ending":str(prior_sunday - timedelta(weeks=week)), "unit_desc":unit,"Value":value}
-                for state in params["state_alpha"] for week in (1,0)
+                for crop_class, states in scope["class_states"].items()
+                for state in states if state in params["state_alpha"] for week in (1,0)
                 for unit,value in [("PCT GOOD","50"),("PCT EXCELLENT","20"),("PCT FAIR","20"),("PCT POOR","8"),("PCT VERY POOR","2")]]})
         if "usdmdataservices.unl.edu" in url:
             assert params["statisticsType"] == 2
             observation = self.session - timedelta(days=(self.session.weekday()-1)%7)
-            return self.response([{"StateAbbreviation":state,"MapDate":observation.strftime("%Y%m%d"),
-                "StatisticFormatID":2,"None":0 if self.weather_disruption else 100,
-                "D0":0,"D1":0,"D2":0,"D3":100 if self.weather_disruption else 0,"D4":0}
-                for state in params["aoi"].split(",")])
+            from tradingagents.strategies.data_sources.drought_monitor_source import STATE_FIPS
+            by_fips = {fips: state for state, fips in STATE_FIPS.items()}
+            return self.response([{"stateAbbreviation":by_fips[fips],"mapDate":observation.strftime("%Y%m%d"),
+                "statisticFormatID":2,"none":0 if self.weather_disruption else 100,
+                "d0":0,"d1":0,"d2":0,"d3":100 if self.weather_disruption else 0,"d4":0}
+                for fips in params["aoi"].split(",")])
         raise AssertionError("unconfigured HTTP fixture endpoint: " + url)
 
     def yahoo(self, tickers, **kwargs):
@@ -222,6 +241,14 @@ class TransportFixture:
             self.model_calls["committee"] += 1
             if self.model_calls["committee"] == self.interrupt_committee_at:
                 raise InterruptedWorker("worker stopped after earlier cohort staging")
+            # The deterministic fixture recommends only a thesis actually
+            # admitted to this decision; repeated events may already be used.
+            signal_section = prompt.split("Signals (all ", 1)[1].split("Current positions", 1)[0]
+            admitted = [json.loads(line[line.index("{"):]) for line in signal_section.splitlines()
+                        if line.startswith("  ") and "{" in line]
+            if not any(row.get("ticker") == "NVDA" and row.get("direction") == "long"
+                       and row.get("strategy") == "earnings_call" for row in admitted):
+                return "[]"
             return json.dumps([{"ticker": "NVDA", "direction": "long", "position_size_pct": .05,
                                 "confidence": .9, "rationale": "Material quarterly earnings and outlook surprise",
                                 "contributing_strategies": ["earnings_call"], "regime_alignment": "aligned"}])
@@ -260,7 +287,7 @@ def pipeline(monkeypatch, tmp_path):
         def now(cls, tz=None):
             return fixture.now.astimezone(tz) if tz else fixture.now.replace(tzinfo=None)
 
-    for name in ("cohort_orchestrator", "multi_strategy_engine", "session_executor", "governed_market_data", "daily_pipeline", "generation_manager"):
+    for name in ("cohort_orchestrator", "multi_strategy_engine", "session_executor", "governed_market_data", "daily_pipeline", "generation_manager", "outcome_evidence"):
         module = importlib.import_module("tradingagents.strategies.orchestration." + name)
         monkeypatch.setattr(module, "datetime", FixedDatetime)
     # Fresh acquisitions run against the fixture's current New York date.
@@ -277,8 +304,10 @@ def pipeline(monkeypatch, tmp_path):
     config = deepcopy(DEFAULT_CONFIG)
     config["autoresearch"]["state_dir"] = str(tmp_path / "data/generations" / GENERATION)
     config["autoresearch"]["finnhub_reliability"]["rate_delay_s"] = 0
-    for key in ("finnhub_api_key", "fred_api_key", "regulations_api_key", "courtlistener_token", "noaa_cdo_token", "usda_nass_api_key", "fmp_api_key"):
+    for key in ("finnhub_api_key", "fred_api_key", "regulations_api_key", "courtlistener_token", "usda_nass_api_key", "fmp_api_key"):
         config["autoresearch"][key] = "offline-dummy"
+    monkeypatch.delenv("NOAA_CDO_TOKEN", raising=False)
+    config["autoresearch"]["noaa_cdo_token"] = ""
     orchestrator = CohortOrchestrator(build_default_cohorts(config), config,
                                      generation_id=GENERATION, generation_commit=COMMIT)
     from tradingagents.strategies.orchestration import generation_manager, runtime_lock

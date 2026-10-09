@@ -38,6 +38,9 @@ def _api_response(rows):
 # Raw shapes observed from the live API (2026-08-06): naive datetime strings.
 API_ROW = {
     "Award ID": "AWARD-1",
+    "generated_internal_id": "CONT_AWD_AWARD-1_9700_PARENT_9700",
+    "internal_id": 123,
+    "Base Obligation Date": "2026-07-07",
     "Recipient Name": "LOCKHEED MARTIN CORP",
     "Award Amount": 250_000_000,
     "Awarding Agency": "DEFENSE, DEPARTMENT OF",
@@ -97,7 +100,7 @@ class TestNormalizeAwardDate:
 class TestSearchContractsNormalization:
     def test_naive_api_timestamps_normalized(self, source):
         with patch("requests.post", return_value=_api_response([API_ROW])):
-            results = source.search_contracts(min_amount=10_000_000)
+            results = source.search_contracts(min_amount=10_000_000, date_from="2026-07-01", date_to="2026-08-06")
 
         assert len(results) == 1
         contract = results[0]

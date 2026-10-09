@@ -301,6 +301,11 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                             "recipient_name": "Lockheed Martin",
                             "amount": 50_000_000,
                             "award_id": "AWARD-1",
+                            "award_key": "generated:AWARD-1",
+                            "award_scope": "new_awards_only",
+                            "amount_basis": "cumulative_award_obligations",
+                            "base_obligation_date": "2026-06-30",
+                            "observed_at": "2026-06-30T20:00:00+00:00",
                             "last_modified_date": "2026-06-30",
                         }
                     ]

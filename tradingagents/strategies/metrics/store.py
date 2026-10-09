@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS outcomes (
   epoch_id TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outcome_inputs (
+  input_id TEXT PRIMARY KEY,
+  ticker TEXT NOT NULL,
+  session TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE (ticker, session)
+);
 CREATE TABLE IF NOT EXISTS strategy_health (
   health_id TEXT PRIMARY KEY,
   epoch_id TEXT NOT NULL,
@@ -229,6 +236,8 @@ class MetricStore:
     @staticmethod
     def _outcome(payload: str) -> OutcomeRecord:
         data = json.loads(payload)
+        if "analysis_status" not in data:
+            data.update(analysis_status="legacy_unknown", analysis_valid=False, analysis_admitted=False)
         data["entry_session"] = date.fromisoformat(data["entry_session"])
         data["exit_session"] = date.fromisoformat(data["exit_session"])
         for field in (
@@ -1834,6 +1843,29 @@ class MetricStore:
                     "VALUES (?, ?, ?)"
                 ),
             )
+
+    def save_outcome_input(self, ticker: str, session: date, record: dict) -> None:
+        """Freeze successful or failed diagnostic acquisition independently of P0."""
+        identity = f"{ticker}/{session.isoformat()}"
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_immutable(
+                connection, table="outcome_inputs", id_column="input_id", record_id=identity,
+                payload=payload, values=(identity, ticker, session.isoformat(), payload),
+                insert_sql="INSERT INTO outcome_inputs VALUES (?, ?, ?, ?)",
+            )
+
+    def load_outcome_input(self, ticker: str, session: date) -> dict | None:
+        with self._connect() as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outcome_inputs'").fetchone():
+                return None
+            row = connection.execute("SELECT payload_json FROM outcome_inputs WHERE ticker=? AND session=?", (ticker, session.isoformat())).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def outcome_ids(self) -> set[str]:
+        with self._connect() as connection:
+            return {row[0] for row in connection.execute("SELECT outcome_id FROM outcomes")}
 
     def load_outcome(self, outcome_id: str) -> OutcomeRecord:
         with self._connect() as connection:

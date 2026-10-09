@@ -5,6 +5,7 @@ from typing import Any
 import math
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +261,7 @@ class InsiderActivityStrategy:
                     )
 
         candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[: params.get("max_positions", 3)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)))
 
     def check_exit(
         self,

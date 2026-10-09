@@ -157,7 +157,14 @@ def _original_evidence(signal, data, limit):
                     break
                 walk(item, provider, depth + 1)
     for provider in sorted(_STRATEGY_PROVIDERS.get(signal.get("strategy"), set()) & set(data)):
-        walk(data[provider], provider)
+        source_payload = data[provider]
+        if isinstance(source_payload, dict):
+            # Acquisition manifests describe sampling, not original claims.
+            # Walking their nested identity copies can falsely exhaust the
+            # source-evidence depth/record budget despite a complete thesis.
+            source_payload = {key: value for key, value in source_payload.items()
+                              if key != "coverage"}
+        walk(source_payload, provider)
     # Identifier-only records do not substantiate a claim.
     records = [r for r in records if set(r["record"]) - set(_IDENTIFIERS) - {"ticker", "symbol", "date", "year", "quarter"}]
     return records, truncated

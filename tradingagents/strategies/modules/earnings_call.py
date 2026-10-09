@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ class EarningsCallStrategy:
                     if num_analysts >= 10:
                         candidate.score = min(candidate.score * 1.15, 1.0)
 
-        return candidates[: params.get("max_positions", 4)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
 
     def check_exit(
         self,

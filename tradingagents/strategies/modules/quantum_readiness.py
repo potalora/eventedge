@@ -23,6 +23,7 @@ import json
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +222,7 @@ class QuantumReadinessStrategy:
                     c.metadata["sector"] = profile_data[c.ticker].get("sector", "")
                     c.metadata["industry"] = profile_data[c.ticker].get("industry", "")
 
-        return candidates[: params.get("max_positions", 4)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
 
     def _compute_regime_score(
         self,
@@ -335,7 +336,7 @@ class QuantumReadinessStrategy:
                 )
 
         # Short crypto-exposed names (migration laggards)
-        for ticker in CRYPTO_EXPOSED[:3]:
+        for ticker in CRYPTO_EXPOSED:
             candidates.append(
                 Candidate(
                     ticker=ticker,

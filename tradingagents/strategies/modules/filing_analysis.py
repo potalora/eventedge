@@ -4,6 +4,8 @@ import logging
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
+from ..data_sources.edgar_source import normalize_filing_form, filing_form_family
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ class FilingAnalysisStrategy:
             "hold_days": hp["hold_days_range"],
             "forms_to_analyze": (
                 ["10-K", "10-Q"],
-                ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
+                ["10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"],
             ),
         }
 
@@ -48,7 +50,7 @@ class FilingAnalysisStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "forms_to_analyze": ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
+            "forms_to_analyze": ["10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"],
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -60,10 +62,12 @@ class FilingAnalysisStrategy:
             return []
 
         forms_to_analyze = params.get("forms_to_analyze", ["10-K", "10-Q", "DEF 14A"])
+        forms_to_analyze = {filing_form_family(form) for form in forms_to_analyze}
         candidates = []
 
         for filing in filings:
-            form_type = filing.get("form_type", "")
+            form_type = normalize_filing_form(filing.get("form_type", ""))
+            form_family = filing_form_family(form_type)
             entity_name = filing.get("entity_name", "")
             ticker = filing.get("ticker", "")
             filing_identity = {
@@ -140,9 +144,9 @@ class FilingAnalysisStrategy:
                 )
 
             # SC 13D/13G → activist or large passive stake
-            elif form_type in ("SC 13D", "SC 13G") and form_type in forms_to_analyze:
+            elif form_family in ("SCHEDULE 13D", "SCHEDULE 13G") and form_family in forms_to_analyze:
                 stake_text = filing.get("current_text", "")
-                is_activist = form_type == "SC 13D"
+                is_activist = form_family == "SCHEDULE 13D"
                 # Schedule 13 reporters may differ from the subject issuer.
                 # Generic EDGAR display-name tickers are not subject attribution.
                 subject_ticker = filing.get("subject_ticker")
@@ -155,6 +159,7 @@ class FilingAnalysisStrategy:
                         score=0.7 if is_activist else 0.4,
                         metadata={
                             "form_type": form_type,
+                            "source_form_type": filing.get("source_form_type", filing.get("form_type", "")),
                             "subject_attribution_verified": bool(subject_ticker),
                             **({"non_actionable_reason": "unverified_subject_issuer"} if not subject_ticker else {}),
                             "entity_name": entity_name,
@@ -200,7 +205,7 @@ class FilingAnalysisStrategy:
             if isinstance(profile_data, dict) and ticker in profile_data:
                 candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
 
-        return unique
+        return admit_candidates(self.name, unique, params.get("analysis_budget"))
 
     def check_exit(
         self,
@@ -231,6 +236,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (target ~25-30 days)
-- forms_to_analyze: subset of ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"]
+- forms_to_analyze: subset of ["10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"]
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

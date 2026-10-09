@@ -1,5 +1,4 @@
 """Provider-shaped transport regressions for the 2026-10-09 source audit."""
-from datetime import datetime, timezone
 from types import SimpleNamespace as NS
 import sys
 
@@ -69,8 +68,9 @@ def test_missing_requested_environment_is_failure(provider, monkeypatch):
     from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
     from tradingagents.strategies.data_sources.noaa_source import NOAASource
     from tradingagents.strategies.data_sources.usda_source import USDASource
-    from zoneinfo import ZoneInfo
-    today = datetime.now(ZoneInfo('America/New_York')).date().isoformat()
+    today = '2026-09-14'
+    for name in ('drought_monitor', 'noaa', 'usda'):
+        monkeypatch.setattr(f'tradingagents.strategies.data_sources.{name}_source.current_session_date', lambda: today)
     for name in ('drought_monitor','noaa','usda'):
         monkeypatch.setattr(f'tradingagents.strategies.data_sources.{name}_source.provider_request', lambda *a, name=name, **kw: response({'data': [], 'results': [], 'metadata':{'resultset':{'count':0}}} if name != 'drought_monitor' else []))
     call = {'drought':lambda: DroughtMonitorSource().fetch_composite_score(['IA'], today), 'noaa':lambda: NOAASource(token='x').fetch_ag_weather_summary(today, 1), 'usda':lambda: USDASource(api_key='x').fetch_crop_progress('CORN', int(today[:4]), 'IA')}[provider]
@@ -84,7 +84,7 @@ def test_noaa_aggregates_regional_days_and_full_frost_dates(day, expected, monke
     monkeypatch.setattr(mod, 'AG_STATES', {'IA':'FIPS:19','IL':'FIPS:17'})
     monkeypatch.setattr(mod, 'current_session_date', lambda: day, raising=False)
     rows = [{'date':day+'T00:00:00','datatype':dtype,'station':str(i),'value':value,'attributes':',,,'} for i in range(100) for dtype,value in [('TMAX',100),('TMIN',20),('PRCP',0.1)]]
-    monkeypatch.setattr(mod, 'provider_request', lambda *a, **kw: response({'results':rows, 'metadata':{'resultset':{'count':len(rows)}}}))
+    monkeypatch.setattr(mod.NOAASource, 'fetch_region_daily', lambda self, start, end: {state:rows for state in mod.AG_STATES})
     out = mod.NOAASource(token='x').fetch_ag_weather_summary(day, 1)
     assert out['heat_stress_days'] == 1
     assert out['frost_events'] == expected
@@ -150,9 +150,9 @@ def test_usaspending_exhaustive_pagination(monkeypatch):
     from tradingagents.strategies.data_sources.usaspending_source import USASpendingSource
     def transport(*a, **kw):
         page=kw['json']['page']
-        return response({'results':[{'Award ID':str(page),'Recipient Name':'Example','Award Amount':100,'Start Date':'2026-10-01'}], 'page_metadata':{'page':page,'hasNext':page==1}})
+        return response({'results':[{'Award ID':str(page),'generated_internal_id':f'CONT_{page}','Recipient Name':'Example','Award Amount':100,'Start Date':'2026-10-01','Base Obligation Date':'2026-10-01'}], 'page_metadata':{'page':page,'hasNext':page==1}})
     monkeypatch.setattr('tradingagents.strategies.data_sources.usaspending_source.provider_request',transport)
-    assert [r['award_id'] for r in USASpendingSource().search_contracts()] == ['1','2']
+    assert [r['award_id'] for r in USASpendingSource().search_contracts(date_from='2026-10-01',date_to='2026-10-09')] == ['1','2']
 
 
 @pytest.mark.parametrize('provider', ['courtlistener','regulations','congress'])
@@ -209,7 +209,7 @@ def test_multi_request_acquisition_shares_one_absolute_budget(provider, monkeypa
         if provider=='edgar':
             hit={'_id':'0001-26-000001:report.htm','_source':{'form':'10-K','file_date':'2026-10-01','adsh':'0001-26-000001','ciks':['1'],'display_names':['Example']}}
             return response({'hits':{'hits':[hit],'total':{'value':2,'relation':'eq'}}})
-        return response({'results':[{'Award ID':str(len(calls)),'Recipient Name':'Example','Award Amount':1,'Start Date':'2026-10-01'}], 'page_metadata':{'page':len(calls),'hasNext':len(calls)==1}})
+        return response({'results':[{'Award ID':str(len(calls)),'generated_internal_id':f'CONT_{len(calls)}','Recipient Name':'Example','Award Amount':1,'Start Date':'2026-10-01','Base Obligation Date':'2026-10-01'}], 'page_metadata':{'page':len(calls),'hasNext':len(calls)==1}})
     monkeypatch.setattr(requests,'get',transport)
     monkeypatch.setattr(requests,'post',transport)
     if provider=='cftc':
@@ -217,7 +217,7 @@ def test_multi_request_acquisition_shares_one_absolute_budget(provider, monkeypa
             calls.append(kw);clock[0]+=61
             return pd.DataFrame({cot_mod.COL_MARKET:[cot_mod.COMMODITY_CODES['gold']],cot_mod.COL_DATE:['2025-12-30'],cot_mod.COL_MM_LONG:[1],cot_mod.COL_MM_SHORT:[0]})
         monkeypatch.setitem(sys.modules,'cot_reports',NS(cot_year=annual))
-    call={'edgar':lambda:EDGARSource().search_filings('10-K'), 'usaspending':lambda:USASpendingSource().search_contracts(),'cftc':lambda:cot_mod.CFTCSource()._fetch_raw_report()}[provider]
+    call={'edgar':lambda:EDGARSource().search_filings('10-K'), 'usaspending':lambda:USASpendingSource().search_contracts(date_from='2026-10-01',date_to='2026-10-09'),'cftc':lambda:cot_mod.CFTCSource()._fetch_raw_report()}[provider]
     with pytest.raises(SourceFetchError) as exc:
         call()
     assert exc.value.reason_code=='timeout'
@@ -303,7 +303,7 @@ def test_noaa_latest_complete_contiguous_window_has_bounded_freshness(lag,usable
     ending=pd.Timestamp('2026-06-12')-pd.Timedelta(days=lag)
     days=pd.date_range(ending-pd.Timedelta(days=2),ending)
     rows=[{'date':str(day.date())+'T00:00:00','datatype':dtype,'station':'S1','value':value,'attributes':',,,'} for day in days for dtype,value in [('TMAX',100),('TMIN',55),('PRCP',.1)]]
-    monkeypatch.setattr(mod,'provider_request',lambda *a,**kw:response({'results':rows,'metadata':{'resultset':{'count':len(rows)}}}))
+    monkeypatch.setattr(mod.NOAASource,'fetch_region_daily',lambda self,start,end:{state:rows for state in mod.AG_STATES})
     source=mod.NOAASource(token='x')
     if not usable:
         with pytest.raises(SourceFetchError) as exc:
@@ -364,3 +364,48 @@ def test_native_form4_forty_filing_sample_has_explicit_scope(monkeypatch, tmp_pa
     assert scope['mode']=='bounded_sample' and scope['complete'] is False
     assert scope['issuers']['AAPL']==rows.coverage
     assert scope['issuers']['AAPL']['source_total']==41
+
+
+@pytest.mark.parametrize('outer,expected', [(None,190),(400,190),(150,150)])
+@pytest.mark.parametrize('entry', ['summary', 'bulk'])
+def test_noaa_native_regional_budget_caps_outer_deadline(outer, expected, entry, monkeypatch):
+    """A pipeline's larger budget cannot expand NOAA's declared 90 seconds."""
+    import contextlib
+    import tradingagents.strategies.data_sources.noaa_source as mod
+    from tradingagents.strategies.data_sources.request_policy import provider_budget, current_provider_deadline
+    monkeypatch.setattr(mod.time, 'monotonic', lambda:100)
+    monkeypatch.setattr(mod, 'current_session_date', lambda:'2026-06-12')
+    seen=[]
+    def capture(*args, **kwargs):
+        seen.append(current_provider_deadline('noaa'))
+        raise SourceFetchError('bounded fixture stop',reason_code='timeout')
+    source=mod.NOAASource(token='x')
+    if entry == 'summary':
+        monkeypatch.setattr(source,'fetch_region_daily',capture)
+    else:
+        monkeypatch.setattr(mod,'provider_request',capture)
+    context=provider_budget('noaa',outer) if outer is not None else contextlib.nullcontext()
+    with context, pytest.raises(SourceFetchError):
+        if entry == 'summary':
+            source.fetch_ag_weather_summary('2026-06-12',1)
+        else:
+            source.fetch_region_daily('2026-06-12','2026-06-12')
+    assert seen == [expected]
+
+
+def test_noaa_public_summary_available_without_cdo_token(monkeypatch):
+    import tradingagents.strategies.data_sources.noaa_source as mod
+    from tradingagents.strategies.data_sources.registry import DataSourceRegistry
+    monkeypatch.delenv('NOAA_CDO_TOKEN',raising=False)
+    monkeypatch.setattr(mod,'current_session_date',lambda:'2026-06-12')
+    source=mod.NOAASource()
+    registry=DataSourceRegistry()
+    registry.register(source)
+    assert 'noaa' in registry.available_sources()
+    assert source.requires_api_key is False
+    rows=[{'date':'2026-06-12','datatype':dtype,'station':'S1','value':value}
+          for dtype,value in [('TMAX',85),('TMIN',55),('PRCP',.12)]]
+    monkeypatch.setattr(source,'fetch_region_daily',lambda start,end:{state:rows for state in mod.AG_STATES})
+    assert source.fetch_ag_weather_summary('2026-06-12',1)['coverage']['complete'] is True
+    with pytest.raises(SourceFetchError,match='access missing'):
+        source.fetch_state_daily('FIPS:19','2026-06-12','2026-06-12')

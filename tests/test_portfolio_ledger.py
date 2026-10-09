@@ -466,7 +466,7 @@ def test_typed_ordered_reads_filter_sqlite_rows_by_session_and_epoch(tmp_path):
             )
             connection.execute(
                 """INSERT INTO account_snapshots VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )""",
                 (
                     "snapshot-2",
@@ -477,11 +477,12 @@ def test_typed_ordered_reads_filter_sqlite_rows_by_session_and_epoch(tmp_path):
                     *decimals,
                     1,
                     "",
+                    "0",
                 ),
             )
             connection.execute(
                 """INSERT INTO account_snapshots VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )""",
                 (
                     "snapshot-1",
@@ -492,6 +493,7 @@ def test_typed_ordered_reads_filter_sqlite_rows_by_session_and_epoch(tmp_path):
                     *decimals,
                     1,
                     "",
+                    "0",
                 ),
             )
             connection.execute(

@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+from datetime import date as calendar_date
 from typing import Any
 
 import requests
@@ -33,6 +34,54 @@ ESMIS_LANDING = "https://esmis.nal.usda.gov/concern/publications/8336h188j"
 
 # Key agricultural states (Corn Belt + Plains)
 AG_STATES = "IA,IL,KS,NE,MN,IN,OH,SD,ND,MO"
+
+# Declared strategy comparison universes, anchored to NASS selected-state
+# condition tables. These conservative common reporting intervals are strategy
+# policy, not a promise of exact first/last publication dates by NASS.
+WHEAT_CLASS_STATES = {
+    "WINTER": ["IL", "IN", "KS", "MO", "ND", "NE", "OH", "SD"],
+    "SPRING, (EXCL DURUM)": ["MN", "ND", "SD"],
+    "SPRING, DURUM": ["ND"],
+}
+MAX_CONDITION_LAG_DAYS = 14
+
+
+class ConditionObservations(list):
+    """List-compatible observations with explicit serializable survey scope."""
+    def __init__(self, rows, coverage):
+        super().__init__(rows)
+        self.coverage = coverage
+
+
+def condition_scope(commodity: str, as_of: str) -> dict:
+    """Return the class/state comparison scope and appropriate reporting year.
+
+    Winter wheat's November observations belong to the following harvest year.
+    We deliberately compare only common survey periods, avoiding pretending
+    harvested crops' last summer condition is a current weekly observation.
+    """
+    commodity = commodity.upper()
+    day = calendar_date.fromisoformat(as_of)
+    month_day = (day.month, day.day)
+    wheat = commodity == "WHEAT"
+    classes = WHEAT_CLASS_STATES if wheat else {"ALL CLASSES":AG_STATES.split(",")}
+    active = []
+    for crop_class in classes:
+        if crop_class == "WINTER":
+            in_season = (4,15) <= month_day <= (6,30) or (11,15) <= month_day <= (11,30)
+        elif crop_class.startswith("SPRING"):
+            in_season = (6,15) <= month_day <= (8,15)
+        else:
+            in_season = (6,15) <= month_day <= (10,15)
+        if in_season:
+            active.append(crop_class)
+    return {"commodity":commodity, "reporting_year":day.year + int(wheat and day.month >= 11),
+            "class_states":{key:list(value) for key,value in classes.items()},
+            "active_classes":active, "as_of":as_of,
+            "season_policy":"conservative_common_comparison_periods_v1",
+            "inactive_reason":"outside_declared_comparison_season" if not active else None,
+            "max_observation_lag_days":MAX_CONDITION_LAG_DAYS}
+
 
 # Condition rating categories in NASS data
 CONDITION_CATEGORIES = {
@@ -170,9 +219,11 @@ class USDASource:
         if not self._api_key:
             raise SourceFetchError("USDA access missing", reason_code="provider_error")
 
+        scope = condition_scope(commodity, as_of)
+        default_states = ",".join(sorted({state for values in scope["class_states"].values() for state in values}))
         requested_states = sorted({
             state.strip().upper()
-            for state in (states or AG_STATES).split(",") if state.strip()
+            for state in (states or default_states).split(",") if state.strip()
         })
         cache_key = f"{commodity.upper()}|{year}|{','.join(requested_states)}|{as_of}"
         if cache_key in self._cache:
@@ -221,8 +272,6 @@ class USDASource:
             if not isinstance(record, dict):
                 continue
             week = record.get("week_ending", "")
-            if source_date(week) and week[:10] > as_of:
-                continue
             state = record.get("state_alpha", "")
             crop_class = record.get("class_desc", "ALL CLASSES")
             unit = record.get("unit_desc", "")
@@ -242,6 +291,8 @@ class USDASource:
             if (not source_date(week) or not all(source_text(value) for value in (state, crop_class, unit))
                     or state not in requested_states or not year_matches or not observation_year_matches):
                 invalid_records = True
+                continue
+            if week[:10] > as_of:
                 continue
             field = CONDITION_CATEGORIES.get(unit)
             if not field:
@@ -290,16 +341,52 @@ class USDASource:
             observations,
             key=lambda row: (row["week_ending"], row["state"], row["crop_class"]),
         )
-        missing = set(requested_states) - {row["state"] for row in weeks}
+        # Explicit custom state queries remain available for research. Defaults
+        # bind native wheat classes to their distinct declared reporting states.
+        class_states = scope["class_states"] if states is None else {
+            crop_class:requested_states for crop_class in sorted({row["crop_class"] for row in weeks})
+        }
+        active_classes = scope["active_classes"] if year == scope["reporting_year"] else []
+        coverage = {**scope, "active_classes":active_classes, "classes":{}, "complete":True,
+                    "requested_states":requested_states, "scope_mode":"declared_survey" if states is None else "explicit_states",
+                    "requested_reporting_year":year}
+        for crop_class, required in class_states.items():
+            latest = {state:max((row["week_ending"] for row in weeks if row["state"]==state and row["crop_class"]==crop_class), default=None)
+                      for state in required}
+            active = crop_class in active_classes or (states is not None and bool(active_classes))
+            missing_states = sorted(state for state,week in latest.items() if week is None)
+            stale_states = sorted(state for state,week in latest.items() if week and active
+                and (calendar_date.fromisoformat(as_of)-calendar_date.fromisoformat(week[:10])).days > MAX_CONDITION_LAG_DAYS)
+            newest = max((week for week in latest.values() if week), default=None)
+            missing_latest = sorted(state for state,week in latest.items() if active and week != newest)
+            complete = not (missing_states or stale_states or missing_latest) if active else True
+            coverage["classes"][crop_class] = {"required_states":required, "active":active,
+                "latest_by_state":latest, "missing_states":missing_states, "stale_states":stale_states,
+                "missing_latest_states":missing_latest, "observation_date":newest, "complete":complete,
+                "inactive_reason":None if active else "outside_declared_comparison_season"}
+            coverage["complete"] = coverage["complete"] and complete
+        for row in weeks:
+            row["survey_active"] = coverage["classes"].get(row["crop_class"], {}).get("active",False)
+            row["survey_as_of"] = as_of
+        weeks = ConditionObservations(weeks,coverage)
+        required_now = {state for info in coverage["classes"].values() if info["active"] for state in info["required_states"]}
+        # An empty custom response must not erase the explicitly requested
+        # geography during an active comparison season.
+        if states is not None and active_classes:
+            required_now.update(requested_states)
+        missing = required_now - {row["state"] for row in weeks}
         if missing:
             raise SourceFetchError("USDA requested state observations unavailable", reason_code="invalid_response",
                 partial_data={"crop_progress":{commodity.upper():weeks},
-                              "coverage":{"complete":False, "missing_states":sorted(missing)}})
+                              "coverage":{**coverage, "complete":False, "missing_states":sorted(missing)}})
+        if not coverage["complete"]:
+            raise SourceFetchError("USDA class/state/current-week coverage incomplete", reason_code="invalid_response",
+                partial_data={"crop_progress":{commodity.upper():weeks}, "coverage":coverage})
         if invalid_records:
             # Invalid latest-week markers prevent older valid rows masquerading
             # as a current comparison. They carry no numerical observations.
             raise SourceFetchError("USDA crop records invalid", reason_code="invalid_response",
-                                   partial_data={"crop_progress": {commodity.upper(): weeks}})
+                                   partial_data={"crop_progress": {commodity.upper(): weeks}, "coverage":{**coverage,"complete":False}})
         self._cache[cache_key] = weeks
         return weeks
 
@@ -312,7 +399,7 @@ class USDASource:
         year = params.get("year", int(current_session_date()[:4]))
         states = params.get("states")
         weeks = self.fetch_crop_progress(commodity, year, states, as_of=params.get("as_of"))
-        return {"weeks": weeks, "count": len(weeks)}
+        return {"weeks": weeks, "count": len(weeks), "coverage":weeks.coverage}
 
     # ------------------------------------------------------------------
     # ESMIS fallback

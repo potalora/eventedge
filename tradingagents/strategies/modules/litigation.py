@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +154,15 @@ class LitigationStrategy:
             )
             ranked.append((0, -candidate.score, sec_offset + release_index, candidate))
 
-        ranked.sort(key=lambda item: item[:3])
-        selected = [item[3] for item in ranked[: params.get("max_positions", 3)]]
+        selected = admit_candidates(
+            self.name, [item[3] for item in ranked],
+            params.get("analysis_budget", params.get("max_positions", 3)),
+            rank_key=lambda candidate: (
+                0 if candidate.metadata.get("source") == "sec_enforcement" else (1 if candidate.ticker else 2),
+                -candidate.score, candidate.ticker,
+            ),
+            policy="sec_enforcement_resolved_then_unresolved_score_identity_v1",
+        )
         resolved = sum(bool(candidate.ticker) for candidate in selected)
         logger.info(
             "Litigation screen: fetched=%d unique=%d eligible=%d sec=%d "

@@ -278,6 +278,7 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
     tmp_path, monkeypatch, missing_required
 ):
     from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
+    from tradingagents.strategies.data_sources.usda_source import ConditionObservations
     from tradingagents.strategies.modules.weather_ag import WeatherAgStrategy
 
     # Keep the real shared fetcher, Yahoo adapter, and weather screen. Only
@@ -316,10 +317,10 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
             SimpleNamespace(
                 name="usda",
                 is_available=lambda: True,
-                fetch_crop_progress=lambda *a, **kw: [{
+                fetch_crop_progress=lambda *a, **kw: ConditionObservations([{
                     "week_ending": "2026-09-27", "state": "IA", "good_pct": 50,
                     "excellent_pct": 20, "available_at": "2026-10-01T20:00:00+00:00",
-                }],
+                }], {"complete": True, "scope_mode": "explicit_states", "requested_states": ["IA"]}),
             )
         )
     registry.register(

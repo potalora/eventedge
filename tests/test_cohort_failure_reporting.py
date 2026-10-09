@@ -442,6 +442,9 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
             return [issue]
 
     class Executor:
+        def outcome_dependency_plan(self, exact_session):
+            return {}
+
         def ensure_metric_epoch(self, context, exact_session):
             assert exact_session == session
             return SimpleNamespace(
@@ -451,17 +454,21 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
             )
 
     class Ledger:
+        def committee_decision(self, *args):
+            return None
+
         def session_invalid_reason(self, exact_session):
             assert exact_session == session
             return "metric epoch conflict"
 
     orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
+    orchestrator._base_config = {}
     orchestrator._metric_store = Store()
     orchestrator._metric_epoch_context = object()
     orchestrator._epoch_id = None
     orchestrator.cohorts = [
         {
-            "config": SimpleNamespace(name="cohort-a"),
+            "config": SimpleNamespace(name="cohort-a", horizon="30d"),
             "executor": Executor(),
             "ledger": Ledger(),
         }
@@ -510,7 +517,7 @@ def test_pending_gap_exact_session_exit_lazily_hydrates_persisted_candidate_issu
     orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
     orchestrator._metric_store = Store()
     orchestrator._epoch_id = None
-    orchestrator.cohorts = [object()]
+    orchestrator.cohorts = [{"config": SimpleNamespace(name="cohort-a")}]
     orchestrator._complete_pending_critical_gap = lambda marker, processed, results: {
         "cohort-a": {
             "error": True,

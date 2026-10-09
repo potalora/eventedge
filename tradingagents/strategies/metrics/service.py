@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
@@ -16,8 +16,9 @@ from tradingagents.strategies.state.portfolio_ledger import (
 )
 
 from .identity import deduplicate_signals
-from .models import MetricEpoch, PairedComparison, PortfolioMetrics, SignalMetricRecord
-from .outcomes import directional_accuracy
+from .models import MetricEpoch, PairedComparison, PortfolioMetrics, SignalMetricRecord, OUTCOME_WINDOWS
+from .outcomes import OutcomeCalculator, directional_accuracy
+from .populations import signal_eligibility, is_actionable, population_diagnostics, ELIGIBILITY_FIELDS
 from .portfolio import (
     daily_net_returns,
     equal_weighted_scenario_return,
@@ -29,6 +30,7 @@ from .portfolio import (
     validate_snapshot_window,
 )
 from .store import MetricStore
+from .research import research_diagnostics, aggregate_realized_contributions
 
 
 _HEADLINE_BOOKS = frozenset(
@@ -105,7 +107,7 @@ class MetricsService:
         return epoch
 
     @staticmethod
-    def _metric_signal(row: SignalRecord) -> SignalMetricRecord:
+    def _metric_signal(row: SignalRecord, observation: dict | None = None, journal: dict | None = None) -> SignalMetricRecord:
         return SignalMetricRecord(
             event_key=row.event_key,
             signal_id=row.signal_id,
@@ -116,6 +118,7 @@ class MetricsService:
             direction=row.direction,
             decision_at=row.decision_at,
             reference_session=row.reference_session,
+            **signal_eligibility(observation, journal),
         )
 
     def _ledger(self, cohort_id: str) -> PortfolioLedger:
@@ -153,7 +156,9 @@ class MetricsService:
                     snapshots=snapshots,
                 )
             )
-            deduped = deduplicate_signals(self._metric_signal(row) for row in signals)
+            deduped = deduplicate_signals(
+                self._metric_signal(row, *(ledger.signal_observation(row.signal_id) or (None, None, None))[1:])
+                for row in signals)
             if deduped.conflicts:
                 raise ValueError("conflicting signal identities")
             fills = (
@@ -195,11 +200,11 @@ class MetricsService:
 
     @staticmethod
     def _directional_accuracy_5d(signals: tuple, outcomes: tuple) -> float | None:
-        signal_ids = {row.signal_id for row in signals}
+        eligible = {row.signal_id: row for row in signals if is_actionable(row)}
         summary = directional_accuracy(
-            row
+            replace(row, **{key: getattr(eligible[row.signal_id], key) for key in ELIGIBILITY_FIELDS})
             for row in outcomes
-            if row.holding_sessions == 5 and row.signal_id in signal_ids
+            if row.holding_sessions == 5 and row.signal_id in eligible
         )
         return summary.rate
 
@@ -439,6 +444,80 @@ class MetricsService:
             if owns_snapshot:
                 connection.execute("ROLLBACK")
 
+    def retained_obligation_diagnostics(self) -> dict[str, object]:
+        """Report every original epoch's hypotheses without validating its books.
+
+        The cutoff is each book's latest retained session, including invalid
+        attempts. It never advances to wall-clock today or pools scenario books.
+        """
+        per_cohort = {}
+        calculator = OutcomeCalculator()
+        for cohort_id in self.cohort_ids:
+            ledger = self._ledger(cohort_id)
+            signals = tuple(self._metric_signal(
+                row, *(ledger.signal_observation(row.signal_id) or (None, None, None))[1:]
+            ) for row in ledger.read_signals())
+            dates = [row.reference_session for row in signals]
+            dates.extend(row.session for row in ledger.read_snapshots())
+            latest_attempt = ledger.connection.execute(
+                "SELECT MAX(session) FROM session_runs WHERE cohort_id=?", (cohort_id,)
+            ).fetchone()[0]
+            if latest_attempt:
+                dates.append(date.fromisoformat(latest_attempt))
+            grouped = {}
+            for signal in signals:
+                grouped.setdefault(signal.epoch_id, []).append(signal)
+            epochs = {}
+            outcomes_by_epoch = {key: self.store.read_outcomes(key) for key in grouped}
+            for epoch_id, rows in outcomes_by_epoch.items():
+                identities = {signal.signal_id for signal in grouped[epoch_id]}
+                dates.extend(row.exit_session for row in rows if row.signal_id in identities
+                             and row.status in {"valid", "invalid"})
+            cutoff = max(dates) if dates else None
+            for original_epoch, epoch_signals in sorted(grouped.items()):
+                try:
+                    epoch_status = self.store.load_epoch(original_epoch).status
+                except KeyError:
+                    epoch_status = "unknown"
+                selected = set()
+                for session, policy in {(row.reference_session, row.policy_id) for row in epoch_signals}:
+                    decision = ledger.committee_decision(session, original_epoch, policy)
+                    if decision is not None:
+                        selected.update(decision.get("status", {}).get("selected_signal_ids", ()))
+                executed = {signal.signal_id
+                            for fill in ledger.read_fills(epoch_id=original_epoch)
+                            if fill.side in {"buy", "short"}
+                            for signal in ledger.signals_for_intent(fill.intent_id)}
+                outcomes = outcomes_by_epoch[original_epoch]
+                windows = {}
+                for window in OUTCOME_WINDOWS:
+                    populations = population_diagnostics(epoch_signals, outcomes,
+                        selected_ids=selected, executed_ids=executed, as_of=cutoff,
+                        holding_sessions=window)
+                    rows = {row.signal_id: row for row in outcomes if row.holding_sessions == window}
+                    obligations = []
+                    for signal in sorted(epoch_signals, key=lambda item: item.signal_id):
+                        entry = calculator.calendar.next_session(signal.reference_session)
+                        maturity = calculator.calendar.held_session(entry, window)
+                        row = rows.get(signal.signal_id)
+                        obligations.append({
+                            "signal_id": signal.signal_id, "epoch_id": original_epoch,
+                            "event_key": signal.event_key, "ticker": signal.ticker,
+                            "outcome_id": calculator.outcome_id(signal, window),
+                            "entry_session": entry, "maturity_session": maturity,
+                            "status": row.status if row else (
+                                "missing_mature" if cutoff is not None and maturity <= cutoff else "pending"),
+                            "invalid_reason": row.invalid_reason if row else "",
+                        })
+                    populations["obligations"] = obligations
+                    windows[str(window)] = populations
+                epochs[original_epoch] = {"epoch_status": epoch_status,
+                    "portfolio_performance_included": False, "holding_windows": windows}
+            per_cohort[cohort_id] = {"as_of_session": cutoff, "epochs": epochs}
+        return {"aggregation_prohibited": True, "aggregate": None,
+                "scope": "original signal epochs; diagnostic obligations only; no portfolio performance",
+                "per_cohort": per_cohort}
+
     def generation_report(self, epoch_id: str | None = None) -> dict[str, object]:
         unexpected = sorted(set(self.cohort_ids) - _SCENARIO_BOOKS)
         if unexpected:
@@ -450,6 +529,7 @@ class MetricsService:
             return {
                 "metric_schema_version": 2,
                 "epoch": None,
+                "retained_obligation_diagnostics": self.retained_obligation_diagnostics(),
                 "headline_books": {},
                 "scenario_panel": None,
                 "scenario_panel_available": False,
@@ -538,6 +618,7 @@ class MetricsService:
         return {
             "metric_schema_version": 2,
             "epoch": asdict(epoch),
+            "retained_obligation_diagnostics": self.retained_obligation_diagnostics(),
             "headline_books": headline,
             "scenario_panel": panel,
             "scenario_panel_available": panel is not None,
@@ -566,22 +647,61 @@ class MetricsService:
             },
         }
 
+    def _cohort_diagnostics(self, cohort_id: str, epoch_id: str, inputs: tuple,
+                            outcomes: tuple, series: dict) -> dict[str, object]:
+        snapshots, _benchmarks, signals, fills = inputs
+        ledger = self._ledger(cohort_id)
+        selected: set[str] = set()
+        decision_count = 0
+        for session, policy_id in sorted({(row.reference_session, row.policy_id) for row in signals}):
+            decision = ledger.committee_decision(session, epoch_id, policy_id)
+            if decision is not None:
+                decision_count += 1
+                selected.update(decision.get("status", {}).get("selected_signal_ids", ()))
+        executed: set[str] = set()
+        for fill in fills:
+            if fill.side in {"buy", "short"}:
+                executed.update(row.signal_id for row in ledger.signals_for_intent(fill.intent_id))
+        populations = population_diagnostics(signals, outcomes, selected_ids=selected,
+            executed_ids=executed, as_of=snapshots[-1].session if snapshots else None)
+        populations["committee_selection_evidence"] = {
+            "status": "available" if decision_count else "insufficient_evidence",
+            "immutable_decision_count": decision_count,
+            "scope": "this cohort only; accepted committee recommendations before execution",
+        }
+        realized: dict[str, float] = {}
+        if snapshots:
+            rows = ledger.connection.execute(
+                """SELECT l.ticker, c.realized_pnl FROM lot_closures c
+                   JOIN lots l ON l.lot_id=c.lot_id JOIN fills f ON f.fill_id=c.fill_id
+                   WHERE l.cohort_id=? AND f.session>? AND f.session<=?
+                   AND EXISTS (SELECT 1 FROM intent_signals x JOIN signals s ON s.signal_id=x.signal_id
+                               WHERE x.intent_id=(SELECT intent_id FROM fills WHERE fill_id=l.fill_id)
+                               AND s.epoch_id=?) ORDER BY l.ticker,c.closure_id""",
+                (cohort_id, snapshots[0].session.isoformat(), snapshots[-1].session.isoformat(), epoch_id),
+            ).fetchall()
+            realized = aggregate_realized_contributions(rows)
+        return {"population_diagnostics": populations,
+                "research_diagnostics": research_diagnostics(series, realized_contributions=realized)}
+
     def _materialize_cohort(
         self, cohort_id: str, epoch_id: str, outcomes: tuple = ()
     ) -> tuple[PortfolioMetrics | dict[str, object], dict[str, object]]:
         """Build metrics and reporting series from one SQLite snapshot."""
         inputs = self._inputs(cohort_id, epoch_id, allow_insufficient=True)
         series = self._cohort_series_from_inputs(inputs)
+        diagnostics = self._cohort_diagnostics(cohort_id, epoch_id, inputs, outcomes, series)
         if len(inputs[0]) < 2:
-            return self._insufficient_book(cohort_id, epoch_id, inputs, outcomes), series
+            return {**self._insufficient_book(cohort_id, epoch_id, inputs, outcomes), **diagnostics}, series
         if series.get("benchmark_unavailable_reason"):
             book = self._insufficient_book(cohort_id, epoch_id, inputs, outcomes)
             reason = str(series["benchmark_unavailable_reason"])
             book.update(unavailable_reason=reason, sharpe_unavailable_reason=reason, information_ratio_unavailable_reason=reason)
-            return book, series
+            return {**book, **diagnostics}, series
         report = self._book_payload(
             self._portfolio_from_inputs(cohort_id, epoch_id, inputs)
         )
+        report.update(diagnostics)
         report["directional_accuracy_5d"] = self._directional_accuracy_5d(
             inputs[2], outcomes
         )

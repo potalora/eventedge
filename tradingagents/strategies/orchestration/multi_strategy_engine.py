@@ -369,10 +369,15 @@ class MultiStrategyEngine:
                 continue
             try:
                 params = strategy.get_default_params(horizon=horizon)
+                from tradingagents.strategies.modules.admission import admit_candidates
                 candidates = strategy.screen(data, trading_date, params)
+                if not hasattr(candidates, "admission_manifest"):
+                    candidates = admit_candidates(strategy.name, candidates, budget=None)
+                admission_manifest = candidates.admission_manifest
                 error = None
             except Exception as exc:
                 candidates = []
+                admission_manifest = None
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
             if candidates:
@@ -387,7 +392,7 @@ class MultiStrategyEngine:
                 epoch_id=epoch_id, session=date.fromisoformat(trading_date),
                 policy_id=policy_id, strategy=strategy.name,
                 data_sources=tuple(strategy.data_sources), candidates=candidates,
-                provider_errors=provider_errors, exception=error)
+                provider_errors=provider_errors, exception=error, admission_manifest=admission_manifest)
             if non_actionable:
                 health_record.evidence["non_actionable_reasons"] = non_actionable
                 health_record.evidence["actionable_candidate_count"] = sum(not c.journal_only for c in candidates)
@@ -762,6 +767,7 @@ class MultiStrategyEngine:
                 "regime": shared_regime,
                 "account": marked_account.__dict__,
                 "replayed": True,
+                "committee_decision_status": (self.ledger.committee_decision(session, epoch_id, policy_id) or {}).get("status", {"status": "legacy_unknown", "degraded": True}),
             }
 
         records: list[SignalRecord] = []
@@ -1037,15 +1043,47 @@ class MultiStrategyEngine:
         }
         committee_signals = [signal for signal, _ in timely]
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
-        recommendations = committee.synthesize(
-            signals=committee_signals,
-            regime_context=shared_regime or {},
-            strategy_confidence=strategy_confidence,
-            current_positions=self.ledger.open_positions(),
-            total_capital=float(marked_account.net_equity),
-            enrichment=enrichment or {},
-            risk_context=risk_context,
-        )
+        frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
+        if frozen_decision is None:
+            positions = []
+            for position in self.ledger.open_positions():
+                item = dict(position)
+                ticker = str(item["ticker"])
+                mark = raw_bars[ticker].close
+                value = Decimal(str(item["quantity"])) * mark
+                direction = str(item.get("side", "long"))
+                signed_value = -value if direction == "short" else value
+                item.update(direction=direction, mark_price=str(mark), market_value=str(value),
+                            signed_market_value=str(signed_value),
+                            weight=float(value / marked_account.net_equity) if marked_account.net_equity else 0.0)
+                positions.append(item)
+            recommendations = committee.synthesize(
+                signals=committee_signals, regime_context=shared_regime or {},
+                strategy_confidence=strategy_confidence, current_positions=positions,
+                total_capital=float(marked_account.net_equity), enrichment=enrichment or {}, risk_context=risk_context,
+            )
+            decision_status = dict(committee.last_decision_status)
+            decision_status["selected_signal_ids"] = sorted({
+                record.signal_id for _, record in timely for rec in recommendations
+                if record.ticker == rec.ticker and record.direction == rec.direction
+                and record.strategy in rec.contributing_strategies
+            })
+            frozen_decision = {"status": decision_status,
+                "recommendations": [asdict(rec) for rec in recommendations],
+                "policy_decisions": [asdict(row) for row in committee.last_policy_decisions]}
+            self.ledger.record_committee_decision(session, epoch_id, policy_id, frozen_decision)
+        else:
+            from tradingagents.strategies.modules.base import OptionSpec
+            from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
+            from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicyDecision
+            recommendations = []
+            for row in frozen_decision["recommendations"]:
+                values = dict(row)
+                if values.get("option_spec"):
+                    values["option_spec"] = OptionSpec(**values["option_spec"])
+                recommendations.append(TradeRecommendation(**values))
+            committee.last_policy_decisions = tuple(PortfolioPolicyDecision(**row) for row in frozen_decision["policy_decisions"])
+        decision_status = frozen_decision["status"]
         if policy_config is not None:
             policy_decisions = tuple(
                 getattr(committee, "last_policy_decisions", ())
@@ -1263,6 +1301,7 @@ class MultiStrategyEngine:
             "regime": shared_regime,
             "account": marked_account.__dict__,
             "replayed": not executed,
+            "committee_decision_status": decision_status,
         }
 
     def _build_exit_specs(
@@ -1697,6 +1736,83 @@ class MultiStrategyEngine:
 
         result: dict[str, Any] = {}
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        import hashlib
+        settings = getattr(self, "ar_config", {}).get("finnhub_acquisition", {})
+        if not isinstance(settings, dict):
+            raise ValueError("finnhub_acquisition must be a mapping")
+        budgets = {key: settings.get(key, default) for key, default in (
+            ("earnings_news_budget", 10), ("pqc_symbol_budget", 6),
+            ("earnings_article_budget", 5))}
+        if any(type(value) is not int or value < 0 for value in budgets.values()):
+            raise ValueError("Finnhub acquisition budgets must be nonnegative integers")
+        pqc_tickers = settings.get("pqc_universe", [
+            "CRWD", "PANW", "ZS", "FTNT", "IBM", "CSCO", "MSFT", "IONQ", "RGTI", "COIN"])
+        if (not isinstance(pqc_tickers, list)
+                or any(not isinstance(symbol, str) or not symbol.strip() for symbol in pqc_tickers)):
+            raise ValueError("Finnhub PQC universe must be a list of nonempty symbols")
+        pqc_tickers = sorted({symbol.strip().upper() for symbol in pqc_tickers})
+
+        def admit(records, budget, population, identity_fn, rank_fn):
+            """Retain every fetched/query row before a deterministic request cap."""
+            entries = []
+            for record in records:
+                raw = json.dumps(record, sort_keys=True, default=str)
+                evidence_hash = hashlib.sha256(raw.encode()).hexdigest()
+                identity = identity_fn(record)
+                valid = identity is not None
+                identity = identity or {"invalid_source_payload_hash": evidence_hash}
+                encoded = json.dumps([population, identity], sort_keys=True, default=str)
+                discovery_id = "finnhub-discovery:" + hashlib.sha256(encoded.encode()).hexdigest()[:24]
+                row = {"discovery_id": discovery_id, "identity": identity, "evidence_hash": evidence_hash}
+                entries.append(((0 if valid else 1, *(rank_fn(record) if valid else ()),
+                                 discovery_id, evidence_hash), record, row, valid))
+            selected, discovered, admitted, excluded, seen = [], [], [], [], set()
+            for _, record, row, valid in sorted(entries, key=lambda item: item[0]):
+                reason = ("invalid_source_identity" if not valid else
+                          "duplicate_source_identity" if row["discovery_id"] in seen else
+                          "acquisition_budget" if budget is not None and len(selected) >= budget else "admitted")
+                seen.add(row["discovery_id"])
+                row = dict(row, reason=reason)
+                discovered.append(row)
+                if reason == "admitted":
+                    selected.append((record, row))
+                    admitted.append(row)
+                else:
+                    excluded.append(row)
+            return selected, {"version": 1, "population": population,
+                "budget": budget, "discovered_count": len(discovered),
+                "admitted_count": len(admitted), "excluded_count": len(excluded),
+                "discovered": discovered, "admitted": admitted, "excluded": excluded}
+
+        def earnings_identity(record):
+            if not isinstance(record, dict) or not isinstance(record.get("symbol"), str) or not record["symbol"].strip():
+                return None
+            try:
+                report_date = date.fromisoformat(record.get("date", "")).isoformat()
+            except (TypeError, ValueError):
+                return None
+            return {"symbol": record["symbol"].strip().upper(), "date": report_date,
+                    "year": record.get("year"), "quarter": record.get("quarter")}
+
+        def article_identity(article):
+            if not isinstance(article, dict):
+                return None
+            locator = article.get("id") or article.get("article_id") or article.get("url")
+            return {"locator": str(locator)} if locator else {
+                "source": article.get("source", ""), "headline": article.get("headline", ""),
+                "published_at": article.get("published_at", article.get("datetime", ""))}
+
+        def article_rank(article):
+            stamp = article.get("published_at", article.get("datetime", ""))
+            try:
+                timestamp = float(stamp) if isinstance(stamp, (int, float)) else datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+                if not math.isfinite(timestamp):
+                    timestamp = 0.
+            except (TypeError, ValueError):
+                timestamp = 0.
+            return (-timestamp, json.dumps(article_identity(article), sort_keys=True, default=str))
+
+        manifests: dict[str, Any] = {"earnings_articles": []}
         failures = []
         def acquire(operation, fn, *args, **kwargs):
             try:
@@ -1721,33 +1837,44 @@ class MultiStrategyEngine:
             date_to,
             deadline=deadline,
         )
-        if earnings:
-            # Collect news around earnings dates for top reporters (proxy for transcripts)
+        earnings_selected, manifests["earnings_news"] = admit(
+            earnings, budgets["earnings_news_budget"], "reported_earnings_calendar",
+            earnings_identity, lambda record: (-date.fromisoformat(record["date"]).toordinal(),
+                record["symbol"].strip().upper(), str(record.get("year", "")), str(record.get("quarter", ""))))
+        manifests["earnings_news"]["policy"] = "report_date_desc_symbol_fiscal_identity_v1"
+        if earnings_selected:
+            # News around explicitly admitted earnings events proxies transcripts.
             transcripts = []
-            for e in earnings[:10]:  # Top 10 to limit API calls
-                symbol = e.get("symbol", "")
+            for e, discovery in earnings_selected:
+                symbol = e.get("symbol", "").strip().upper()
                 edate = e.get("date", "")
-                if not symbol or not edate:
-                    continue
+                prior_failures = len(failures)
                 news = acquire("earnings_news", source.fetch_earnings_news,
                     symbol,
                     edate,
                     deadline=deadline,
                 )
-                if news:
+                discovery.update(request_status="failed" if len(failures) > prior_failures else "succeeded", result_count=len(news))
+                selected_articles, article_manifest = admit(news, budgets["earnings_article_budget"],
+                    "earnings_news_articles", article_identity, article_rank)
+                article_manifest.update(policy="publication_desc_source_identity_v1", parent_discovery_id=discovery["discovery_id"])
+                manifests["earnings_articles"].append(article_manifest)
+                if selected_articles:
                     # Build a pseudo-transcript from earnings news
                     news_text = "\n".join(
                         f"[{n.get('source', 'Unknown')}]: {n.get('headline', '')} — {n.get('summary', '')}"
-                        for n in news[:5]
+                        for n, _row in selected_articles
                     )
                     publication_times = [
                         str(article["published_at"])
-                        for article in news[:5]
+                        for article, _row in selected_articles
                         if article.get("published_at")
                     ]
                     transcripts.append(
                         {
                             "symbol": symbol,
+                            "acquisition_discovery_id": discovery["discovery_id"],
+                            "article_discovery_ids": [row["discovery_id"] for _article, row in selected_articles],
                             "year": e.get("year"),
                             "quarter": e.get("quarter"),
                             "transcript_text": news_text,
@@ -1798,34 +1925,41 @@ class MultiStrategyEngine:
             result["supply_chains"] = chains
 
         # PQC migration news for quantum_readiness strategy
-        pqc_tickers = [
-            "CRWD",
-            "PANW",
-            "ZS",
-            "FTNT",
-            "IBM",
-            "CSCO",
-            "MSFT",
-            "IONQ",
-            "RGTI",
-            "COIN",
-        ]
         pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
         pqc_news = []
-        for symbol in pqc_tickers[:6]:  # Rate limit: 6 tickers max
+        queries = [{"symbol": symbol, "from": date_from, "to": date_to} for symbol in pqc_tickers]
+        pqc_selected, manifests["pqc_news"] = admit(queries, budgets["pqc_symbol_budget"],
+            "declared_pqc_query_universe", lambda query: query, lambda query: (query["symbol"],))
+        manifests["pqc_news"].update(policy="symbol_ascending_v1", keyword_filter=pqc_kw)
+        manifests["pqc_articles"] = []
+        for query, discovery in pqc_selected:
+            symbol = query["symbol"]
+            prior_failures = len(failures)
             news = acquire("company_news", source.fetch_company_news,
                 symbol,
                 date_from,
                 date_to,
                 deadline=deadline,
             )
-            for article in news:
+            discovery.update(request_status="failed" if len(failures) > prior_failures else "succeeded", result_count=len(news))
+            observed, article_manifest = admit(news, None, "pqc_news_articles", article_identity, article_rank)
+            article_manifest.update(policy="all_returned_articles_publication_identity_v1", parent_discovery_id=discovery["discovery_id"])
+            manifests["pqc_articles"].append(article_manifest)
+            for article, article_discovery in observed:
                 text = (
                     article.get("headline", "") + " " + article.get("summary", "")
                 ).lower()
                 if any(kw in text for kw in pqc_kw):
-                    article["symbol"] = symbol
-                    pqc_news.append(article)
+                    pqc_news.append(dict(article, symbol=symbol,
+                        acquisition_discovery_id=article_discovery["discovery_id"],
+                        acquisition_query_id=discovery["discovery_id"]))
+                else:
+                    article_discovery["reason"] = "pqc_keyword_absent"
+                    article_manifest["admitted"].remove(article_discovery)
+                    article_manifest["excluded"].append(article_discovery)
+            article_manifest["admitted_count"] = len(article_manifest["admitted"])
+            article_manifest["excluded_count"] = len(article_manifest["excluded"])
+            discovery["qualifying_count"] = article_manifest["admitted_count"]
         if pqc_news:
             result["pqc_news"] = pqc_news
 
@@ -1840,6 +1974,11 @@ class MultiStrategyEngine:
         )
         if failures:
             result["error"] = "; ".join(failures)
+        result["coverage"] = {"contract": "finnhub-acquisition-admission-v1",
+            "status": "partial" if failures else "complete_within_declared_admission",
+            "request_window": {"from": date_from, "to": date_to},
+            "supply_chain_query_universe": sc_symbols,
+            "acquisition_admission": manifests}
         return result
 
     def _fetch_regulations_data(self, trading_date: str | None = None) -> dict[str, Any]:
@@ -1871,8 +2010,8 @@ class MultiStrategyEngine:
         operations = {
             "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14),
             "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
-            "activist_13d": lambda: monitor.poll_edgar_filings(["SC 13D"], days_back=14),
-            "passive_13g": lambda: monitor.poll_edgar_filings(["SC 13G"], days_back=14),
+            "activist_13d": lambda: monitor.poll_edgar_filings(["SCHEDULE 13D"], days_back=14),
+            "passive_13g": lambda: monitor.poll_edgar_filings(["SCHEDULE 13G"], days_back=14),
             "pqc_filings": lambda: monitor.poll_keyword_filings(["8-K", "10-K", "10-Q"],
                 ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30),
         }
@@ -2042,20 +2181,30 @@ class MultiStrategyEngine:
     def _fetch_usda_data(self, trading_date: str) -> dict[str, Any]:
         """Preserve crops fetched before any required crop failure."""
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        from tradingagents.strategies.data_sources.usda_source import condition_scope
         source = self.registry.get("usda")
         if source is None:
             return {}
-        crop_progress, failures = {}, []
-        year = datetime.strptime(trading_date, "%Y-%m-%d").year
+        crop_progress, failures, crop_coverage = {}, [], {}
         for commodity in ("CORN", "SOYBEANS", "WHEAT"):
+            scope = condition_scope(commodity, trading_date)
+            year = scope["reporting_year"]
             try:
-                crop_progress[commodity] = source.fetch_crop_progress(commodity, year, as_of=trading_date)
+                observations = source.fetch_crop_progress(commodity, year, as_of=trading_date)
+                crop_progress[commodity] = list(observations)
+                crop_coverage[commodity] = getattr(observations, "coverage", {**scope, "complete": False, "reason": "missing_survey_coverage"})
+                if crop_coverage[commodity].get("complete") is not True:
+                    failures.append(f"{commodity}: incomplete declared survey coverage")
             except Exception as exc:
                 error = source_fetch_error("USDA crop acquisition incomplete", exc)
                 crop_progress.update(error.partial_data.get("crop_progress", {}))
+                crop_coverage[commodity] = error.partial_data.get("coverage", {**scope, "complete": False})
                 failures.append(f"{commodity}: {error}")
         acquisition_times = [str(row["available_at"]) for weeks in crop_progress.values() for row in weeks if isinstance(row, dict) and row.get("available_at")]
-        result = {"crop_progress": crop_progress}
+        result = {"crop_progress": crop_progress, "coverage": {
+            "complete": not failures and all(row.get("complete") is True for row in crop_coverage.values()),
+            "crops": crop_coverage,
+        }}
         if acquisition_times:
             acquired = max(acquisition_times)
             result.update(available_at=acquired, acquired_at=acquired)

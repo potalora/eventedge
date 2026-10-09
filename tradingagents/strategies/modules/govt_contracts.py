@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from datetime import date as calendar_date, datetime, timedelta
+import math
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +49,7 @@ class GovtContractsStrategy:
     4-6 day lag, giving retail investors a window.
 
     Signal logic:
-    1. Screen USAspending for recent large contracts.
+    1. Screen new awards by base obligation date, using cumulative obligations at acquisition.
     2. Resolve recipient names to tickers (using keyword matching).
     3. Filter by contract materiality (amount > threshold).
     4. Go long, hold 30-60 days for market to price in the revenue impact.
@@ -106,6 +109,24 @@ class GovtContractsStrategy:
                 ).lower()
                 amount = contract.get("amount", 0) or 0
                 award_id = contract.get("award_id", "")
+                base_date = contract.get("base_obligation_date", "")
+                # Only the adapter's declared new-award contract supports this
+                # thesis. An old award modification is not a fresh contract win.
+                try:
+                    recent = (calendar_date.fromisoformat(date) - timedelta(days=params.get("award_days_back", 30))).isoformat()
+                    observed = datetime.fromisoformat(contract.get("observed_at", ""))
+                    valid = (
+                        contract.get("award_scope") == "new_awards_only"
+                        and contract.get("amount_basis") == "cumulative_award_obligations"
+                        and bool(contract.get("award_key"))
+                        and recent <= calendar_date.fromisoformat(base_date).isoformat() <= date
+                        and observed.tzinfo is not None and observed.utcoffset() is not None
+                        and not isinstance(amount, bool) and math.isfinite(amount)
+                    )
+                except (ValueError, TypeError):
+                    valid = False
+                if not valid:
+                    continue
 
                 # Resolve recipient to ticker
                 ticker = None
@@ -117,7 +138,7 @@ class GovtContractsStrategy:
                 if not ticker or not award_id or amount < 10_000_000:  # $10M minimum
                     continue
 
-                score = min(amount / 1_000_000_000, 1.0)  # Scale by $1B
+                score = min(amount / 1_000_000_000, 1.0)  # Observed cumulative obligations on the new award.
                 candidates.append(
                     Candidate(
                         ticker=ticker,
@@ -129,15 +150,12 @@ class GovtContractsStrategy:
                             "contract_amount": amount,
                             "source": "usaspending",
                             "award_id": award_id,
-                            **(
-                                {
-                                    "last_modified_date": contract.get(
-                                        "last_modified_date"
-                                    )
-                                }
-                                if contract.get("last_modified_date")
-                                else {}
-                            ),
+                            "award_key": contract["award_key"],
+                            "base_obligation_date": base_date,
+                            "amount_basis": contract["amount_basis"],
+                            "award_scope": contract["award_scope"],
+                            "observed_at": contract["observed_at"],
+                            "thesis": "Newly originated award; amount is cumulative obligations observed at acquisition, not initial obligation or incremental modification.",
                         },
                     )
                 )
@@ -153,8 +171,7 @@ class GovtContractsStrategy:
                     "price_target_mean"
                 )
 
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[: params.get("max_positions", 3)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)))
 
     def check_exit(
         self,

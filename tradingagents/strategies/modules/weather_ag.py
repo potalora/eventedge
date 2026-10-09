@@ -208,7 +208,7 @@ class WeatherAgStrategy:
         }
 
         candidates = []
-        for name, ticker, ret, window_end in ag_returns[:3]:
+        for name, ticker, ret, window_end in ag_returns:
             source_ids = [f"YFINANCE:{ticker}:{window_end}"]
             source_dates = [window_end]
             for key in ("observation_date", "start_date", "end_date"):
@@ -252,7 +252,10 @@ class WeatherAgStrategy:
                 )
             )
 
-        return candidates
+        from .admission import admit_candidates
+        return admit_candidates(self.name, candidates, budget=3,
+            rank_key=lambda candidate: (-candidate.metadata["trailing_return"], candidate.ticker),
+            policy="trailing_return_desc_ticker_source_identity_v1")
 
     def check_exit(
         self,
@@ -345,6 +348,7 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
         max_decline = 0.0
         for weeks in crop_progress.values():
+            weeks = [row for row in weeks if isinstance(row, dict) and row.get("survey_active") is not False]
             latest, observations = validated_condition_observations(weeks)
             if latest is None:
                 continue

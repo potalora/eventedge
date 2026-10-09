@@ -82,7 +82,8 @@ def test_split_before_dividend_independent_of_ids(ledger):
     seed(ledger)
     actions=[CorporateAction('z-split','AAPL',MON,'split',D(2),None,'fixture',at(MON),True),CorporateAction('a-dividend','AAPL',MON,'cash_dividend',None,D(1),'fixture',at(MON),True)]
     ledger.apply_corporate_actions(MON,actions,at(MON))
-    assert ledger.account_state().cash==D(9020)
+    assert ledger.account_state().cash==D(9000)
+    assert ledger.account_state().dividend_receivable==D(20)
 
 def test_weekend_short_cost_survives_close_and_late_resume(ledger):
     seed(ledger,side='short'); intent(ledger,'cover',side='cover')

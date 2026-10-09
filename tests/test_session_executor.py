@@ -2272,6 +2272,7 @@ def test_shared_action_batch_isolates_malformed_member_to_affected_cohort(tmp_pa
             },
             actions,
             FakePriceSource().adjusted,
+            action_coverage={FRIDAY: ("AAPL", "MSFT")},
         )
         SessionExecutor.validate_shared_action_response(
             shared.actions, shared.tickers, MONDAY
@@ -2286,7 +2287,8 @@ def test_shared_action_batch_isolates_malformed_member_to_affected_cohort(tmp_pa
 
         assert aapl.valid
         assert aapl.snapshot is not None
-        assert aapl.snapshot.dividend_cash == Decimal("1.0000")
+        assert aapl.snapshot.dividend_cash == 0
+        assert aapl.snapshot.dividend_receivable == Decimal("1.0000")
         assert not msft.valid
         assert "unverified" in msft.invalid_reason
         assert not aapl_ledger.session_invalid_reason(MONDAY)
@@ -2995,6 +2997,8 @@ def test_production_usaspending_availability_stages_real_candidate(tmp_path):
         "results": [
             {
                 "Award ID": "AWARD-1",
+                "generated_internal_id": "CONT_AWARD_1",
+                "Base Obligation Date": "2026-07-30",
                 "Recipient Name": "Lockheed Martin",
                 "Award Amount": 50_000_000,
                 "Awarding Agency": "DOD",
@@ -3536,7 +3540,8 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         assert len(result["intents_staged"]) == 1
         decisions = ledger.read_policy_candidate_decisions()
         assert len(decisions) == 1
-        assert decisions[0]["approved_weight"] == pytest.approx(0.03)
+        # The first committee decision survives a later staging crash.
+        assert decisions[0]["approved_weight"] == pytest.approx(0.04)
         assert (
             ledger.read_policy_session_context(FRIDAY, binding_kind="staging")
             is not None

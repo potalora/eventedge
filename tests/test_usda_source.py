@@ -214,7 +214,8 @@ class TestIncidentRegression:
         assert "unit_desc" not in params
         assert params["agg_level_desc"] == "STATE"
 
-    def test_cache_respects_requested_states(self, source):
+    def test_cache_respects_requested_states(self, source, monkeypatch):
+        monkeypatch.setattr("tradingagents.strategies.data_sources.usda_source.current_session_date", lambda: "2026-06-18")
         def request(url, **kwargs):
             response = MagicMock(status_code=200)
             state = kwargs["params"]["state_alpha"][0]

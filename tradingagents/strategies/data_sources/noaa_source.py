@@ -1,7 +1,7 @@
-"""NOAA Climate Data Online (CDO) v2 source.
+"""NOAA public regional weather and optional CDO v2 source.
 
-Provides temperature and precipitation anomaly data for US agricultural
-regions. Free token from https://www.ncdc.noaa.gov/cdo-web/token.
+Regional temperature and precipitation use public NCEI Access summaries.
+Direct CDO state queries require a token from https://www.ncdc.noaa.gov/cdo-web/token.
 
 Rate limits: 5 requests/second, 10,000 requests/day.
 """
@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import requests
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.ncei.noaa.gov/cdo-web/api/v2"
 MAX_STATE_OBSERVATIONS = 100_000
 MAX_OBSERVATION_LAG_DAYS = 7
+BULK_URL = "https://www.ncei.noaa.gov/access/services/data/v1"
+CATALOG_URL = "https://www.ncei.noaa.gov/pub/data/ghcn/daily"
+REGIONAL_BUDGET_SECONDS = 90
+MAX_REGIONAL_STATIONS = 12_000
 
 # Key US agricultural states (Corn Belt + Plains)
 AG_STATES = {
@@ -53,16 +58,18 @@ def _build_session() -> requests.Session:
 
 
 class NOAASource:
-    """Data source backed by NOAA CDO API v2."""
+    """Public NCEI regional summaries with optional authenticated CDO queries."""
 
     name: str = "noaa"
-    requires_api_key: bool = True
+    requires_api_key: bool = False
 
     def __init__(self, token: str | None = None) -> None:
         self._token = token or os.environ.get("NOAA_CDO_TOKEN", "")
         self._cache: dict[str, Any] = {}
         self._last_request_time: float = 0.0
         self._session: requests.Session | None = None
+        self.observation_exclusions = {"quality_flag": 0}
+        self.regional_coverage: dict[str, Any] = {}
 
     def _get_session(self) -> requests.Session:
         if self._session is None:
@@ -87,7 +94,9 @@ class NOAASource:
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
-        return bool(self._token)
+        # The default regional acquisition path is public. Direct CDO requests
+        # still check their token at _api_get before sending any request.
+        return True
 
     def fetch_state_daily(
         self,
@@ -124,6 +133,7 @@ class NOAASource:
         seen_observations: set[tuple[str, str, str]] = set()
         offset = 1
         expected_total = None
+        raw_received = 0
 
         while True:
             try:
@@ -141,6 +151,8 @@ class NOAASource:
                 exc.partial_data = {"observations": all_results + exc.partial_data.get("observations", [])}
                 raise
             results = data["results"]
+            raw_count = data.get("raw_count", len(results))
+            raw_received += raw_count
             for row in results:
                 identity = (row["date"], row["datatype"], row["station"])
                 if identity in seen_observations:
@@ -161,17 +173,17 @@ class NOAASource:
                     or (expected_total is not None and total != expected_total)
                     or ("offset" in metadata and (type(metadata["offset"]) is not int or metadata["offset"] != offset))
                     or ("limit" in metadata and (type(metadata["limit"]) is not int
-                        or not 1 <= metadata["limit"] <= 1000 or len(results) > metadata["limit"]))
-                    or len(results) > 1000
+                        or not 1 <= metadata["limit"] <= 1000 or raw_count > metadata["limit"]))
+                    or raw_count > 1000
                     or len(all_results) > MAX_STATE_OBSERVATIONS
-                    or len(all_results) > total
-                    or (not results and len(all_results) < total)):
+                    or raw_received > total
+                    or (not raw_count and raw_received < total)):
                 raise SourceFetchError("NOAA pagination inconsistent", reason_code="invalid_response",
                                        partial_data={"observations": all_results})
             expected_total = total
-            if len(all_results) == total:
+            if raw_received == total:
                 break
-            offset += len(results)
+            offset += raw_count
         self._cache[cache_key] = all_results
         return all_results
 
@@ -190,20 +202,23 @@ class NOAASource:
         require_current_as_of(date, current_session_date())
         if type(lookback_days) is not int or lookback_days < 1:
             raise SourceFetchError("NOAA lookback invalid", reason_code="invalid_response")
-        if current_provider_deadline("noaa") is None:
-            with provider_budget("noaa", time.monotonic() + 60):
+        deadline = current_provider_deadline("noaa")
+        native_deadline = time.monotonic() + REGIONAL_BUDGET_SECONDS
+        if deadline is None or deadline > native_deadline:
+            with provider_budget("noaa", native_deadline):
                 return self.fetch_ag_weather_summary(date, lookback_days)
         as_of_date = datetime.strptime(date, "%Y-%m-%d")
         fetch_start = as_of_date - timedelta(days=lookback_days - 1 + MAX_OBSERVATION_LAG_DAYS)
         failures, statuses, state_groups = {}, {}, {}
-        for state, fips in AG_STATES.items():
-            try:
-                obs = self.fetch_state_daily(fips, fetch_start.strftime("%Y-%m-%d"), date)
-            except SourceFetchError as exc:
-                obs = exc.partial_data.get("observations", [])
-                failures[state] = exc.reason_code
-                if exc.http_status is not None:
-                    statuses[state] = exc.http_status
+        try:
+            regional = self.fetch_region_daily(fetch_start.strftime("%Y-%m-%d"), date)
+        except SourceFetchError as exc:
+            regional = exc.partial_data.get("states", {})
+            failures = {state: exc.reason_code for state in AG_STATES}
+            if exc.http_status is not None:
+                statuses = {state: exc.http_status for state in AG_STATES}
+        for state in AG_STATES:
+            obs = regional.get(state, [])
             grouped = {}
             for row in obs:
                 key = (row.get("date", "")[:10], row.get("datatype"))
@@ -281,6 +296,7 @@ class NOAASource:
                 "requested_states":list(AG_STATES), "states_reporting":reporting,
                 "window_start":start_date.strftime("%Y-%m-%d"), "window_end":end_date.strftime("%Y-%m-%d"),
                 "as_of":date, "observation_lag_days":selected_lag, "max_observation_lag_days":MAX_OBSERVATION_LAG_DAYS,
+                **self.regional_coverage, "exclusions":dict(self.observation_exclusions),
                 "missing":missing, "station_aggregation":"arithmetic_mean_per_state_date_datatype"},
         }
         if failures:
@@ -290,6 +306,94 @@ class NOAASource:
             raise SourceFetchError("NOAA state coverage incomplete", reason_code="batch_failure",
                 failed_operations=failures, failed_http_statuses=statuses, partial_data=summary)
         return summary
+
+    @staticmethod
+    def _quality_flagged(attributes):
+        return isinstance(attributes, str) and len(attributes.split(",")) > 1 and bool(attributes.split(",")[1].strip())
+
+    def fetch_region_daily(self, start: str, end: str) -> dict[str, list[dict]]:
+        """Bulk GHCN observations for all state-catalog stations active in the window's years.
+
+        The official inventory selects all stations with any requested element
+        spanning an observation year, never a conveniently reporting panel.
+        Completeness still means usable state/day/type samples, not spatial census.
+        """
+        deadline = current_provider_deadline("noaa")
+        native_deadline = time.monotonic() + REGIONAL_BUDGET_SECONDS
+        if deadline is None or deadline > native_deadline:
+            with provider_budget("noaa", native_deadline):
+                return self.fetch_region_daily(start, end)
+        station_text = provider_request("noaa", "GET", f"{CATALOG_URL}/ghcnd-stations.txt",
+            operation="station_catalog", timeout=(5,15)).text
+        inventory = provider_request("noaa", "GET", f"{CATALOG_URL}/ghcnd-inventory.txt",
+            operation="element_inventory", timeout=(5,15)).text
+        states = {line[:11]:line[38:40] for line in station_text.splitlines() if line[38:40] in AG_STATES}
+        selected = set()
+        try:
+            for line in inventory.splitlines():
+                if line[:11] in states and line[31:35] in {"TMAX","TMIN","PRCP"}:
+                    if int(line[36:40]) <= int(end[:4]) and int(line[41:45]) >= int(start[:4]):
+                        selected.add(line[:11])
+        except (ValueError, TypeError):
+            raise SourceFetchError("NOAA station inventory invalid", reason_code="invalid_response") from None
+        if not selected or len(selected) > MAX_REGIONAL_STATIONS or set(AG_STATES) - {states[s] for s in selected}:
+            raise SourceFetchError("NOAA regional station catalog incomplete or exceeds bound", reason_code="invalid_response")
+        self.observation_exclusions = {"quality_flag":0}
+        self.regional_coverage = {"acquisition_path":"ncei_daily_summaries_bulk",
+            "catalog_station_count":len(selected), "catalog_station_ids":sorted(selected),
+            "catalog_selection":"all_requested_state_stations_with_element_inventory_overlapping_observation_years",
+            "catalog_stations_by_state":{state:sum(states[s]==state for s in selected) for state in AG_STATES},
+            "acquisition_budget_seconds":REGIONAL_BUDGET_SECONDS}
+        batches = [sorted(selected)[i:i+100] for i in range(0,len(selected),100)]
+        def acquire(batch):
+            with provider_budget("noaa", deadline):
+                data = provider_request("noaa", "GET", BULK_URL, operation="bulk_daily_observations",
+                    params={"dataset":"daily-summaries", "stations":",".join(batch),
+                        "startDate":start, "endDate":end, "dataTypes":"TMAX,TMIN,PRCP",
+                        "units":"standard", "includeAttributes":"true", "format":"json"}, timeout=(5,15)).json()
+            if not isinstance(data,list) or not all(isinstance(row,dict) for row in data):
+                raise SourceFetchError("NOAA bulk schema invalid", reason_code="invalid_response")
+            rows, excluded, seen = [], 0, set()
+            for row in data:
+                station, day = row.get("STATION"), row.get("DATE")
+                if station not in batch or not source_date(day) or not start <= day[:10] <= end or (station,day[:10]) in seen:
+                    raise SourceFetchError("NOAA bulk observation identity invalid", reason_code="invalid_response")
+                seen.add((station,day[:10]))
+                for dtype in ("TMAX","TMIN","PRCP"):
+                    value = row.get(dtype)
+                    if value is None or value == "":
+                        continue
+                    attributes = row.get(dtype+"_ATTRIBUTES")
+                    if not isinstance(attributes,str) or len(attributes.split(",")) < 3:
+                        raise SourceFetchError("NOAA bulk quality attributes missing", reason_code="invalid_response")
+                    if self._quality_flagged(attributes):
+                        excluded += 1
+                        continue
+                    try:
+                        value = float(value)
+                    except (ValueError,TypeError):
+                        raise SourceFetchError("NOAA bulk value invalid", reason_code="invalid_response") from None
+                    if not source_number(value):
+                        raise SourceFetchError("NOAA bulk value invalid", reason_code="invalid_response")
+                    rows.append({"date":day[:10], "station":station, "datatype":dtype, "value":value})
+            return rows, excluded
+        regional = {state:[] for state in AG_STATES}
+        errors = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(acquire,batch) for batch in batches]
+            for future in futures:
+                try:
+                    rows, excluded = future.result()
+                    self.observation_exclusions["quality_flag"] += excluded
+                    for row in rows:
+                        regional[states[row["station"]]].append(row)
+                except SourceFetchError as exc:
+                    errors.append(exc)
+        if errors:
+            error = errors[0]
+            error.partial_data = {"states":regional}
+            raise error
+        return regional
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -308,18 +412,20 @@ class NOAASource:
         except Exception:
             raise SourceFetchError("NOAA observations invalid", reason_code="invalid_response") from None
         valid_rows, invalid = [], False
+        raw_count = len(data["results"])
         for row in data["results"]:
             if (not source_date(row.get("date")) or not source_text(row.get("datatype"))
                     or not source_text(row.get("station")) or not source_number(row.get("value"))
-                    or (isinstance(row.get("attributes"), str) and len(row["attributes"].split(",")) > 1
-                        and row["attributes"].split(",")[1].strip())):
+                    ):
                 invalid = True
+            elif self._quality_flagged(row.get("attributes")):
+                self.observation_exclusions["quality_flag"] += 1
             else:
                 valid_rows.append(row)
         if invalid:
             raise SourceFetchError("NOAA observation records invalid", reason_code="invalid_response",
                                    partial_data={"observations": valid_rows})
-        return data
+        return {**data, "results":valid_rows, "raw_count":raw_count}
 
     def _dispatch_ag_summary(self, params: dict[str, Any]) -> dict[str, Any]:
         date = params.get("date", current_session_date())

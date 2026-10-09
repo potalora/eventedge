@@ -9,6 +9,7 @@ from tradingagents.strategies.execution.models import CorporateAction, MarketBar
 from .calendar import XNYSCalendar
 from .identity import _stable_id
 from .models import OutcomeRecord, SignalMetricRecord
+from .populations import ELIGIBILITY_FIELDS, is_actionable
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,7 @@ class OutcomeCalculator:
             status="invalid" if reason else "valid",
             invalid_reason=reason,
             return_basis="next_open_total_shareholder_return_gross_v2",
+            **{key: getattr(signal, key) for key in ELIGIBILITY_FIELDS},
         )
 
     @staticmethod
@@ -127,7 +129,7 @@ def directional_accuracy(
 ) -> DirectionalAccuracy:
     rows = list(outcomes)
     valid = [row for row in rows if row.status == "valid"]
-    actionable = [row for row in valid if row.direction in {"long", "short"}]
+    actionable = [row for row in valid if is_actionable(row) and row.signed_return is not None]
     hits = sum(row.signed_return > 0 for row in actionable)
     return DirectionalAccuracy(
         actionable_count=len(actionable),

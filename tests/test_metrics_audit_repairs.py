@@ -39,7 +39,8 @@ def test_reporting_reads_all_mature_scoped_outcomes(tmp_path):
         store.upsert_outcome(record);records.append(record)
     read=store.read_outcomes('epoch')
     assert len(read)==1001
-    signals=tuple(SimpleNamespace(signal_id=r.signal_id) for r in records)
+    signals=tuple(SignalMetricRecord(r.event_key, r.signal_id, r.epoch_id, r.policy_id,
+        r.strategy, r.ticker, r.direction, at(date(2026,7,31)), date(2026,7,31)) for r in records)
     assert MetricsService._directional_accuracy_5d(signals,read)==1000/1001
     assert MetricsService._directional_accuracy_5d((signals[-1],),read)==0
 
@@ -124,6 +125,22 @@ def test_ratio_availability_distinguishes_count_from_zero_variance(count,reason)
     text=_rows({'book':asdict(report)})[0][SHARPE_LABEL]
     assert ('zero variance' in text) if count==31 else ('29/30 returns' in text)
 
+def _capture_independent_outcome_inputs(executor, source, session):
+    from tradingagents.strategies.orchestration.daily_pipeline import DailyRunState
+    from tradingagents.strategies.orchestration.outcome_evidence import capture_outcome_inputs
+
+    class SessionClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at(session)
+
+    cohort = {"executor": executor, "ledger": executor.ledger}
+    owner = SimpleNamespace(cohorts=[cohort], _metric_store=executor.metric_store, _price_source=source)
+    state = DailyRunState(owner, str(session), session, at(session), fresh=[cohort])
+    with patch("tradingagents.strategies.orchestration.outcome_evidence.datetime", SessionClock):
+        capture_outcome_inputs(state)
+
+
 @pytest.mark.parametrize('direction,expected',[('long',D('.02')),('short',D('-.02'))])
 def test_native_untraded_outcome_has_continuous_action_coverage(tmp_path,direction,expected):
     from test_session_executor import FakePriceSource, _config
@@ -137,6 +154,7 @@ def test_native_untraded_outcome_has_continuous_action_coverage(tmp_path,directi
         session=date(2026,8,day); price='50' if day>=6 else '100'; b=replace(bar('AAPL',session,p=price),source='fixture-raw')
         actions=[CorporateAction('z-split','AAPL',session,'split',D(2),None,'fixture',at(session),True),CorporateAction('a-div','AAPL',session,'cash_dividend',None,D(1),'fixture',at(session),True)] if day==6 else []
         source=FakePriceSource(bars={('AAPL',session):b},actions=actions,adjusted={(s,session):D(100) for s in ('SPY','BIL')})
+        _capture_independent_outcome_inputs(ex, source, session)
         assert ex.execute_open_and_mark(session,'epoch-1',source,{},at(session)).valid
     assert ex.record_due_outcomes(session,'epoch-1',{('AAPL',session):b})==1
     outcome=ex.metric_store.read_outcomes('epoch-1')[0]
@@ -195,6 +213,7 @@ def test_untraded_outcome_with_missing_intermediate_action_coverage_is_invalid(t
     for day in (4,5,7,10):  # Aug 6 corporate-action evidence was never accepted.
         session=date(2026,8,day); b=_bar('AAPL',session,'100','100')
         source=FakePriceSource(bars={('AAPL',session):b},adjusted={(s,session):D(100) for s in ('SPY','BIL')})
+        _capture_independent_outcome_inputs(ex, source, session)
         assert ex.execute_open_and_mark(session,'epoch-1',source,{},at(session)).valid
     ex.record_due_outcomes(session,'epoch-1',{('AAPL',session):b})
     outcome=ex.metric_store.read_outcomes('epoch-1')[0]

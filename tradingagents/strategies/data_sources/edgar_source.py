@@ -37,6 +37,29 @@ def _extract_ticker(display_name: str) -> str:
     return ""
 
 
+def normalize_filing_form(value: str) -> str:
+    """Canonicalize ownership form spelling while preserving amendment identity."""
+    form = " ".join(value.upper().split())
+    if re.fullmatch(r"(?:SC|SCHEDULE) 13[DG](?:/A)?", form):
+        return form.replace("SC ", "SCHEDULE ", 1)
+    return form
+
+
+def filing_form_family(value: str) -> str:
+    form = normalize_filing_form(value)
+    return form.removesuffix("/A") if form.startswith("SCHEDULE 13") else form
+
+
+def filing_search_forms(value: str) -> str:
+    """Ownership searches include current and historical labels and amendments."""
+    family = filing_form_family(value)
+    if family in {"SCHEDULE 13D", "SCHEDULE 13G"}:
+        # EFTS base names already include amendments. Explicit /A filters
+        # narrow a mixed query to amendments and would lose initial filings.
+        return ",".join(f"{prefix} {family.split()[-1]}" for prefix in ("SCHEDULE", "SC"))
+    return normalize_filing_form(value)
+
+
 class EDGARSource:
     """Data source for SEC EDGAR filings.
 
@@ -127,7 +150,7 @@ class EDGARSource:
                                        partial_data={"filings": records})
             expected = total
             for row in page:
-                identity = (row['adsh'], tuple(row['ciks']))
+                identity = row['adsh']
                 # Full-text hits can include multiple documents per filing.
                 if identity not in seen:
                     seen.add(identity)
@@ -164,7 +187,7 @@ class EDGARSource:
         """
         import requests
 
-        params: dict[str, Any] = {"forms": form_type, "q": keyword or "", "from": offset, "size": 100}
+        params: dict[str, Any] = {"forms": filing_search_forms(form_type), "q": keyword or "", "from": offset, "size": 100}
         if ticker:
             cik = self.ticker_to_cik(ticker)
             if not cik:
@@ -213,7 +236,8 @@ class EDGARSource:
                 file_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{adsh_nod}/{adsh}-index.htm"
             results.append({
                 "file_date": src.get("file_date", ""),
-                "form_type": src.get("form", ""),
+                "form_type": normalize_filing_form(src["form"]),
+                "source_form_type": src["form"],
                 "entity_name": entity_name,
                 "ticker": ticker_str,
                 "file_url": file_url,
@@ -273,7 +297,7 @@ class EDGARSource:
             if not source_text(forms[i]) or not source_date(dates[i]) or not source_text(accessions[i]) or not source_text(documents[i]):
                 raise SourceFetchError("EDGAR submission record invalid", reason_code="invalid_response",
                                        partial_data={"filings": results})
-            if form_types and forms[i] not in form_types:
+            if form_types and normalize_filing_form(forms[i]) not in {normalize_filing_form(form) for form in form_types}:
                 continue
             results.append({
                 "accession_number": accessions[i] if i < len(accessions) else "",
@@ -283,7 +307,7 @@ class EDGARSource:
             })
             if len(results) >= count:
                 break
-        matching_total = sum(1 for form in forms if not form_types or form in form_types)
+        matching_total = sum(1 for form in forms if not form_types or normalize_filing_form(form) in {normalize_filing_form(value) for value in form_types})
         archive_files = data.get("filings", {}).get("files")
         coverage = {"mode":"bounded_sample", "complete":False, "limit":count,
                     "count":len(results), "returned":len(results), "source_total":matching_total,
@@ -309,7 +333,7 @@ class EDGARSource:
             if len(cells) < 4 or not cells[2].find("a"):
                 continue
             record_form = cells[3].get_text(strip=True)
-            if (form_type and record_form != form_type) or (not form_type and cells[0].get_text(strip=True) != "1"):
+            if (form_type and normalize_filing_form(record_form) != normalize_filing_form(form_type)) or (not form_type and cells[0].get_text(strip=True) != "1"):
                 continue
             href = cells[2].find("a").get("href", "")
             candidate = urljoin(url, href)
@@ -534,7 +558,7 @@ class EDGARSource:
         reference = datetime.fromisoformat(as_of) if as_of else datetime.fromisoformat(current_session_date())
         date_from = (reference - timedelta(days=days_back)).strftime("%Y-%m-%d")
         date_to = reference.strftime("%Y-%m-%d")
-        return self.search_filings("SC 13D", date_from=date_from, date_to=date_to)
+        return self.search_filings("SCHEDULE 13D", date_from=date_from, date_to=date_to)
 
     def _normalize_name(self, name: str) -> str:
         """Normalize a company name for matching."""

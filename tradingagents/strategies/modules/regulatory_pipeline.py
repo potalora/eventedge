@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class RegulatoryPipelineStrategy:
                         "industry", ""
                     )
 
-        return candidates[: params.get("max_positions", 3)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)))
 
     def check_exit(
         self,

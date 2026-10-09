@@ -13,6 +13,7 @@ from typing import Any
 
 from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError, source_fetch_error
 from tradingagents.strategies.data_sources.evidence import CoverageRecords
+from tradingagents.strategies.data_sources.edgar_source import filing_form_family
 
 logger = logging.getLogger(__name__)
 
@@ -71,14 +72,24 @@ class EventMonitor:
                 if exc.http_status is not None:
                     statuses[operation] = exc.http_status
 
+        deduplicated, seen = [], set()
+        for filing in all_filings:
+            identity = filing.get("adsh") or filing.get("accession_number") or filing.get("file_url")
+            if identity and identity in seen:
+                continue
+            if identity:
+                seen.add(identity)
+            deduplicated.append(filing)
+        all_filings = deduplicated
+
         # Count attempts against the budget and isolate each filing failure.
-        text_forms = {"10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"}
+        text_forms = {"10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"}
         attempted = 0
         if fetch_text:
             for index, filing in enumerate(all_filings):
                 form = filing.get("form_type", "")
                 url = filing.get("primary_document_url") or filing.get("file_url", "")
-                if form not in text_forms:
+                if filing_form_family(form) not in text_forms:
                     continue
                 if not url or attempted >= max_text_fetches:
                     filing["text_status"] = "missing_document_url" if not url else "text_budget_exhausted"
@@ -410,7 +421,7 @@ class EventMonitor:
 
         # EDGAR filings (10-K, 10-Q, DEF 14A, SC 13D, Form 4)
         filings = self.poll_edgar_filings(
-            form_types=["SC 13D", "4", "10-K", "10-Q", "DEF 14A"],
+            form_types=["SCHEDULE 13D", "4", "10-K", "10-Q", "DEF 14A"],
             days_back=7,
         )
         if filings:

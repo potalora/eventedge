@@ -72,6 +72,12 @@ class SignalMetricRecord:
     direction: Direction
     decision_at: datetime
     reference_session: date
+    journal_only: bool = False
+    analysis_status: str = "not_required"
+    analysis_valid: bool = True
+    analysis_admitted: bool = True
+    non_actionable_reason: str = ""
+    discovery_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,12 @@ class OutcomeRecord:
     status: OutcomeStatus
     invalid_reason: str
     return_basis: str = "legacy_raw_price_return_v1"
+    journal_only: bool = False
+    analysis_status: str = "not_required"
+    analysis_valid: bool = True
+    analysis_admitted: bool = True
+    non_actionable_reason: str = ""
+    discovery_id: str = ""
 
 
 @dataclass(frozen=True)

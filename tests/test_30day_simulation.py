@@ -1145,7 +1145,7 @@ class TestIdempotencyDoubleRun:
         assert rows[0].invalid_reason == expected_reason
         assert calls_after == (
             calls_before[0] + 1,
-            calls_before[1] + secondary_fetches,
+            calls_before[1] + 1,  # Independent action evidence survives a raw-price failure.
             calls_before[2] + secondary_fetches,
         )
         assert replay["cohort_0"]["error"]
@@ -1441,6 +1441,8 @@ class TestIdempotencyDoubleRun:
             "invalid_reason": "candidate reference-bar validation failed",
             "input_coverage_valid": True,
             "source_health_failures": [],
+            "outcome_coverage_valid": True,
+            "outcome_evidence_failures": {},
             "degraded": True,
             "execution_valid": True,
             "staging_valid": False,
@@ -2261,7 +2263,7 @@ class TestIdempotencyDoubleRun:
         ]
         assert store.read_outcomes(orchestrator._epoch_id) == (valid_outcome,)
         assert valid_outcome.status == "valid"
-        assert committed_due_calls == []
+        assert committed_due_calls == [True]
         assert committed_invalid_calls == [True]
         assert epoch is not None and epoch.status == "invalid"
         assert orchestrator.cohorts[1]["ledger"].session_invalid_reason(sessions[-1])
@@ -2306,7 +2308,7 @@ class TestIdempotencyDoubleRun:
         assert store.pending_critical_gap() is None
         assert len(source.raw_calls) == calls_before
 
-    def test_untraded_signal_outcomes_reuse_one_shared_raw_bundle_and_restart_idempotently(
+    def test_untraded_outcomes_share_independent_evidence_and_restart_idempotently(
         self, tmp_path
     ):
         orchestrator, source = _authoritative_orchestrator(tmp_path, cohorts=2)
@@ -2329,11 +2331,12 @@ class TestIdempotencyDoubleRun:
         outcomes = cohort["executor"].metric_store.read_outcomes(orchestrator._epoch_id)
         assert not first["cohort_0"]["error"]
         assert not first["cohort_1"]["error"]
-        assert source.raw_calls[-1] == (
-            ("AAPL", "BIL", "MSFT", "SPY"),
-            sessions[-1],
-        )
-        assert raw_after_exit == raw_before_exit + 1
+        assert source.raw_calls[raw_before_exit:] == [
+            (("AAPL", "BIL", "SPY"), sessions[-1]),  # Portfolio accounting.
+            (("MSFT",), sessions[-1]),  # Independent outcome evidence.
+            (("MSFT",), sessions[-1]),  # New candidate admission evidence.
+        ]
+        assert raw_after_exit == raw_before_exit + 3
         assert {(row.ticker, row.status) for row in outcomes} == {
             ("AAPL", "valid"),
             ("MSFT", "valid"),
@@ -2417,10 +2420,11 @@ class TestIdempotencyDoubleRun:
 
         assert not first_exit["cohort_0"]["error"]
         assert first_exit["cohort_1"]["error"]
-        assert fresh_required == ("AAPL", "MSFT", "ZZZZ")
+        assert fresh_required == ("AAPL",)
+        assert fresh_executor.outcome_tickers(sessions[-1], orchestrator._epoch_id) == ("AAPL", "MSFT", "ZZZZ")
         assert not replay["cohort_1"]["error"]
         assert source.raw_calls[before_replay] == (
-            ("AAPL", "BIL", "MSFT", "SPY", "ZZZZ"),
+            ("AAPL", "BIL", "SPY"),
             sessions[-1],
         )
 
@@ -2568,7 +2572,7 @@ class TestIdempotencyDoubleRun:
             len(source.benchmark_calls),
         ) == calls_before
 
-    def test_stage_only_repair_corrupt_entry_bundle_closes_epoch_and_preserves_p0(
+    def test_stage_only_repair_corrupt_entry_outcome_evidence_closes_epoch_and_preserves_p0(
         self, tmp_path
     ):
         orchestrator, source = _authoritative_orchestrator(
@@ -2596,9 +2600,12 @@ class TestIdempotencyDoubleRun:
         snapshot = cohort["ledger"].read_snapshots(sessions[-1], sessions[-1])[0]
         with sqlite3.connect(store.path) as connection:
             connection.execute("DELETE FROM outcomes")
-        entry_context = cohort["ledger"].session_execution_context(sessions[1])
-        assert entry_context is not None
-        _corrupt_persisted_market_bundle(cohort["ledger"], sessions[1])
+        with sqlite3.connect(store.path) as connection:
+            row = connection.execute("SELECT payload_json FROM outcome_inputs WHERE ticker='AAPL' AND session=?", (str(sessions[1]),)).fetchone()
+            original_input_json = row[0]
+            payload = json.loads(original_input_json)
+            del payload['bar']['open']
+            connection.execute("UPDATE outcome_inputs SET payload_json=? WHERE ticker='AAPL' AND session=?", (json.dumps(payload), str(sessions[1])))
         calls_before = (
             len(source.raw_calls),
             len(source.action_calls),
@@ -2629,21 +2636,11 @@ class TestIdempotencyDoubleRun:
                 len(source.benchmark_calls),
             ) == calls_before
 
-        cohort["ledger"].connection.execute(
-            """
-            UPDATE session_execution_contexts
-            SET economic_inputs_json = ?, input_digest = ?, market_digest = ?
-            WHERE cohort_id = ? AND session = ?
-            """,
-            (
-                entry_context["economic_inputs_json"],
-                entry_context["input_digest"],
-                entry_context["market_digest"],
-                cohort["ledger"].cohort_id,
-                sessions[1].isoformat(),
-            ),
-        )
-        cohort["ledger"].connection.commit()
+        with sqlite3.connect(store.path) as connection:
+            connection.execute(
+                "UPDATE outcome_inputs SET payload_json=? WHERE ticker='AAPL' AND session=?",
+                (original_input_json, str(sessions[1])),
+            )
         with patch(
             "tradingagents.strategies.trading.portfolio_committee.PortfolioCommittee.synthesize",
             side_effect=_authoritative_committee,
@@ -3032,7 +3029,8 @@ class TestThirtyDayFullLifecycle:
             assert replay[f"cohort_{index}"]["replayed"]
 
         assert len(source.benchmark_calls) == 30
-        assert len(source.raw_calls) <= 2 * 30
+        # At most one governed, one diagnostic and one candidate price batch per session.
+        assert len(source.raw_calls) <= 3 * 30
         assert committee.call_count <= 2 * 30
         assert (
             len(source.raw_calls),
@@ -3136,16 +3134,31 @@ class TestReactivatedStrategies:
                             "recipient": "Lockheed Martin Corp",
                             "amount": 500_000_000,
                             "award_id": "AWARD-LMT",
+                            "award_key": "generated:AWARD-LMT",
+                            "award_scope": "new_awards_only",
+                            "amount_basis": "cumulative_award_obligations",
+                            "base_obligation_date": "2026-03-14",
+                            "observed_at": "2026-03-14T20:00:00+00:00",
                         },
                         {
                             "recipient": "Northrop Grumman Systems",
                             "amount": 200_000_000,
                             "award_id": "AWARD-NOC",
+                            "award_key": "generated:AWARD-NOC",
+                            "award_scope": "new_awards_only",
+                            "amount_basis": "cumulative_award_obligations",
+                            "base_obligation_date": "2026-03-14",
+                            "observed_at": "2026-03-14T20:00:00+00:00",
                         },
                         {
                             "recipient": "Small Unknown Contractor",
                             "amount": 10_000_000,
                             "award_id": "AWARD-SMALL",
+                            "award_key": "generated:AWARD-SMALL",
+                            "award_scope": "new_awards_only",
+                            "amount_basis": "cumulative_award_obligations",
+                            "base_obligation_date": "2026-03-14",
+                            "observed_at": "2026-03-14T20:00:00+00:00",
                         },  # Below threshold
                     ]
                 }

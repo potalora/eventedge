@@ -731,8 +731,10 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
             assert ledger.read_snapshots(MONDAY, MONDAY) == []
             assert ledger.read_fills(MONDAY, MONDAY) == []
             assert ledger.intent(due.intent_id).status == "cancelled"
+            # Closed WIN retains its realized P&L but is only an outcome obligation.
+            # Held inventory and the due entry still require exact execution bars.
             assert source.raw_requests == [
-                (("HELD", "NEW", "WIN"), MONDAY, MONDAY, False)
+                (("HELD", "NEW"), MONDAY, MONDAY, False)
             ]
         elif case == "transaction_crash_rolls_back":
             due = _intent(
@@ -943,11 +945,15 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 True,
             )
             actions = [split, dividend]
+            cash_before = ledger.account_state().cash
             events = ledger.apply_corporate_actions(
                 MONDAY, actions, _at_close(MONDAY)
             )
             assert len(events) == 3
             state_after_first = ledger.account_state()
+            assert dividend.payment_date is None
+            assert state_after_first.cash == cash_before
+            assert state_after_first.dividend_receivable == Decimal("2.5000")
             ledger_path = ledger.path
             ledger.close()
             ledger = PortfolioLedger(ledger_path, COHORT, Decimal("5000"))
@@ -979,7 +985,16 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 ledger.connection.execute(
                     "SELECT dividend_cash FROM accounting_state"
                 ).fetchone()[0]
-            ) == Decimal("2.5000")
+            ) == Decimal("0")
+            assert ledger.connection.execute(
+                "SELECT COUNT(*) FROM cash_events WHERE event_type='dividend'"
+            ).fetchone()[0] == 0
+            # Unknown payment dates retain the signed entitlement in equity,
+            # while neither first application nor restart turns it into cash.
+            marked = ledger.account_state({"AAPL": Decimal("50")})
+            assert marked.cash == cash_before
+            assert marked.dividend_receivable == Decimal("2.5000")
+            assert marked.net_equity == cash_before + Decimal("200") - Decimal("100") + Decimal("2.5000")
         elif case == "compatibility_json_matches_ledger":
             long_order = _intent(
                 ledger,

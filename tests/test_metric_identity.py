@@ -119,6 +119,8 @@ def test_metric_record_fields_and_schema_constants_are_exact() -> None:
         "direction",
         "decision_at",
         "reference_session",
+        "journal_only", "analysis_status", "analysis_valid", "analysis_admitted",
+        "non_actionable_reason", "discovery_id",
     )
     assert tuple(field.name for field in fields(SignalConflict)) == (
         "epoch_id",
@@ -150,6 +152,8 @@ def test_metric_record_fields_and_schema_constants_are_exact() -> None:
         "status",
         "invalid_reason",
         "return_basis",
+        "journal_only", "analysis_status", "analysis_valid", "analysis_admitted",
+        "non_actionable_reason", "discovery_id",
     )
     assert tuple(field.name for field in fields(StrategyHealthRecord)) == (
         "health_id",
