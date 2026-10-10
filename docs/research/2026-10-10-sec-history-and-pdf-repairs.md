@@ -35,3 +35,11 @@ New regressions cover missing metadata versus malformed values, exact accession 
 Result: **166 passed in 1.13 seconds**. Full captured response replay separately verified all 346 history identities and all 56 Carnival document spans/hashes. No new network request was used for those replays; only the linked public SEC documentation was consulted online.
 
 The combined repair, including guarded ASCII DOM reuse, subsequently passed the complete offline suite: **4,509 passed**, four live tests deselected, one existing dependency warning, in 194.20 seconds. Independent review passed 326 focused checks, including 34 additional adversarial and retained-response controls, without an actionable finding.
+
+## Fresh native verification
+
+The committed repaired runtime `9f339ff8a836c0dc6682d6c7f67516ea71f8f4a1` subsequently passed CI: **4,509 tests**, four live tests deselected and one existing warning, in 598.31 seconds. A separately supervised native diagnostic made exactly three fixed SEC requests, with one attempt each and unchanged 120-second worker / 150-second whole limits. All three bodies were byte-identical to the original diagnostic, and all three current native validators returned successfully.
+
+Pillarstone returned all 346 identities with the 49 empty names preserved. Carnival returned all 56 document inventory entries and five full supported units. The Saratoga control preserved its complete native evidence after only a comparison-time projection of `observed_at`; both stored observations remain untouched. Its build time fell from 10.649 to 5.593 seconds on these exact bytes. Collection took 8.949 seconds and supervised closure 22.821 seconds. The supervisor independently replayed all three native validations without acquiring data.
+
+Root independently verified all 165 original closed files and the complete archive (`81ddd2c2a7a6858f58c49a9b13165334d8c9ea14231b7cec203b49f0f458b57e`). All 153 approved files and 1,209 production files remained unchanged; the owned process group was empty. This verifies the selected repairs and selected-body performance. Complete source acquisition within 600 seconds, the missing/ambiguous predecessor cases, model throughput and full end-to-end acceptance remain separate unresolved requirements. Nothing was merged or deployed.
