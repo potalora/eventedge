@@ -166,6 +166,15 @@ def test_orchestrator_keeps_population_order_and_optional_failure_evidence(monke
 
     source = source_with(native, [short_row(symbol="wrong")])
     monkeypatch.setattr(source, "is_available", lambda: True)
+    # Keep this orchestration test independent of installed provider versions.
+    # The guarded bulk adapter and real-shaped history validation have dedicated tests.
+    def short_batch(symbols):
+        results = {symbol: source.fetch({"method": "equity_short_interest", "ticker": symbol})
+                   for symbol in symbols}
+        return {"short_interest": {}, "errors": results,
+                "acquisition": {"schema_version": 1, "requested_count": len(symbols),
+                                "cached_count": 0, "attempts": [], "population_sha256": "a"*64}}
+    monkeypatch.setattr(source, "fetch_short_interest", short_batch)
     owner = object.__new__(CohortOrchestrator)
     owner.cohorts = [{"engine": N(registry={"openbb": source})}]
     signals = [{"ticker": f"T{i:02}"} for i in reversed(range(10))] + [{"ticker": "T00"}]

@@ -38,6 +38,59 @@ def _profile_result(item: Any) -> dict[str, Any]:
     }
 
 
+def normalize_short_interest(ticker, items):
+    """Shared scalar/bulk native row validation; preserve unknown float percentage."""
+    if not items:
+        return {"error": f"No short interest data for {ticker}", "reason_code": "provider_error"}
+    dated = []
+    for item in items:
+        symbol = _getfield(item, "symbol")
+        if symbol is not None and symbol != ticker:
+            raise SourceFetchError("Mismatched FINRA symbol", reason_code="invalid_response")
+        try:
+            settlement = date.fromisoformat(str(_getfield(item, "settlement_date", "")))
+        except (TypeError, ValueError):
+            raise SourceFetchError("Invalid FINRA settlement date", reason_code="invalid_response") from None
+        dated.append((settlement, item))
+    latest = max(settlement for settlement, _ in dated)
+    normalized = []
+    for settlement, item in dated:
+        if settlement != latest:
+            continue
+        short_pos = _getfield(item, "current_short_position")
+        coverage = _getfield(item, "days_to_cover")
+        avg_vol = _getfield(item, "avg_daily_volume", _getfield(item, "average_daily_volume"))
+        try:
+            if isinstance(short_pos, bool) or not math.isfinite(float(short_pos)) or float(short_pos) < 0:
+                raise ValueError
+            if coverage is None:
+                if isinstance(avg_vol, bool) or not math.isfinite(float(avg_vol)) or float(avg_vol) <= 0:
+                    raise ValueError
+                coverage = float(short_pos) / float(avg_vol)
+            if isinstance(coverage, bool) or not math.isfinite(float(coverage)) or float(coverage) < 0:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            raise SourceFetchError("Invalid FINRA coverage data", reason_code="invalid_response") from None
+        short_pct = _getfield(item, "short_percent_of_float")
+        if short_pct is not None:
+            try:
+                if isinstance(short_pct, bool) or not math.isfinite(float(short_pct)) or float(short_pct) < 0:
+                    raise ValueError
+                short_pct = float(short_pct)
+            except (TypeError, ValueError, OverflowError):
+                raise SourceFetchError("Invalid FINRA float percentage", reason_code="invalid_response") from None
+        normalized.append({
+            "short_interest": float(short_pos),
+            "short_pct_of_float": short_pct,
+            "days_to_cover": float(coverage),
+            "date": latest.isoformat(),
+        })
+    result = normalized[0]
+    if any(row != result for row in normalized[1:]):
+        raise SourceFetchError("Conflicting latest FINRA rows", reason_code="invalid_response")
+    return result
+
+
 class OpenBBSource:
     """Data source backed by the OpenBB Platform SDK.
 
@@ -263,6 +316,73 @@ class OpenBBSource:
         self._cache[ckey] = result
         return result
 
+    def fetch_short_interest(self, tickers: list[str]) -> dict[str, Any]:
+        """Acquire the complete native FINRA history once for uncached exact symbols."""
+        from .finra_bulk import acquire, check_deadline, new_attempt, validated_acquisition, population_digest
+        symbols = list(dict.fromkeys(tickers))
+        cached = {symbol: self._cache[f"equity_short_interest|{symbol}"]
+                  for symbol in symbols if f"equity_short_interest|{symbol}" in self._cache}
+        pending = [symbol for symbol in symbols if symbol not in cached]
+        acquisition = {"schema_version": 1, "requested_count": len(symbols),
+                       "cached_count": len(cached), "attempts": [], "population_sha256": population_digest(symbols)}
+        successes, errors = {}, {}
+        def run():
+            attempt = new_attempt()
+            acquisition["attempts"].append(attempt)
+            published = []
+            try:
+                check_deadline()
+                self._get_obb()
+                check_deadline()
+                fetcher, histories = acquire(pending, attempt)
+                values, failures = {}, {}
+                for symbol in pending:
+                    check_deadline()
+                    try:
+                        query = fetcher.transform_query({"symbol": symbol})
+                        check_deadline()
+                        if getattr(query, "symbol", None) != symbol:
+                            raise SourceFetchError("Mismatched FINRA query symbol", reason_code="invalid_response")
+                        rows = fetcher.transform_data(query, histories[symbol])
+                        check_deadline()
+                        result = normalize_short_interest(symbol, rows)
+                        if "error" in result:
+                            failures[symbol] = result
+                        else:
+                            values[symbol] = result
+                    except Exception as exc:
+                        error = source_fetch_error("Invalid FINRA symbol history", exc)
+                        # Native model validation is a per-symbol invalid response.
+                        if isinstance(exc, (ValueError, TypeError)):
+                            error = SourceFetchError("Invalid FINRA symbol history", reason_code="invalid_response")
+                        if error.reason_code == "timeout":
+                            raise error
+                        failures[symbol] = {"error": str(error), "reason_code": error.reason_code}
+                    check_deadline()
+                check_deadline()
+                for symbol, value in values.items():
+                    self._cache[f"equity_short_interest|{symbol}"] = value
+                    published.append(symbol)
+                check_deadline()
+                attempt["status"], attempt["reason_code"] = "success", None
+                return values, failures
+            except Exception as exc:
+                for symbol in published:
+                    self._cache.pop(f"equity_short_interest|{symbol}", None)
+                error = source_fetch_error("FINRA bulk acquisition failed", exc)
+                attempt["reason_code"] = error.reason_code
+                raise error from None
+        if pending:
+            try:
+                successes, errors = provider_call("openbb", "equity_short_interest_batch", run, maximum_seconds=60)
+            except Exception as exc:
+                error = source_fetch_error("FINRA bulk acquisition failed", exc)
+                errors = {symbol: {"error": str(error), "reason_code": error.reason_code} for symbol in pending}
+        values = cached | successes
+        return {"short_interest": {symbol: values[symbol] for symbol in symbols if symbol in values},
+                "errors": {symbol: errors[symbol] for symbol in symbols if symbol in errors},
+                "acquisition": validated_acquisition(acquisition)}
+
     def _equity_short_interest(self, params: dict[str, Any]) -> dict[str, Any]:
         ticker = params.get("ticker") or params.get("symbol")
         if not ticker:
@@ -277,52 +397,7 @@ class OpenBBSource:
         if not resp.results:
             return {"error": f"No short interest data for {ticker}"}
 
-        dated = []
-        for item in resp.results:
-            symbol = _getfield(item, "symbol")
-            if symbol is not None and symbol != ticker:
-                raise SourceFetchError("Mismatched FINRA symbol", reason_code="invalid_response")
-            try:
-                settlement = date.fromisoformat(str(_getfield(item, "settlement_date", "")))
-            except (TypeError, ValueError):
-                raise SourceFetchError("Invalid FINRA settlement date", reason_code="invalid_response") from None
-            dated.append((settlement, item))
-        latest = max(settlement for settlement, _ in dated)
-        normalized = []
-        for settlement, item in dated:
-            if settlement != latest:
-                continue
-            short_pos = _getfield(item, "current_short_position")
-            coverage = _getfield(item, "days_to_cover")
-            avg_vol = _getfield(item, "avg_daily_volume", _getfield(item, "average_daily_volume"))
-            try:
-                if isinstance(short_pos, bool) or not math.isfinite(float(short_pos)) or float(short_pos) < 0:
-                    raise ValueError
-                if coverage is None:
-                    if isinstance(avg_vol, bool) or not math.isfinite(float(avg_vol)) or float(avg_vol) <= 0:
-                        raise ValueError
-                    coverage = float(short_pos) / float(avg_vol)
-                if isinstance(coverage, bool) or not math.isfinite(float(coverage)) or float(coverage) < 0:
-                    raise ValueError
-            except (TypeError, ValueError, OverflowError):
-                raise SourceFetchError("Invalid FINRA coverage data", reason_code="invalid_response") from None
-            short_pct = _getfield(item, "short_percent_of_float")
-            if short_pct is not None:
-                try:
-                    if isinstance(short_pct, bool) or not math.isfinite(float(short_pct)) or float(short_pct) < 0:
-                        raise ValueError
-                    short_pct = float(short_pct)
-                except (TypeError, ValueError, OverflowError):
-                    raise SourceFetchError("Invalid FINRA float percentage", reason_code="invalid_response") from None
-            normalized.append({
-                "short_interest": float(short_pos),
-                "short_pct_of_float": short_pct,
-                "days_to_cover": float(coverage),
-                "date": latest.isoformat(),
-            })
-        result = normalized[0]
-        if any(row != result for row in normalized[1:]):
-            raise SourceFetchError("Conflicting latest FINRA rows", reason_code="invalid_response")
+        result = normalize_short_interest(ticker, resp.results)
         self._cache[ckey] = result
         return result
 

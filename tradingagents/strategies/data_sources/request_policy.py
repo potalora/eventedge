@@ -72,6 +72,12 @@ def current_provider_deadline(provider):
     return budget.deadline if budget is not None and budget.provider == provider else None
 
 
+def provider_clock_time(provider):
+    """Read the matching acquisition clock without changing its absolute deadline."""
+    budget = _CURRENT.get()
+    return budget.clock() if budget is not None and budget.provider == provider else time.monotonic()
+
+
 def provider_timeout(provider, maximum=15):
     """Clip an SDK's exposed inactivity timeout to its acquisition budget."""
     budget = _CURRENT.get()

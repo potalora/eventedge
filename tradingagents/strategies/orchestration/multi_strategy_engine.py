@@ -1164,6 +1164,10 @@ class MultiStrategyEngine:
             failures = _enrichment_failures(enrichment or {})
             if failures:
                 decision_status["enrichment_failures"] = failures
+            if "short_interest_acquisition" in (enrichment or {}):
+                from tradingagents.strategies.data_sources.finra_bulk import validated_acquisition
+                decision_status["short_interest_acquisition"] = validated_acquisition(
+                    enrichment["short_interest_acquisition"])
             decision_status["selected_signal_ids"] = sorted({
                 record.signal_id for _, record in timely for rec in recommendations
                 if record.ticker == rec.ticker and record.direction == rec.direction

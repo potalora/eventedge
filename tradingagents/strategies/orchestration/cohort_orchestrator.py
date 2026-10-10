@@ -977,18 +977,13 @@ class CohortOrchestrator:
         if profiles:
             enrichment["profiles"] = profiles
 
-        # Fetch short interest for all tickers
-        short_interest = {}
-        for ticker in tickers:
-            result = openbb_source.fetch(
-                {"method": "equity_short_interest", "ticker": ticker}
-            )
-            if "error" not in result:
-                short_interest[ticker] = result
-            else:
-                errors.setdefault("short_interest", {})[ticker] = result
-        if short_interest:
-            enrichment["short_interest"] = short_interest
+        # Native preparation and a complete read snapshot serve every exact symbol.
+        short_batch = openbb_source.fetch_short_interest(tickers)
+        if short_batch["short_interest"]:
+            enrichment["short_interest"] = short_batch["short_interest"]
+        if short_batch["errors"]:
+            errors["short_interest"] = short_batch["errors"]
+        enrichment["short_interest_acquisition"] = short_batch["acquisition"]
 
         # Fetch Fama-French factors (once, not per ticker)
         factors = openbb_source.fetch({"method": "factors_fama_french"})
