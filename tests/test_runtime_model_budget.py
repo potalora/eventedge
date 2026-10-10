@@ -22,7 +22,7 @@ def stalled_server():
 
         def do_GET(self):
             self.server.started.set()
-            time.sleep(3)
+            self.server.release.wait(timeout=15)
 
         def do_POST(self):
             self.do_GET()
@@ -30,12 +30,16 @@ def stalled_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     server.started = threading.Event()
+    server.release = threading.Event()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield server
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
+    try:
+        yield server
+    finally:
+        server.release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_fred_native_transport_does_not_hold_subprocess_after_gather(stalled_server):
@@ -65,13 +69,14 @@ def test_real_responses_transport_is_killed_at_total_deadline(stalled_server):
     from openai import OpenAI
     from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_budget
 
-    client = OpenAI(api_key="offline", base_url=f"http://127.0.0.1:{stalled_server.server_port}/v1", max_retries=4)
-    started = time.monotonic()
-    with model_budget(time.monotonic() + 1.5), pytest.raises(ModelDeadlineExceeded):
-        call_analysis_model(client, model="gpt-6-luna", system="sys", prompt="hi", max_tokens=30, temperature=0, effort="high")
-    assert stalled_server.started.is_set()
-    assert time.monotonic() - started < 2.2
-    client.close()
+    with OpenAI(api_key="offline", base_url=f"http://127.0.0.1:{stalled_server.server_port}/v1", max_retries=4) as client:
+        started = time.monotonic()
+        # Include cold subprocess imports on CI, then keep the actual HTTP
+        # transport stalled past the deadline. No provider timeout can finish it.
+        with model_budget(started + 5), pytest.raises(ModelDeadlineExceeded):
+            call_analysis_model(client, model="gpt-6-luna", system="sys", prompt="hi", max_tokens=30, temperature=0, effort="high")
+        assert stalled_server.started.is_set(), "must exercise the real Responses HTTP boundary"
+        assert time.monotonic() - started < 6
 
 
 def test_model_provenance_marks_returned_alias_without_revision_unpinned():

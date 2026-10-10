@@ -58,7 +58,7 @@ def test_unexpected_shared_input_failure_logs_safe_origin_and_keeps_gap_closed(t
     ("staging_volatility", "_restore_staging_volatility"),
 ])
 def test_candidate_boundary_failure_logs_safe_origin_and_preserves_accounting(
-    tmp_path, caplog, boundary, helper,
+    tmp_path, caplog, monkeypatch, boundary, helper,
 ):
     import json
     import logging
@@ -69,6 +69,26 @@ def test_candidate_boundary_failure_logs_safe_origin_and_preserves_accounting(
         orch._base_config["autoresearch"]["portfolio_policy"] = {}
     session = date(2026, 3, 30)
     secret = "candidate-private-api-key"
+
+    def offline_price_history(engine, tickers, start, end):
+        import pandas as pd
+        from tradingagents.strategies.orchestration.trading_calendar import previous_session
+
+        assert boundary == "staging_volatility", "unexpected price-history acquisition"
+        sessions = [previous_session(date.fromisoformat(end))]
+        for _ in range(60):
+            sessions.append(previous_session(sessions[-1]))
+        for ticker in tickers:
+            engine._price_cache[ticker] = pd.DataFrame(
+                {"Close": [100.0 + index / 10 for index in range(61)]},
+                index=pd.DatetimeIndex(reversed(sessions)),
+            )
+
+    for cohort in orch.cohorts:
+        engine = cohort["engine"]
+        monkeypatch.setattr(engine, "_fetch_missing_prices",
+                            lambda tickers, start, end, engine=engine:
+                            offline_price_history(engine, tickers, start, end))
 
     def secret_bearing_failure(*args, **kwargs):
         raise RuntimeError(f"https://private.example/?key={secret} Authorization: Bearer {secret}")
