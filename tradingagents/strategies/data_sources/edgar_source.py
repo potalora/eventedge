@@ -677,9 +677,11 @@ class EDGARSource:
         if "/" in primary_doc:
             primary_doc = primary_doc.rsplit("/", 1)[-1]
 
-        padded_cik = cik.zfill(10)
+        # Archives uses an integer CIK directory; ten-digit padding belongs to
+        # the submissions API. Keep redirect denial and request the native path.
+        archive_cik = _history_cik(cik).lstrip("0")
         accession_nodash = accession.replace("-", "")
-        url = f"https://www.sec.gov/Archives/edgar/data/{padded_cik}/{accession_nodash}/{primary_doc}"
+        url = f"https://www.sec.gov/Archives/edgar/data/{archive_cik}/{accession_nodash}/{primary_doc}"
 
         response = None
         try:
