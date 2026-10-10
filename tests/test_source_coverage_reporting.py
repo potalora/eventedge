@@ -33,7 +33,7 @@ def state_with_health(*, failed=False, missing=False):
     owner = SimpleNamespace(
         _active_strategy_names=strategies, cohorts=cohorts,
         _policy_id_for_horizon=lambda horizon: f'foundation-{horizon}',
-        _metric_store=SimpleNamespace(read_strategy_health=read_health, read_candidate_input_issues=lambda *args: []),
+        _metric_store=SimpleNamespace(read_strategy_health=read_health, read_session_candidate_input_issues=lambda *args: []),
     )
     state = DailyRunState(owner, SESSION.isoformat(), SESSION, datetime(2026, 10, 6, 22, tzinfo=timezone.utc), epoch_id=EPOCH)
     results = {cohort['config'].name: {'error': False, 'execution_valid': True, 'staging_valid': True} for cohort in cohorts}

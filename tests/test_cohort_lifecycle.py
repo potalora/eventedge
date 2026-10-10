@@ -1473,7 +1473,7 @@ class TestCandidateBarLifecycle:
                         {"open": "200", "high": "203", "low": "199", "close": "202"}
                     )
                 else:
-                    final_attempt["fetched_at"] = "2026-03-31T19:00:00+00:00"
+                    final_attempt["fetched_at"] = "2026-03-31 19:00:00+00:00"
                 connection.execute(
                     "UPDATE candidate_bar_recoveries SET payload_json = ? "
                     "WHERE recovery_id = ?",

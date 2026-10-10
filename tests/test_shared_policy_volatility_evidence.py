@@ -1154,7 +1154,7 @@ def test_completed_projection_resume_retains_accepted_volatility_history(
         assert replay[unfinished_name]["error"] is False
         assert frozen_path.read_bytes() == accepted_bytes
         pd.testing.assert_frame_equal(
-            orchestrator.cohorts[0]["engine"]._price_cache["UI"], _history(0.031)
+            orchestrator.cohorts[0]["engine"]._price_cache["UI"], _history(0.031).tail(61)
         )
         assert orchestrator._metric_store.read_candidate_input_issues(
             orchestrator._epoch_id, SESSION
@@ -1264,7 +1264,7 @@ def test_stored_candidate_issue_resume_retains_accepted_governed_history(
         assert missing_fetch_calls[first_fetch_count:] == []
         assert frozen_path.read_bytes() == accepted_bytes
         pd.testing.assert_frame_equal(
-            orchestrator.cohorts[0]["engine"]._price_cache["OPEN"], _history(0.021)
+            orchestrator.cohorts[0]["engine"]._price_cache["OPEN"], _history(0.021).tail(61)
         )
         assert all(result["error"] is False for result in replay.values())
         assert all(

@@ -128,6 +128,7 @@ _MAX_GOVERNED_RECOVERY_ROWS = 7
 _MAX_GOVERNED_RECOVERY_COHORTS = 64
 _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES = 100_000
 _MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES = 1_000_000
+_MAX_CANDIDATE_SESSION_RECORD_BYTES = 1_000_000
 _NEW_YORK = ZoneInfo("America/New_York")
 _CANDIDATE_ATTEMPT_KEYS = frozenset(
     {
@@ -1778,6 +1779,100 @@ class MetricStore:
                 (*values, limit),
             ).fetchall()
         return tuple(self._candidate_input_issue(row) for row in rows)
+
+    def _complete_candidate_session_rows(
+        self, table: str, columns: str, epoch_id: str, session: date,
+        *, max_records: int,
+    ) -> list[tuple[object, ...]]:
+        """Read one complete execution scope, with bounds before materialization.
+
+        A ticker needs at least one of the bounded binding's identities. There
+        can be one recovery and two dependency issues per ticker. Reuse the
+        binding's independent serialized budget for each evidence collection.
+        Reporting/window readers deliberately retain their separate row limits.
+        """
+        if (
+            not self._bounded_candidate_recovery_text(epoch_id)
+            or epoch_id != epoch_id.strip()
+            or not isinstance(session, date)
+            or isinstance(session, datetime)
+            or not self._calendar.is_session(session)
+        ):
+            raise ValueError("candidate session evidence scope is invalid")
+        available = (self._has_candidate_bar_recoveries if table == "candidate_bar_recoveries"
+                     else self._has_candidate_input_issues)
+        if not available:
+            return []
+        with self._connect() as connection:
+            # SELECT alone does not begin a Python sqlite3 transaction. Hold
+            # the same read snapshot across budget checking and payload fetch.
+            connection.execute("BEGIN")
+            count, total_bytes, largest, invalid = connection.execute(
+                f"""SELECT COUNT(*), COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0),
+                           COALESCE(MAX(length(CAST(payload_json AS BLOB))), 0),
+                           COALESCE(SUM(typeof(payload_json) != 'text'), 0)
+                    FROM {table} WHERE epoch_id = ? AND session = ?""",
+                (epoch_id, session.isoformat()),
+            ).fetchone()
+            if (
+                count > max_records
+                or total_bytes > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES
+                or largest > _MAX_CANDIDATE_SESSION_RECORD_BYTES
+                or invalid
+            ):
+                raise ValueError("candidate session evidence exceeds bound or is invalid")
+            return connection.execute(
+                f"SELECT {columns} FROM {table} WHERE epoch_id = ? AND session = ? ORDER BY 1",
+                (epoch_id, session.isoformat()),
+            ).fetchall()
+
+    def read_session_candidate_input_issues(
+        self, epoch_id: str, session: date,
+    ) -> tuple[CandidateInputIssue, ...]:
+        """Return every validated issue for an exact execution session or fail."""
+        rows = self._complete_candidate_session_rows(
+            "candidate_input_issues",
+            "issue_id, epoch_id, session, dependency_kind, ticker, payload_json",
+            epoch_id, session, max_records=2 * _MAX_CANDIDATE_SIGNAL_IDENTITIES,
+        )
+        records = tuple(self._candidate_input_issue(row) for row in rows)
+        if any(record.epoch_id != epoch_id or record.session != session for record in records):
+            raise ValueError("candidate session issue scope is invalid")
+        return tuple(sorted(records, key=lambda record: (
+            record.session, record.dependency_kind, record.ticker, record.issue_id,
+        )))
+
+    def read_session_candidate_bar_recoveries(
+        self, epoch_id: str, session: date,
+    ) -> tuple[CandidateBarRecoveryRecord, ...]:
+        """Return every validated recovery for an exact execution session or fail."""
+        rows = self._complete_candidate_session_rows(
+            "candidate_bar_recoveries", "recovery_id, epoch_id, session, payload_json",
+            epoch_id, session, max_records=_MAX_CANDIDATE_SIGNAL_IDENTITIES,
+        )
+        records = []
+        tickers = set()
+        for recovery_id, row_epoch, row_session, payload in rows:
+            try:
+                record = self._candidate_bar_recovery(payload)
+                self._validate_candidate_bar_recovery(record)
+                canonical = self._json(record)
+            except (AttributeError, KeyError, TypeError, ValueError, RecursionError) as error:
+                raise ValueError("candidate session recovery payload is invalid") from error
+            if (
+                canonical != payload
+                or (record.recovery_id, record.epoch_id, record.session.isoformat())
+                != (recovery_id, row_epoch, row_session)
+                or record.epoch_id != epoch_id or record.session != session
+            ):
+                raise ValueError("candidate session recovery scope or canonical payload is invalid")
+            if record.ticker in tickers:
+                raise ValueError("candidate session recovery has duplicate ticker scope")
+            tickers.add(record.ticker)
+            records.append(record)
+        return tuple(sorted(records, key=lambda record: (
+            record.session, record.ticker, record.recovery_id,
+        )))
 
     def read_candidate_bar_recoveries(
         self,

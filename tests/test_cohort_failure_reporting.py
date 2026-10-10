@@ -211,11 +211,11 @@ def test_candidate_issue_hydration_rejects_mismatched_durable_scope(
         affected_cohorts=("cohort-a",),
     )
 
-    def read_candidate_input_issues(exact_epoch, exact_session):
+    def read_session_candidate_input_issues(exact_epoch, exact_session):
         assert (exact_epoch, exact_session) == (state_epoch_id, state_session)
         return [issue]
 
-    store = SimpleNamespace(read_candidate_input_issues=read_candidate_input_issues)
+    store = SimpleNamespace(read_session_candidate_input_issues=read_session_candidate_input_issues)
     state = DailyRunState(
         owner=SimpleNamespace(_metric_store=store),
         trading_date=state_session.isoformat(),
@@ -433,11 +433,11 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
         def pending_critical_gap(self):
             return None
 
-        def read_candidate_bar_recoveries(self, epoch_id, exact_session):
+        def read_session_candidate_bar_recoveries(self, epoch_id, exact_session):
             assert (epoch_id, exact_session) == (issue.epoch_id, session)
             return []
 
-        def read_candidate_input_issues(self, epoch_id, exact_session):
+        def read_session_candidate_input_issues(self, epoch_id, exact_session):
             assert (epoch_id, exact_session) == (issue.epoch_id, session)
             return [issue]
 
@@ -510,7 +510,7 @@ def test_pending_gap_exact_session_exit_lazily_hydrates_persisted_candidate_issu
         def pending_critical_gap(self):
             return marker
 
-        def read_candidate_input_issues(self, epoch_id, exact_session):
+        def read_session_candidate_input_issues(self, epoch_id, exact_session):
             assert (epoch_id, exact_session) == (issue.epoch_id, session)
             return [issue]
 

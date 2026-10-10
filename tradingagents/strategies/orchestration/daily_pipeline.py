@@ -229,7 +229,7 @@ def finalize_daily_results(
             not in state.candidate_issue_reference_suppressions
         }
         if state.epoch_id is not None:
-            issues = state.owner._metric_store.read_candidate_input_issues(
+            issues = state.owner._metric_store.read_session_candidate_input_issues(
                 state.epoch_id, state.session
             )
             for issue in issues:
@@ -1151,7 +1151,7 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
     owner, session = state.owner, state.session
     state.session_candidate_quarantines = sorted(
         record.ticker
-        for record in owner._metric_store.read_candidate_bar_recoveries(
+        for record in owner._metric_store.read_session_candidate_bar_recoveries(
             state.epoch_id, session
         )
         if record.outcome == "quarantined"
@@ -1598,7 +1598,7 @@ def _persist_screen_health(state: DailyRunState) -> dict[str, Any] | None:
         # Preserve already accepted quarantine references without recreating
         # evidence from the conflicting population or making provider calls.
         known = {reference["issue_id"] for reference in state.candidate_issue_references}
-        for issue in owner._metric_store.read_candidate_input_issues(state.epoch_id, state.session):
+        for issue in owner._metric_store.read_session_candidate_input_issues(state.epoch_id, state.session):
             if issue.issue_id not in known:
                 state.candidate_issue_references.append(issue.reference())
         reason = _candidate_replay_conflict_reason(sorted(ticker for ticker in tickers if ticker))
@@ -1766,7 +1766,7 @@ def _replay_candidate_reference_issues(
 ) -> None:
     stored_issues = {
         issue.ticker: issue
-        for issue in state.owner._metric_store.read_candidate_input_issues(
+        for issue in state.owner._metric_store.read_session_candidate_input_issues(
             state.epoch_id, state.session
         )
         if issue.dependency_kind == "reference_bar"
@@ -2026,7 +2026,7 @@ def run_candidate_reference_validation(
     candidate_only = signal_tickers - set(state.governed_reference_bars)
     stored = {
         record.ticker: record
-        for record in state.owner._metric_store.read_candidate_bar_recoveries(
+        for record in state.owner._metric_store.read_session_candidate_bar_recoveries(
             state.epoch_id, state.session
         )
     }
@@ -2240,7 +2240,7 @@ def run_candidate_volatility_validation(
         candidate_boundary = True
         stored_issues = {
             issue.ticker: issue
-            for issue in state.owner._metric_store.read_candidate_input_issues(
+            for issue in state.owner._metric_store.read_session_candidate_input_issues(
                 state.epoch_id, state.session
             )
             if issue.dependency_kind == "volatility_history"
@@ -2382,7 +2382,10 @@ def run_candidate_volatility_validation(
         candidate_boundary = False
         accepted = volatility_store.freeze(volatility_identity, {
             "price_history": {
+                # Full histories were validated above; retain exactly the Close
+                # observations used by the policy, with their pandas metadata.
                 ticker: state.first_engine._price_cache[ticker]
+                .loc[:, ["Close"]].tail(lookback + 1).copy()
                 for ticker in sorted(state.shared_volatility_evidence)
             },
             "expected_sessions": expected_sessions,
