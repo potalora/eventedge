@@ -44,8 +44,11 @@ def _capacity(max_bytes=None, max_nodes=None) -> tuple[int, int]:
 
 def source_codec_limits(config: Mapping, *, source: str | None = None) -> dict[str, int]:
     """Full-filing corpora have explicit finite capacity; other stores keep defaults."""
-    if (config.get('autoresearch', {}).get('filing_evidence_policy') == 'complete_submission_v1'
-            and source in (None, 'edgar')):
+    ar_config = config.get('autoresearch', {})
+    if ((ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
+            and source in (None, 'edgar'))
+            or (ar_config.get('congress_disclosure_policy') == 'display_audit_only_v1'
+                and source in (None, 'congress'))):
         return {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES}
     return {}
 

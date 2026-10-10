@@ -93,6 +93,8 @@ class FilingAnalysisStrategy:
                     "filing_evidence_ref": filing.get("filing_evidence_ref"),
                     "prior_evidence_ref": filing.get("prior_evidence_ref"),
                     "comparison_binding": deepcopy(filing.get("comparison_binding")),
+                    "filing_assessment_scope": filing.get("filing_assessment_scope"),
+                    "prior_status": filing.get("prior_status"),
                     "issuer_binding": deepcopy(binding),
                     "filing_evidence_status": filing.get("filing_evidence_status", "unavailable"),
                 })
@@ -114,7 +116,7 @@ class FilingAnalysisStrategy:
                             "current_text": current_text,
                             "prior_text": filing.get("prior_text", ""),
                             "needs_llm_analysis": True,
-                            "analysis_type": "filing_change",
+                            "analysis_type": ("filing_current_only" if full_evidence and filing.get("filing_assessment_scope") == "current_only" else "filing_change"),
                             **filing_identity,
                         },
                     )

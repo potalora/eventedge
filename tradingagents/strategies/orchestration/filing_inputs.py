@@ -7,6 +7,7 @@ import json
 from tradingagents.strategies.data_sources.equity_universe import EquityUniverse
 from tradingagents.strategies.data_sources.filing_assessment import evidence_digest, unit_id
 from tradingagents.strategies.data_sources.filing_hydration import POLICY, _nearest
+from tradingagents.strategies.data_sources.filing_comparison_policy import validate_current_only_binding
 from tradingagents.strategies.data_sources.filing_news import prepare_filing_news as _news
 
 
@@ -97,6 +98,15 @@ def filing_analysis_inputs(candidate, shared_data, universe):
                     _fail('comparator')
                 prior = corpus[prior_ref]
                 _comparison(graph, comparison, current[0], prior)
+            elif metadata['analysis_type'] == 'filing_current_only':
+                comparison = metadata['comparison_binding']
+                if metadata.get('prior_evidence_ref') is not None or not any(
+                        row.get('comparison_binding') == comparison
+                        and row.get('filing_assessment_scope') == 'current_only'
+                        and row.get('prior_evidence_ref') is None
+                        and row.get('requires_prior') is True for row in rows):
+                    _fail('comparator')
+                validate_current_only_binding(graph, comparison, current[0])
         for item in current:
             if item['accession'] not in corpus or corpus[item['accession']] != item:
                 _fail()

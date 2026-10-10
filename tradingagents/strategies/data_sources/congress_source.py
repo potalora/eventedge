@@ -218,16 +218,21 @@ def _page_json(raw: bytes):
 class CongressSource:
     """Data source for congressional stock trading disclosures.
 
-    Uses FMP's authenticated latest House and Senate disclosure endpoints when
-    a key is configured. Missing access is an explicit coverage failure.
-    Results are cached in-memory only after both chambers succeed.
+    Legacy trading methods use authenticated FMP disclosure endpoints. The
+    explicit display/audit policy exposes a separate anonymous snapshot method;
+    it never adapts those rows into trading input.
     """
 
     name: str = "congress"
     requires_api_key: bool = True
 
-    def __init__(self, fmp_api_key: str | None = None) -> None:
-        self._fmp_api_key = fmp_api_key or os.environ.get("FMP_API_KEY", "")
+    def __init__(self, fmp_api_key: str | None = None, *, disclosure_policy: str | None = None) -> None:
+        from .congress_disclosure_audit import POLICY
+        if disclosure_policy not in (None, POLICY):
+            raise ValueError('invalid_congress_disclosure_policy')
+        self._disclosure_policy = disclosure_policy
+        self.requires_api_key = disclosure_policy is None
+        self._fmp_api_key = (fmp_api_key or os.environ.get("FMP_API_KEY", "")) if disclosure_policy is None else ""
         self._cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -258,7 +263,10 @@ class CongressSource:
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
-        """Congress requires a configured stable FMP feed."""
+        """Check dependencies for the selected public-audit or legacy FMP route."""
+        if self._disclosure_policy is not None:
+            from importlib.util import find_spec
+            return find_spec('pyarrow') is not None and find_spec('requests') is not None
         if not self._fmp_api_key:
             return False
         try:
@@ -271,6 +279,15 @@ class CongressSource:
     # ------------------------------------------------------------------
     # Public data methods
     # ------------------------------------------------------------------
+
+    def get_audit_snapshot(self, *, date_filed_after: str, date_filed_before: str,
+                           absolute_deadline: float) -> dict[str, Any]:
+        """Separate free display/audit route; never returns strategy trade input."""
+        from .congress_disclosure_audit import POLICY, fetch_audit_snapshot
+        if self._disclosure_policy != POLICY:
+            raise ValueError('congress_audit_policy_not_enabled')
+        return fetch_audit_snapshot(date_filed_after=date_filed_after,
+            date_filed_before=date_filed_before, absolute_deadline=absolute_deadline)
 
     def _fetch_fmp_latest(self) -> list[dict[str, Any]]:
         """Legacy latest-page API, explicitly bounded to 25 rows per chamber.

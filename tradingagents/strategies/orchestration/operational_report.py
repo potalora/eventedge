@@ -251,17 +251,21 @@ def _manifest_history(metadata: dict, attempts: list[dict], latest: dict | None,
         diagnose('manifest_session_latest_missing')
 
 
-def _declared_exclusion(row: dict) -> bool:
+def _declared_exclusion(row: dict, disabled: dict | None = None) -> bool:
     reason = next((getattr(strategy, 'retirement_reason', None)
                    for strategy in get_paper_trade_strategies()
                    if strategy.name == row.get('strategy')), None)
     evidence = row.get('evidence')
+    if (row.get('strategy') == 'congressional_trades'
+            and (disabled or {}).get('congressional_trades') == 'display_audit_only_v1'
+            and isinstance(evidence, dict) and evidence.get('disclosure_policy') == 'display_audit_only_v1'):
+        reason = 'display_audit_only_v1'
     return (row.get('status') == 'disabled_by_policy' and reason is not None
             and row.get('signal_count') == 0 and isinstance(evidence, dict)
             and evidence.get('reason') == reason)
 
 
-def _metrics(state: Path, generation: str, session: str, commit: str, diagnose) -> tuple[str | None, list[dict]]:
+def _metrics(state: Path, generation: str, session: str, commit: str, diagnose, disabled=None) -> tuple[str | None, list[dict]]:
     path = state / 'metrics_v2.sqlite3'
     if not path.exists():
         diagnose('metrics_missing')
@@ -288,7 +292,7 @@ def _metrics(state: Path, generation: str, session: str, commit: str, diagnose) 
                     diagnose('health_identity_conflict', row['health_id'])
                     continue
                 if (not all(_safe_id(value.get(key)) for key in ('health_id','policy_id','strategy')) or
-                        (value.get('status') not in _HEALTHY | _FAILURES and not _declared_exclusion(value)) or
+                        (value.get('status') not in _HEALTHY | _FAILURES and not _declared_exclusion(value, disabled)) or
                         not isinstance(value.get('evidence'),dict)):
                     diagnose('health_contract_invalid', row['health_id'])
                     continue
@@ -387,7 +391,7 @@ def _candidate_issues(state: Path, epoch: str | None, session: str, diagnose) ->
         return []
 
 
-def _health_coverage(health: list[dict], epoch: str | None, session: str, diagnose) -> list[dict]:
+def _health_coverage(health: list[dict], epoch: str | None, session: str, diagnose, disabled=None) -> list[dict]:
     strategies = {strategy.name for strategy in get_paper_trade_strategies()}
     failures = []
     scoped = {}
@@ -407,7 +411,7 @@ def _health_coverage(health: list[dict], epoch: str | None, session: str, diagno
         affected = [name for name in EXPECTED_COHORTS if name.startswith('horizon_'+horizon+'_')]
         for strategy in sorted(strategies):
             row = scoped.get((policy,strategy))
-            if row is not None and (row['status'] in _HEALTHY or _declared_exclusion(row)):
+            if row is not None and (row['status'] in _HEALTHY or _declared_exclusion(row, disabled)):
                 continue
             if row is None:
                 diagnose('health_missing', policy+':'+strategy)
@@ -422,9 +426,11 @@ def _health_coverage(health: list[dict], epoch: str | None, session: str, diagno
 
 
 def _accepted_envelope(path: Path, generation: str, session: str, commit: str, *, purpose: str | None = None) -> dict:
-    if path.stat().st_size > MAX_BYTES:
+    from .source_inputs import FULL_FILING_MAX_BYTES, FULL_FILING_MAX_NODES
+    limits = {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES} if purpose is None else {}
+    if path.stat().st_size > limits.get('max_bytes', MAX_BYTES):
         raise ValueError('source byte bound')
-    envelope = SourceInputStore.decode(path.read_text())
+    envelope = SourceInputStore.decode(path.read_text(), **limits)
     identity = envelope['identity']
     keys={'generation','session','commit','configuration'} | ({'purpose'} if purpose else set())
     if (set(envelope) != {'version','identity','acquired_at','payload','digest'} or
@@ -432,7 +438,7 @@ def _accepted_envelope(path: Path, generation: str, session: str, commit: str, *
             set(identity)!=keys or identity.get('purpose')!=purpose or
             identity['generation']!=generation or identity['session']!=session or identity['commit']!=commit or
             not isinstance(identity['configuration'],str) or not identity['configuration'] or
-            envelope['digest']!=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest() or
+            envelope['digest']!=hashlib.sha256(SourceInputStore.encode(envelope['payload'], **limits).encode()).hexdigest() or
             not isinstance(envelope['acquired_at'],datetime) or envelope['acquired_at'].tzinfo is None or
             envelope['acquired_at']>datetime.now(timezone.utc) or not isinstance(envelope['payload'],dict)):
         raise ValueError('source identity/content conflict')
@@ -485,6 +491,32 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose) 
         identity = envelope['identity']
         result['configuration'] = identity['configuration']
         result['acquired_at'] = envelope['acquired_at'].isoformat()
+        from .congress_policy import declared_exclusions, audit_scope, POLICY as CONGRESS_POLICY
+        exclusions = declared_exclusions(envelope['payload'])
+        congress_config = ({'congress_disclosure_policy': CONGRESS_POLICY,
+                            'disabled_strategies': exclusions} if exclusions else {})
+        congress_scope = audit_scope(envelope['payload'], congress_config, session,
+                                    now=envelope['acquired_at'], replay=True)
+        if exclusions:
+            result['declared_exclusions'] = exclusions
+        if congress_scope is not None:
+            result['congress_audit_scope'] = congress_scope
+        from .filing_policy_validation import validate_filing_comparison_policy
+        graph = envelope['payload'].get('edgar', {}).get('filing_evidence')
+        filing_config = ({'filing_evidence_policy': graph.get('policy'),
+                          'filing_comparison_policy': graph.get('coverage', {}).get('comparator_policy'),
+                          'filing_attribution_policy': graph.get('coverage', {}).get('attribution_policy')}
+                         if isinstance(graph, dict) else {})
+        filing_scope = validate_filing_comparison_policy(envelope['payload'], filing_config)
+        if filing_scope is not None:
+            result['filing_comparison_scope'] = filing_scope
+        from .filing_attribution_validation import validate_filing_attribution_policy, filing_source_error_sha256
+        attribution_scope = validate_filing_attribution_policy(envelope['payload'], filing_config)
+        if attribution_scope is not None:
+            result['filing_attribution_scope'] = attribution_scope
+        source_error_digest = filing_source_error_sha256(envelope['payload'].get('edgar'))
+        if source_error_digest is not None:
+            result['filing_source_error_sha256'] = source_error_digest
         required={source for strategy in get_paper_trade_strategies() for source in strategy.data_sources if source!='openbb'}
         for source in sorted(required-set(envelope['payload'])):
             diagnose('accepted_source_missing',source)
@@ -601,7 +633,9 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
              'screen_failure_count':row['screen_failure_count'],'failures':row['failures']}
             for row in attempts if row['action']=='preflight' and (row['preflight_ok'] is not True or row['failures'])
         ]
-        epoch,health = _metrics(state,generation,session,commit,diagnose)
+        report['sources'] = _sources(state,generation,session,commit,diagnose)
+        disabled = report['sources'].get('declared_exclusions', {})
+        epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
         report['epoch_id'] = epoch
         report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
         report['cohorts'] = {name:_book(state,name,generation,session,epoch,diagnose) for name in EXPECTED_COHORTS}
@@ -613,19 +647,51 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             # Completion records the phase, validity records accepted inputs.
             row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
-        report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose)
+        report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled)
+        try:
+            expected_attribution = report['sources'].get('filing_attribution_scope')
+            source_error_digest = report['sources'].get('filing_source_error_sha256')
+            if expected_attribution is not None or source_error_digest is not None:
+                from .filing_attribution_validation import validate_filing_attribution_health
+                strategy_sources = {strategy.name: strategy.data_sources for strategy in get_paper_trade_strategies()
+                                  if 'edgar' in strategy.data_sources and strategy.name not in disabled
+                                  and not getattr(strategy, 'retirement_reason', None)}
+                validate_filing_attribution_health(health, {row['policy_id'] for row in health},
+                    set(strategy_sources), expected_attribution, expected_error_sha256=source_error_digest,
+                    strategy_sources=strategy_sources)
+            elif any('filing_attribution_scope' in row['evidence'] for row in health):
+                raise ValueError('unbound filing attribution health')
+        except (ValueError, TypeError, KeyError):
+            diagnose('filing_attribution_scope_conflict')
         try:
             scope_limits = source_scope_limits_from_health(health)
+            expected_congress_scope = report['sources'].get('congress_audit_scope')
+            if scope_limits.get('congress') != expected_congress_scope:
+                diagnose('congress_audit_scope_conflict')
+            if disabled.get('congressional_trades') == 'display_audit_only_v1':
+                for row in health:
+                    if row['strategy'] != 'congressional_trades':
+                        continue
+                    evidence = row['evidence']
+                    if (not _declared_exclusion(row, disabled)
+                            or type(row.get('signal_count')) is not int
+                            or type(evidence.get('candidate_count')) is not int
+                            or evidence['candidate_count'] != 0
+                            or evidence.get('data_sources') != ['congress', 'yfinance']
+                            or canonical_source_scope_limits(evidence.get('source_scope_limits', {}))
+                               != ({'congress': expected_congress_scope} if expected_congress_scope is not None else {})):
+                        diagnose('congress_audit_scope_conflict', row['policy_id'])
             if scope_limits:
                 report['source_scope_limits'] = scope_limits
         except (ValueError, TypeError, KeyError):
             diagnose('source_scope_limits_invalid')
-        report['disabled_strategies'] = {row['strategy']: row['evidence']['reason'] for row in health if _declared_exclusion(row)}
+        report['disabled_strategies'] = {row['strategy']: row['evidence']['reason'] for row in health if _declared_exclusion(row,disabled)}
         report['input_coverage_valid'] = epoch is not None and not report['source_health_failures']
-        report['sources'] = _sources(state,generation,session,commit,diagnose)
         report['volatility'] = _volatility(state,generation,session,commit,report['sources'],report['candidate_input_issues'],report['cohorts'],diagnose)
         failed_sources = {item['provider'] for item in report['sources']['unresolved']}
-        required_failures = {source for strategy in get_paper_trade_strategies() for source in strategy.data_sources if source!='openbb'} & failed_sources
+        required_failures = {source for strategy in get_paper_trade_strategies()
+            if strategy.name not in report['disabled_strategies']
+            for source in strategy.data_sources if source!='openbb'} & failed_sources
         if required_failures:
             report['input_coverage_valid'] = False
         for item in report['sources']['unresolved']:
@@ -696,6 +762,18 @@ def render_operational_report(report: dict) -> str:
             lines.append(f"- {attempt['attempt_id']}: {label}; {status}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
     if report.get('disabled_strategies'):
         lines.extend(['', 'Policy exclusions: ' + ', '.join(f'{name} ({reason})' for name, reason in sorted(report['disabled_strategies'].items())) + '.'])
+    if report['sources'].get('filing_comparison_scope'):
+        scope = report['sources']['filing_comparison_scope']
+        lines.extend(['', f"Rows permitted for current-only filing assessment: {scope['current_only_rows']} "
+            f"({scope['current_only_absent_rows']} without an earlier same-form filing; "
+            f"{scope['current_only_ambiguous_rows']} without a unique earlier comparator). "
+            'The policy requires the full current filing and prohibits comparison claims; these counts do not establish model completion.'])
+    if report['sources'].get('filing_attribution_scope'):
+        scope = report['sources']['filing_attribution_scope']
+        lines.extend(['', f"Filing security attribution: {scope['verified_target_rows']} verified target rows, "
+            f"{scope['outside_rows']} outside the declared universe, {scope['unresolved_rows']} unresolved, "
+            f"from {scope['total_rows']} retained discovery rows. "
+            'Unresolved rows remain non-actionable. These counts establish neither full attribution nor model completion.'])
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:
@@ -711,6 +789,11 @@ def render_operational_report(report: dict) -> str:
                 lines.append(f"- USAspending: verified listed targets only; {counts['verified_listed_target']} verified listed, "
                     f"{counts['verified_no_listed_target']} proven no-listed, {counts['unresolved']} unresolved awards. "
                     'Unresolved awards remain nonactionable attribution gaps, not proven exclusions.')
+            elif provider == 'congress':
+                lines.append(f"- Congressional disclosures: display/audit only; trading signals and model context disabled. "
+                    f"{scope['filing_counts']['house']} House and {scope['filing_counts']['senate']} Senate filings, "
+                    f"{scope['printed_row_count']} printed transaction rows; audit status {scope['status']}. "
+                    'Senate coverage, extraction accuracy and historical first availability remain unverified.')
             else:
                 lines.append(f"- CourtListener: docket metadata only for declared issuer and case queries, not marketwide; "
                     f"{scope['issuer_count']} issuers, {scope['case_count']} cases, {scope['docket_count']} dockets; "

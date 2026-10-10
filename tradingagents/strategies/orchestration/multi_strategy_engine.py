@@ -309,6 +309,10 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from .congress_policy import configured
+        configured(self.ar_config)
+        from tradingagents.strategies.data_sources.filing_attribution_policy import configured as filing_attribution_configured
+        filing_attribution_configured(self.ar_config)
 
         # Load strategies (paper-trade only)
         self.paper_trade_strategies = strategies or get_paper_trade_strategies()
@@ -403,10 +407,33 @@ class MultiStrategyEngine:
         Returns enriched, deduped signals, regime model, and health records. These can be
         shared across cohorts so LLM non-determinism doesn't confound results.
         """
-        regime_model = self._build_regime_model(data)
-        regime_model.setdefault("timestamp", datetime.now().isoformat())
+        from .congress_policy import configured, audit_scope, DECLARATION_KEY, POLICY as CONGRESS_POLICY
+        congress_audit_scope = audit_scope(data, self.ar_config, trading_date)
+        signal_data = ({key: value for key, value in data.items() if key not in ('congress', DECLARATION_KEY)}
+                       if configured(self.ar_config) else data)
         from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
         scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
+        from .filing_policy_validation import validate_filing_comparison_policy
+        filing_comparison_scope = None
+        try:
+            filing_comparison_scope = validate_filing_comparison_policy(data, self.ar_config)
+        except ValueError:
+            scope_errors['edgar'] = 'invalid_filing_comparison_policy'
+        from .filing_attribution_validation import validate_filing_attribution_policy
+        from tradingagents.strategies.data_sources.filing_attribution_policy import (
+            configured as filing_attribution_configured, signal_edgar,
+        )
+        filing_attribution_scope = None
+        try:
+            filing_attribution_scope = validate_filing_attribution_policy(data, self.ar_config)
+            if filing_attribution_configured(self.ar_config):
+                signal_data = dict(signal_data, edgar=(signal_edgar(data['edgar'], filing_attribution_scope)
+                    if filing_attribution_scope is not None else {}))
+        except ValueError:
+            scope_errors['edgar'] = 'invalid_filing_attribution_policy'
+            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        regime_model = self._build_regime_model(signal_data)
+        regime_model.setdefault("timestamp", datetime.now().isoformat())
         if 'courtlistener' in scope_proofs:
             from .scoped_sources import litigation_context
             regime_model['litigation_context'] = litigation_context(data, scope_proofs['courtlistener'])
@@ -432,11 +459,16 @@ class MultiStrategyEngine:
             disabled_reason = self.ar_config.get("disabled_strategies", {}).get(strategy.name) or getattr(strategy, "retirement_reason", None)
             if disabled_reason:
                 from tradingagents.strategies.metrics.identity import _stable_id
+                disabled_evidence = {"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}
+                if strategy.name == 'congressional_trades' and disabled_reason == CONGRESS_POLICY:
+                    disabled_evidence['disclosure_policy'] = CONGRESS_POLICY
+                    if congress_audit_scope is not None:
+                        disabled_evidence['source_scope_limits'] = {'congress': congress_audit_scope}
                 health.append(StrategyHealthRecord(
                     health_id=_stable_id("health", epoch_id, date.fromisoformat(trading_date), policy_id, strategy.name),
                     epoch_id=epoch_id, session=date.fromisoformat(trading_date), policy_id=policy_id,
                     strategy=strategy.name, status="disabled_by_policy", signal_count=0,
-                    evidence={"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}))
+                    evidence=disabled_evidence))
                 continue
             try:
                 params = strategy.get_default_params(horizon=horizon)
@@ -444,7 +476,7 @@ class MultiStrategyEngine:
                 with candidate_universe(universe):
                     candidates = (admit_candidates(strategy.name, [], budget=None)
                         if any(source in scope_errors for source in strategy.data_sources)
-                        else strategy.screen(data, trading_date, params))
+                        else strategy.screen(signal_data, trading_date, params))
                     if not hasattr(candidates, "admission_manifest"):
                         candidates = admit_candidates(strategy.name, candidates, budget=None)
                 admission_manifest = candidates.admission_manifest
@@ -455,7 +487,7 @@ class MultiStrategyEngine:
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
             if candidates:
-                filing_options = ({'filing_data': data, 'universe': universe}
+                filing_options = ({'filing_data': signal_data, 'universe': universe}
                     if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' else {})
                 candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model, **filing_options)
             universe_assessments = []
@@ -517,6 +549,9 @@ class MultiStrategyEngine:
                 health_record.evidence['filing_assessments'] = [deepcopy({
                     'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
                     'analysis_type': c.metadata.get('analysis_type'),
+                    'filing_assessment_scope': c.metadata.get('filing_assessment_scope'),
+                    'prior_status': c.metadata.get('prior_status'),
+                    'comparison_binding': c.metadata.get('comparison_binding'),
                     'filing_evidence_ref': c.metadata.get('filing_evidence_ref'),
                     'filing_evidence_refs': c.metadata.get('filing_evidence_refs'),
                     'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
@@ -528,6 +563,11 @@ class MultiStrategyEngine:
                 }) for c in full_filing_candidates]
             if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' and 'edgar' in strategy.data_sources:
                 health_record.evidence['filing_source_coverage'] = data.get('edgar', {}).get('filing_evidence', {}).get('coverage', {})
+                if filing_comparison_scope is not None:
+                    health_record.evidence['filing_comparison_scope'] = dict(filing_comparison_scope)
+                if filing_attribution_scope is not None:
+                    from copy import deepcopy
+                    health_record.evidence['filing_attribution_scope'] = deepcopy(filing_attribution_scope)
             health.append(health_record)
             for c in candidates:
                 if c.metadata.get("equity_universe_excluded"):
@@ -1831,6 +1871,8 @@ class MultiStrategyEngine:
 
         self._emit("phase", phase="data_fetch", status="starting")
         data: dict[str, Any] = {}
+        from .congress_policy import declaration
+        data.update(declaration(self.ar_config))
         if decision_policy == PROSPECTIVE:
             data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
                                             'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
@@ -1894,7 +1936,8 @@ class MultiStrategyEngine:
         if "fred" in needed_sources and "fred" in available:
             api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
-            api_fetches["congress"] = (self._fetch_congress_data, (end_date,))
+            api_fetches["congress"] = (self._fetch_congress_data,
+                (end_date, acquisition_deadline) if self.ar_config.get('congress_disclosure_policy') else (end_date,))
         if "noaa" in needed_sources and "noaa" in available:
             api_fetches["noaa"] = (self._fetch_noaa_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
         if "usda" in needed_sources and "usda" in available:
@@ -2240,7 +2283,17 @@ class MultiStrategyEngine:
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         filing_policy = self.ar_config.get('filing_evidence_policy')
-        monitor = EventMonitor(self.registry, filing_policy=filing_policy) if filing_policy else EventMonitor(self.registry)
+        comparator_policy = self.ar_config.get('filing_comparison_policy')
+        parser_policy = self.ar_config.get('filing_parser_policy')
+        attribution_policy = self.ar_config.get('filing_attribution_policy')
+        monitor_options = {'filing_policy': filing_policy} if filing_policy else {}
+        if comparator_policy is not None:
+            monitor_options['comparator_policy'] = comparator_policy
+        if parser_policy is not None:
+            monitor_options['parser_policy'] = parser_policy
+        if attribution_policy is not None:
+            monitor_options['attribution_policy'] = attribution_policy
+        monitor = EventMonitor(self.registry, **monitor_options)
         monitor.as_of = trading_date
         result, failures = {}, []
         company_map = None
@@ -2398,11 +2451,21 @@ class MultiStrategyEngine:
         logger.info("FRED fetch: %d series loaded", len(result))
         return result
 
-    def _fetch_congress_data(self, trading_date: str) -> dict[str, Any]:
-        """Fetch recent congressional stock trades."""
+    def _fetch_congress_data(self, trading_date: str, acquisition_deadline: float | None = None) -> dict[str, Any]:
+        """Fetch the declared display snapshot or the legacy trading input."""
         source = self.registry.get("congress")
         if source is None:
             return {}
+        from .congress_policy import configured
+        if configured(self.ar_config):
+            import time
+            from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
+            deadline = acquisition_deadline if acquisition_deadline is not None else current_provider_deadline('congress')
+            if deadline is None:
+                deadline = time.monotonic() + 90
+            return source.get_audit_snapshot(
+                date_filed_after=(date.fromisoformat(trading_date) - timedelta(days=30)).isoformat(),
+                date_filed_before=trading_date, absolute_deadline=deadline)
 
         result: dict[str, Any] = {}
         try:

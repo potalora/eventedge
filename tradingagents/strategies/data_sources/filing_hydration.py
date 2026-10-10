@@ -17,6 +17,8 @@ import re
 
 from .edgar_source import normalize_filing_form, filing_form_family
 from .equity_universe import EquityUniverse
+from .filing_comparison_policy import (CURRENT_ONLY_POLICY, NO_UNIQUE_PRIOR,
+    checked_history, history_comparison, current_only_binding)
 from .fetch_errors import SourceFetchError, source_date, source_fetch_error
 from .request_policy import current_provider_deadline, provider_clock_time, provider_timeout
 
@@ -132,7 +134,8 @@ def _issuer_binding(evidence, universe, company_symbols):
 
 def hydrate_filings(source, collections: dict, *, equity_universe=None,
                     company_map=None, max_workers=16,
-                    max_evidence_bytes=512 * 1024 * 1024) -> dict:
+                    max_evidence_bytes=512 * 1024 * 1024, comparator_policy=None,
+                    attribution_policy=None) -> dict:
     """Hydrate all categories once under the caller's unchanged absolute budget.
 
     Output rows contain corpus references, never duplicated full narratives.
@@ -140,6 +143,11 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     `coverage.complete` requires selected structural evidence, proven K/Q prior
     comparisons and ownership binding; model adequacy remains not assessed.
     """
+    if comparator_policy not in (None, CURRENT_ONLY_POLICY):
+        raise ValueError('Unknown filing comparison policy')
+    from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY, attribution_binding, build_scope
+    if attribution_policy not in (None, ATTRIBUTION_POLICY):
+        raise ValueError('invalid_filing_attribution')
     if current_provider_deadline('edgar') is None:
         raise ValueError('An inherited EDGAR deadline is required')
     if type(max_workers) is not int or not 1 <= max_workers <= 16:
@@ -264,6 +272,11 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             history = histories.get(cik, {})
             if 'failure' in history:
                 continue
+            if comparator_policy == CURRENT_ONLY_POLICY:
+                try:
+                    checked_history(history, cik)
+                except (KeyError, TypeError, AttributeError, ValueError, SourceFetchError):
+                    continue
             candidate, _ = _nearest(history.get('filings', []), spec['form'], spec['date'])
             floor = candidate['filing_date'] if candidate else '0001-01-01'
             for descriptor in history.get('archives', []):
@@ -273,39 +286,83 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                         partial(source.get_company_submission_archive, cik, descriptor))
     _run_tasks([archive_tasks[key] for key in sorted(archive_tasks)], max_workers, accept)
 
-    comparisons = {}
+    # Normal comparisons keep the existing nearest-date acquisition scope.
+    # Only proven no-unique candidates request older archives for permission.
+    expanded_history = set()
+    if comparator_policy == CURRENT_ONLY_POLICY:
+        additional = {}
+        for key in annual:
+            current = corpus.get(key)
+            if current is None or current['structural_status'] != 'complete':
+                continue
+            first, _ = history_comparison(current, histories,
+                {cik + '/' + name: value for (cik, name), value in archives.items()},
+                require_full_history=False)
+            if first['status'] not in NO_UNIQUE_PRIOR:
+                continue
+            expanded_history.add(key)
+            for cik in first['issuer_ciks']:
+                for descriptor in histories[cik]['archives']:
+                    archive_key = (cik, descriptor['name'])
+                    if descriptor['filingFrom'] < current['filing_date'] and archive_key not in archive_tasks:
+                        additional[archive_key] = (('archive', archive_key),
+                            partial(source.get_company_submission_archive, cik, descriptor))
+        archive_tasks.update(additional)
+        _run_tasks([additional[key] for key in sorted(additional)], max_workers, accept)
+
+    comparisons, selected_proofs = {}, {}
     for key in annual:
         if key not in corpus:
             comparisons[key] = {'status': 'current_evidence_unavailable'}
             continue
         spec, selected = specs[key], []
         filers = _role_ciks(corpus[key], 'FILER')
-        status = 'missing_issuer_roles' if not filers else 'selected'
-        for cik in filers:
-            history = histories.get(cik, {'failure': _failure('missing_history')})
-            if 'failure' in history:
-                status = 'unproven_prior'
-                break
-            rows = list(history.get('filings', []))
-            relevant = [archive_key for archive_key in archive_tasks if archive_key[0] == cik]
-            if any('failure' in archives.get(archive_key, {}) for archive_key in relevant):
-                status = 'unproven_prior'
-                break
-            for archive_key in relevant:
-                rows.extend(archives[archive_key]['filings'])
-            candidate, candidate_status = _nearest(rows, spec['form'], spec['date'])
-            if candidate_status != 'selected':
-                status = candidate_status
-                break
-            selected.append((cik, candidate))
-        if status == 'selected' and len({row['accession_number'] for _, row in selected}) != 1:
-            status = 'unresolved_joint_prior'
-        if status == 'selected' and any(row != selected[0][1] for _, row in selected):
-            status = 'conflicting_history_metadata'
-        if status != 'selected':
-            comparisons[key] = {'status': status, 'issuer_ciks': filers}
-            continue
-        cik, candidate = selected[0]  # Every actual FILER selected this exact accession.
+        if comparator_policy == CURRENT_ONLY_POLICY:
+            comparison, proof = history_comparison(corpus[key], histories,
+                {cik + '/' + name: value for (cik, name), value in archives.items()},
+                require_full_history=key in expanded_history)
+            status = comparison['status']
+            if status != 'selected':
+                if status in NO_UNIQUE_PRIOR and key in expanded_history and corpus[key]['structural_status'] == 'complete':
+                    try:
+                        provider_timeout('edgar')
+                        permission = current_only_binding(corpus[key], comparison, proof)
+                        provider_timeout('edgar')
+                    except SourceFetchError:
+                        comparison['status'] = 'comparison_proof_timeout'
+                    else:
+                        comparison['binding'] = permission
+                comparisons[key] = comparison
+                continue
+            cik, candidate = filers[0], comparison['candidate']
+            selected_proofs[key] = proof
+        else:
+            status = 'missing_issuer_roles' if not filers else 'selected'
+            for cik in filers:
+                history = histories.get(cik, {'failure': _failure('missing_history')})
+                if 'failure' in history:
+                    status = 'unproven_prior'
+                    break
+                rows = list(history.get('filings', []))
+                relevant = [archive_key for archive_key in archive_tasks if archive_key[0] == cik]
+                if any('failure' in archives.get(archive_key, {}) for archive_key in relevant):
+                    status = 'unproven_prior'
+                    break
+                for archive_key in relevant:
+                    rows.extend(archives[archive_key]['filings'])
+                candidate, candidate_status = _nearest(rows, spec['form'], spec['date'])
+                if candidate_status != 'selected':
+                    status = candidate_status
+                    break
+                selected.append((cik, candidate))
+            if status == 'selected' and len({row['accession_number'] for _, row in selected}) != 1:
+                status = 'unresolved_joint_prior'
+            if status == 'selected' and any(row != selected[0][1] for _, row in selected):
+                status = 'conflicting_history_metadata'
+            if status != 'selected':
+                comparisons[key] = {'status': status, 'issuer_ciks': filers}
+                continue
+            cik, candidate = selected[0]  # Every actual FILER selected this exact accession.
         prior_acc = candidate['accession_number']
         comparisons[key] = {'status': 'selected', 'accession': prior_acc, 'issuer_ciks': filers}
         prior_spec = {'form': candidate['form'], 'date': candidate['filing_date'],
@@ -330,6 +387,8 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             comparison['status'] = 'available'
             history_refs = comparison['issuer_ciks']
             archive_keys = sorted(ref for ref in archive_tasks if ref[0] in history_refs)
+            if key in selected_proofs:
+                archive_keys = [tuple(ref.split('/', 1)) for ref in sorted(selected_proofs[key]['archives'])]
             archive_refs = [cik + '/' + name for cik, name in archive_keys]
             # Exact digest formula shared with the model boundary: canonical
             # JSON of these once-stored complete observations, UTF-8 SHA-256.
@@ -366,8 +425,13 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                 row['text_status'] = 'available' if value['structural_status'] == 'complete' else 'insufficient'
                 failed = value['structural_status'] != 'complete'
                 binding = _issuer_binding(value, equity_universe, symbols)
+                attribution_permission = False
+                if attribution_policy and value['structural_status'] == 'complete':
+                    # This validates joint roles without changing their status.
+                    binding = attribution_binding(value, equity_universe, symbols)
+                    attribution_permission = True
                 row['issuer_binding'] = binding
-                failed = failed or binding['status'] != 'verified'
+                failed = failed or (binding['status'] != 'verified' and not attribution_permission)
                 if filing_form_family(value['form']) in _OWNERSHIP:
                     row['subject_attribution_verified'] = binding['execution_status'] == 'verified'
                     row['subject_ticker'] = binding.get('ticker', '')
@@ -376,7 +440,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                         outside_ownership += 1
                     elif binding['execution_status'] != 'verified':
                         unresolved_ownership += 1
-                        failed = True
+                        failed = failed or not attribution_permission
             if key in comparisons:
                 comparison = comparisons[key]
                 if row.get('requires_prior'):
@@ -386,10 +450,14 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                     row['prior_evidence_ref'] = comparison['accession']
                     row['comparison_binding'] = comparison['binding']
                 elif row.get('requires_prior'):
-                    failed = True
+                    if comparison.get('binding', {}).get('policy') == CURRENT_ONLY_POLICY:
+                        row['comparison_binding'] = comparison['binding']
+                        row['filing_assessment_scope'] = 'current_only'
+                    else:
+                        failed = True
             failed_rows += int(failed)
     deadline_exhausted = provider_clock_time('edgar') >= current_provider_deadline('edgar')
-    return {'policy': POLICY, 'collections': copied, 'corpus': dict(sorted(corpus.items())),
+    result = {'policy': POLICY, 'collections': copied, 'corpus': dict(sorted(corpus.items())),
             'history_corpus': dict(sorted(histories.items())),
             'archive_corpus': {cik + '/' + name: value for (cik, name), value in sorted(archives.items())},
             'discovery_coverage': discovery_coverage,
@@ -399,6 +467,14 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                          'required_rows': sum(map(len, refs.values())), 'failed_rows': failed_rows,
                          'unique_current_accessions': len(refs), 'acquired_accessions': len(corpus),
                          'prior_policy': PRIOR_POLICY,
+                         **({'comparator_policy': comparator_policy,
+                             'current_only_rows': sum(row.get('filing_assessment_scope') == 'current_only'
+                                 for rows in refs.values() for row in rows),
+                             'current_only_absent_rows': sum(row.get('filing_assessment_scope') == 'current_only'
+                                 and row.get('prior_status') == 'missing_prior' for rows in refs.values() for row in rows),
+                             'current_only_ambiguous_rows': sum(row.get('filing_assessment_scope') == 'current_only'
+                                 and row.get('prior_status') == 'ambiguous_prior_date' for rows in refs.values() for row in rows)}
+                            if comparator_policy else {}),
                          'prior_required_accessions': len(annual),
                          'prior_required_rows': sum(row.get('requires_prior', False)
                                                     for rows in refs.values() for row in rows),
@@ -411,3 +487,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                          'rejected_evidence_objects': rejected_objects,
                          'deadline_exhausted': deadline_exhausted,
                          'analysis_adequacy': 'not_assessed'}}
+    if attribution_policy:
+        result['coverage']['attribution_policy'] = attribution_policy
+        result['attribution_scope'] = build_scope(result, copied, equity_universe, company_map)
+    return result

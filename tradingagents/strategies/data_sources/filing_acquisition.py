@@ -69,12 +69,20 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
         response.close()
     provider_timeout('edgar')
     try:
-        parsed = parse_submission(
-            raw, expected_accession=accession, expected_form=form_type,
-            expected_date=filing_date, observed_at=observed_at,
-            max_submission_bytes=max_submission_bytes)
-        provider_timeout('edgar')
-        result = build_evidence(parsed, required_exhibits=required_exhibits)
+        from .filing_parser_dispatch import current_dispatcher, dispatch_evidence
+        if current_dispatcher() is not None:
+            result = dispatch_evidence(
+                raw, expected_accession=accession, expected_form=form_type,
+                expected_date=filing_date, observed_at=observed_at,
+                max_submission_bytes=max_submission_bytes,
+                required_exhibits=required_exhibits)
+        else:
+            parsed = parse_submission(
+                raw, expected_accession=accession, expected_form=form_type,
+                expected_date=filing_date, observed_at=observed_at,
+                max_submission_bytes=max_submission_bytes)
+            provider_timeout('edgar')
+            result = build_evidence(parsed, required_exhibits=required_exhibits)
     except EvidenceError:
         raise SourceFetchError('SEC submission evidence invalid', reason_code='invalid_response') from None
     provider_timeout('edgar')

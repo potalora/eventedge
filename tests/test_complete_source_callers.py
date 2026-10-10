@@ -68,6 +68,7 @@ def test_engine_congress_path_requests_complete_window():
 
     source = CongressSource()
     engine = object.__new__(MultiStrategyEngine)
+    engine.ar_config = {}
     engine.registry = SimpleNamespace(get=lambda name: source)
     result = engine._fetch_congress_data('2026-10-09')
     assert result == {'recent_trades': [], 'coverage': {'complete': True, 'date_to': '2026-10-09'}}

@@ -21,15 +21,33 @@ logger = logging.getLogger(__name__)
 class EventMonitor:
     """Polls data sources for actionable events."""
 
-    def __init__(self, registry: Any, *, filing_policy: str | None = None) -> None:
+    def __init__(self, registry: Any, *, filing_policy: str | None = None,
+                 comparator_policy: str | None = None,
+                 parser_policy: str | None = None,
+                 attribution_policy: str | None = None) -> None:
         """
         Args:
             registry: DataSourceRegistry instance.
         """
         if filing_policy not in (None, 'complete_submission_v1'):
             raise ValueError('Unknown filing acquisition policy')
+        if comparator_policy is not None:
+            from tradingagents.strategies.data_sources.filing_comparison_policy import CURRENT_ONLY_POLICY
+            if comparator_policy != CURRENT_ONLY_POLICY or filing_policy != 'complete_submission_v1':
+                raise ValueError('Invalid filing comparator policy')
+        if parser_policy is not None:
+            from tradingagents.strategies.data_sources.filing_parser_dispatch import POLICY
+            if parser_policy != POLICY or filing_policy != 'complete_submission_v1':
+                raise ValueError('Invalid filing parser policy')
+        if attribution_policy is not None:
+            from tradingagents.strategies.data_sources.filing_attribution_policy import POLICY
+            if attribution_policy != POLICY or filing_policy != 'complete_submission_v1':
+                raise ValueError('Invalid filing attribution policy')
         self.registry = registry
         self.filing_policy = filing_policy
+        self.comparator_policy = comparator_policy
+        self.parser_policy = parser_policy
+        self.attribution_policy = attribution_policy
         self.as_of: str | None = None
         self.equity_universe = None
         self._last_poll: dict[str, str] = {}  # source -> last poll timestamp
@@ -47,8 +65,13 @@ class EventMonitor:
         if source is None or not source.is_available():
             raise SourceFetchError('Required source access unavailable', reason_code='provider_error')
         from tradingagents.strategies.data_sources.filing_hydration import hydrate_filings
-        return hydrate_filings(source, collections, equity_universe=self.equity_universe,
-                               company_map=company_map, max_workers=max_workers)
+        from contextlib import nullcontext
+        from tradingagents.strategies.data_sources.filing_parser_dispatch import parser_scope
+        with parser_scope() if self.parser_policy is not None else nullcontext():
+            return hydrate_filings(source, collections, equity_universe=self.equity_universe,
+                                   company_map=company_map, max_workers=max_workers,
+                                   comparator_policy=self.comparator_policy,
+                                   attribution_policy=self.attribution_policy)
 
     def poll_edgar_filings(
         self,

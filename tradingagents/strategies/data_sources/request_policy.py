@@ -67,21 +67,25 @@ def provider_budget(provider, deadline, *, clock=None, sleep=None,
 
 
 @contextmanager
-def provider_subbudget(provider, *, maximum_seconds, absolute_deadline):
-    """Narrow an acquisition scope without consuming a physical request slot."""
+def provider_subbudget(provider, *, maximum_seconds, absolute_deadline,
+                       max_attempts=None):
+    """Narrow a deadline/retry scope without consuming a physical request slot."""
     if (type(maximum_seconds) not in (int, float) or not math.isfinite(maximum_seconds)
             or maximum_seconds <= 0 or type(absolute_deadline) not in (int, float)
             or not math.isfinite(absolute_deadline)):
         raise ValueError("invalid provider subbudget")
+    if max_attempts is not None and (type(max_attempts) is not int or not 1 <= max_attempts <= 5):
+        raise ValueError("invalid provider subbudget attempts")
     parent = _CURRENT.get()
     if parent is not None and parent.provider == provider:
         deadline = min(parent.deadline, absolute_deadline, parent.clock() + maximum_seconds)
         options = dict(clock=parent.clock, sleep=parent.sleep, random_fn=parent.random_fn,
-                       max_attempts=parent.max_attempts, limits=parent.limits,
+                       max_attempts=min(parent.max_attempts, max_attempts) if max_attempts is not None else parent.max_attempts,
+                       limits=parent.limits,
                        diagnostics=parent.diagnostics)
     else:
         deadline = min(absolute_deadline, time.monotonic() + maximum_seconds)
-        options = {}
+        options = {} if max_attempts is None else {'max_attempts': max_attempts}
     with provider_budget(provider, deadline, **options) as diagnostics:
         yield diagnostics
 

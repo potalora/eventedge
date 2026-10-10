@@ -22,10 +22,14 @@ def _safe_id(value: object) -> bool:
 
 def canonical_source_scope_limits(value: object) -> dict[str, dict]:
     """Allowlisted public scope facts, never provider prose or raw payloads."""
-    if not isinstance(value, Mapping) or not set(value) <= {'usaspending', 'courtlistener'}:
+    if not isinstance(value, Mapping) or not set(value) <= {'usaspending', 'courtlistener', 'congress'}:
         raise ValueError('source scope limits are invalid')
     output = {}
     for provider, row in value.items():
+        if provider == 'congress':
+            from tradingagents.strategies.data_sources.congress_disclosure_audit import canonical_audit_summary
+            output[provider] = canonical_audit_summary(row)
+            continue
         fields = ({'policy', 'scope_sha256', 'counts', 'attribution_complete', 'coverage_basis'}
                   if provider == 'usaspending' else
                   {'policy', 'scope_sha256', 'target_manifest_sha256', 'coverage_basis', 'content_kind',
@@ -68,9 +72,16 @@ def source_scope_limits_from_health(records) -> dict[str, dict]:
         sources = evidence.get('data_sources')
         errors = evidence.get('provider_errors', {})
         status = record.get('status') if isinstance(record, Mapping) else record.status
+        strategy = record.get('strategy') if isinstance(record, Mapping) else record.strategy
+        signal_count = record.get('signal_count') if isinstance(record, Mapping) else record.signal_count
+        congress_audit = (set(scoped) == {'congress'} and strategy == 'congressional_trades'
+            and status == _DISABLED and signal_count == 0
+            and evidence.get('reason') == 'display_audit_only_v1'
+            and evidence.get('disclosure_policy') == 'display_audit_only_v1')
         if (not isinstance(sources, (list, tuple)) or any(not isinstance(source, str) for source in sources)
-                or not isinstance(errors, Mapping) or status == _DISABLED
-                or any(provider not in sources or provider in errors for provider in scoped)):
+                or not isinstance(errors, Mapping) or (status == _DISABLED and not congress_audit)
+                or ('congress' in scoped and not congress_audit)
+                or any(provider not in sources or (provider in errors and not congress_audit) for provider in scoped)):
             raise ValueError('source scope limits lack matching source provenance')
         for provider, summary in scoped.items():
             if provider in combined and combined[provider] != summary:

@@ -1655,7 +1655,8 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
             source_config = owner._base_config.get('autoresearch', {})
             if (source_config.get('filing_evidence_policy') == 'complete_submission_v1'
                     or source_config.get('courtlistener_scope_policy')
-                    or source_config.get('award_attribution_policy')):
+                    or source_config.get('award_attribution_policy')
+                    or source_config.get('congress_disclosure_policy')):
                 from tradingagents.strategies.orchestration.multi_strategy_engine import _fetch_timeout_s
                 deadline = time.monotonic() + max(0.0, _fetch_timeout_s())
                 fetch_options['acquisition_deadline'] = deadline
