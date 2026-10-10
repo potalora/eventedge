@@ -129,6 +129,15 @@ def _line_finditer(pattern: bytes, raw: bytes):
             yield match
 
 
+def _native_pdf_wrapper(body: bytes) -> bool:
+    """Recognize bounded native PDF framing, without interpreting its content."""
+    opened = list(_line_finditer(rb'<PDF>(?=[\r\n])', body))
+    closed = list(_line_finditer(rb'</PDF>(?=[\r\n]|\Z)', body))
+    return (len(opened) == len(closed) == 1 and opened[0].end() < closed[0].start()
+            and not body[:opened[0].start()].strip() and not body[closed[0].end():].strip()
+            and bool(body[opened[0].end():closed[0].start()].strip()))
+
+
 def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
                      expected_date: str, observed_at: str,
                      max_submission_bytes=64 * 1024 * 1024, max_documents=2000) -> dict:
@@ -217,6 +226,18 @@ def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
                           'body_start': body_start, 'body_end': body_end,
                           'body_sha256': _sha(body), 'body': body})
     primary = [i for i, doc in enumerate(documents) if _form(doc['type']) == exact_form]
+    if len(primary) > 1 and exact_form in {'10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A'}:
+        # SEC INVALID_UNOFFICIAL_PDF requires official ASCII/HTML to precede
+        # supplemental PDF attachments. Keep every PDF in the full inventory;
+        # this identifies the official representation, not content equivalence.
+        official = [i for i in primary if documents[i]['filename'].lower().endswith(('.htm', '.html', '.txt'))]
+        if len(official) == 1:
+            first = official[0]
+            if all(index > first and documents[index]['sequence'] > documents[first]['sequence']
+                   and documents[index]['filename'].lower().endswith('.pdf')
+                   and _native_pdf_wrapper(documents[index]['body'])
+                   for index in primary if index != first):
+                primary = official
     if len(primary) != 1:
         raise EvidenceError('ambiguous_primary_document')
     acceptance = _one(values, 'ACCEPTANCE-DATETIME', optional=True)
@@ -234,12 +255,13 @@ def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
             'primary_index': primary[0]}
 
 
-def _visible_text(body: bytes) -> str:
+def _visible_text(body: bytes, *, soup=None) -> str:
     try:
         text = body.decode('utf-8')
     except UnicodeDecodeError:
         raise EvidenceError('unsupported_text_encoding') from None
-    soup = BeautifulSoup(text, 'html.parser')
+    if soup is None:
+        soup = BeautifulSoup(text, 'html.parser')
     tags = soup.find_all()
     inline, instance = {'ix'}, {'xbrli'}
     for tag in tags:
@@ -341,8 +363,13 @@ def build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 *
     by_name = {d['filename']: i for i, d in enumerate(documents)}
     selected = {primary_index}
     dependencies, issues = [], []
+    primary_soup = None
     if len(primary['body']) <= max_document_bytes and primary['filename'].lower().endswith(('.htm', '.html')):
         soup = BeautifulSoup(primary['body'], 'html.parser')
+        # Reuse only the verified ASCII bytes/text path; preserve the original
+        # BeautifulSoup encoding decisions for every other document.
+        if primary['body'].isascii() and soup.original_encoding == 'ascii':
+            primary_soup = soup
         for anchor in soup.find_all('a', href=True):
             href = str(anchor['href'])
             if len(href) > 4096:
@@ -390,7 +417,7 @@ def build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 *
                 text = _ownership_text(document, parsed)
                 representation = 'ownership_form_data'
             elif suffix.endswith(('.htm', '.html', '.txt')):
-                text = _visible_text(document['body'])
+                text = _visible_text(document['body'], soup=primary_soup if index == primary_index else None)
                 representation = 'full_visible_text'
             else:
                 raise EvidenceError('unsupported_document_format')

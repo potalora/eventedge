@@ -117,8 +117,10 @@ def _history_rows(data):
                 or not re.fullmatch(r'[0-9]{10}-[0-9]{2}-[0-9]{6}', accession)
                 or not isinstance(document, str)
                 or len(document) > 512 or not 1 <= len(document.split('/')) <= 8
-                or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', part)
-                       for part in document.split('/'))
+                # SEC legacy rows may record an empty primaryDocument. Preserve
+                # that missing value; complete submissions bind by accession.
+                or (document != '' and any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', part)
+                                           for part in document.split('/')))
                 or accession in seen):
             raise ValueError('invalid history row')
         seen.add(accession)
