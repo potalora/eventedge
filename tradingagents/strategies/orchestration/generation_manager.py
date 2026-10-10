@@ -138,6 +138,7 @@ def _daily_history_entry(result: dict, trading_date: str) -> dict:
         "execution_valid",
         "input_coverage_valid",
         "source_health_failures",
+        "source_scope_limits",
         "candidate_bar_quarantines",
         "error",
         "evidence_path",
@@ -199,7 +200,7 @@ def _valid_daily_cohort_results(
     from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
     )
-    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures
+    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures, aggregate_source_scope_limits
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         build_default_cohorts,
     )
@@ -212,6 +213,7 @@ def _valid_daily_cohort_results(
             cohort_results, trading_date
         )
         aggregate_source_health_failures(cohort_results, trading_date, require_coverage=True)
+        aggregate_source_scope_limits(cohort_results)
     except ValueError:
         return False
     affected_by_issue = {
@@ -1128,6 +1130,9 @@ class GenerationManager:
                         failure["candidate_input_issues"] = candidate_issues
                     failure["input_coverage_valid"] = summary.input_coverage_valid
                     failure["source_health_failures"] = list(summary.source_health_failures)
+                    from .source_coverage import aggregate_source_scope_limits
+                    if limits := aggregate_source_scope_limits(cohort_results):
+                        failure['source_scope_limits'] = limits
                     return failure
 
                 if n_degraded:
@@ -1161,6 +1166,9 @@ class GenerationManager:
                         degraded_result["candidate_input_issues"] = candidate_issues
                     degraded_result["input_coverage_valid"] = summary.input_coverage_valid
                     degraded_result["source_health_failures"] = list(summary.source_health_failures)
+                    from .source_coverage import aggregate_source_scope_limits
+                    if limits := aggregate_source_scope_limits(cohort_results):
+                        degraded_result['source_scope_limits'] = limits
                     return degraded_result
 
             if proc.returncode != 0:
@@ -1186,12 +1194,15 @@ class GenerationManager:
                 gen_data["gen_id"],
                 elapsed,
             )
+            from .source_coverage import aggregate_source_scope_limits
+            scope_limits = aggregate_source_scope_limits(cohort_results)
             return {
                 "outcome": RunOutcome.CLEAN.value,
                 "success": True,
                 "execution_valid": summary.execution_valid,
                 "input_coverage_valid": summary.input_coverage_valid,
                 "source_health_failures": list(summary.source_health_failures),
+                **({'source_scope_limits': scope_limits} if scope_limits else {}),
                 "elapsed_s": round(elapsed, 2),
             }
 

@@ -100,6 +100,10 @@ class GovtContractsStrategy:
         # Try USASpending contract data first
         usaspending = data.get("usaspending", {})
         contracts = usaspending.get("data", {}).get("contracts", [])
+        scope = None
+        if usaspending.get('award_attribution_policy') is not None:
+            from ..data_sources.award_attribution_policy import validate_attribution_scope
+            scope = validate_attribution_scope(usaspending, session=date)
 
         if contracts:
             for contract in contracts:
@@ -158,6 +162,11 @@ class GovtContractsStrategy:
                             "recipient_identity_status": contract.get("recipient_identity_status", "missing_native_recipient"),
                             "recipient_identity_source": contract.get("recipient_identity_source", ""),
                             "issuer_attribution": attribution,
+                            **({"award_attribution_policy": scope['policy'],
+                                "award_attribution_scope_sha256": scope['scope_sha256'],
+                                **({"attribution_coverage_gap": "unresolved_recipient_issuer"}
+                                   if attribution['status'] == 'unresolved' else {})}
+                               if scope is not None else {}),
                             **({"non_actionable_reason": attribution["reason"]} if not attribution["verified"] else {}),
                             "thesis": "Newly originated award; amount is cumulative obligations observed at acquisition, not initial obligation or incremental modification.",
                         },
@@ -177,11 +186,15 @@ class GovtContractsStrategy:
 
         # Unknown issuers stay in discovery and may use remaining journal slots,
         # but must not crowd verified issuers out of the bounded admission set.
-        return admit_candidates(
+        population = admit_candidates(
             self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)),
             rank_key=lambda candidate: (candidate.journal_only, -float(candidate.score), candidate.ticker),
             policy="verified_issuer_first_score_desc_ticker_source_identity_v1",
         )
+        if scope is not None:
+            from copy import deepcopy
+            population.admission_manifest['award_attribution_scope'] = deepcopy(scope)
+        return population
 
     def check_exit(
         self,

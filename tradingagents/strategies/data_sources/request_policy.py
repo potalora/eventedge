@@ -66,6 +66,26 @@ def provider_budget(provider, deadline, *, clock=None, sleep=None,
         _CURRENT.reset(token)
 
 
+@contextmanager
+def provider_subbudget(provider, *, maximum_seconds, absolute_deadline):
+    """Narrow an acquisition scope without consuming a physical request slot."""
+    if (type(maximum_seconds) not in (int, float) or not math.isfinite(maximum_seconds)
+            or maximum_seconds <= 0 or type(absolute_deadline) not in (int, float)
+            or not math.isfinite(absolute_deadline)):
+        raise ValueError("invalid provider subbudget")
+    parent = _CURRENT.get()
+    if parent is not None and parent.provider == provider:
+        deadline = min(parent.deadline, absolute_deadline, parent.clock() + maximum_seconds)
+        options = dict(clock=parent.clock, sleep=parent.sleep, random_fn=parent.random_fn,
+                       max_attempts=parent.max_attempts, limits=parent.limits,
+                       diagnostics=parent.diagnostics)
+    else:
+        deadline = min(absolute_deadline, time.monotonic() + maximum_seconds)
+        options = {}
+    with provider_budget(provider, deadline, **options) as diagnostics:
+        yield diagnostics
+
+
 def current_provider_deadline(provider):
     """Return the active absolute deadline, for adapters with existing policies."""
     budget = _CURRENT.get()
@@ -195,16 +215,18 @@ def _retry_after(response):
     return max(0.0, delay) if math.isfinite(delay) else 0.0
 
 
-def _run(provider, operation, attempt):
+def _run(provider, operation, attempt, *, before_attempt=None):
     budget = _CURRENT.get()
     if budget is None or budget.provider != provider:
         with provider_budget(provider, time.monotonic() + 60):
-            return _run(provider, operation, attempt)
+            return _run(provider, operation, attempt, before_attempt=before_attempt)
     error = None
     attempts = 0
     response = None
     for index in range(budget.max_attempts):
         try:
+            if before_attempt is not None:
+                before_attempt()
             _slot(budget)
             attempts += 1
             response = None
@@ -243,11 +265,14 @@ def _run(provider, operation, attempt):
     raise error from None
 
 
-def provider_request(provider, method, url, *, operation=None, transport=None, **kwargs):
+def provider_request(provider, method, url, *, operation=None, transport=None,
+                     before_attempt=None, **kwargs):
     """Request with bounded retries, retaining requests.get/post monkeypatches.
 
     transport optionally supplies a session's bound get/post for providers with
     required transport adapters. It has the same (url, **kwargs) protocol.
+    before_attempt can reject a capped acquisition before any rate slot is
+    reserved. It runs for every retry and must not acquire or count requests.
     """
     method = method.lower()
     request = transport or getattr(requests, method)
@@ -261,7 +286,9 @@ def provider_request(provider, method, url, *, operation=None, transport=None, *
         else:
             options["timeout"] = max(0.001, min(timeout or 15, remaining))
         return request(url, **options)
-    return _run(provider, operation or method, attempt)
+    if before_attempt is None:
+        return _run(provider, operation or method, attempt)
+    return _run(provider, operation or method, attempt, before_attempt=before_attempt)
 
 
 def provider_call(provider, operation, callable, *, maximum_seconds=None):

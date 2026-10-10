@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+from datetime import datetime, timezone
 import os
 import time
 from typing import Any
@@ -16,7 +18,7 @@ from urllib.parse import urlsplit, parse_qs
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 from .evidence import CoverageRecords, bounded_coverage, collection_envelope
-from .request_policy import provider_request, provider_timeout, read_bounded_response, provider_budget, current_provider_deadline
+from .request_policy import provider_request, provider_timeout, read_bounded_response, provider_budget, current_provider_deadline, provider_subbudget, provider_clock_time
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +39,41 @@ def _page_json(raw: bytes):
         return result
     def invalid_constant(value):
         raise ValueError("nonfinite JSON")
+    def finite_float(value):
+        parsed=float(value)
+        if not math.isfinite(parsed):raise ValueError("nonfinite JSON")
+        return parsed
     try:
-        return json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        return json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_constant, parse_float=finite_float)
     except (ValueError, UnicodeError, RecursionError):
         raise SourceFetchError("Provider page JSON invalid", reason_code="invalid_response") from None
+
+
+class _FocusedAcquisition:
+    def __init__(self, cap):
+        self.cap=cap;self.requests=0;self.used_bytes=0;self.exhausted=False
+
+    @property
+    def remaining_bytes(self):
+        from .courtlistener_scope import MAX_BYTES
+        return MAX_BYTES-self.used_bytes
+
+    def before_request(self):
+        provider_timeout('courtlistener')
+        if self.requests>=self.cap:
+            self.exhausted=True
+            raise SourceFetchError('Focused Court request cap exhausted',reason_code='invalid_response')
+
+    def request(self,url,**kwargs):
+        import requests
+        self.before_request();self.requests+=1
+        return requests.get(url,**kwargs)
+
+    def consume(self,raw):
+        self.used_bytes+=len(raw)
+        if self.remaining_bytes<0:
+            raise SourceFetchError('Focused Court response byte limit exhausted',reason_code='invalid_response')
+        provider_timeout('courtlistener')
 
 
 class CourtListenerSource:
@@ -58,6 +91,7 @@ class CourtListenerSource:
         dispatch = {
             "search_dockets": self._dispatch_search_dockets,
             "search_opinions": self._dispatch_search_opinions,
+            "focused_litigation": self._dispatch_focused_litigation,
         }
         handler = dispatch.get(method)
         if handler is None:
@@ -85,7 +119,7 @@ class CourtListenerSource:
         court: str | None = None,
         date_filed_after: str | None = None,
         page_size: int = 20,
-        *, date_filed_before: str | None = None,
+        *, date_filed_before: str | None = None, _acquisition=None,
     ) -> list[dict]:
         """Search federal court dockets.
 
@@ -103,7 +137,7 @@ class CourtListenerSource:
         if current_provider_deadline("courtlistener") is None:
             with provider_budget("courtlistener", time.monotonic()+60):
                 return self.search_dockets(query, court, date_filed_after, page_size,
-                                           date_filed_before=date_filed_before)
+                                           date_filed_before=date_filed_before, _acquisition=_acquisition)
         if (type(page_size) is not int or not 1 <= page_size <= 250
                 or any(value is not None and (not source_date(value) or len(value) != 10)
                        for value in (date_filed_after, date_filed_before))
@@ -113,7 +147,7 @@ class CourtListenerSource:
             raise SourceFetchError("CourtListener access missing", reason_code="provider_error")
         params: dict[str, Any] = {
             "q": query,
-            "type": "r",  # RECAP dockets
+            "type": "d" if _acquisition is not None else "r",  # Focused docket metadata only
             "page_size": page_size,
             "order_by": "dateFiled desc",
         }
@@ -133,12 +167,17 @@ class CourtListenerSource:
             for page in range(1, 1001):
                 response = None
                 try:
+                    if _acquisition is not None: _acquisition.before_request()
                     response = provider_request("courtlistener", "GET", url, params=request_params,
                         headers={"Authorization": f"Token {self._token}"},
-                        timeout=provider_timeout("courtlistener"), stream=True, allow_redirects=False)
+                        timeout=provider_timeout("courtlistener"), stream=True, allow_redirects=False,
+                        **({"transport":_acquisition.request,"before_attempt":_acquisition.before_request}
+                           if _acquisition is not None else {}))
                     if response.status_code != 200:
                         raise SourceFetchError("CourtListener request failed", reason_code="http_error", http_status=response.status_code)
-                    raw = read_bounded_response(response, provider="courtlistener", max_bytes=32*1024*1024-used_bytes)
+                    raw = read_bounded_response(response, provider="courtlistener", max_bytes=min(32*1024*1024-used_bytes,
+                        _acquisition.remaining_bytes if _acquisition is not None else 32*1024*1024))
+                    if _acquisition is not None: _acquisition.consume(raw)
                     used_bytes += len(raw)
                     data = _page_json(raw)
                     provider_timeout("courtlistener")
@@ -164,7 +203,8 @@ class CourtListenerSource:
                     results.append({"docket_id": item["docket_id"], "case_name": item["caseName"],
                         "court": item["court"], "date_filed": item["dateFiled"],
                         "date_terminated": item.get("dateTerminated"), "cause": item.get("cause", ""),
-                        "nature_of_suit": item.get("suitNature", ""), "jury_demand": item.get("juryDemand", "")})
+                        "nature_of_suit": item.get("suitNature", ""), "jury_demand": item.get("juryDemand", ""),
+                        **({"native_record":item,"content_kind":"docket_metadata_only"} if _acquisition is not None else {})})
                 coverage["total"] = data.get("count")
                 if data["next"] is None:
                     # A genuinely complete population below the provider's hit
@@ -196,6 +236,153 @@ class CourtListenerSource:
             error = source_fetch_error("CourtListener search_dockets failed", exc)
             error.partial_data = {"dockets": results, "coverage": {**coverage, "complete": False}}
             raise error from None
+
+    def fetch_focused_litigation(self, scope, *, date_filed_after, date_filed_before,
+            absolute_deadline, request_cap=10, subbudget_seconds=120,
+            prior_evidence=None, max_evidence_age_seconds=3600):
+        """Complete only the caller's declared issuer/case metadata scope.
+
+        Completeness describes these exact searches and case lookups, never
+        all litigation or substantive legal-document analysis. Prior evidence
+        must already be source-bound by the caller's immutable store.
+        """
+        from .courtlistener_scope import (POLICY, CONTENT_KIND, canonical_scope,
+            declared_queries, digest, evidence_digest, reusable_evidence, validate_window, validate_focused_litigation)
+        selected=canonical_scope(scope);validate_window(date_filed_after,date_filed_before)
+        if (type(request_cap) is not int or not 1<=request_cap<=50
+                or type(subbudget_seconds) not in (int,float) or not math.isfinite(subbudget_seconds) or not 0<subbudget_seconds<=120
+                or type(absolute_deadline) not in (int,float) or not math.isfinite(absolute_deadline)
+                or type(max_evidence_age_seconds) not in (int,float) or not math.isfinite(max_evidence_age_seconds) or not 0<=max_evidence_age_seconds<=86400):
+            raise ValueError('invalid_focused_court_budget')
+        if current_provider_deadline('courtlistener') is None:
+            with provider_budget('courtlistener',absolute_deadline):
+                return self.fetch_focused_litigation(selected,date_filed_after=date_filed_after,
+                    date_filed_before=date_filed_before,absolute_deadline=absolute_deadline,
+                    request_cap=request_cap,subbudget_seconds=subbudget_seconds,
+                    prior_evidence=prior_evidence,max_evidence_age_seconds=max_evidence_age_seconds)
+        parent=current_provider_deadline('courtlistener')
+        allowance=min(subbudget_seconds,min(parent,absolute_deadline)-provider_clock_time('courtlistener'))
+        queries=[{**row,'status':'not_attempted','returned':0} for row in declared_queries(selected)]
+        coverage={'policy':POLICY,'mode':'declared_focused_scope','complete':False,
+            'scope':selected,'scope_sha256':digest(selected),'date_filed_after':date_filed_after,
+            'date_filed_before':date_filed_before,'queries':queries,'requests':0,'request_cap':request_cap,
+            'budget_exhausted':False,'request_cap_exhausted':False,'returned':0,
+            'content_kind':CONTENT_KIND,'acquisition_started_at':datetime.now(timezone.utc).isoformat(),
+            'acquired_at':None,'absolute_deadline':min(parent,absolute_deadline),
+            'subbudget_seconds':subbudget_seconds,'prior_reuse_status':'not_supplied'}
+        result={'dockets':[],'coverage':coverage}
+        def acquire():
+            acquisition=_FocusedAcquisition(request_cap)
+            coverage['absolute_deadline']=current_provider_deadline('courtlistener')
+            prior,status=reusable_evidence(prior_evidence,selected,date_filed_after,date_filed_before,
+                datetime.now(timezone.utc),max_evidence_age_seconds)
+            coverage['prior_reuse_status']=status
+            if prior is not None:
+                provider_timeout('courtlistener')
+                prior['reuse']={'status':status,'checked_at':datetime.now(timezone.utc).isoformat(),
+                    'requests':0,'original_acquired_at':prior['coverage']['acquired_at']}
+                return prior
+            seen={}
+            for query in queries:
+                try:
+                    if acquisition.requests>=request_cap:
+                        acquisition.exhausted=True
+                        break
+                    acquisition.before_request()
+                    if query['kind']=='issuer_search':
+                        rows=self.search_dockets(query['query'],date_filed_after=date_filed_after,
+                            date_filed_before=date_filed_before,_acquisition=acquisition)
+                        query['coverage']=rows.coverage
+                    else:
+                        rows=[self._focused_known_case(query['docket_id'],acquisition)]
+                        query['coverage']={'complete':True,'termination':'exact_native_docket_id','pages':1}
+                    for row in rows:
+                        key=row['docket_id'];existing=seen.get(key)
+                        if existing is not None:
+                            if any(existing.get(k)!=row.get(k) for k in ('case_name','court','date_filed','cause','nature_of_suit')):
+                                raise SourceFetchError('Focused Court docket conflict',reason_code='invalid_response')
+                            existing.setdefault('additional_native_records',[]).append(row['native_record'])
+                        else:
+                            seen[key]=row;result['dockets'].append(row)
+                    query.update(status='complete',returned=len(rows),docket_ids=[row['docket_id'] for row in rows])
+                    provider_timeout('courtlistener')
+                except Exception as error:
+                    safe=source_fetch_error('Focused Court query failed',error)
+                    query.update(status='failed',reason_code=safe.reason_code,http_status=safe.http_status,
+                        coverage={**safe.partial_data.get('coverage',{}),'complete':False})
+                    # Preserve valid partial rows; they do not become complete scope evidence.
+                    for row in safe.partial_data.get('dockets',[]):
+                        if row['docket_id'] not in seen:
+                            seen[row['docket_id']]=row;result['dockets'].append(row)
+                    coverage['budget_exhausted'] |= safe.reason_code=='timeout'
+                    if acquisition.exhausted or coverage['budget_exhausted']:break
+            coverage.update(requests=acquisition.requests,request_cap_exhausted=acquisition.exhausted,
+                returned=len(result['dockets']),acquired_at=datetime.now(timezone.utc).isoformat(),
+                response_bytes=acquisition.used_bytes,
+                complete=all(row['status']=='complete' for row in queries))
+            try:provider_timeout('courtlistener')
+            except SourceFetchError:coverage.update(complete=False,budget_exhausted=True)
+            if not coverage['complete']:result['error']='Focused Court declared scope incomplete'
+            coverage['evidence_sha256']=evidence_digest(result)
+            if coverage['complete']:
+                try:
+                    validate_focused_litigation(result,expected_scope=selected,
+                        date_filed_after=date_filed_after,date_filed_before=date_filed_before,
+                        max_evidence_age_seconds=None)
+                except ValueError:
+                    coverage.update(complete=False,validation_error='invalid_response')
+                    result['error']='Focused Court declared scope incomplete'
+                    coverage['evidence_sha256']=evidence_digest(result)
+            try:provider_timeout('courtlistener')
+            except SourceFetchError:
+                coverage.update(complete=False,budget_exhausted=True)
+                result['error']='Focused Court declared scope incomplete'
+                coverage['evidence_sha256']=evidence_digest(result)
+            return result
+        if allowance<=0:
+            coverage.update(budget_exhausted=True,acquired_at=datetime.now(timezone.utc).isoformat())
+            result['error']='Focused Court declared scope incomplete'
+            coverage['evidence_sha256']=evidence_digest(result)
+            return result
+        # All query errors are collected inside acquire; retries never restart
+        # the entire population. Nested HTTP calls keep the parent's retry policy.
+        with provider_subbudget('courtlistener',maximum_seconds=allowance,absolute_deadline=absolute_deadline):
+            return acquire()
+
+    def _focused_known_case(self, docket_id, acquisition):
+        if not self._token:
+            raise SourceFetchError('CourtListener access missing',reason_code='provider_error')
+        response=None
+        try:
+            acquisition.before_request()
+            response=provider_request('courtlistener','GET',f'{BASE_URL}/dockets/{docket_id}/',
+                transport=acquisition.request,before_attempt=acquisition.before_request,
+                headers={'Authorization':f'Token {self._token}'},
+                timeout=provider_timeout('courtlistener'),stream=True,allow_redirects=False)
+            if response.status_code!=200:
+                raise SourceFetchError('Focused Court docket request failed',reason_code='http_error',http_status=response.status_code)
+            raw=read_bounded_response(response,provider='courtlistener',max_bytes=acquisition.remaining_bytes)
+            acquisition.consume(raw);item=_page_json(raw)
+            if (not isinstance(item,dict) or type(item.get('id')) is not int or item['id']!=docket_id
+                    or not source_text(item.get('case_name')) or not source_text(item.get('court_id'))
+                    or not source_date(item.get('date_filed'))):
+                raise SourceFetchError('Focused Court docket identity invalid',reason_code='invalid_response')
+            row={'docket_id':item['id'],'case_name':item['case_name'],'court':item['court_id'],
+                'date_filed':item['date_filed'],'date_terminated':item.get('date_terminated'),
+                'cause':item.get('cause',''),'nature_of_suit':item.get('nature_of_suit',''),
+                'jury_demand':item.get('jury_demand',''),'native_record':item,
+                'content_kind':'docket_metadata_only'}
+            provider_timeout('courtlistener')
+            return row
+        finally:
+            if response is not None:response.close()
+
+    def _dispatch_focused_litigation(self, params):
+        return self.fetch_focused_litigation(params['scope'],
+            date_filed_after=params['date_filed_after'],date_filed_before=params['date_filed_before'],
+            absolute_deadline=params['absolute_deadline'],request_cap=params.get('request_cap',10),
+            subbudget_seconds=params.get('subbudget_seconds',120),prior_evidence=params.get('prior_evidence'),
+            max_evidence_age_seconds=params.get('max_evidence_age_seconds',3600))
 
     def search_opinions(
         self,

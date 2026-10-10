@@ -22,7 +22,9 @@ from tradingagents.strategies.orchestration.run_outcome import (
     DAILY_RESULT_ENVELOPE_KEYS, DAILY_RESULT_PREFIX, DAILY_RESULT_WIRE_VERSION,
 )
 from tradingagents.strategies.orchestration.runtime_lock import canonical_runtime_lock_path, runtime_lock
-from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures
+from tradingagents.strategies.orchestration.source_coverage import (
+    aggregate_source_health_failures, canonical_source_scope_limits, source_scope_limits_from_health,
+)
 from tradingagents.strategies.orchestration.source_inputs import (
     CONTRACT_VERSION, MAX_BYTES, SourceInputStore, configuration_fingerprint,
 )
@@ -612,6 +614,12 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
         report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose)
+        try:
+            scope_limits = source_scope_limits_from_health(health)
+            if scope_limits:
+                report['source_scope_limits'] = scope_limits
+        except (ValueError, TypeError, KeyError):
+            diagnose('source_scope_limits_invalid')
         report['disabled_strategies'] = {row['strategy']: row['evidence']['reason'] for row in health if _declared_exclusion(row)}
         report['input_coverage_valid'] = epoch is not None and not report['source_health_failures']
         report['sources'] = _sources(state,generation,session,commit,diagnose)
@@ -640,6 +648,12 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 if issues!=report['candidate_input_issues']:
                     diagnose('wire_candidate_issues_conflict')
                 for name,row in wire.items():
+                    horizon = name.split('_')[1]
+                    expected_scope = source_scope_limits_from_health(
+                        item for item in health if item['policy_id'] == 'foundation-' + horizon
+                        or item['policy_id'].endswith(':health:' + horizon))
+                    if canonical_source_scope_limits(row.get('source_scope_limits', {})) != expected_scope:
+                        diagnose('wire_source_scope_conflict')
                     book=report['cohorts'][name]
                     if row['execution_valid']!=book['accounting_valid'] or row['staging_valid']!=book['staging_valid']:
                         diagnose('wire_ledger_conflict',name)
@@ -688,6 +702,19 @@ def render_operational_report(report: dict) -> str:
         lines.extend(['','## Candidate input issues',''])
         for row in report['candidate_input_issues']:
             lines.append(f"- {row['ticker']}: {row['dependency_kind']} / {row['reason_code']}; {len(row['affected_cohorts'])} affected books ({row['issue_id']}).")
+    if report.get('source_scope_limits'):
+        lines.extend(['', '## Source scope limitations', '',
+                      'Input coverage validity applies to these declared scopes; it is not a marketwide coverage claim.'])
+        for provider, scope in canonical_source_scope_limits(report['source_scope_limits']).items():
+            if provider == 'usaspending':
+                counts = scope['counts']
+                lines.append(f"- USAspending: verified listed targets only; {counts['verified_listed_target']} verified listed, "
+                    f"{counts['verified_no_listed_target']} proven no-listed, {counts['unresolved']} unresolved awards. "
+                    'Unresolved awards remain nonactionable attribution gaps, not proven exclusions.')
+            else:
+                lines.append(f"- CourtListener: docket metadata only for declared issuer and case queries, not marketwide; "
+                    f"{scope['issuer_count']} issuers, {scope['case_count']} cases, {scope['docket_count']} dockets; "
+                    f"{scope['omitted_issuer_count']} omitted issuers. No full-document or marketwide analysis is implied.")
     for title,key in (('Source coverage failures','source_health_failures'),('Recovered acquisition','recovered'),('Unresolved acquisition','unresolved')):
         rows=report[key] if key=='source_health_failures' else report['sources'][key]
         if rows:

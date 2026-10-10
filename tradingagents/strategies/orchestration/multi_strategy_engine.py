@@ -405,6 +405,11 @@ class MultiStrategyEngine:
         """
         regime_model = self._build_regime_model(data)
         regime_model.setdefault("timestamp", datetime.now().isoformat())
+        from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
+        scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
+        if 'courtlistener' in scope_proofs:
+            from .scoped_sources import litigation_context
+            regime_model['litigation_context'] = litigation_context(data, scope_proofs['courtlistener'])
 
         universe = None
         universe_failure = False
@@ -437,7 +442,9 @@ class MultiStrategyEngine:
                 params = strategy.get_default_params(horizon=horizon)
                 from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
                 with candidate_universe(universe):
-                    candidates = strategy.screen(data, trading_date, params)
+                    candidates = (admit_candidates(strategy.name, [], budget=None)
+                        if any(source in scope_errors for source in strategy.data_sources)
+                        else strategy.screen(data, trading_date, params))
                     if not hasattr(candidates, "admission_manifest"):
                         candidates = admit_candidates(strategy.name, candidates, budget=None)
                 admission_manifest = candidates.admission_manifest
@@ -467,10 +474,13 @@ class MultiStrategyEngine:
                         candidate.metadata.setdefault("non_actionable_reason", "equity_universe_unresolved")
                         candidate.journal_only = True
             provider_errors = _provider_errors(data, strategy.data_sources)
+            provider_errors.update({source: reason for source, reason in scope_errors.items()
+                                    if source in strategy.data_sources})
             if universe_failure:
                 provider_errors = dict(provider_errors, equity_universe="universe_evidence_unavailable")
             non_actionable = sorted({c.metadata["non_actionable_reason"] for c in candidates if c.metadata.get("non_actionable_reason")})
-            if non_actionable:
+            if any(c.metadata.get('non_actionable_reason') and not
+                   accepted_attribution_limitation(c, strategy.name, scope_proofs) for c in candidates):
                 provider_errors = dict(provider_errors, analysis="required_evidence_unavailable")
             if error is None and any(str(c.metadata.get("analysis_failure_reason", "")).startswith("unsupported_required_analysis:") for c in candidates):
                 error = ValueError("unsupported_required_analysis")
@@ -488,6 +498,15 @@ class MultiStrategyEngine:
             source_coverage = {source: data[source]["coverage"] for source in strategy.data_sources if isinstance(data.get(source), dict) and "coverage" in data[source]}
             if source_coverage:
                 health_record.evidence["source_coverage"] = source_coverage
+            selected_limits = {source: value for source, value in scope_limits.items()
+                               if source in strategy.data_sources}
+            if selected_limits:
+                health_record.evidence['source_scope_limits'] = selected_limits
+            if 'courtlistener' in selected_limits:
+                health_record.evidence['litigation_context'] = {
+                    **selected_limits['courtlistener'],
+                    'docket_ids': sorted(row['docket_id'] for row in data['courtlistener']['dockets']),
+                    'actionable_from_docket_metadata': False}
             full_filing_candidates = [c for c in candidates
                 if c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1']
             if full_filing_candidates:
@@ -1748,7 +1767,8 @@ class MultiStrategyEngine:
     # ------------------------------------------------------------------
 
     def _fetch_all_data(self, start_date: str, end_date: str, *,
-                        acquisition_deadline: float | None = None) -> dict[str, Any]:
+                        acquisition_deadline: float | None = None,
+                        litigation_target_owner=None) -> dict[str, Any]:
         """Fetch all data needed by active strategies.
 
         Returns nested dict: {source_name: {data_type: data}}.
@@ -1850,7 +1870,27 @@ class MultiStrategyEngine:
         if "regulations" in needed_sources and "regulations" in available:
             api_fetches["regulations"] = (self._fetch_regulations_data, (end_date,))
         if "courtlistener" in needed_sources and "courtlistener" in available:
-            api_fetches["courtlistener"] = (self._fetch_courtlistener_data, (end_date,))
+            if self.ar_config.get('courtlistener_scope_policy') is not None:
+                from .scoped_sources import litigation_settings
+                from .litigation_targets import build_litigation_targets
+                def focused_targets():
+                    company_source = self.registry.get('edgar')
+                    if company_source is None:
+                        raise ValueError('Court issuer verification unavailable')
+                    company_map = company_source.company_ticker_map()
+                    targets = build_litigation_targets(litigation_target_owner,
+                        date.fromisoformat(end_date), cutoff=acquisition_cutoff,
+                        company_map=company_map, settings=litigation_settings(self.ar_config))
+                    return dict(targets, company_map=company_map)
+                targets = acquire('edgar', focused_targets, ())
+                data['_courtlistener_targets'] = targets
+                if targets.get('error'):
+                    data['courtlistener'] = {'error': 'Court issuer scope unavailable'}
+                else:
+                    api_fetches['courtlistener'] = (self._fetch_courtlistener_data,
+                        (end_date, targets['scope'], acquisition_deadline))
+            else:
+                api_fetches["courtlistener"] = (self._fetch_courtlistener_data, (end_date,))
         if "fred" in needed_sources and "fred" in available:
             api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
@@ -1876,6 +1916,9 @@ class MultiStrategyEngine:
         cache_stores = {}
         for name, (fetcher, args) in api_fetches.items():
             source_fingerprint = config_fingerprint
+            if name == 'courtlistener' and '_courtlistener_targets' in data:
+                from tradingagents.strategies.data_sources.courtlistener_scope import digest
+                source_fingerprint += ':court-scope:' + digest(data['_courtlistener_targets']['scope'])
             if decision_policy == PROSPECTIVE and name in {'noaa', 'usda', 'drought_monitor', 'cftc'}:
                 source_fingerprint += ':current-vintage:' + vintage
             if name == "edgar" and universe_policy:
@@ -2255,8 +2298,23 @@ class MultiStrategyEngine:
             result["error"] = "; ".join(failures)
         return result
 
-    def _fetch_courtlistener_data(self, trading_date: str | None = None) -> dict[str, Any]:
+    def _fetch_courtlistener_data(self, trading_date: str | None = None,
+                                focused_scope: dict | None = None,
+                                acquisition_deadline: float | None = None) -> dict[str, Any]:
         """Fetch CourtListener data for litigation strategy."""
+        if self.ar_config.get('courtlistener_scope_policy') is not None:
+            from .scoped_sources import litigation_settings
+            litigation_settings(self.ar_config)
+            if focused_scope is None or acquisition_deadline is None or trading_date is None:
+                raise ValueError('focused Court scope and parent deadline required')
+            source = self.registry.get('courtlistener')
+            if source is None:
+                return {'error': 'CourtListener unavailable'}
+            result = source.fetch_focused_litigation(focused_scope,
+                date_filed_after=(date.fromisoformat(trading_date) - timedelta(days=14)).isoformat(),
+                date_filed_before=trading_date, absolute_deadline=acquisition_deadline,
+                request_cap=10, subbudget_seconds=120)
+            return dict(result, courtlistener_scope_policy='focused_litigation_v1')
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
 
@@ -2369,6 +2427,7 @@ class MultiStrategyEngine:
         if source is None:
             return {}
 
+        payload = {}
         try:
             contracts = source.get_recent_large_contracts(
                 min_amount=50_000_000,
@@ -2380,14 +2439,24 @@ class MultiStrategyEngine:
                 result["coverage"] = contracts.coverage
             logger.info("USASpending fetch: %d large contracts", len(contracts))
             payload = {"data": result, **({"coverage": contracts.coverage} if hasattr(contracts, "coverage") else {})}
-            if (hasattr(contracts, "coverage")
+            policy = self.ar_config.get('award_attribution_policy')
+            if policy is not None:
+                from tradingagents.strategies.data_sources.award_attribution_policy import (
+                    POLICY, apply_attribution_policy,
+                )
+                if policy != POLICY:
+                    raise ValueError('unsupported award attribution policy')
+                scoped = apply_attribution_policy(list(contracts), getattr(contracts, 'coverage', None), session=trading_date)
+                payload.update(scoped)
+                result['coverage'] = scoped['coverage']
+            elif (hasattr(contracts, "coverage")
                     and contracts.coverage.get('issuer_attribution', {}).get('complete') is False):
                 payload['error'] = 'USASpending issuer attribution incomplete'
             return payload
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.error("%s", safe_error)
-            return {**safe_error.partial_data, "error": str(safe_error)}
+            return {**payload, **safe_error.partial_data, "error": str(safe_error)}
 
     def _fetch_noaa_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""

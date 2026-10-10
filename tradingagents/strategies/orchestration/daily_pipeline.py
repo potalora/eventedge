@@ -1652,15 +1652,25 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         if state.shared_data is None:
             deadline = None
             fetch_options = {}
-            if owner._base_config.get('autoresearch', {}).get('filing_evidence_policy') == 'complete_submission_v1':
+            source_config = owner._base_config.get('autoresearch', {})
+            if (source_config.get('filing_evidence_policy') == 'complete_submission_v1'
+                    or source_config.get('courtlistener_scope_policy')
+                    or source_config.get('award_attribution_policy')):
                 from tradingagents.strategies.orchestration.multi_strategy_engine import _fetch_timeout_s
                 deadline = time.monotonic() + max(0.0, _fetch_timeout_s())
                 fetch_options['acquisition_deadline'] = deadline
+            if source_config.get('courtlistener_scope_policy'):
+                fetch_options['litigation_target_owner'] = owner
             acquired = state.first_engine._fetch_all_data(lookback_start, state.trading_date, **fetch_options)
             # Persist and decode before any strategy/model can mutate observations.
             state.shared_data = source_store.freeze(source_identity, acquired, deadline=deadline)
         if not isinstance(state.shared_data, dict):
             raise SourceInputError("shared source bundle must be a mapping")
+        from .scoped_sources import validate_portfolio_targets
+        try:
+            validate_portfolio_targets(state.shared_data, owner, state.trading_date)
+        except (ValueError, TypeError, KeyError):
+            raise SourceInputError('frozen Court portfolio scope invalid') from None
         from .decision_clock import policy, PROSPECTIVE
         if policy(owner._base_config) == PROSPECTIVE:
             from .source_inputs import source_codec_limits

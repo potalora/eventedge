@@ -154,6 +154,9 @@ def validate_completed_replay(owner, session: date, epoch: str, completed) -> di
     context = validate_context(config, session, accepted['context'])
     if context['source_digest'] != source_digest or _aware(context['acquisition_started_at']) != acquired_at:
         raise ValueError('decision source binding mismatch')
+    from .scoped_replay import validate_replay_source_scopes
+    validate_replay_source_scopes(source_data, owner, session.isoformat(), epoch,
+                                  now=_aware(context['cutoff']))
     if context['eligibility_digest'] != eligibility_digest:
         raise ValueError('decision eligibility binding mismatch')
     if not isinstance(accepted['enrichment'], dict):

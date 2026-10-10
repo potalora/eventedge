@@ -1,13 +1,7 @@
-"""P10: Pre-filing Litigation/Investigation Detection.
+"""Litigation screening with explicit CourtListener evidence limitations.
 
-Monitors federal court dockets for new lawsuits and investigations
-against public companies. Securities class actions, FTC investigations,
-DOJ probes, and patent trolling all create predictable price impacts.
-
-Academic basis: Karpoff et al. (2008, JFE) show enforcement actions
-lead to -38% loss in market-adjusted value. Early detection = edge.
-
-Data source: CourtListener (free API, 5,000 req/hour).
+The focused policy retains docket metadata as context. Case titles and suit
+categories alone do not establish a substantive legal thesis or a trade.
 """
 
 from __future__ import annotations
@@ -82,9 +76,14 @@ class LitigationStrategy:
         dockets = cl_data.get("dockets", [])
         fetched_count = len(dockets)
         unique_dockets = self._deduplicate_dockets(dockets)
+        court_policy = cl_data.get('courtlistener_scope_policy')
+        context_only = court_policy == 'focused_litigation_v1'
+        if court_policy is not None and (not context_only or
+                cl_data.get('coverage', {}).get('content_kind') != 'docket_metadata_only'):
+            raise ValueError('invalid focused litigation evidence kind')
         ranked: list[tuple[int, float, int, Candidate]] = []
 
-        for source_index, docket in enumerate(unique_dockets):
+        for source_index, docket in enumerate([] if context_only else unique_dockets):
             if not docket.get("docket_id"):
                 continue
             nature = docket.get("nature_of_suit", "")
@@ -163,6 +162,10 @@ class LitigationStrategy:
             ),
             policy="sec_enforcement_resolved_then_unresolved_score_identity_v1",
         )
+        if context_only:
+            selected.admission_manifest['content_kind'] = 'docket_metadata_only'
+            selected.admission_manifest['context_only_docket_ids'] = sorted(
+                {docket['docket_id'] for docket in unique_dockets if docket.get('docket_id')})
         resolved = sum(bool(candidate.ticker) for candidate in selected)
         logger.info(
             "Litigation screen: fetched=%d unique=%d eligible=%d sec=%d "
