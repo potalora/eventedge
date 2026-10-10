@@ -45,11 +45,12 @@ def _source(monkeypatch, *, mutation=None, now=NOW):
     monkeypatch.setenv("ALPACA_API_KEY", "offline-key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "offline-secret")
 
+    # OHLC values are observed; positive activity values are synthetic test data.
     def get(url, **kwargs):
         session = date.fromisoformat(kwargs["params"]["start"][:10])
         if url == "https://data.alpaca.markets/v2/stocks/bars":
             body = {
-                "bars": {ticker: [dict(t=f"{session}T04:00:00Z", **dict(zip("ohlc", OBSERVED[ticker, session])))]
+                "bars": {ticker: [dict(t=f"{session}T04:00:00Z", v=1, n=1, **dict(zip("ohlc", OBSERVED[ticker, session])))]
                          for ticker in kwargs["params"]["symbols"].split(",")},
                 "next_page_token": None,
             }
@@ -64,7 +65,7 @@ def _source(monkeypatch, *, mutation=None, now=NOW):
         ticker = url.split("/")[-2]
         body = {
             "symbol": ticker,
-            "bars": [dict(t=f"{session}T04:00:00Z", **dict(zip("ohlc", OBSERVED[ticker, session])))],
+            "bars": [dict(t=f"{session}T04:00:00Z", v=1, n=1, **dict(zip("ohlc", OBSERVED[ticker, session])))],
             "next_page_token": None,
         }
         if mutation:

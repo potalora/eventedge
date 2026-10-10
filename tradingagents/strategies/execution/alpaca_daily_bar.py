@@ -102,6 +102,20 @@ def _price(value: object) -> Decimal:
     return result
 
 
+def _validate_activity(row: dict) -> None:
+    """Require actual stock-bar activity, without a minimum liquidity rule.
+
+    Alpaca's stock aggregation contract increments volume and trade count
+    together and emits bars only with nonzero OHLC and volume. A flat price
+    may be valid; zero-activity provider rows cannot establish this session's
+    traded execution/mark price. No VWAP or arbitrary size threshold is used.
+    https://docs.alpaca.markets/us/docs/market-data-faq#how-are-bars-aggregated
+    """
+    _price(row["v"])
+    if type(row["n"]) is not int or row["n"] <= 0:
+        raise ValueError("invalid stock bar activity")
+
+
 class AlpacaHistoricalSIPSource:
     """Validated historical observations; credentials come from env."""
 
@@ -261,6 +275,7 @@ class AlpacaHistoricalSIPSource:
                 stamp = datetime.fromisoformat(row["t"].replace("Z", "+00:00"))
                 if stamp.tzinfo is None or stamp.utcoffset() is None or stamp != start:
                     raise ValueError("invalid timestamp")
+                _validate_activity(row)
                 op, high, low, close = (_price(row[field]) for field in ("o", "h", "l", "c"))
                 if high < max(op, close) or low > min(op, close) or high < low:
                     raise ValueError("incoherent prices")
@@ -364,6 +379,7 @@ class AlpacaHistoricalSIPSource:
             stamp = datetime.fromisoformat(row["t"].replace("Z", "+00:00"))
             if stamp.tzinfo is None or stamp.utcoffset() is None or stamp != start:
                 return fail(AlpacaBarFailure.INVALID_RESPONSE)
+            _validate_activity(row)
             op, high, low, close = (_price(row[key]) for key in ("o", "h", "l", "c"))
             if high < max(op, close) or low > min(op, close) or high < low:
                 return fail(AlpacaBarFailure.INVALID_RESPONSE)

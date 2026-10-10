@@ -18,7 +18,8 @@ NOW = datetime(2026, 10, 10, 1, tzinfo=timezone.utc)
 
 
 def row(**changes):
-    return {"t": "2026-10-09T04:00:00Z", "o": "1", "h": "3", "l": "1", "c": "2", **changes}
+    # Synthetic valid positive activity; no minimum liquidity threshold.
+    return {"t": "2026-10-09T04:00:00Z", "o": "1", "h": "3", "l": "1", "c": "2", "v": 1, "n": 1, **changes}
 
 
 class Response:
