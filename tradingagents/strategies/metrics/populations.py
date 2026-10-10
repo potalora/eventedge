@@ -89,5 +89,16 @@ def population_diagnostics(
                         'missing_mature_outcome_count': missing_mature,
                         'directional_accuracy': hits / len(valid) if valid else None,
                         'outcome_coverage': valid_count / len(identities) if identities else None}
+        members = [unique[key] for key in identities]
+        events = Counter(signal.event_key for signal in members if signal.event_key)
+        result[name]['dependence'] = {
+            'event_key_count': len(events),
+            'ticker_count': len({signal.ticker for signal in members if signal.ticker}),
+            'ticker_session_count': len({(signal.ticker, signal.reference_session) for signal in members}),
+            'largest_event_share': max(events.values()) / len(members) if events else None,
+            'missing_event_key_count': sum(not signal.event_key for signal in members),
+            'independence_established': False, 'effective_sample_size': None,
+            'scope': 'retained event identities and ticker/date proxies; related catalysts may span keys',
+        }
     result['provisional']['label'] = 'screen hypotheses only; not validated actionable predictions'
     return result

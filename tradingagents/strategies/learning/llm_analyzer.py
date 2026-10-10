@@ -51,23 +51,23 @@ _DEFAULT_PROMPTS: dict[str, str] = {
 Assess sentiment and identify surprises from news articles about the earnings event.
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-tone_assessment (1 sentence), guidance_changes (max 2 items), red_flags (max 2 items), rationale (1 sentence).
+tone_assessment (1 sentence), guidance_changes (list of strings, max 2 items), red_flags (list of strings, max 2 items), rationale (1 sentence).
 Keep ALL string values under 100 characters.""",
     "insider_activity": """You are analyzing SEC Form 4 insider transaction filings.
 Look for: cluster buys (multiple insiders buying within days), C-suite purchases,
 large purchases relative to salary, purchases during quiet periods.
 Insider SELLS are less informative (diversification, tax planning).
 Return JSON with keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-cluster_size (int), notable_insiders (list), rationale (1-2 sentences).""",
+cluster_size (int), notable_insiders (list of strings, each combining name and title; not objects), rationale (1-2 sentences).""",
     "filing_analysis": """You are a financial analyst comparing two SEC filings for material changes.
 Focus on: risk factor changes, revenue guidance shifts, new litigation,
 accounting policy changes, going concern language, and segment changes.
 Return JSON with keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-changes (list of material changes found), rationale (1-2 sentences).""",
+changes (list of strings describing material changes found), rationale (1-2 sentences).""",
     "regulatory_pipeline": """You are analyzing a proposed regulation for stock market impact.
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-affected_tickers (max 5 ticker symbols), affected_sectors (max 3),
+affected_tickers (max 5 ticker symbols), affected_sectors (list of strings, max 3),
 impact_assessment (1 sentence), rationale (1 sentence).
 Keep ALL string values under 80 characters.""",
     "supply_chain": """You are analyzing a supply chain disruption for trading signals.
@@ -134,6 +134,11 @@ class LLMAnalyzer:
             "autoresearch", {}
         ).get("autoresearch_model", "claude-haiku-4-5-20251001")
         self._effort = self.config.get("autoresearch", {}).get("llm_effort", "medium")
+        self._thesis_model = self.config.get("autoresearch", {}).get("thesis_model", self._model_name)
+        self._thesis_effort = self.config.get("autoresearch", {}).get("thesis_effort", self._effort)
+        self.last_call_provenance: dict[str, Any] = {}
+        self.last_call_failure = ""
+        self._provider_clients: dict[str, Any] = {}
         # Older models use temperature zero by default. Sonnet 5 omits sampling
         # controls because adaptive thinking rejects non-default values.
         self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
@@ -160,8 +165,8 @@ class LLMAnalyzer:
         """Lazy-init the selected provider; credentials stay in its environment."""
         if self._client is None:
             try:
-                from tradingagents.strategies.llm_utils import LUNA_MODEL
-                if self._model_name == LUNA_MODEL:
+                from tradingagents.strategies.llm_utils import uses_responses
+                if uses_responses(self._model_name):
                     from openai import OpenAI
                     self._client = OpenAI(
                         timeout=httpx.Timeout(120.0, connect=10.0), max_retries=0,
@@ -169,7 +174,7 @@ class LLMAnalyzer:
                     return self._client
                 import anthropic
                 self._client = anthropic.Anthropic(
-                    timeout=httpx.Timeout(60.0, connect=10.0),
+                    timeout=httpx.Timeout(60.0, connect=10.0), max_retries=0,
                 )
             except ImportError:
                 logger.error("Selected LLM provider package not installed")
@@ -195,20 +200,56 @@ class LLMAnalyzer:
             f"Factor regime into your conviction level."
         )
 
-    def _call_llm(self, system: str, user: str, max_tokens: int = 4096) -> str:
+    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis") -> str:
         """Make a single LLM call. Returns response text or empty string."""
-        client = self._get_client()
-        if client is None:
-            return ""
+        from tradingagents.strategies.candidate_response_reuse import reused_candidate_response, retain_candidate_response
+        from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        model = self._model_name if role == "bounded" else self._thesis_model
+        effort = self._effort if role == "bounded" else self._thesis_effort
+        self.last_call_failure = ""
+        self.last_call_provenance = {"configured_model": model, "returned_model": None,
+                                     "returned_revision": None, "identity_status": "unpinned",
+                                     "response_id": None, "reasoning_effort": effort, "role": role}
         try:
-            from tradingagents.strategies.llm_utils import call_analysis_model
-            return call_analysis_model(
-                client, model=self._model_name, max_tokens=max_tokens,
+            model_timeout()
+            if uses_responses(model) != uses_responses(self._model_name):
+                # Mixed-provider configurations do not mutate the shared role model.
+                provider = "openai" if uses_responses(model) else "anthropic"
+                if provider not in self._provider_clients:
+                    if provider == "openai":
+                        from openai import OpenAI
+                        self._provider_clients[provider] = OpenAI(timeout=120, max_retries=0)
+                    else:
+                        from anthropic import Anthropic
+                        self._provider_clients[provider] = Anthropic(timeout=60, max_retries=0)
+                client = self._provider_clients[provider]
+            else:
+                client = self._get_client()
+            if client is None:
+                self.last_call_failure = "model_unavailable"
+                return ""
+            reused = reused_candidate_response(client, model=model, system=system, prompt=user,
+                                                max_tokens=max_tokens, temperature=self._temperature,
+                                                effort=effort, role=role)
+            if reused is not None:
+                text, self.last_call_provenance = reused
+                model_timeout()
+                return text
+            text = call_analysis_model(
+                client, model=model, max_tokens=max_tokens,
                 system=system, prompt=user, temperature=self._temperature,
-                effort=self._effort,
+                effort=effort, provenance=self.last_call_provenance,
             )
+            self.last_call_provenance["role"] = role
+            retain_candidate_response(text, self.last_call_provenance)
+            return text
+        except ModelDeadlineExceeded:
+            self.last_call_failure = "model_deadline_exhausted"
+            return ""
         except Exception:
-            logger.error("LLM call failed", exc_info=True)
+            self.last_call_failure = "analysis_unavailable"
+            logger.error("LLM call failed")
             return ""
 
     # ------------------------------------------------------------------
@@ -230,7 +271,7 @@ class LLMAnalyzer:
 Focus on: risk factor changes, revenue guidance shifts, new litigation,
 accounting policy changes, going concern language, and segment changes.
 Return JSON with keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-changes (list of material changes found), rationale (1-2 sentences)."""
+changes (list of strings describing material changes found), rationale (1-2 sentences)."""
 
         # Truncate to fit context
         current_excerpt = current_text[:3000]
@@ -285,7 +326,7 @@ should NOT be treated as bullish signals. Tax withholding sales (code "F") are
 mechanical and should be ignored.
 
 Return JSON with keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-cluster_size (int), notable_insiders (list of names+titles), rationale (1-2 sentences)."""
+cluster_size (int), notable_insiders (list of strings, each combining name and title; not objects), rationale (1-2 sentences)."""
 
         filings_text = json.dumps(form4_filings[:10], indent=2, default=str)
         user = f"""Ticker: {ticker}
@@ -296,7 +337,7 @@ Recent Form 4 filings:
 Analyze insider trading patterns and return JSON.""" + self._regime_suffix(regime_context)
 
         system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
-        result = self._call_llm(self._prompt_overrides.get("insider_activity", system), user)
+        result = self._call_llm(self._prompt_overrides.get("insider_activity", system), user, role="bounded")
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
@@ -322,7 +363,7 @@ Red flags include: plans adopted shortly before material announcements,
 frequent plan modifications or terminations, sales clustering at price peaks,
 plans with very short cooling-off periods.
 Return JSON with keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-red_flags (list of specific concerns), rationale (1-2 sentences)."""
+red_flags (list of strings describing specific concerns), rationale (1-2 sentences)."""
 
         filings_text = json.dumps(form4_filings[:10], indent=2, default=str)
         user = f"""Ticker: {ticker}
@@ -360,7 +401,7 @@ Bullish signals: increased stock-based comp, tighter performance hurdles, inside
 Bearish signals: golden parachutes, option repricing, lowered performance targets,
 excessive perks, management entrenchment provisions.
 Return JSON with keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-comp_changes (list of notable changes), rationale (1-2 sentences)."""
+comp_changes (list of strings describing notable changes), rationale (1-2 sentences)."""
 
         proxy_excerpt = proxy_text[:4000]
         user = f"""Ticker: {ticker}
@@ -401,7 +442,7 @@ deceptive or evasive responses, Q&A dynamics (dodged questions, vague answers),
 and guidance revisions compared to prior quarters.
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-tone_assessment (1 sentence), guidance_changes (max 2 items), red_flags (max 2 items), rationale (1 sentence).
+tone_assessment (1 sentence), guidance_changes (list of strings, max 2 items), red_flags (list of strings, max 2 items), rationale (1 sentence).
 Keep ALL string values under 100 characters."""
             source_label = "EARNINGS CALL TRANSCRIPT"
         else:
@@ -410,7 +451,7 @@ Assess sentiment and identify surprises from news articles about the earnings ev
 You do NOT have the actual transcript — be honest about working from news coverage.
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-tone_assessment (1 sentence), guidance_changes (max 2 items), red_flags (max 2 items), rationale (1 sentence).
+tone_assessment (1 sentence), guidance_changes (list of strings, max 2 items), red_flags (list of strings, max 2 items), rationale (1 sentence).
 Keep ALL string values under 100 characters."""
             source_label = "EARNINGS NEWS COVERAGE"
 
@@ -445,7 +486,7 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
         system = """You are analyzing a proposed regulation for stock market impact.
 Return ONLY compact JSON. No explanation outside JSON.
 Keys: direction ("long"/"short"/"neutral"), conviction (0.0-1.0),
-affected_tickers (max 5 ticker symbols), affected_sectors (max 3),
+affected_tickers (max 5 ticker symbols), affected_sectors (list of strings, max 3),
 impact_assessment (1 sentence), rationale (1 sentence).
 Keep ALL string values under 80 characters."""
 
@@ -592,7 +633,7 @@ Return JSON: direction (long/short/neutral), score (0-1), reasoning (source-grou
         user = json.dumps({"ticker": ticker, "commodity": commodity_name,
                            "cot": cot_context, "macro": macro_context}, default=str)
         system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
-        result = self._call_llm(system, user + self._regime_suffix(regime_context))
+        result = self._call_llm(system, user + self._regime_suffix(regime_context), role="bounded")
         return _parse_json_response(result) if result else {}
 
     def analyze_ag_weather(
@@ -669,7 +710,7 @@ Assess probability that ag supply disruption drives {ticker} higher over {hold_d
 Return JSON.""" + self._regime_suffix(regime_context)
 
         system += "\nInclude evidence_claim: one factual source-grounded catalyst assertion with company attribution; exclude return predictions and unsupported inference."
-        result = self._call_llm(system, user)
+        result = self._call_llm(system, user, role="bounded")
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------

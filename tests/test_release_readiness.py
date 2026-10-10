@@ -16,6 +16,7 @@ from tradingagents.strategies.orchestration.release_readiness import (
     assess_generation,
 )
 from tradingagents.strategies.orchestration.session_executor import PHASES
+from tradingagents.strategies.execution.ids import stable_id
 
 SESSIONS = (
     "2026-09-15",
@@ -143,6 +144,12 @@ def _fixture(tmp_path):
                     **base,
                     execution_context_id=session,
                     epoch_id="epoch",
+                    economic_inputs_json=json.dumps({"market": {"benchmarks": [
+                        {"symbol": symbol} for symbol in ("SPY", "BIL")]}}),
+                    input_digest=stable_id("session_economic_inputs", {"market": {"benchmarks": [
+                        {"symbol": symbol} for symbol in ("SPY", "BIL")]}}),
+                    market_digest=stable_id("session_market_inputs", {"benchmarks": [
+                        {"symbol": symbol} for symbol in ("SPY", "BIL")]}),
                 )
                 _insert(
                     connection,
@@ -222,6 +229,36 @@ def test_five_consecutive_complete_sessions_are_ready(tmp_path):
     assert report["ready"] is True
     assert [row["session"] for row in report["sessions"]] == list(SESSIONS)
     assert all(row["ready"] for row in report["sessions"])
+
+
+@pytest.mark.parametrize("fault", [None, "missing", "extra", "tampered_contract"])
+def test_readiness_matches_frozen_four_etf_contract_with_legacy_two_still_supported(tmp_path, fault):
+    repo, state, _ = _fixture(tmp_path)
+    symbols = ("SPY", "BIL", "VTI", "VT")
+    market = {"benchmarks": [{"symbol": symbol} for symbol in symbols]}
+    economic = {"market": market}
+    for cohort in COHORTS:
+        with _db(state / cohort / "portfolio.db") as connection:
+            connection.execute(
+                "UPDATE session_execution_contexts SET economic_inputs_json=?, input_digest=?, market_digest=?",
+                (json.dumps(economic), stable_id("session_economic_inputs", economic),
+                 stable_id("session_market_inputs", market)),
+            )
+            for session in SESSIONS:
+                for symbol in ("VTI", "VT"):
+                    _insert(connection, "benchmark_observations", session=session, cohort_id=cohort,
+                            observation_id=session + symbol, epoch_id="epoch", symbol=symbol, valid=1)
+    with _db(state / COHORTS[0] / "portfolio.db") as connection:
+        if fault == "missing":
+            connection.execute("DELETE FROM benchmark_observations WHERE session=? AND symbol='VT'", (SESSIONS[-1],))
+        elif fault == "extra":
+            _insert(connection, "benchmark_observations", session=SESSIONS[-1], cohort_id=COHORTS[0],
+                    observation_id="unconfigured-IVV", epoch_id="epoch", symbol="IVV", valid=1)
+        elif fault == "tampered_contract":
+            connection.execute("UPDATE session_execution_contexts SET market_digest='tampered' WHERE session=?", (SESSIONS[-1],))
+    report = _assess(repo)
+    assert report["ready"] is (fault is None)
+    assert report["sessions"][-1]["accounting_complete"] is (fault is None)
 
 
 def test_candidate_quarantine_cannot_be_called_clean(tmp_path):

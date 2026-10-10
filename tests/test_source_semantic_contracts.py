@@ -146,7 +146,7 @@ def test_other_consumed_required_records_reject_empty_records(provider, monkeypa
     elif provider == 'edgar':
         source = EDGARSource(); call = lambda: source.search_filings('10-K'); budget_provider = provider
     else:
-        monkeypatch.setattr('fredapi.Fred.get_series', lambda *a, **kw: pd.Series([float('nan')], index=['2026-10-01']))
+        monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series', lambda *a, **kw: pd.Series([float('nan')], index=['2026-10-01']))
         source = FREDSource(api_key='offline'); call = lambda: source.fetch_series('UNRATE', '2026-10-01', '2026-10-06'); budget_provider = provider
     with provider_budget(budget_provider, 100, clock=lambda: 0, sleep=lambda _: None, limits=()):
         with pytest.raises(SourceFetchError):

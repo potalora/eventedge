@@ -134,6 +134,7 @@ class SessionInputBundle:
     governed_recovery_summaries: tuple[Mapping[str, object], ...] = ()
     continuity_actions: tuple[CorporateAction, ...] = ()
     action_coverage: Mapping[date, tuple[str, ...]] = field(default_factory=dict)
+    payment_actions: tuple[CorporateAction, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "action_coverage", MappingProxyType({day: tuple(sorted(set(tickers))) for day, tickers in self.action_coverage.items()}))
@@ -174,6 +175,7 @@ class SessionInputBundle:
                 action for action in self.actions if action.ticker in selected
             ),
             benchmarks=self.benchmarks,
+            payment_actions=self.payment_actions,
             continuity_actions=tuple(a for a in self.continuity_actions if a.ticker in selected),
             action_coverage={day: tuple(t for t in tickers if t in selected) for day, tickers in self.action_coverage.items()},
             governed_recoveries={
@@ -738,6 +740,7 @@ class SessionExecutor:
         processed_at: datetime | None = None,
         persist: bool = True,
         continuity_requirements: Mapping[date, tuple[str, ...]] | None = None,
+        dividend_actions: tuple[CorporateAction, ...] = (),
     ) -> SessionInputBundle:
         """Fetch the raw/action/adjusted set once for any number of cohorts."""
         routing_fields = (
@@ -850,6 +853,8 @@ class SessionExecutor:
                     failure_map[symbol] = (
                         f"invalid_benchmark {symbol}/{session.isoformat()}"
                     )
+        enrich = getattr(price_source, "enrich_dividend_payment_terms", None)
+        payment_actions = tuple(a for a in enrich(dividend_actions) if a.payment_date is not None) if enrich and dividend_actions else ()
         return SessionInputBundle(
             session,
             tuple(sorted(tickers)),
@@ -861,6 +866,7 @@ class SessionExecutor:
             recovery_summaries,
             tuple(continuity_actions),
             action_coverage,
+            payment_actions,
         )
 
     def validate_execution_input_bundle(
@@ -950,6 +956,8 @@ class SessionExecutor:
                 ),
                 bool(item["verified"]),
                 date.fromisoformat(str(item["payment_date"])) if item.get("payment_date") else None,
+                str(item.get("payment_source", "")), str(item.get("payment_reference", "")),
+                datetime.fromisoformat(str(item["payment_observed_at"])) if item.get("payment_observed_at") else None,
             )
             for item in market.get("corporate_actions", [])
         )
@@ -988,8 +996,9 @@ class SessionExecutor:
             governed_recoveries,
             {},
             recovery_summaries,
-            tuple(a for a in actions if a.session < session),
+            tuple(a for a in actions if a.session < session and a.action_id not in market.get("payment_action_ids", [])),
             {date.fromisoformat(day): tuple(tickers) for day, tickers in market.get("action_coverage", {}).items()},
+            payment_actions=tuple(a for a in actions if a.action_id in market.get("payment_action_ids", [])),
             validated_at=context["bound_at"],
         )
 
@@ -1238,7 +1247,7 @@ class SessionExecutor:
             )
             bound_recoveries = bound_market.get("governed_recoveries", {})
             if bound_context is not None and (
-                bound_recoveries or self.pricing_version == SIP_PRICING_VERSION
+                bound_recoveries or self.pricing_version == SIP_PRICING_VERSION or bound_market.get("payment_action_ids")
             ):
                 bundle = self.persisted_input_bundle(session)
             elif isinstance(price_source, SessionInputBundle):
@@ -1249,6 +1258,7 @@ class SessionExecutor:
                     required,
                     price_source,
                     self.benchmark_symbols,
+                    dividend_actions=self.ledger.pending_dividend_actions(),
                     continuity_requirements=(
                         {date.fromisoformat(day): tuple(tickers) for day, tickers in bound_market.get("action_coverage", {}).items()}
                         if bound_context is not None else self.ledger.inventory_action_requirements(session)
@@ -1284,6 +1294,9 @@ class SessionExecutor:
                 )
             )
             coverage = self.ledger.inventory_action_requirements(session) if bound_context is None else bundle.action_coverage
+            selected_payment_ids = sorted(a.action_id for a in bundle.payment_actions if any(a.action_id == b.action_id for b in actions))
+            if selected_payment_ids:
+                market_inputs["payment_action_ids"] = selected_payment_ids
             market_inputs["action_coverage"] = {day.isoformat(): list(tickers) for day, tickers in sorted(coverage.items())}
             if bound_context is None:
                 starting_state = self.ledger.execution_starting_state(session)
@@ -1538,6 +1551,9 @@ class SessionExecutor:
                     "action_id": action.action_id,
                     "session": action.session.isoformat(),
                     "payment_date": action.payment_date.isoformat() if action.payment_date else None,
+                    **({"payment_source": action.payment_source, "payment_reference": action.payment_reference,
+                        "payment_observed_at": action.payment_observed_at.isoformat()}
+                       if action.payment_observed_at is not None else {}),
                     "ticker": action.ticker,
                     "action_type": action.action_type,
                     "ratio": (
@@ -2034,6 +2050,20 @@ class SessionExecutor:
         if any(a.session not in bundle.action_coverage for a in bundle.continuity_actions):
             raise ValueError("uncovered inventory corporate action")
         actions += tuple(a for a in bundle.continuity_actions if a.ticker in requirements.get(a.session, ()))
+        # Payment-only refreshes may belong to closed positions and must never
+        # require raw bars or recreate entitlements in another cohort.
+        payment_ids = {row[0] for row in self.ledger.connection.execute("SELECT action_id FROM corporate_actions")}
+        payment_actions = tuple(a for a in bundle.payment_actions if a.action_id in payment_ids)
+        for action in payment_actions:
+            if action.session >= session or action.payment_observed_at is None:
+                raise ValueError("invalid late dividend payment observation")
+        # Ledger validation verifies economic identity and the independent terms clock.
+        errors = self.ledger.corporate_action_batch_errors(session, payment_actions, validation_at, allow_prior=True)
+        if errors:
+            raise CorporateActionBatchError(payment_actions, errors)
+        by_id = {a.action_id: a for a in actions}
+        by_id.update({a.action_id: a for a in payment_actions})
+        actions = tuple(by_id.values())
         actions = tuple(sorted(actions, key=lambda a: (a.session, a.action_type != "split", a.ticker, a.action_id)))
         validate_required_bars(
             bundle.bars, set(bundle.tickers), session, validation_at, max_age

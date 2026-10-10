@@ -9,6 +9,20 @@ import math
 import random
 import statistics
 
+from .benchmark_inference import benchmark_returns, paired_excess
+
+
+_FIXED_ETFS = ("SPY", "BIL", "VTI", "VT")
+_SECONDARY_EQUITY_ETFS = ("VTI", "VT")
+
+
+def _secondary_comparison(comparison: dict) -> dict:
+    """Secondary intervals are descriptive, never an acceptance decision."""
+    return {**comparison, "annualized_hurdle": 0.,
+            "primary_acceptance_criterion": False,
+            "decision": "descriptive_only",
+            "decision_reason": "fixed_secondary_benchmark_not_acceptance_criterion"}
+
 
 def _unavailable(reason: str, **details) -> dict:
     return dict(status='insufficient_evidence', reason=reason, **details)
@@ -66,6 +80,16 @@ def research_diagnostics(series: dict, *, realized_contributions: dict[str, floa
         'largest_contributor_stress': _unavailable('no_realized_lot_contributions'),
         'market_exposure_attribution': _unavailable('matched_total_return_benchmarks_required'),
         'dependence_aware_uncertainty': block_uncertainty([]),
+        'benchmark_comparison_policy': {
+            'primary': 'SPY', 'primary_annualized_hurdle': .05,
+            'secondary_equity': list(_SECONDARY_EQUITY_ETFS),
+            'cash_diagnostic': 'BIL', 'exposure_diagnostic': 'SPY_BIL_EXPOSURE',
+            'selection_policy': 'fixed_ex_ante_no_winner_selection',
+        },
+        'benchmark_excess_uncertainty': {symbol: (
+            _secondary_comparison(_unavailable('matched_total_return_benchmarks_required'))
+            if symbol in _SECONDARY_EQUITY_ETFS else _unavailable('matched_total_return_benchmarks_required'))
+            for symbol in (*_FIXED_ETFS, 'SPY_BIL_EXPOSURE')},
         'model_calibration': _unavailable('no_held_out_probability_forecasts',
             required_evidence='event-linked probability target, live model outputs and matured held-out outcomes; conviction scores are not calibrated probabilities'),
         'executable_fill_validation': _unavailable('no_independent_executable_quote_evidence',
@@ -110,28 +134,33 @@ def research_diagnostics(series: dict, *, realized_contributions: dict[str, floa
             'portfolio_return_unavailable_reason': 'reconciled_per_name_total_pnl_and_dynamic_counterfactual_unavailable',
         }
     benchmarks = series.get('benchmarks') or {}
-    by_symbol = {symbol: {row['session']: row for row in benchmarks.get(symbol, [])}
-                 for symbol in ('SPY', 'BIL')}
-    required = {row['session'] for row in history}
-    complete = all(required <= set(by_symbol[symbol]) and
-        all(by_symbol[symbol][session].get('return_basis') == 'paired_total_return_index_v2' for session in required)
-        for symbol in ('SPY', 'BIL'))
-    if complete and not series.get('benchmark_unavailable_reason'):
+    # Validate each ETF on the same retained dates and its own adjustment basis.
+    # A legacy or missing symbol cannot erase evidence for another fixed ETF.
+    matched = {symbol: benchmark_returns(history, benchmarks.get(symbol, []))
+               for symbol in _FIXED_ETFS}
+    for symbol, observations in matched.items():
+        if observations is not None:
+            comparison = paired_excess(returns, observations, hurdle=.05 if symbol == 'SPY' else 0.)
+            comparison['total_excess_return'] = math.prod(1 + value for value in returns) - math.prod(
+                1 + value for value in observations)
+            result['benchmark_excess_uncertainty'][symbol] = (
+                _secondary_comparison(comparison) if symbol in _SECONDARY_EQUITY_ETFS else comparison)
+    if all(matched[symbol] is not None for symbol in ('SPY', 'BIL')):
         market, cash, residual, wealth = 0., 0., 0., 1.
         daily = []
-        for previous, current, portfolio_return in zip(history, history[1:], returns):
-            previous_session, current_session = previous['session'], current['session']
-            spy = float(by_symbol['SPY'][current_session]['close']) / float(by_symbol['SPY'][previous_session]['close']) - 1
-            bil = float(by_symbol['BIL'][current_session]['close']) / float(by_symbol['BIL'][previous_session]['close']) - 1
+        exposure_returns = []
+        for previous, current, portfolio_return, spy, bil in zip(
+                history, history[1:], returns, matched['SPY'], matched['BIL']):
             net_weight = float(previous['net_exposure']) / float(previous['net_equity'])
             gross_weight = float(previous['gross_exposure']) / float(previous['net_equity'])
             market_piece, cash_piece = net_weight * spy, max(0., 1 - gross_weight) * bil
+            exposure_returns.append(market_piece + cash_piece)
             residual_piece = portfolio_return - market_piece - cash_piece
             market += wealth * market_piece
             cash += wealth * cash_piece
             residual += wealth * residual_piece
             wealth *= 1 + portfolio_return
-            daily.append({'session': current_session, 'lagged_net_weight': net_weight,
+            daily.append({'session': current['session'], 'lagged_net_weight': net_weight,
                           'lagged_gross_weight': gross_weight, 'market_return_component': market_piece,
                           'cash_return_component': cash_piece, 'residual_return_component': residual_piece})
         result['market_exposure_attribution'] = {
@@ -140,4 +169,6 @@ def research_diagnostics(series: dict, *, realized_contributions: dict[str, floa
             'market_contribution': market, 'cash_contribution': cash, 'residual_contribution': residual,
             'portfolio_total_return': wealth - 1, 'daily_components': daily,
         }
+        result['benchmark_excess_uncertainty']['SPY_BIL_EXPOSURE'] = paired_excess(
+            returns, exposure_returns, hurdle=0.)
     return result

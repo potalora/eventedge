@@ -168,7 +168,7 @@ def test_fred_partial_failure_keeps_valid_series_and_reaches_health(
             raise requests.Timeout(_SECRET)
         return pd.Series([3.0], index=pd.to_datetime(["2026-09-01"]))
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     source = FREDSource(api_key="offline")
     config, engine = _engine(tmp_path, source)
     payload = _assert_failure_visible(config, engine, "fred")
@@ -179,7 +179,7 @@ def test_fred_partial_failure_keeps_valid_series_and_reaches_health(
 
 def test_fred_successful_empty_series_is_not_fetch_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "fredapi.Fred.get_series", lambda *args, **kwargs: pd.Series(dtype=float)
+        "tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", lambda *args, **kwargs: pd.Series(dtype=float)
     )
     source = FREDSource(api_key="offline")
     config, engine = _engine(tmp_path, source)
@@ -225,7 +225,7 @@ def test_fred_generic_batch_retains_partial_data_and_safe_error(monkeypatch):
             raise requests.Timeout(_SECRET)
         return pd.Series([3.0], index=["2026-09-01"])
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     result = FREDSource(api_key="offline").fetch(
         {"method": "multi_series", "series_ids": ["CPIAUCSL", "UNRATE"],
          "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"}
@@ -243,7 +243,7 @@ def test_fred_malformed_series_is_visible_and_not_cached(tmp_path, monkeypatch):
             return {"unexpected": "provider shape"}
         return pd.Series([3.0], index=pd.to_datetime(["2026-09-01"]))
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     _, engine = _engine(tmp_path, FREDSource(api_key="offline"))
     failed = engine._fetch_fred_data("2026-07-01", "2026-10-01")
     assert failed.get("error")
@@ -429,7 +429,7 @@ def test_fred_batch_preserves_failed_series_and_reason_across_groups(
             return {"malformed": True}
         return pd.Series([3.0], index=["2026-09-01"])
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     config, engine = _engine(tmp_path, FREDSource(api_key="offline"))
     payload = _assert_failure_visible(config, engine, "fred")
     assert "CPIAUCSL:timeout" in payload["error"]
@@ -441,7 +441,7 @@ def test_fred_batch_preserves_failed_series_and_reason_across_groups(
 def test_generic_dispatch_preserves_safe_reason(provider, monkeypatch):
     if provider == "fred":
         monkeypatch.setattr(
-            "fredapi.Fred.get_series", Mock(side_effect=requests.Timeout(_SECRET))
+            "tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", Mock(side_effect=requests.Timeout(_SECRET))
         )
         result = FREDSource(api_key="offline").fetch(
             {"method": "series", "series_id": "CPIAUCSL", "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"}
@@ -465,7 +465,7 @@ def test_fred_direct_diagnostic_retains_safe_series_identity(monkeypatch):
     from urllib.error import URLError
 
     monkeypatch.setattr(
-        "fredapi.Fred.get_series", Mock(side_effect=URLError(TimeoutError(_SECRET)))
+        "tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", Mock(side_effect=URLError(TimeoutError(_SECRET)))
     )
     source = FREDSource(api_key="offline")
     result = source.fetch({"method": "series", "series_id": "CPIAUCSL", "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"})
@@ -504,19 +504,15 @@ def test_invalid_json_is_a_safe_invalid_response(provider, monkeypatch):
 def test_fred_actual_http_wrapper_retains_status_and_redacts_body(
     tmp_path, monkeypatch, body
 ):
-    from io import BytesIO
-    from urllib.error import HTTPError
-    from urllib.parse import parse_qs, urlsplit
-
-    def urlopen(url):
-        series_id = parse_qs(urlsplit(url).query)["series_id"][0]
+    def transport(url, **options):
+        series_id = options["params"]["series_id"]
         if series_id == "CPIAUCSL":
-            raise HTTPError(url, 502, "fixture-secret", {}, BytesIO(body))
-        return BytesIO(
-            b'<observations><observation date="2026-09-01" value="3.0"/></observations>'
-        )
+            response = _response({})
+            response.status_code = 502
+            return response
+        return _response({"observations": [{"date": "2026-09-01", "value": "3.0"}]})
 
-    monkeypatch.setattr("fredapi.fred.urlopen", urlopen)
+    monkeypatch.setattr(FREDSource, "_transport_get", staticmethod(transport))
     source = FREDSource(api_key="fixture-secret")
     config, engine = _engine(tmp_path, source)
     payload = _assert_failure_visible(config, engine, "fred")

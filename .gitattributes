@@ -1,0 +1,2 @@
+# Captured SEC responses retain their verified native bytes, including spaces.
+tests/fixtures/edgar-ownership-index-*.html -text whitespace=-blank-at-eol

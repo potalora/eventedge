@@ -17,6 +17,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, TypeVar
+from zoneinfo import ZoneInfo
 
 from tradingagents.strategies.execution import (
     AccountSnapshot,
@@ -39,7 +40,7 @@ from tradingagents.strategies.execution.price_source import (
     BarValidationError,
     validate_required_bars,
 )
-from tradingagents.strategies.orchestration.trading_calendar import session_close
+from tradingagents.strategies.orchestration.trading_calendar import session_close, session_open
 
 
 SCHEMA_VERSION = 1
@@ -266,6 +267,11 @@ _DDL: tuple[str, ...] = (
     """CREATE TABLE IF NOT EXISTS dividend_receivables (
         event_id TEXT PRIMARY KEY REFERENCES dividend_events(dividend_event_id),
         amount TEXT NOT NULL, payment_date TEXT, settled_session TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS dividend_payment_observations (
+        action_id TEXT PRIMARY KEY REFERENCES corporate_actions(action_id),
+        payment_date TEXT NOT NULL, source TEXT NOT NULL, reference TEXT NOT NULL,
+        observed_at TEXT NOT NULL, accepted_session TEXT NOT NULL, accepted_at TEXT NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS dividend_payment_terms (
         action_id TEXT PRIMARY KEY REFERENCES corporate_actions(action_id), payment_date TEXT
@@ -824,9 +830,28 @@ class PortfolioLedger:
         def rows(sql: str, parameters: tuple[object, ...]) -> list[dict[str, object]]:
             return [dict(row) for row in self._connection.execute(sql, parameters)]
 
+        receivables = [dict(row) for row in self._dividend_receivable_rows(session)]
+        payment_state: dict[str, list[dict[str, object]]] = {}
+        for table in ("dividend_payment_terms", "dividend_payment_observations"):
+            # Historical read-only ledgers may predate either additive table.
+            # Keep the same bounded entitlement scope as dividend_receivables,
+            # including this session's settled rows for post-phase verification.
+            exists = self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            payment_state[table] = rows(
+                f"SELECT p.* FROM {table} p WHERE EXISTS ("
+                "SELECT 1 FROM dividend_events e JOIN dividend_receivables r "
+                "ON r.event_id=e.dividend_event_id WHERE e.action_id=p.action_id "
+                "AND (r.settled_session IS NULL OR r.settled_session=?)) "
+                "ORDER BY p.action_id",
+                (session.isoformat(),),
+            ) if receivables and exists is not None else []
+
         return {
             "account": account.__dict__,
-            "dividend_receivables": [dict(row) for row in self._dividend_receivable_rows(session)],
+            "dividend_receivables": receivables,
+            **payment_state,
             "execution_policy_binding": (
                 None
                 if execution_policy_binding is None
@@ -3993,6 +4018,12 @@ class PortfolioLedger:
                     errors.append(f"invalid dividend {action.action_id}")
             else:
                 errors.append(f"unsupported corporate action {action.action_id}")
+            if action.payment_observed_at is not None:
+                observed = action.payment_observed_at
+                if (observed.tzinfo is None or observed.utcoffset() is None or observed > processed_at
+                    or observed.astimezone(ZoneInfo("America/New_York")).date() > session or not action.payment_source or not action.payment_reference
+                    or action.payment_date is None):
+                    errors.append(f"invalid dividend payment observation {action.action_id}")
             if action.payment_date is not None and (action.action_type != "cash_dividend" or action.payment_date < action.session):
                 errors.append(f"invalid dividend payment date {action.action_id}")
         return tuple(sorted(set(errors)))
@@ -4646,6 +4677,8 @@ class PortfolioLedger:
                                 processed,
                             )
                         )
+                    else:
+                        self._accept_dividend_payment_terms(action, session, processed)
                     continue
                 self._connection.execute(
                     "INSERT INTO corporate_actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -4655,6 +4688,7 @@ class PortfolioLedger:
                     "INSERT INTO dividend_payment_terms VALUES (?, ?)",
                     (action.action_id, action.payment_date.isoformat() if action.payment_date else None),
                 )
+                self._accept_dividend_payment_terms(action, session, processed)
                 if action.session > session or (action.session != session and not allow_prior):
                     events.append(
                         self._quarantine_action(
@@ -5360,10 +5394,43 @@ class PortfolioLedger:
         )
         terms = self._connection.execute("SELECT payment_date FROM dividend_payment_terms WHERE action_id=?", (action.action_id,)).fetchone()
         payment_date = terms[0] if terms is not None else None
-        return payment_date == (action.payment_date.isoformat() if action.payment_date else None) and all(
+        incoming = action.payment_date.isoformat() if action.payment_date else None
+        # Missing repeat evidence cannot erase verified terms; only an audited
+        # unknown-to-known observation may add terms. Economics remain immutable.
+        terms_match = payment_date == incoming or incoming is None or (
+            payment_date is None and bool(action.payment_source and action.payment_reference and action.payment_observed_at)
+        )
+        return terms_match and all(
             (ignore_observation_time and column == "fetched_at") or row[column] == value
             for column, value in zip(columns, self._corporate_action_values(action))
         )
+
+    def _accept_dividend_payment_terms(self, action: CorporateAction, session: date, processed: datetime) -> None:
+        if action.payment_date is None or action.payment_observed_at is None:
+            return
+        self._connection.execute(
+            "INSERT OR IGNORE INTO dividend_payment_observations VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (action.action_id, action.payment_date.isoformat(), action.payment_source,
+             action.payment_reference, action.payment_observed_at.isoformat(), session.isoformat(), processed.isoformat()),
+        )
+        self._connection.execute("UPDATE dividend_payment_terms SET payment_date=? WHERE action_id=? AND payment_date IS NULL",
+            (action.payment_date.isoformat(), action.action_id))
+        self._connection.execute(
+            "UPDATE dividend_receivables SET payment_date=? WHERE payment_date IS NULL AND settled_session IS NULL "
+            "AND event_id IN (SELECT dividend_event_id FROM dividend_events WHERE action_id=?)",
+            (action.payment_date.isoformat(), action.action_id),
+        )
+
+    def pending_dividend_actions(self) -> tuple[CorporateAction, ...]:
+        """Unknown payable terms for retained entitlements, including closed lots."""
+        rows = self._connection.execute(
+            "SELECT DISTINCT a.* FROM corporate_actions a JOIN dividend_events e USING(action_id) "
+            "JOIN dividend_receivables r ON r.event_id=e.dividend_event_id WHERE r.payment_date IS NULL "
+            "AND r.settled_session IS NULL ORDER BY a.action_id"
+        ).fetchall()
+        return tuple(CorporateAction(row["action_id"], row["ticker"], _date(row["session"]),
+            row["action_type"], None, _decimal(row["cash_per_share"]), row["source"],
+            datetime.fromisoformat(row["fetched_at"]), bool(row["verified"])) for row in rows)
 
     def _invalid_split_reason(self, action: CorporateAction) -> str | None:
         if action.ratio is None or not action.ratio.is_finite() or action.ratio <= 0:
@@ -5555,9 +5622,15 @@ class PortfolioLedger:
         """Transfer only verified payable entitlements into cash, once."""
         with self.transaction():
             for row in self._connection.execute(
-                "SELECT * FROM dividend_receivables WHERE settled_session IS NULL AND payment_date <= ? ORDER BY event_id",
+                "SELECT r.*, o.observed_at FROM dividend_receivables r "
+                "JOIN dividend_events e ON e.dividend_event_id=r.event_id "
+                "LEFT JOIN dividend_payment_observations o ON o.action_id=e.action_id "
+                "WHERE r.settled_session IS NULL AND r.payment_date <= ? ORDER BY r.event_id",
                 (session.isoformat(),),
             ).fetchall():
+                # After-open knowledge cannot finance this session's open fills.
+                if row["observed_at"] and datetime.fromisoformat(row["observed_at"]) >= session_open(session):
+                    continue
                 amount = _decimal(row["amount"])
                 self._insert_named_cash_event(
                     stable_id("dividend_payment", self.cohort_id, row["event_id"]),

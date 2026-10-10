@@ -58,7 +58,8 @@ def _models(**changes: str | None) -> dict[str, str | None]:
     return models
 
 
-@pytest.mark.parametrize("key", ["llm_effort", "portfolio_committee_model"])
+@pytest.mark.parametrize("key", ["llm_effort", "portfolio_committee_model",
+                                 "thesis_model", "thesis_effort", "portfolio_committee_effort"])
 def test_analysis_effort_and_committee_override_are_semantic_identity(key):
     before = _context(models=_models(**{key: "low"}))
     after = _context(models=_models(**{key: "high"}))

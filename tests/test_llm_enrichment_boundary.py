@@ -66,3 +66,30 @@ def test_valid_llm_score_is_numeric_in_candidate_and_journal_metadata(tmp_path, 
     assert candidate.direction == "short"
     assert candidate.metadata["llm_analysis"][field] == float(value)
     assert result[field] == value
+
+
+@pytest.mark.parametrize("notable,valid", [
+    ([{"name": "Fixture Insider", "title": "CEO"}], False),
+    (["Fixture Insider, CEO"], True),
+])
+def test_native_insider_array_shape_keeps_string_schema_enforced(tmp_path, notable, valid):
+    engine = MultiStrategyEngine(
+        config={"autoresearch": {"state_dir": str(tmp_path)}}, registry=DataSourceRegistry(),
+    )
+    engine._analyzer = SimpleNamespace(analyze_insider_context=lambda *args, **kwargs: {
+        "direction": "long", "conviction": .8, "rationale": "Retained purchase",
+        "notable_insiders": notable,
+    })
+    candidate = Candidate(ticker="AAPL", date="2026-03-30", score=.7, metadata={
+        "needs_llm_analysis": True, "analysis_type": "insider_activity", "cluster_type": "buy_cluster",
+        "filings": [{"owner_name": "Fixture Insider", "owner_title": "CEO"}],
+    })
+    result = engine._enrich_with_llm([candidate], "insider_activity")[0]
+    if valid:
+        assert result.metadata["analysis_status"] == "validated"
+        assert result.metadata["llm_analysis"]["notable_insiders"] == notable
+    else:
+        assert result.metadata["analysis_status"] == "failed"
+        assert result.metadata["analysis_failure_reason"] == "invalid_notable_insiders"
+        assert result.journal_only and result.score == .7
+        assert "llm_analysis" not in result.metadata

@@ -266,6 +266,11 @@ class CohortOrchestrator:
         models["portfolio_committee_model"] = ar_config.get("paper_trade", {}).get(
             "portfolio_committee_model", ar_config.get("autoresearch_model")
         )
+        models["portfolio_committee_effort"] = ar_config.get("paper_trade", {}).get(
+            "portfolio_committee_effort", models["llm_effort"]
+        )
+        models["thesis_model"] = ar_config.get("thesis_model", ar_config.get("autoresearch_model"))
+        models["thesis_effort"] = ar_config.get("thesis_effort", models["llm_effort"])
         for key, value in models.items():
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"model {key} must be non-empty text")

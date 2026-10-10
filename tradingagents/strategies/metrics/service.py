@@ -814,14 +814,8 @@ class MetricsService:
     def _cohort_series_from_inputs(inputs: tuple) -> dict[str, object]:
         """Serialize one valid ledger window and its persisted benchmarks."""
         snapshots, benchmarks, _signals, _fills = inputs
-        if not snapshots:
-            return {
-                "net_equity_history": [],
-                "benchmarks": {"SPY": [], "BIL": []},
-                "matched_benchmark_returns": [],
-            }
         benchmark_rows = tuple(
-            row for row in benchmarks if row.valid and row.symbol in {"SPY", "BIL"}
+            row for row in benchmarks if row.valid
         )
         by_symbol = {
             symbol: [
@@ -835,10 +829,19 @@ class MetricsService:
                 for row in benchmark_rows
                 if row.symbol == symbol
             ]
-            for symbol in ("SPY", "BIL")
+            for symbol in sorted({"SPY", "BIL"} | {row.symbol for row in benchmarks})
         }
+        if not snapshots:
+            return {
+                "net_equity_history": [],
+                "benchmarks": by_symbol,
+                "matched_benchmark_returns": [],
+            }
         benchmark_unavailable_reason = None
-        if any(row.return_basis != "paired_total_return_index_v2" for row in benchmark_rows):
+        # Core portfolio metrics use SPY/BIL. A secondary benchmark's unavailable
+        # vintage must not invalidate a healthy primary accounting comparison.
+        if any(row.return_basis != "paired_total_return_index_v2"
+               for row in benchmark_rows if row.symbol in {"SPY", "BIL"}):
             matched = ()
             benchmark_unavailable_reason = "legacy_unpaired_benchmark_basis"
         else:

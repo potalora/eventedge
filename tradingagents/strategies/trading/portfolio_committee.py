@@ -5,7 +5,6 @@ Returns ranked trade recommendations with position sizes.
 
 Uses the configured model, or explicit rule-only synthesis when disabled.
 Model abstention holds cash; model failure holds cash and is degraded.
-Cost: ~$0.001 per synthesis call.
 """
 from __future__ import annotations
 
@@ -99,7 +98,7 @@ class PortfolioCommittee:
             "portfolio_committee_model",
             self.config.get("autoresearch", {}).get("autoresearch_model", "claude-haiku-4-5-20251001"),
         )
-        self._effort = self.config.get("autoresearch", {}).get("llm_effort", "medium")
+        self._effort = pt_config.get("portfolio_committee_effort", self.config.get("autoresearch", {}).get("llm_effort", "medium"))
         self._enabled = pt_config.get("portfolio_committee_enabled", True)
         # Older models use temperature zero by default. Sonnet 5 omits sampling
         # controls because adaptive thinking rejects non-default values.
@@ -135,6 +134,7 @@ class PortfolioCommittee:
         self.last_policy_decisions = ()
         self.last_decision_status: dict[str, Any] = {}
         self._model_failure_reason = ""
+        self.last_call_provenance: dict[str, Any] = {}
 
     def synthesize(
         self,
@@ -145,6 +145,7 @@ class PortfolioCommittee:
         total_capital: float = 5000.0,
         enrichment: dict | None = None,
         risk_context: PortfolioRiskContext | None = None,
+        model_coverage: dict[str, Any] | None = None,
     ) -> list[TradeRecommendation]:
         """Synthesize all signals into ranked trade recommendations.
 
@@ -162,12 +163,23 @@ class PortfolioCommittee:
         """
         self.last_policy_decisions = ()
         self._model_failure_reason = ""
+        self.last_call_provenance = {"configured_model": self._model_name,
+            "returned_model": None, "returned_revision": None, "identity_status": "unpinned",
+            "response_id": None, "reasoning_effort": self._effort} if self._enabled else {}
         self.last_decision_status = {
             "mode": "model" if self._enabled else "rule_only",
             "model": self._model_name if self._enabled else None,
             "status": "no_candidates", "degraded": False, "reason": "",
             "input_count": len(signals), "eligible_count": 0, "selected_count": 0,
         }
+        if self.last_call_provenance:
+            self.last_decision_status["model_provenance"] = dict(self.last_call_provenance)
+        if model_coverage is not None:
+            self.last_decision_status["model_coverage"] = dict(model_coverage)
+        if (model_coverage is not None and model_coverage.get("complete") is False) or any(
+            (s.get("metadata") or {}).get("analysis_failure_reason") == "model_deadline_exhausted" for s in signals):
+            self.last_decision_status.update(status="failed", degraded=True, reason="model_deadline_exhausted")
+            return []
         signals = [s for s in signals if not s.get("journal_only") and not (s.get("metadata") or {}).get("non_actionable_reason")]
         self.last_decision_status["eligible_count"] = len(signals)
         if not signals:
@@ -195,8 +207,10 @@ class PortfolioCommittee:
                     current_positions, total_capital, enrichment,
                 )
             except Exception as exc:
-                self._model_failure_reason = type(exc).__name__
+                self._model_failure_reason = "model_deadline_exhausted" if type(exc).__name__ == "ModelDeadlineExceeded" else type(exc).__name__
                 logger.warning("LLM synthesis failed; holding cash", exc_info=True)
+            if self.last_call_provenance:
+                self.last_decision_status["model_provenance"] = dict(self.last_call_provenance)
             if ranked is None:
                 self.last_decision_status.update(status="failed", degraded=True,
                     reason=self._model_failure_reason or "model_unavailable")
@@ -674,7 +688,7 @@ class PortfolioCommittee:
                 ]
             return recs
         except Exception as exc:
-            self._model_failure_reason = type(exc).__name__
+            self._model_failure_reason = "model_deadline_exhausted" if type(exc).__name__ == "ModelDeadlineExceeded" else type(exc).__name__
             logger.warning("LLM synthesis call failed; holding cash", exc_info=True)
             return None
 
@@ -889,8 +903,8 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
         """Lazy-init the selected provider."""
         if self._client is None:
             try:
-                from tradingagents.strategies.llm_utils import LUNA_MODEL
-                if self._model_name == LUNA_MODEL:
+                from tradingagents.strategies.llm_utils import uses_responses
+                if uses_responses(self._model_name):
                     import httpx
                     from openai import OpenAI
                     self._client = OpenAI(
@@ -902,7 +916,7 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
                 # Force IPv4 — IPv6 connections to Anthropic hang on some networks
                 transport = httpx.HTTPTransport(local_address="0.0.0.0")
                 self._client = anthropic.Anthropic(
-                    timeout=httpx.Timeout(60.0, connect=10.0),
+                    timeout=httpx.Timeout(60.0, connect=10.0), max_retries=0,
                     http_client=httpx.Client(transport=transport),
                 )
             except (ImportError, Exception):
@@ -910,33 +924,32 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
         return self._client
 
     def _call_llm(self, *, system: str, prompt: str, max_tokens: int = 1024):
-        """Call LLM with retry + exponential backoff for rate limits.
-
-        Returns the response text, or raises on non-retryable failure.
-        """
+        """SDK retries are off; rate-limit backoff consumes one shared deadline."""
+        from tradingagents.strategies.llm_utils import call_analysis_model
+        from tradingagents.strategies.runtime_deadline import (
+            DEFAULT_MODEL_BUDGET_S, ModelDeadlineExceeded, current_model_deadline,
+            model_backoff, model_budget, model_timeout,
+        )
+        deadline = current_model_deadline()
+        if deadline is None:
+            with model_budget(time.monotonic() + DEFAULT_MODEL_BUDGET_S):
+                return self._call_llm(system=system, prompt=prompt, max_tokens=max_tokens)
+        model_timeout()
         client = self._get_client()
         if client is None:
             raise RuntimeError("No LLM client")
-
-        max_retries = 4
-        base_delay = 2.0
-        for attempt in range(max_retries + 1):
+        for attempt in range(5):
             try:
-                from tradingagents.strategies.llm_utils import call_analysis_model
                 return call_analysis_model(
                     client, model=self._model_name, max_tokens=max_tokens,
                     system=system, prompt=prompt, temperature=self._temperature,
-                    effort=self._effort,
+                    effort=self._effort, provenance=self.last_call_provenance,
                 )
+            except ModelDeadlineExceeded:
+                raise
             except Exception as exc:
-                is_rate_limit = "rate" in str(exc).lower() or "429" in str(exc)
-                is_overloaded = "overloaded" in str(exc).lower() or "529" in str(exc)
-                if (is_rate_limit or is_overloaded) and attempt < max_retries:
-                    delay = base_delay * (2 ** attempt)
-                    logger.info(
-                        "LLM rate limited (attempt %d/%d), retrying in %.1fs",
-                        attempt + 1, max_retries, delay,
-                    )
-                    time.sleep(delay)
+                status = getattr(exc, "status_code", None)
+                if status in {429, 529} and attempt < 4:
+                    model_backoff(2.0 * 2 ** attempt)
                     continue
                 raise

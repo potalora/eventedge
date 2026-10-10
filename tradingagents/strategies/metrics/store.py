@@ -118,7 +118,11 @@ _MAX_CANDIDATE_RECOVERY_TEXT = 256
 _MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT = 128
 _MAX_CANDIDATE_RECOVERY_ATTEMPTS = 2
 _MAX_CANDIDATE_RECOVERY_SIGNALS = 64
-_MAX_CANDIDATE_SIGNAL_IDENTITIES = 4_096
+# Six exhaustive SEC windows can retain 10,000 filings each, repeated across
+# four default horizons. Keep every journal-only identity for immutable replay;
+# the independent byte budget bounds the serialized resource cost as well.
+_MAX_CANDIDATE_SIGNAL_IDENTITIES = 262_144
+_MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES = 64 * 1024 * 1024
 _MAX_GOVERNED_RECOVERY_TEXT = 4_096
 _MAX_GOVERNED_RECOVERY_ROWS = 7
 _MAX_GOVERNED_RECOVERY_COHORTS = 64
@@ -285,14 +289,62 @@ class MetricStore:
         )
         return CandidateBarRecoveryRecord(**data)
 
-    @staticmethod
     def _candidate_signal_identity_binding(
+        self,
         payload: str,
+        *,
+        expected_scope: tuple[str, date] | None = None,
+        expected_binding_id: str | None = None,
     ) -> CandidateSignalIdentityBinding:
-        data = json.loads(payload)
-        data["session"] = date.fromisoformat(data["session"])
-        data["identities"] = tuple(dict(identity) for identity in data["identities"])
-        return CandidateSignalIdentityBinding(**data)
+        if not isinstance(payload, str):
+            raise ValueError("candidate signal identity binding payload is invalid")
+        # Count bytes before JSON parsing without expanding a large Unicode
+        # document into a second, full UTF-8 allocation.
+        if len(payload) > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
+            raise ValueError("candidate signal identity binding payload exceeds bound")
+        byte_count = 0
+        for offset in range(0, len(payload), 8_192):
+            byte_count += len(payload[offset:offset + 8_192].encode("utf-8"))
+            if byte_count > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
+                raise ValueError("candidate signal identity binding payload exceeds bound")
+        try:
+            data = json.loads(payload)
+            if (
+                not isinstance(data, dict)
+                or set(data) != {"binding_id", "epoch_id", "session", "identities"}
+                or not isinstance(data["identities"], list)
+                or not all(isinstance(identity, dict) for identity in data["identities"])
+            ):
+                raise ValueError
+            data["session"] = date.fromisoformat(data["session"])
+            data["identities"] = tuple(data["identities"])
+            record = CandidateSignalIdentityBinding(**data)
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("candidate signal identity binding payload is invalid") from None
+        self._validate_candidate_signal_identity_binding(record)
+        if expected_scope is not None and (record.epoch_id, record.session) != expected_scope:
+            raise ValueError("candidate signal identity binding scope is invalid")
+        if expected_binding_id is not None and record.binding_id != expected_binding_id:
+            raise ValueError("candidate signal identity binding identifier is invalid")
+        return record
+
+    @staticmethod
+    def _candidate_signal_identity_binding_payload(
+        record: CandidateSignalIdentityBinding,
+    ) -> str:
+        # Preserve _json's canonical bytes without asdict's deep copy or a
+        # complete oversized JSON/UTF-8 allocation before enforcing the budget.
+        document = {"binding_id": record.binding_id, "epoch_id": record.epoch_id,
+                    "session": record.session, "identities": record.identities}
+        encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"), default=str,
+                                   ensure_ascii=True)
+        encoded = bytearray()
+        for chunk in encoder.iterencode(document):
+            # ensure_ascii makes character count equal serialized UTF-8 bytes.
+            if len(encoded) + len(chunk) > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
+                raise ValueError("candidate signal identity binding payload exceeds bound")
+            encoded.extend(chunk.encode("ascii"))
+        return encoded.decode("ascii")
 
     @staticmethod
     def _candidate_input_issue(
@@ -1789,7 +1841,7 @@ class MetricStore:
         self, record: CandidateSignalIdentityBinding
     ) -> None:
         self._validate_candidate_signal_identity_binding(record)
-        payload = self._json(record)
+        payload = self._candidate_signal_identity_binding_payload(record)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._insert_immutable(
@@ -1819,13 +1871,23 @@ class MetricStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT payload_json
+                SELECT binding_id, length(CAST(payload_json AS BLOB)),
+                       CASE WHEN length(CAST(payload_json AS BLOB)) <= ?
+                            THEN payload_json END
                 FROM candidate_signal_identity_bindings
                 WHERE epoch_id = ? AND session = ?
                 """,
-                (epoch_id, session.isoformat()),
+                (_MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES, epoch_id, session.isoformat()),
             ).fetchone()
-        return self._candidate_signal_identity_binding(row[0]) if row else None
+        if row is None:
+            return None
+        if not self._bounded_candidate_recovery_text(row[0]):
+            raise ValueError("candidate signal identity binding identifier is invalid")
+        if row[1] > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
+            raise ValueError("candidate signal identity binding payload exceeds bound")
+        return self._candidate_signal_identity_binding(
+            row[2], expected_scope=(epoch_id, session), expected_binding_id=row[0]
+        )
 
     def upsert_outcome(self, outcome: OutcomeRecord) -> None:
         payload = self._json(outcome)

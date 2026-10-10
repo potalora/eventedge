@@ -65,7 +65,7 @@ class FakePriceSource:
     def __init__(self, bars=None, actions=None, adjusted=None):
         self.bars = bars or {}
         self.actions = actions or []
-        values = adjusted or {"SPY": "650.25", "BIL": "91.10"}
+        values = adjusted or {"SPY": "650.25", "BIL": "91.10", "VTI": "300", "VT": "130"}
         self.adjusted = {
             (symbol, session): (
                 value
@@ -3000,6 +3000,7 @@ def test_production_usaspending_availability_stages_real_candidate(tmp_path):
                 "generated_internal_id": "CONT_AWARD_1",
                 "Base Obligation Date": "2026-07-30",
                 "Recipient Name": "Lockheed Martin",
+                "Recipient UEI": "H7PNSVNN5827",
                 "Award Amount": 50_000_000,
                 "Awarding Agency": "DOD",
                 "Start Date": "2026-07-01",
@@ -3223,6 +3224,8 @@ def _policy_enabled_staging_fixture(tmp_path):
             adjusted={
                 ("SPY", FRIDAY): Decimal("649"),
                 ("BIL", FRIDAY): Decimal("91"),
+                ("VTI", FRIDAY): Decimal("299"),
+                ("VT", FRIDAY): Decimal("129"),
             }
         ),
         {},
@@ -3440,6 +3443,8 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
                 adjusted={
                     ("SPY", FRIDAY): Decimal("649"),
                     ("BIL", FRIDAY): Decimal("91"),
+                    ("VTI", FRIDAY): Decimal("299"),
+                    ("VT", FRIDAY): Decimal("129"),
                 }
             ),
             {},
@@ -3617,6 +3622,8 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
                 adjusted={
                     ("SPY", MONDAY): Decimal("650"),
                     ("BIL", MONDAY): Decimal("91.1"),
+                    ("VTI", MONDAY): Decimal("300"),
+                    ("VT", MONDAY): Decimal("130"),
                 },
             ),
             {},
@@ -3671,6 +3678,8 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
                 adjusted={
                     ("SPY", FRIDAY): Decimal("649"),
                     ("BIL", FRIDAY): Decimal("91"),
+                    ("VTI", FRIDAY): Decimal("299"),
+                    ("VT", FRIDAY): Decimal("129"),
                 }
             ),
             {},
@@ -3722,6 +3731,8 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
                 adjusted={
                     ("SPY", MONDAY): Decimal("650"),
                     ("BIL", MONDAY): Decimal("91.1"),
+                    ("VTI", MONDAY): Decimal("300"),
+                    ("VT", MONDAY): Decimal("130"),
                 },
             ),
             {"MSFT": borrow_rate},
@@ -4076,6 +4087,42 @@ def test_date_only_event_uses_end_of_date_and_is_same_session_cutoff_late(tmp_pa
         record = ledger.read_signals(FRIDAY, FRIDAY)[0]
         assert result["cutoff_late"] == [record.signal_id]
         assert record.event_at == datetime(2026, 7, 31, 23, 59, 59, 999999, UTC)
+        assert ledger.pending_intents(MONDAY) == []
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("empty_signals", [False, True])
+def test_timeout_held_policy_stage_persists_failed_committee_coverage_and_replay(tmp_path, monkeypatch, empty_signals):
+    """Policy eligibility must not erase failed analysis when it removes every signal."""
+    from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    engine.config["autoresearch"]["paper_trade"]["portfolio_committee_enabled"] = True
+    call["annualized_volatility_evidence"] = {"AAPL":.31}
+    signal = call["shared_signals"][0]
+    signal["journal_only"] = True
+    signal["metadata"].update(analysis_status="failed", analysis_failure_reason="model_deadline_exhausted",non_actionable_reason="model_sample_incomplete")
+    if empty_signals:
+        call["shared_signals"] = []
+        call["model_coverage"] = {"complete":False,"reason":"model_deadline_exhausted"}
+    def forbidden(*args, **kwargs):
+        pytest.fail("Timeout-held policy staging must not call a model")
+    monkeypatch.setattr(PortfolioCommittee,"_get_client",forbidden)
+    try:
+        result = engine.screen_and_stage(**call)
+        status = result["committee_decision_status"]
+        assert status["status"] == "failed"
+        assert status["degraded"] is True
+        assert status["reason"] == "model_deadline_exhausted"
+        assert status["eligible_count"] == 0
+        assert status["model_coverage"] == {"complete":False,"reason":"model_deadline_exhausted"}
+        assert result["intents_staged"] == []
+        accepted = ledger.committee_decision(FRIDAY,"epoch","foundation-30d")
+        assert accepted["status"] == status
+        replay = engine.screen_and_stage(**call)
+        assert replay["replayed"] is True
+        assert replay["committee_decision_status"] == status
+        assert ledger.committee_decision(FRIDAY,"epoch","foundation-30d") == accepted
         assert ledger.pending_intents(MONDAY) == []
     finally:
         ledger.close()

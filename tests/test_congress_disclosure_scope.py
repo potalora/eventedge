@@ -53,7 +53,43 @@ def test_current_house_bond_and_llc_shapes_preserve_stock_and_free_tier_calls(mo
                for _, kwargs in calls)
 
 
-@pytest.mark.parametrize("asset_type", ["Government Securities", "Other Securities"])
+def test_native_senate_corporate_bonds_preserve_valid_stock_and_disclosure_clock(monkeypatch):
+    # Anonymized instrument shapes observed from Senate page zero on 2026-10-09.
+    senate = [
+        disclosure(assetType="Corporate Bond", assetDescription="Example issuer bond A",
+                   transactionDate="2026-09-16", disclosureDate="2026-10-07"),
+        disclosure(assetType="Corporate Bond", assetDescription="Example issuer bond B",
+                   transactionDate="2026-09-15", disclosureDate="2026-10-07"),
+        disclosure(symbol="MSFT", assetType="Stock", assetDescription="Microsoft Corp.",
+                   transactionDate="2026-09-18", disclosureDate="2026-10-07"),
+    ]
+    calls = mock_feed(monkeypatch, [], senate)
+    source = CongressSource(fmp_api_key="offline")
+    trades = source.fetch_all_trades()
+    assert [(trade["ticker"], trade["chamber"]) for trade in trades] == [("MSFT", "Senate")]
+    assert trades[0]["transaction_date"] == "2026-09-18"
+    assert trades[0]["publication_date"] == "2026-10-07"
+    assert trades[0]["representative"] == "Example Representative"
+    assert source.get_recent_trades(as_of="2026-10-06") == []
+    assert [row["ticker"] for row in source.get_recent_trades(as_of="2026-10-07")] == ["MSFT"]
+    assert source.fetch_all_trades() == trades
+    assert len(calls) == 2
+    assert all(kwargs["params"]["page"] == 0 and kwargs["params"]["limit"] == FMP_FREE_LIMIT
+               for _, kwargs in calls)
+
+
+def test_corporate_bond_missing_symbol_remains_invalid(monkeypatch):
+    row = disclosure(assetType="Corporate Bond")
+    row.pop("symbol")
+    mock_feed(monkeypatch, [], [row])
+    source = CongressSource(fmp_api_key="offline")
+    with pytest.raises(SourceFetchError) as exc:
+        source.fetch_all_trades()
+    assert exc.value.failed_operations == {"senate-latest": "invalid_response"}
+    assert not source._cache
+
+
+@pytest.mark.parametrize("asset_type", ["Government Securities", "Other Securities", "Corporate Bond"])
 @pytest.mark.parametrize("changes", [
     {"symbol": None}, {"symbol": 0}, {"assetDescription": ""},
     {"transactionDate": "invalid"}, {"disclosureDate": "2026-13-01"},

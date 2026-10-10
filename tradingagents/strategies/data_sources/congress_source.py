@@ -297,6 +297,7 @@ class CongressSource:
                                 and item.get("assetType") in {
                                     "Other", "Non-Public Stock",
                                     "Government Securities", "Other Securities",
+                                    "Corporate Bond",
                                 }
                                 and source_text(item.get("assetDescription"))):
                             continue

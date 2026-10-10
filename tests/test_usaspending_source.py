@@ -42,6 +42,7 @@ API_ROW = {
     "internal_id": 123,
     "Base Obligation Date": "2026-07-07",
     "Recipient Name": "LOCKHEED MARTIN CORP",
+    "Recipient UEI": "H7PNSVNN5827",
     "Award Amount": 250_000_000,
     "Awarding Agency": "DEFENSE, DEPARTMENT OF",
     "Start Date": "2026-07-01 00:00:00",

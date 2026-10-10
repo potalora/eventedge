@@ -61,6 +61,7 @@ def test_schedule_query_parser_monitor_screen_keep_family_and_issuer(family, pre
 
 def award_row(**changes):
     return dict({'Award ID': 'SAME-PIID', 'Recipient Name': 'LOCKHEED MARTIN CORP',
+        'Recipient UEI': 'H7PNSVNN5827',
         'Award Amount': 250_000_000, 'Start Date': '2020-01-01',
         'Base Obligation Date': '2026-10-01', 'Last Modified Date': '2026-10-08 10:11:12',
         'internal_id': 42, 'generated_internal_id': 'CONT_AWD_SAME-PIID_AGENCY_PARENT',

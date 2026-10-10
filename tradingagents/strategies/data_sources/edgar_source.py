@@ -328,6 +328,8 @@ class EDGARSource:
         resp = provider_request("edgar", "GET", url, headers={"User-Agent":self._user_agent},
                                 timeout=15, operation="filing_detail")
         candidates = []
+        directory = urlparse(url).path.rsplit("/", 1)[0]
+        accession = re.fullmatch(r"/Archives/edgar/data/[0-9]+/([0-9]+)", directory)
         for row in BeautifulSoup(resp.text, "html.parser").select("table.tableFile tr"):
             cells = row.find_all("td")
             if len(cells) < 4 or not cells[2].find("a"):
@@ -344,14 +346,42 @@ class EDGARSource:
                     continue
                 candidate = urljoin(url, documents[0])
                 parsed = urlparse(candidate)
-            if not parsed.path.startswith(urlparse(url).path.rsplit("/",1)[0] + "/"):
-                continue
             if parsed.netloc != "www.sec.gov" or not parsed.path.startswith("/Archives/edgar/data/") or re.search(r"-index\.html?$", candidate):
                 continue
-            candidates.append(candidate)
-        if len(set(candidates)) != 1:
+            document_directory = directory
+            if filing_form_family(record_form) in {"SCHEDULE 13D", "SCHEDULE 13G"}:
+                # Ownership indices can use the subject CIK while their listed
+                # documents use another CIK. Bind to the exact accession, never
+                # use a document-directory CIK to infer the subject issuer.
+                scope = (re.fullmatch(r"(/Archives/edgar/data/[0-9]+/" + re.escape(accession.group(1))
+                                     + r")/(.+)", parsed.path) if accession else None)
+                if (not scope or parsed.scheme != "https" or parsed.query or parsed.fragment
+                        or re.search(r"-index\.html?$", parsed.path)
+                        or "%" in parsed.path or "\\" in parsed.path or parsed.path.endswith("/")
+                        or any(part in {".", ".."} for part in parsed.path.split("/"))):
+                    continue
+                document_directory = scope.group(1)
+            elif not parsed.path.startswith(directory + "/"):
+                continue
+            candidates.append((cells[0].get_text(strip=True), normalize_filing_form(record_form), candidate, document_directory))
+        # SEC ownership indices list the same sequence/XML both raw and through
+        # a form-specific stylesheet. Coalesce only an actually listed raw pair
+        # with the same form, sequence and accepted accession directory.
+        canonical = set()
+        for sequence, record_form, candidate, document_directory in candidates:
+            parsed = urlparse(candidate)
+            family = filing_form_family(record_form)
+            if family in {"SCHEDULE 13D", "SCHEDULE 13G"}:
+                stylesheet = re.escape(family.replace(" ", "_"))
+                match = re.fullmatch(re.escape(document_directory) + rf"/xsl{stylesheet}_X[0-9]+/([^/]+\.xml)", parsed.path)
+                if match:
+                    raw = parsed._replace(path=document_directory + "/" + match.group(1)).geturl()
+                    if (sequence, record_form, raw, document_directory) in candidates:
+                        candidate = raw
+            canonical.add(candidate)
+        if len(canonical) != 1:
             raise SourceFetchError("EDGAR primary document ambiguous or unavailable", reason_code="invalid_response")
-        document = candidates[0]
+        document = canonical.pop()
         self._session_cache[key] = document
         return document
 

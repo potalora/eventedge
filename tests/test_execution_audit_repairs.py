@@ -31,8 +31,8 @@ def seed(l,t='AAPL',qty=10,side='buy',mark=True):
     if mark: l.mark(FRI,{t:bar(t,FRI)},'epoch',at(FRI))
     return o
 
-def bundle(bars,actions=()):
-    bm={(s,MON):AdjustedClose(s,MON,D(100),'fixture-adjusted',at(MON),previous_session(MON),D(100)) for s in ('SPY','BIL')}
+def bundle(bars,actions=(),benchmarks=('SPY','BIL')):
+    bm={(s,MON):AdjustedClose(s,MON,D(100),'fixture-adjusted',at(MON),previous_session(MON),D(100)) for s in benchmarks}
     return SessionInputBundle(MON,tuple(sorted(bars)),{(t,MON):b for t,b in bars.items()},tuple(actions),bm)
 @pytest.fixture
 def ledger(tmp_path):
@@ -176,7 +176,7 @@ def test_default_shared_policy_uses_net_loss_and_coherent_split_open(tmp_path,sp
         new=fixture._stage_entry(l,ex,'MSFT',MON,2,suffix='new')
         l.stage_intent(OrderIntent('exit',held.signal_ids,l.cohort_id,'sell',5,session_close(FRI),MON,'next_session_open','pending',None,None))
         actions=();price='60'
-    r=ex.execute_open_and_mark(MON,'epoch',bundle({'AAPL':bar('AAPL',p=price),'MSFT':bar('MSFT')},actions),{},at(MON))
+    r=ex.execute_open_and_mark(MON,'epoch',bundle({'AAPL':bar('AAPL',p=price),'MSFT':bar('MSFT')},actions,ex.benchmark_symbols),{},at(MON))
     assert ex.policy_enabled and r.valid and l.intent(new.intent_id).status=='rejected'
     l.close()
 
@@ -232,7 +232,7 @@ def test_costed_policy_rebases_existing_and_pending_exposure(tmp_path,held_pendi
     if not held_pending: marks={t:bar(t,FRI) for t in ('AAPL','HELD')}
     l.mark(FRI,marks,'epoch',at(FRI))
     new=fixture._stage_entry(l,ex,'MSFT',MON,10,suffix='new')
-    r=ex.execute_open_and_mark(MON,'epoch',bundle({'AAPL':bar('AAPL'),'HELD':bar('HELD'),'MSFT':bar('MSFT',p='99.96')}),{},at(MON))
+    r=ex.execute_open_and_mark(MON,'epoch',bundle({'AAPL':bar('AAPL'),'HELD':bar('HELD'),'MSFT':bar('MSFT',p='99.96')},benchmarks=ex.benchmark_symbols),{},at(MON))
     assert r.valid and l.intent(new.intent_id).status=='rejected'
     assert l.account_state().net_equity==D(5000)
     l.close()

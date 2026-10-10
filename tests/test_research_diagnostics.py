@@ -76,3 +76,52 @@ def test_missing_history_benchmarks_and_per_name_pnl_stay_unavailable():
     for key in ('cost_sensitivity', 'largest_contributor_stress', 'market_exposure_attribution'):
         assert report[key]['status'] == 'insufficient_evidence'
     assert report['dependence_aware_uncertainty']['block_lengths'][0]['status'] == 'insufficient_evidence'
+
+
+def test_paired_etf_uncertainty_cancels_identical_market_path():
+    from tradingagents.strategies.metrics.research import research_diagnostics
+    data = series(253)
+    # Volatile but identical paths must cancel in each paired resample.
+    for account, spy in zip(data['net_equity_history'], data['benchmarks']['SPY']):
+        spy['close'] = account['net_equity'] / 1000
+    result = research_diagnostics(data)['benchmark_excess_uncertainty']['SPY']
+    assert result['return_count'] == 252
+    assert result['annualized_excess_return'] == pytest.approx(0, abs=1e-12)
+    assert result['decision'] == 'below_research_hurdle'
+    assert result['annualized_hurdle'] == .05
+    for block in result['block_lengths']:
+        assert block['annualized_excess_confidence_interval'] == pytest.approx([0, 0], abs=1e-12)
+
+
+def test_paired_etf_uncertainty_matches_compounded_hurdle_and_lagged_exposure():
+    from tradingagents.strategies.metrics.research import research_diagnostics
+    data = series(41)
+    result = research_diagnostics(data)['benchmark_excess_uncertainty']
+    p = data['net_equity_history'][-1]['net_equity'] / data['net_equity_history'][0]['net_equity']
+    expected = p ** (252 / 40) - 1.001 ** 252
+    assert result['SPY']['annualized_excess_return'] == pytest.approx(expected)
+    assert result['SPY']['decision'] == 'inconclusive'
+    assert result['SPY']['decision_reason'] == 'fewer_than_252_valid_returns'
+    assert result['SPY_BIL_EXPOSURE']['annualized_excess_return'] == pytest.approx(
+        p ** (252 / 40) - (1 + .5 * .001 + .5 * .0001) ** 252)
+    assert result['SPY']['pairing'] == 'same_session_same_resample_indices'
+
+
+@pytest.mark.parametrize('fault', ['missing', 'duplicate', 'nan', 'legacy'])
+def test_bad_etf_evidence_is_unavailable_without_erasing_healthy_comparison(fault):
+    from tradingagents.strategies.metrics.research import research_diagnostics
+    data = series(40)
+    if fault == 'missing':
+        data['benchmarks']['BIL'].pop(8)
+    elif fault == 'duplicate':
+        data['benchmarks']['BIL'].append(dict(data['benchmarks']['BIL'][8]))
+    elif fault == 'nan':
+        data['benchmarks']['BIL'][8]['close'] = float('nan')
+    else:
+        data['benchmarks']['BIL'][8]['return_basis'] = 'unpaired'
+    report = research_diagnostics(data)
+    result = report['benchmark_excess_uncertainty']
+    assert result['SPY']['status'] == 'available'
+    assert result['BIL']['status'] == 'insufficient_evidence'
+    assert result['SPY_BIL_EXPOSURE']['status'] == 'insufficient_evidence'
+    assert report['market_exposure_attribution']['status'] == 'insufficient_evidence'

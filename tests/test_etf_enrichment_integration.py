@@ -1,4 +1,4 @@
-"""Exercise the strategy -> Luna response -> SEC registry boundary offline."""
+"""Exercise the strategy -> role-routed response -> SEC registry boundary offline."""
 
 import json
 from copy import deepcopy
@@ -27,7 +27,7 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", unexpected)
 
 
-def engine_with_company_registry(tmp_path, output):
+def engine_with_company_registry(tmp_path, output, expected_model="gpt-6-luna"):
     config = deepcopy(DEFAULT_CONFIG)
     config["autoresearch"]["state_dir"] = str(tmp_path)
     edgar = EDGARSource()
@@ -40,7 +40,7 @@ def engine_with_company_registry(tmp_path, output):
     engine = MultiStrategyEngine(config=config, registry=registry, use_llm=True)
 
     def responses_create(**request):
-        assert request["model"] == "gpt-6-luna"
+        assert request["model"] == expected_model
         assert request["reasoning"] == {"effort": "high"}
         return SimpleNamespace(status="completed", output_text=output, output=[])
 
@@ -96,6 +96,7 @@ def test_new_model_resolved_company_still_requires_sec_identity(
                 field: [model_ticker] if field == "affected_tickers" else model_ticker,
             }
         ),
+        expected_model="gpt-6-astra",
     )
     candidate = Candidate(
         ticker="",

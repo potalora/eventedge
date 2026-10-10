@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 import time
+import os
+import json
+
 from types import MappingProxyType
 from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
@@ -1017,7 +1020,80 @@ class YFinancePriceSource:
                         verified=True,
                     )
                 )
-        return actions
+        return self.enrich_dividend_payment_terms(actions)
+
+    @staticmethod
+    def _payment_terms_get(url: str, **options) -> dict:
+        from tradingagents.strategies.runtime_deadline import bounded_transport
+
+        result = bounded_transport({"kind": "http_get", "url": url, **options}, options["timeout"])
+        if result.get("error") or result.get("status_code") != 200:
+            return {}
+        return json.loads(result["body"])
+
+    def enrich_dividend_payment_terms(
+        self, actions: list[CorporateAction] | tuple[CorporateAction, ...]
+    ) -> list[CorporateAction]:
+        """Enrich the date of an exact, unambiguous existing dividend identity.
+
+        Alpaca filters process_date, not ex_date. Include upcoming processing
+        dates, then join on ex_date and amount; actual observation time is kept.
+        The existing action owns the economic amount; this source only adds a
+        date. Missing optional currency is not asserted to be USD. An explicit
+        foreign denomination, ambiguity or unsupported terms remains unknown.
+        """
+        unknown = [a for a in actions if a.action_type == "cash_dividend" and a.payment_date is None]
+        key, secret = os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", "")
+        if not unknown or not key or not secret:
+            return list(actions)
+        observed = self._now()
+        params = {"symbols": ",".join(sorted({a.ticker for a in unknown})),
+                  "types": "cash_dividend", "start": (min(a.session for a in unknown) - timedelta(days=366)).isoformat(),
+                  "end": (observed.date() + timedelta(days=366)).isoformat(),
+                  "limit": 1000, "sort": "asc"}
+        rows = []
+        deadline = time.monotonic() + 15.0
+        try:
+            # No retry; incomplete pagination never authorizes cash.
+            for _ in range(3):
+                payload = self._payment_terms_get("https://data.alpaca.markets/v1/corporate-actions",
+                    params=dict(params), headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                    timeout=min(5.0, deadline - time.monotonic()))
+                if not isinstance(payload, dict) or not isinstance(payload.get("corporate_actions"), dict):
+                    return list(actions)
+                page = payload["corporate_actions"].get("cash_dividends", [])
+                if not isinstance(page, list):
+                    return list(actions)
+                rows.extend(page)
+                token = payload.get("next_page_token")
+                if not token:
+                    break
+                params["page_token"] = token
+            else:
+                return list(actions)
+        except (TimeoutError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return list(actions)
+        observed = self._now()
+        enriched = []
+        for action in actions:
+            candidates = [r for r in rows if isinstance(r, dict) and r.get("symbol") == action.ticker and r.get("ex_date") == action.session.isoformat()]
+            if action not in unknown or len(candidates) != 1:
+                enriched.append(action)
+                continue
+            row = candidates[0]
+            try:
+                payable = date.fromisoformat(row["payable_date"])
+                if (payable < action.session or Decimal(str(row["rate"])) != action.cash_per_share
+                    or row.get("currency") not in (None, "", "USD") or not row.get("id")
+                    or row.get("due_bill_on_date") or row.get("due_bill_off_date")
+                    or row.get("sub_type")):
+                    raise ValueError("unsupported or mismatched payment terms")
+                enriched.append(replace(action, payment_date=payable,
+                    payment_source="alpaca-corporate-actions-v1", payment_reference=str(row["id"]),
+                    payment_observed_at=observed))
+            except (ValueError, KeyError, TypeError, InvalidOperation):
+                enriched.append(action)
+        return enriched
 
     def get_total_return_closes(
         self,
@@ -1325,6 +1401,10 @@ class AlpacaSIPPriceSource:
         self, tickers: list[str], session: date
     ) -> list[CorporateAction]:
         return self._research_source.get_corporate_actions(tickers, session)
+
+    def enrich_dividend_payment_terms(self, actions: list[CorporateAction] | tuple[CorporateAction, ...]) -> list[CorporateAction]:
+        enrich = getattr(self._research_source, "enrich_dividend_payment_terms", None)
+        return enrich(actions) if enrich else list(actions)
 
     def get_total_return_closes(
         self,

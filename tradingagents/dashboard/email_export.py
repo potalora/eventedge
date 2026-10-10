@@ -7,6 +7,9 @@ from typing import Any, Iterable
 from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard import data_loaders as dl
+from tradingagents.dashboard.benchmark_tables import (
+    ETF_COMPARISON_TITLE, ETF_COMPARISON_DISCLOSURE, ETF_COMPARISON_COLUMNS, etf_comparison_rows,
+)
 
 HEADLINE_TITLE = "Four $100k horizon books"
 PANEL_LABEL = "Equal-weighted scenario panel"
@@ -72,20 +75,27 @@ def _benchmark_rows(series: dict[str, Any]) -> str:
     rows = []
     for cohort_id, item in sorted(series.items()):
         benchmarks = item.get("benchmarks", {}) if isinstance(item, dict) else {}
-        for symbol in ("SPY", "BIL"):
+        for symbol in sorted({"SPY", "BIL", "VTI", "VT"} | set(benchmarks)):
             observations = (
                 benchmarks.get(symbol, []) if isinstance(benchmarks, dict) else []
             )
             latest = observations[-1] if observations else {}
             rows.append(
-                f"<tr><td>{escape(cohort_id)}</td><td>{symbol}</td>"
+                f"<tr><td>{escape(cohort_id)}</td><td>{escape(symbol)}</td>"
                 f"<td>{escape(str(latest.get('observed_at', 'Unavailable')))}</td>"
                 f"<td>{escape(str(latest.get('close', 'Unavailable')))}</td></tr>"
             )
     return (
         "".join(rows)
-        or '<tr><td colspan="4">Persisted SPY/BIL observations unavailable.</td></tr>'
+        or '<tr><td colspan="4">Persisted benchmark observations unavailable.</td></tr>'
     )
+
+
+def _etf_comparison_table(report: dict[str, Any]) -> str:
+    header = "".join(f"<th>{escape(column)}</th>" for column in ETF_COMPARISON_COLUMNS)
+    rows = "".join("<tr>" + "".join(f"<td>{escape(row[column])}</td>" for column in ETF_COMPARISON_COLUMNS) + "</tr>"
+                   for row in etf_comparison_rows(report))
+    return f"<table><thead><tr>{header}</tr></thead><tbody>{rows}</tbody></table>"
 
 
 def _report_section(report: dict[str, Any]) -> str:
@@ -111,6 +121,11 @@ def _report_section(report: dict[str, Any]) -> str:
       <tbody>{_book_rows(headline)}</tbody></table>
     </section>
     <section>
+      <h2>{ETF_COMPARISON_TITLE}</h2>
+      <p class="muted">{ETF_COMPARISON_DISCLOSURE}</p>
+      {_etf_comparison_table(report)}
+    </section>
+    <section>
       <h2>{STRESS_TEST_LABEL}</h2>
       <p class="muted">These are concentration stress tests, not combined capital or fund AUM.</p>
       <table><thead><tr><th>Book</th><th>Net return</th><th>{SHARPE_LABEL}</th><th>{INFORMATION_RATIO_LABEL}</th><th>{ACCURACY_LABEL}</th><th>Valid sessions</th></tr></thead>
@@ -120,7 +135,7 @@ def _report_section(report: dict[str, Any]) -> str:
       <h2>Persisted valuation, benchmark, exposure, and cost evidence</h2>
       <table><thead><tr><th>Book</th><th>Valuation timestamp</th><th>Benchmark timestamp</th><th>Matched benchmark return</th><th>Gross exposure</th><th>Net exposure</th><th>Costs</th></tr></thead>
       <tbody>{_evidence_rows({**headline, **stress})}</tbody></table>
-      <h3>Persisted SPY/BIL observations</h3>
+      <h3>Persisted benchmark observations (SPY/BIL/VTI/VT)</h3>
       <table><thead><tr><th>Book</th><th>Benchmark</th><th>Benchmark timestamp</th><th>Close</th></tr></thead>
       <tbody>{_benchmark_rows(series)}</tbody></table>
     </section>"""

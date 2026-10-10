@@ -135,3 +135,19 @@ def test_validated_neutral_is_not_labeled_failed_screen_hypothesis():
     assert report['validated_neutral']['count'] == 1
     assert report['provisional']['count'] == 0
     assert report['all_observation']['valid_outcome_count'] == 1
+
+
+def test_event_and_ticker_clusters_disclose_repeated_evidence_without_claiming_independence():
+    from tradingagents.strategies.metrics.populations import population_diagnostics
+    first = signal()
+    repeated = replace(first, signal_id='second-policy', policy_id='other')
+    another_event = replace(first, signal_id='new-event', event_key='new-event')
+    same_event_other_ticker = replace(first, signal_id='peer', ticker='MSFT')
+    report = population_diagnostics((first, repeated, another_event, same_event_other_ticker), ())
+    clusters = report['validated_actionable']['dependence']
+    assert clusters['event_key_count'] == 2
+    assert clusters['ticker_count'] == 2
+    assert clusters['ticker_session_count'] == 2
+    assert clusters['largest_event_share'] == .75
+    assert clusters['independence_established'] is False
+    assert clusters['effective_sample_size'] is None

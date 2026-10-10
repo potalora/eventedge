@@ -11,7 +11,7 @@ import logging
 import math
 import os
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Iterable, Mapping
@@ -34,6 +34,8 @@ from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     PortfolioLedger,
 )
+
+from tradingagents.strategies.runtime_deadline import bounded_model_phase
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,7 @@ def _positions_to_price(
 
 _MUTABLE_EVIDENCE_KEYS = {
     "llm_analysis",
+    "model_provenance",
     "llm_conviction",
     "needs_llm_analysis",
 }
@@ -231,6 +234,28 @@ def _gather_with_timeout(
     return results
 
 
+def model_sample_incomplete(signals, health=()):
+    """Coverage survives removal of unresolved/blocked candidates from signals."""
+    return any((s.get("metadata") or {}).get("analysis_failure_reason") == "model_deadline_exhausted" for s in signals) or any(
+        isinstance(record.evidence.get("model_coverage"), dict)
+        and record.evidence["model_coverage"].get("complete") is False for record in health)
+
+
+def hold_incomplete_model_sample(signals, health, *, incomplete=False):
+    """Keep admitted evidence but prohibit selection of a timeout-biased sample."""
+    if not incomplete and not model_sample_incomplete(signals, health):
+        return signals, health
+    for signal in signals:
+        signal["journal_only"] = True
+        signal.setdefault("metadata", {}).update(analysis_status="failed",
+            analysis_failure_reason="model_deadline_exhausted", non_actionable_reason="model_sample_incomplete")
+    health = [replace(record, status="data_failure", evidence={**record.evidence,
+        "provider_errors": {**record.evidence.get("provider_errors", {}), "analysis": "model_deadline_exhausted"},
+        "model_coverage": {"complete": False, "reason": "model_deadline_exhausted"},
+        "actionable_candidate_count": 0}) if record.status != "disabled_by_policy" else record for record in health]
+    return signals, health
+
+
 class MultiStrategyEngine:
     """Paper-trading-first strategy engine.
 
@@ -337,6 +362,7 @@ class MultiStrategyEngine:
                 best[st] = signal
         return [s for s in best.values() if s.get("ticker", "").strip()]
 
+    @bounded_model_phase
     def screen_and_enrich(
         self,
         trading_date: str,
@@ -417,6 +443,7 @@ class MultiStrategyEngine:
                 )
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))
 
+        all_signals, health = hold_incomplete_model_sample(all_signals, health)
         # Preserve every event identity. Committee synthesis may aggregate a
         # decision view, but the authoritative ledger must retain each catalyst.
         deduped_signals = [
@@ -490,6 +517,7 @@ class MultiStrategyEngine:
                 pending[identity] = retained
         return [pending[key] for key in sorted(pending) if key not in consumed]
 
+    @bounded_model_phase
     def screen_and_stage(
         self,
         trading_date: str,
@@ -500,6 +528,7 @@ class MultiStrategyEngine:
         size_profile: Any,
         marked_account: Any,
         annualized_volatility_evidence: Mapping[str, float] | None = None,
+        model_coverage: Mapping[str, Any] | None = None,
     ) -> dict:
         """Persist cutoff-safe signals and next-session intents without economics."""
         from tradingagents.strategies.execution import (
@@ -1042,6 +1071,13 @@ class MultiStrategyEngine:
             for _, record in timely
         }
         committee_signals = [signal for signal, _ in timely]
+        # Policy eligibility may remove every timeout-held candidate. Phase
+        # coverage remains independent of the surviving selection input.
+        incomplete_model_phase = model_sample_incomplete(shared_signals) or (
+            model_coverage is not None and model_coverage.get("complete") is False)
+        phase_model_coverage = {"complete": not incomplete_model_phase}
+        if incomplete_model_phase:
+            phase_model_coverage["reason"] = "model_deadline_exhausted"
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
         frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
         if frozen_decision is None:
@@ -1061,6 +1097,7 @@ class MultiStrategyEngine:
                 signals=committee_signals, regime_context=shared_regime or {},
                 strategy_confidence=strategy_confidence, current_positions=positions,
                 total_capital=float(marked_account.net_equity), enrichment=enrichment or {}, risk_context=risk_context,
+                model_coverage=phase_model_coverage,
             )
             decision_status = dict(committee.last_decision_status)
             decision_status["selected_signal_ids"] = sorted({
@@ -2359,6 +2396,15 @@ class MultiStrategyEngine:
         regime_context: dict | None = None,
     ) -> list[Candidate]:
         """Run LLM analysis on candidates that have needs_llm_analysis=True."""
+        from tradingagents.strategies.runtime_deadline import (
+            DEFAULT_MODEL_BUDGET_S, ModelDeadlineExceeded, current_model_deadline,
+            model_budget, model_timeout,
+        )
+        from tradingagents.strategies.candidate_response_reuse import begin_candidate_response, commit_candidate_response, end_candidate_response
+        if current_model_deadline() is None:
+            import time
+            with model_budget(time.monotonic() + DEFAULT_MODEL_BUDGET_S):
+                return self._enrich_with_llm(candidates, strategy_name, regime_context)
         enriched = []
         for c in candidates:
             if not c.metadata.get("needs_llm_analysis"):
@@ -2369,7 +2415,10 @@ class MultiStrategyEngine:
             llm_result = {}
             optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
 
+            reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
+
             try:
+                model_timeout()
                 required_text_fields = {
                     "earnings_call": ("analysis_text", "transcript_text"),
                     "filing_change": ("current_text",), "exec_comp": ("proxy_text",),
@@ -2472,6 +2521,12 @@ class MultiStrategyEngine:
                     )
                 else:
                     raise ValueError(f"unsupported_required_analysis:{analysis_type}")
+                model_timeout()
+                provenance = getattr(self._analyzer, "last_call_provenance", None)
+                if isinstance(provenance, dict) and provenance:
+                    c.metadata["model_provenance"] = dict(provenance)
+                if getattr(self._analyzer, "last_call_failure", "") == "model_deadline_exhausted":
+                    raise ModelDeadlineExceeded("model_deadline_exhausted")
                 if not isinstance(llm_result, dict) or not llm_result:
                     raise ValueError("analysis_unavailable")
                 llm_result = dict(llm_result)
@@ -2524,6 +2579,10 @@ class MultiStrategyEngine:
                     if not ticker or edgar is None or not edgar.validate_ticker(ticker):
                         raise ValueError("unresolved_issuer")
                 # Commit fields only after full schema and entity validation.
+                reuse = commit_candidate_response()
+                if reuse is not None:
+                    self._analyzer.last_call_provenance["request_reuse"] = reuse
+                    c.metadata["model_provenance"] = dict(self._analyzer.last_call_provenance)
                 c.ticker, c.direction, c.score = ticker, llm_result["direction"], score
                 c.metadata["llm_analysis"] = llm_result
                 c.metadata["analysis_status"] = "validated"
@@ -2533,14 +2592,25 @@ class MultiStrategyEngine:
             except Exception as exc:
                 c.metadata["analysis_status"] = "failed"
                 reason = str(exc)
-                if not isinstance(exc, ValueError) or not reason.startswith(("invalid_", "missing_", "unsupported_required_analysis:", "analysis_unavailable", "unresolved_issuer")):
+                if isinstance(exc, ModelDeadlineExceeded):
+                    reason = "model_deadline_exhausted"
+                elif not isinstance(exc, ValueError) or not reason.startswith(("invalid_", "missing_", "unsupported_required_analysis:", "analysis_unavailable", "unresolved_issuer")):
                     reason = "analysis_unavailable"
                 c.metadata["analysis_failure_reason"] = reason[:160]
-                if not optional:
+                if not optional or isinstance(exc, ModelDeadlineExceeded):
                     c.journal_only = True
                     c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
                 logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
+            finally:
+                end_candidate_response(reuse_token)
 
             enriched.append(c)
 
+        if any(c.metadata.get("analysis_failure_reason") == "model_deadline_exhausted" for c in enriched):
+            # A timeout must not select a prefix of the admitted sample or route
+            # optional assessments back into deterministic selection.
+            for c in enriched:
+                c.journal_only = True
+                c.metadata.update(analysis_status="failed", analysis_failure_reason="model_deadline_exhausted",
+                                  non_actionable_reason="model_sample_incomplete")
         return enriched

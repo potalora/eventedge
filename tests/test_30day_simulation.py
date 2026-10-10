@@ -3132,6 +3132,7 @@ class TestReactivatedStrategies:
                     "contracts": [
                         {
                             "recipient": "Lockheed Martin Corp",
+                            "recipient_uei": "H7PNSVNN5827",
                             "amount": 500_000_000,
                             "award_id": "AWARD-LMT",
                             "award_key": "generated:AWARD-LMT",
@@ -3167,10 +3168,13 @@ class TestReactivatedStrategies:
         }
 
         candidates = strategy.screen(data, "2026-03-15", strategy.get_default_params())
-        # Should find LMT and NOC (Lockheed and Northrop), but not small contractor
+        # Only the native verified Lockheed UEI is actionable. Name-only
+        # recipients remain explicit journal-only award hypotheses.
         assert len(candidates) >= 1
         tickers = [c.ticker for c in candidates]
         assert "LMT" in tickers  # Lockheed
+        assert "NOC" not in tickers
+        assert all(c.journal_only for c in candidates if not c.ticker)
         for c in candidates:
             assert c.direction == "long"
             assert c.score > 0

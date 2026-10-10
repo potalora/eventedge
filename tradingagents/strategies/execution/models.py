@@ -55,6 +55,9 @@ class CorporateAction:
     fetched_at: datetime
     verified: bool
     payment_date: date | None = None
+    payment_source: str = ""
+    payment_reference: str = ""
+    payment_observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_decimals(self)

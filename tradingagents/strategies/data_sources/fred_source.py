@@ -13,7 +13,8 @@ import pandas as pd
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
-from .request_policy import provider_call
+from .request_policy import provider_request, provider_timeout
+from tradingagents.strategies.runtime_deadline import bounded_transport
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ SERIES_MAP = {
 
 
 class FREDSource:
-    """Data source backed by the FRED API via fredapi."""
+    """Data source backed by the public FRED observations REST API."""
 
     name: str = "fred"
     requires_api_key: bool = True
@@ -43,6 +44,7 @@ class FREDSource:
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("FRED_API_KEY", "")
         self._cache: dict[str, Any] = {}
+        self._base_url = "https://api.stlouisfed.org/fred/series/observations"
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "series")
@@ -64,12 +66,47 @@ class FREDSource:
     def is_available(self) -> bool:
         if not self._api_key:
             return False
+        return True
+
+    @staticmethod
+    def _transport_get(url, **options):
+        """Requests inactivity timeout plus a reaped hard wall-clock worker."""
+        import requests
+        timeout = options["timeout"]
         try:
-            from fredapi import Fred  # noqa: F401
-            return True
-        except ImportError:
-            logger.warning("fredapi not installed — run: pip install fredapi")
-            return False
+            result = bounded_transport({"kind": "http_get", "url": url,
+                                        "params": options.get("params", {}), "timeout": timeout}, timeout)
+        except TimeoutError:
+            raise SourceFetchError("FRED transport deadline exhausted", reason_code="timeout") from None
+        if result.get("error"):
+            raise SourceFetchError("FRED transport failed", reason_code=result["error"])
+        response = requests.Response()
+        response.status_code = result["status_code"]
+        response.headers.update(result["headers"])
+        response._content = result["body"].encode()
+        return response
+
+    def _get_series(self, series_id, **params):
+        response = provider_request("fred", "get", self._base_url, operation=series_id,
+                                    transport=self._transport_get,
+                                    params={"api_key": self._api_key, "series_id": series_id,
+                                            "file_type": "json", **params},
+                                    timeout=provider_timeout("fred"))
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("observations"), list):
+            raise SourceFetchError("FRED observations invalid", reason_code="invalid_response")
+        dates, values = [], []
+        for observation in payload["observations"]:
+            if not isinstance(observation, dict) or not source_date(observation.get("date")):
+                raise SourceFetchError("FRED observation invalid", reason_code="invalid_response")
+            dates.append(pd.Timestamp(observation["date"]))
+            value = observation.get("value")
+            # FRED's documented missing-observation marker is a period.
+            try:
+                values.append(float("nan") if value == "." else float(value))
+            except (ValueError, TypeError):
+                raise SourceFetchError("FRED observation value invalid", reason_code="invalid_response") from None
+        return pd.Series(values, index=pd.DatetimeIndex(dates), dtype=float)
 
     def fetch_series(
         self, series_id: str, start: str, end: str, *, as_of: str | None = None
@@ -82,11 +119,8 @@ class FREDSource:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        from fredapi import Fred
-
-        fred = Fred(api_key=self._api_key)
         try:
-            data = provider_call("fred", series_id, lambda: fred.get_series(series_id, observation_start=start, observation_end=end, realtime_start=as_of, realtime_end=as_of))
+            data = self._get_series(series_id, observation_start=start, observation_end=end, realtime_start=as_of, realtime_end=as_of)
             if not isinstance(data, pd.Series):
                 raise SourceFetchError("FRED series response invalid", reason_code="invalid_response")
             if not data.empty:

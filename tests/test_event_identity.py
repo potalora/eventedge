@@ -299,6 +299,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                     "contracts": [
                         {
                             "recipient_name": "Lockheed Martin",
+                            "recipient_uei": "H7PNSVNN5827",
                             "amount": 50_000_000,
                             "award_id": "AWARD-1",
                             "award_key": "generated:AWARD-1",

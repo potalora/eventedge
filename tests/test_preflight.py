@@ -60,6 +60,7 @@ def _govt_contracts_fixture(last_modified_date: str) -> dict:
                 "contracts": [
                     {
                         "recipient_name": "Lockheed Martin",
+                        "recipient_uei": "H7PNSVNN5827",
                         "amount": 50_000_000,
                         "award_id": "AWARD-1",
                         "award_key": "generated:AWARD-1",

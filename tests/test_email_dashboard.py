@@ -55,7 +55,7 @@ def test_email_uses_persisted_metric_report_only(_download) -> None:
     assert "Insufficient history (" in html
     assert "/30 returns; 31 snapshots required)" in html
     for evidence in (
-        "Persisted SPY/BIL observations",
+        "Persisted benchmark observations (SPY/BIL/VTI/VT)",
         "2026-08-31T20:00:00+00:00",
         "2026-08-31T20:01:00+00:00",
         "Matched benchmark return",

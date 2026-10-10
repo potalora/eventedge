@@ -1397,8 +1397,8 @@ class TestEdgarDataFlow:
         analyzer = LLMAnalyzer()
         # Mock _call_llm to capture the prompt
         calls = []
-        analyzer._call_llm = lambda system, user: (
-            calls.append((system, user)),
+        analyzer._call_llm = lambda system, user, *, role: (
+            calls.append((system, user, role)),
             '{"direction": "neutral"}',
         )[1]
         analyzer._regime_suffix = lambda ctx: ""
@@ -1419,6 +1419,7 @@ class TestEdgarDataFlow:
             "AAPL",
         )
         assert len(calls) == 1
+        assert calls[0][2] == "bounded"
         system_prompt = calls[0][0]
         # Verify the prompt explains transaction codes
         assert "transaction_code" in system_prompt

@@ -139,7 +139,7 @@ def test_fred_binds_vintage_and_distinguishes_cache(monkeypatch):
         calls.append(kw)
         value=300 if kw.get('realtime_end')=='2026-01-31' else 310
         return pd.Series([value], index=pd.to_datetime(['2026-01-01']))
-    monkeypatch.setattr('fredapi.Fred.get_series', get)
+    monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series', get)
     source=FREDSource(api_key='x')
     assert source.fetch_series('CPIAUCSL','2026-01-01','2026-01-31').iloc[0] == 300
     assert source.fetch_series('CPIAUCSL','2026-01-01','2026-01-31',as_of='2026-02-28').iloc[0] == 310

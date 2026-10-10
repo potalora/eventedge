@@ -18,6 +18,7 @@ from contextlib import closing
 from datetime import date
 from pathlib import Path
 from typing import Any
+from tradingagents.strategies.execution.ids import stable_id
 
 from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.orchestration.runtime_lock import (
@@ -110,11 +111,27 @@ def _accounting_and_staging(
                     ).fetchone()[0]:
                         accounting_complete = staging_complete = False
                 contexts = connection.execute(
-                    "SELECT epoch_id FROM session_execution_contexts WHERE session = ?",
+                    "SELECT epoch_id, economic_inputs_json, input_digest, market_digest FROM session_execution_contexts WHERE session = ?",
                     (session,),
                 ).fetchall()
-                if contexts != [(epoch_id,)]:
+                expected_benchmarks: set[str] = set()
+                if len(contexts) != 1 or contexts[0][0] != epoch_id:
                     accounting_complete = False
+                else:
+                    # The executor freezes exactly its configured symbols in
+                    # this accepted input document. Never reinterpret legacy
+                    # sessions using the reporting checkout's current defaults.
+                    _, payload, input_digest, market_digest = contexts[0]
+                    economic = json.loads(payload)
+                    market = economic["market"]
+                    declared = [row["symbol"] for row in market["benchmarks"]]
+                    if (not declared or any(not isinstance(symbol, str) or not symbol for symbol in declared)
+                            or len(set(declared)) != len(declared)
+                            or input_digest != stable_id("session_economic_inputs", economic)
+                            or market_digest != stable_id("session_market_inputs", market)):
+                        accounting_complete = False
+                    else:
+                        expected_benchmarks = set(declared)
                 if not _one_valid_row(connection, "session_runs", session):
                     accounting_complete = False
                 snapshots = connection.execute(
@@ -143,8 +160,9 @@ def _accounting_and_staging(
                     (session,),
                 ).fetchall()
                 if (
-                    len(benchmarks) != 2
-                    or {symbol for symbol, _ in benchmarks} != {"SPY", "BIL"}
+                    not expected_benchmarks
+                    or len(benchmarks) != len(expected_benchmarks)
+                    or {symbol for symbol, _ in benchmarks} != expected_benchmarks
                     or any(valid != 1 for _, valid in benchmarks)
                 ):
                     accounting_complete = False
@@ -159,7 +177,7 @@ def _accounting_and_staging(
                     != (policy_id or f"foundation-{cohort.split('_')[1]}")
                 ):
                     staging_complete = False
-        except (OSError, sqlite3.Error, ValueError, TypeError):
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             accounting_complete = False
             staging_complete = False
     return accounting_complete, staging_complete

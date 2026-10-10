@@ -26,6 +26,9 @@ ALLOWED_MODEL_KEYS = frozenset(
         "autoresearch_model",
         "llm_effort",
         "portfolio_committee_model",
+        "portfolio_committee_effort",
+        "thesis_model",
+        "thesis_effort",
     }
 )
 
@@ -269,7 +272,10 @@ def build_epoch_context(
             f"unexpected model key {sorted(unexpected_model_keys)[0]!r}"
         )
     # Earlier frozen generations did not bind these settings explicitly.
-    legacy_model_keys = ALLOWED_MODEL_KEYS - {"llm_effort", "portfolio_committee_model"}
+    legacy_model_keys = ALLOWED_MODEL_KEYS - {
+        "llm_effort", "portfolio_committee_model", "portfolio_committee_effort",
+        "thesis_model", "thesis_effort",
+    }
     missing_model_keys = legacy_model_keys - actual_model_keys
     if missing_model_keys:
         raise ValueError(

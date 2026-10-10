@@ -7,6 +7,9 @@ import streamlit as st
 from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard.charts import make_equity_curves_facet
+from tradingagents.dashboard.benchmark_tables import (
+    ETF_COMPARISON_TITLE, ETF_COMPARISON_DISCLOSURE, ETF_COMPARISON_COLUMNS, etf_comparison_rows,
+)
 from tradingagents.dashboard.data_loaders import (
     get_active_generations,
     load_generation_metrics,
@@ -74,6 +77,10 @@ def render() -> None:
         hide_index=True,
         use_container_width=True,
     )
+    st.subheader(ETF_COMPARISON_TITLE)
+    st.caption(ETF_COMPARISON_DISCLOSURE)
+    st.dataframe(pd.DataFrame(etf_comparison_rows(report), columns=ETF_COMPARISON_COLUMNS),
+                 hide_index=True, use_container_width=True)
     st.subheader(STRESS_TEST_LABEL)
     st.dataframe(
         pd.DataFrame(_rows(dict(report.get("stress_tests", {}) or {}))),

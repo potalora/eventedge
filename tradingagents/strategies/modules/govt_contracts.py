@@ -7,11 +7,12 @@ import math
 
 from .base import Candidate
 from .admission import admit_candidates
+from ..data_sources.award_identity import resolve_award_issuer
 
 logger = logging.getLogger(__name__)
 
 # Known government contractor tickers for backtesting
-# Maps common recipient keywords → tickers
+# Historical research universe only. Never used for award attribution.
 CONTRACTOR_TICKERS = {
     "lockheed": "LMT",
     "raytheon": "RTX",
@@ -50,7 +51,7 @@ class GovtContractsStrategy:
 
     Signal logic:
     1. Screen new awards by base obligation date, using cumulative obligations at acquisition.
-    2. Resolve recipient names to tickers (using keyword matching).
+    2. Verify native recipient/parent UEI against reviewed issuer evidence.
     3. Filter by contract materiality (amount > threshold).
     4. Go long, hold 30-60 days for market to price in the revenue impact.
 
@@ -128,14 +129,9 @@ class GovtContractsStrategy:
                 if not valid:
                     continue
 
-                # Resolve recipient to ticker
-                ticker = None
-                for keyword, t in CONTRACTOR_TICKERS.items():
-                    if keyword in recipient:
-                        ticker = t
-                        break
-
-                if not ticker or not award_id or amount < 10_000_000:  # $10M minimum
+                attribution = resolve_award_issuer(contract)
+                ticker = attribution.get("ticker", "")
+                if not award_id or amount < 10_000_000:  # $10M minimum
                     continue
 
                 score = min(amount / 1_000_000_000, 1.0)  # Observed cumulative obligations on the new award.
@@ -145,6 +141,7 @@ class GovtContractsStrategy:
                         date=date,
                         direction="long",
                         score=score,
+                        journal_only=not attribution["verified"],
                         metadata={
                             "contractor": recipient,
                             "contract_amount": amount,
@@ -155,6 +152,13 @@ class GovtContractsStrategy:
                             "amount_basis": contract["amount_basis"],
                             "award_scope": contract["award_scope"],
                             "observed_at": contract["observed_at"],
+                            "recipient_uei": contract.get("recipient_uei", ""),
+                            "recipient_id": contract.get("recipient_id", ""),
+                            "parent_recipient_uei": contract.get("parent_recipient_uei", ""),
+                            "recipient_identity_status": contract.get("recipient_identity_status", "missing_native_recipient"),
+                            "recipient_identity_source": contract.get("recipient_identity_source", ""),
+                            "issuer_attribution": attribution,
+                            **({"non_actionable_reason": attribution["reason"]} if not attribution["verified"] else {}),
                             "thesis": "Newly originated award; amount is cumulative obligations observed at acquisition, not initial obligation or incremental modification.",
                         },
                     )
@@ -171,7 +175,13 @@ class GovtContractsStrategy:
                     "price_target_mean"
                 )
 
-        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)))
+        # Unknown issuers stay in discovery and may use remaining journal slots,
+        # but must not crowd verified issuers out of the bounded admission set.
+        return admit_candidates(
+            self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)),
+            rank_key=lambda candidate: (candidate.journal_only, -float(candidate.score), candidate.ticker),
+            policy="verified_issuer_first_score_desc_ticker_source_identity_v1",
+        )
 
     def check_exit(
         self,

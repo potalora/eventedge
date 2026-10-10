@@ -120,7 +120,7 @@ def test_other_required_operation_errors_are_explicit(provider,monkeypatch):
     elif provider=='regulations':
         source=RegulationsSource(api_key=SECRET);call=lambda:source.search_documents()
     elif provider=='fred':
-        monkeypatch.setattr('fredapi.Fred.get_series',fail)
+        monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series',fail)
         source=FREDSource(api_key=SECRET);call=lambda:source.fetch_series('UNRATE','2026-10-01','2026-10-06')
     elif provider=='courtlistener':
         source=CourtListenerSource(token=SECRET);call=lambda:source.search_dockets('test')

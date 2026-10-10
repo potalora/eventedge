@@ -268,8 +268,8 @@ def pipeline(monkeypatch, tmp_path):
     monkeypatch.setattr(socket, "create_connection", forbid_socket)
     monkeypatch.setattr(requests.sessions.Session, "request", lambda _self, method, url, **kwargs: fixture.http(method, url, **kwargs))
     monkeypatch.setattr(yfinance, "download", fixture.yahoo)
-    import fredapi
-    monkeypatch.setattr(fredapi.Fred, "get_series", lambda _self, series_id, **kwargs: fixture.fred(series_id, **kwargs))
+    from tradingagents.strategies.data_sources.fred_source import FREDSource
+    monkeypatch.setattr(FREDSource, "_get_series", lambda _self, series_id, **kwargs: fixture.fred(series_id, **kwargs))
     cot = ModuleType("cot_reports")
     cot.cot_year = fixture.cot
     monkeypatch.setitem(sys.modules, "cot_reports", cot)

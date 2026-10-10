@@ -14,6 +14,89 @@ from tradingagents.strategies.execution.price_source import CorporateActionValid
 from tradingagents.strategies.orchestration.trading_calendar import next_session, session_close
 
 
+def test_unexpected_shared_input_failure_logs_safe_origin_and_keeps_gap_closed(tmp_path, caplog):
+    import json
+    import logging
+    from tradingagents.strategies.orchestration.session_executor import SessionExecutor
+
+    orch, _ = _authoritative_orchestrator(tmp_path, cohorts=2, strategy_modules=[])
+    session = date(2026, 3, 30)
+    secret = "canary-private-api-key"
+
+    def secret_bearing_fetch(*args, **kwargs):
+        raise RuntimeError(f"https://private.example/?key={secret} Authorization: Bearer {secret} /credentials/account/token.json")
+
+    caplog.set_level(logging.ERROR)
+    try:
+        with patch.object(SessionExecutor, "fetch_input_bundle", side_effect=secret_bearing_fetch):
+            results = orch.run_daily(session.isoformat())
+        assert all(not row["execution_valid"] for row in results.values())
+        assert orch._metric_store.load_epoch(orch._epoch_id).status == "invalid"
+        assert all(not c["ledger"].read_fills(session, session) for c in orch.cohorts)
+        diagnostics = [json.loads(r.getMessage()) for r in caplog.records
+                       if r.getMessage().startswith('{"event": "shared_session_input_boundary_failed"')]
+        assert len(diagnostics) == 1
+        diagnostic = diagnostics[0]
+        assert diagnostic["exception_type"] == "RuntimeError"
+        assert 1 <= len(diagnostic["code_frames"]) <= 8
+        assert diagnostic["code_frames"][-1]["function"] == "secret_bearing_fetch"
+        assert all(isinstance(f["line"], int) and f["line"] > 0 for f in diagnostic["code_frames"])
+        assert all("/" not in f["file"] and "\\" not in f["file"] for f in diagnostic["code_frames"])
+        assert all(value not in caplog.text for value in (secret, "private.example", "Authorization", "/credentials", "token.json"))
+        with patch.object(SessionExecutor, "fetch_input_bundle", side_effect=AssertionError("replay refetched")):
+            replay = orch.run_daily(session.isoformat())
+        assert all(not row["execution_valid"] for row in replay.values())
+    finally:
+        for cohort in orch.cohorts:
+            cohort["ledger"].close()
+
+
+@pytest.mark.parametrize("boundary,helper", [
+    ("candidate_identity", "_candidate_identity_scope_for_run"),
+    ("candidate_reference_replay", "_replay_candidate_reference_issues"),
+    ("candidate_reference_resolution", "_resolve_candidate_bars"),
+    ("staging_volatility", "_restore_staging_volatility"),
+])
+def test_candidate_boundary_failure_logs_safe_origin_and_preserves_accounting(
+    tmp_path, caplog, boundary, helper,
+):
+    import json
+    import logging
+    from tradingagents.strategies.orchestration import daily_pipeline
+
+    orch, _ = _authoritative_orchestrator(tmp_path, cohorts=2, strategy_modules=[])
+    if boundary == "staging_volatility":
+        orch._base_config["autoresearch"]["portfolio_policy"] = {}
+    session = date(2026, 3, 30)
+    secret = "candidate-private-api-key"
+
+    def secret_bearing_failure(*args, **kwargs):
+        raise RuntimeError(f"https://private.example/?key={secret} Authorization: Bearer {secret}")
+
+    caplog.set_level(logging.ERROR)
+    try:
+        with patch.object(daily_pipeline, helper, side_effect=secret_bearing_failure):
+            results = orch.run_daily(session.isoformat())
+        assert len(results) == 2
+        assert all(row["error"] and row["execution_valid"] for row in results.values())
+        assert all(row["staging_valid"] is False for row in results.values())
+        assert all(not c["ledger"].read_fills(session, session) for c in orch.cohorts)
+        diagnostics = [json.loads(record.getMessage()) for record in caplog.records
+                       if record.getMessage().startswith('{"event": "' + boundary + '_boundary_failed"')]
+        assert len(diagnostics) == 1
+        diagnostic = diagnostics[0]
+        assert diagnostic["exception_type"] == "RuntimeError"
+        assert diagnostic["session"] == session.isoformat()
+        assert 1 <= len(diagnostic["code_frames"]) <= 8
+        assert diagnostic["code_frames"][-1]["function"] == "secret_bearing_failure"
+        assert all("/" not in frame["file"] and "\\" not in frame["file"]
+                   for frame in diagnostic["code_frames"])
+        assert all(value not in caplog.text for value in (secret, "private.example", "Authorization"))
+    finally:
+        for cohort in orch.cohorts:
+            cohort["ledger"].close()
+
+
 @pytest.mark.parametrize("kind,gap_index,expected", [
     ("bar", 2, "valid"),  # Intermediate prices are not an outcome dependency.
     ("action", 2, "invalid"),
