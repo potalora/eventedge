@@ -261,6 +261,10 @@ class TransportFixture:
 @pytest.fixture
 def pipeline(monkeypatch, tmp_path):
     fixture = TransportFixture()
+    # CLI dotenv loading in another test must not authorize shadow acquisition.
+    # Dedicated shadow tests explicitly supply their own credentials afterward.
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
 
     def forbid_socket(*args, **kwargs):
         raise AssertionError("live socket calls forbidden by acceptance harness")
@@ -347,6 +351,24 @@ def pipeline(monkeypatch, tmp_path):
     yield fixture, orchestrator, config, tmp_path
     for cohort in orchestrator.cohorts:
         cohort["ledger"].close()
+
+
+def test_offline_pipeline_isolates_inherited_shadow_credentials(monkeypatch, request):
+    """CLI dotenv loading must not authorize a paid call in offline acceptance."""
+    import os
+
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "a" * 32)
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "offline-seeded-token")
+    fixture, owner, config, _ = request.getfixturevalue("pipeline")
+    account_present = bool(os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
+    token_present = bool(os.environ.get("CLOUDFLARE_API_TOKEN"))
+    assert not account_present
+    assert not token_present
+    assert config["decision_shadow"]["enabled"] is True
+    owner.run_daily(str(SESSION))
+    sidecar = Path(config["autoresearch"]["state_dir"]) / "decision_shadow" / f"{SESSION}.json"
+    assert json.loads(sidecar.read_text())["status"] == "missing_credentials"
+    assert not fixture.blocked_calls
 
 
 def accepted_input_bytes(config):

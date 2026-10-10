@@ -721,8 +721,18 @@ class PortfolioCommittee:
             sector_lines = [f"  {t}: {p.get('sector', '?')}" for t, p in sorted(profiles.items())]
             enrichment_str += "\nSector classification:\n" + "\n".join(sector_lines)
         if short_interest:
-            si_lines = [f"  {t}: {s.get('short_pct_of_float', 0):.1f}% short"
-                        for t, s in sorted(short_interest.items())]
+            si_lines = []
+            for ticker, observation in sorted(short_interest.items()):
+                percentage = observation.get("short_pct_of_float")
+                if percentage is not None:
+                    detail = f"{percentage:.1f}% short"
+                else:
+                    detail = "float percentage unavailable"
+                    if observation.get("short_interest") is not None:
+                        detail += f"; {observation['short_interest']:g} shares short"
+                    if observation.get("date"):
+                        detail += f" as of {observation['date']}"
+                si_lines.append(f"  {ticker}: {detail}")
             enrichment_str += "\nShort interest:\n" + "\n".join(si_lines)
         if factors:
             enrichment_str += f"\nFama-French factors: {json.dumps(factors, default=str)}"

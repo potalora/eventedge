@@ -141,8 +141,8 @@ class SupplyChainStrategy:
         for candidate in candidates:
             if isinstance(short_data, dict) and candidate.ticker in short_data:
                 si = short_data[candidate.ticker]
-                short_pct = si.get("short_pct_of_float", 0)
-                if short_pct > 5.0:  # >5% of float shorted
+                short_pct = si.get("short_pct_of_float")
+                if short_pct is not None and short_pct > 5.0:  # >5% of float shorted
                     candidate.score = min(candidate.score * 1.25, 1.0)
                     candidate.metadata["short_pct_of_float"] = short_pct
                     candidate.metadata["days_to_cover"] = si.get("days_to_cover", 0)

@@ -11,6 +11,7 @@ import json
 import math
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -46,6 +47,7 @@ from tradingagents.strategies.orchestration.trading_calendar import session_clos
 SCHEMA_VERSION = 1
 _OPENING_AT = datetime(1970, 1, 1)
 _T = TypeVar("_T")
+_POLICY_CONTEXT_VALIDATION_MAX_BYTES = 128 * 1024
 
 
 class LedgerConflictError(ValueError):
@@ -2874,6 +2876,13 @@ class PortfolioLedger:
         self, row: sqlite3.Row
     ) -> dict[str, object]:
         label = f"{row['cohort_id']}/{row['session']}/{row['binding_kind']}"
+        # Retain only a validation fact for one exact SQL row, never a parsed
+        # context. Every receiver still reads SQL and parses independent objects;
+        # changes from this connection, another writer or rollback cannot hit.
+        raw_row = tuple(row)
+        already_validated = raw_row == getattr(
+            self, "_validated_policy_context_row", None
+        )
         try:
             config = json.loads(row["policy_config_json"])
             context = json.loads(row["context_json"])
@@ -2882,30 +2891,35 @@ class PortfolioLedger:
             raise LedgerConflictError(
                 f"tampered policy session context {label}"
             ) from exc
-        config_json = _canonical_json(config)
-        context_json = _canonical_json(context)
-        payload_json = _canonical_json(payload)
-        expected_payload = {
-            "cohort_id": row["cohort_id"],
-            "session": row["session"],
-            "binding_kind": row["binding_kind"],
-            "epoch_id": row["epoch_id"],
-            "policy_version": row["policy_version"],
-            "policy_config_digest": row["policy_config_digest"],
-            "context_digest": row["context_digest"],
-        }
-        if (
-            config_json != row["policy_config_json"]
-            or context_json != row["context_json"]
-            or payload_json != row["payload_json"]
-            or row["policy_config_digest"]
-            != stable_id("policy_config", config_json)
-            or row["context_digest"] != stable_id("policy_context", context_json)
-            or payload != expected_payload
-            or row["payload_digest"] != stable_id("policy_binding", payload_json)
-        ):
-            raise LedgerConflictError(f"tampered policy session context {label}")
-        return {
+        if already_validated:
+            config_json = row["policy_config_json"]
+            context_json = row["context_json"]
+            payload_json = row["payload_json"]
+        else:
+            config_json = _canonical_json(config)
+            context_json = _canonical_json(context)
+            payload_json = _canonical_json(payload)
+            expected_payload = {
+                "cohort_id": row["cohort_id"],
+                "session": row["session"],
+                "binding_kind": row["binding_kind"],
+                "epoch_id": row["epoch_id"],
+                "policy_version": row["policy_version"],
+                "policy_config_digest": row["policy_config_digest"],
+                "context_digest": row["context_digest"],
+            }
+            if (
+                config_json != row["policy_config_json"]
+                or context_json != row["context_json"]
+                or payload_json != row["payload_json"]
+                or row["policy_config_digest"]
+                != stable_id("policy_config", config_json)
+                or row["context_digest"] != stable_id("policy_context", context_json)
+                or payload != expected_payload
+                or row["payload_digest"] != stable_id("policy_binding", payload_json)
+            ):
+                raise LedgerConflictError(f"tampered policy session context {label}")
+        result = {
             "cohort_id": str(row["cohort_id"]),
             "session": _date(row["session"]),
             "binding_kind": str(row["binding_kind"]),
@@ -2921,6 +2935,14 @@ class PortfolioLedger:
             "payload_digest": str(row["payload_digest"]),
             "bound_at": _datetime(row["bound_at"]),
         }
+        if self is not None and not already_validated:
+            retained_bytes = sys.getsizeof(raw_row) + sum(
+                sys.getsizeof(value) for value in raw_row
+            )
+            self._validated_policy_context_row = (
+                raw_row if retained_bytes <= _POLICY_CONTEXT_VALIDATION_MAX_BYTES else None
+            )
+        return result
 
     @staticmethod
     def _policy_projection_limit(limit: int, *, maximum: int = 256) -> int:

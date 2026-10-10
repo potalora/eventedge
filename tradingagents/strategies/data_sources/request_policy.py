@@ -201,6 +201,25 @@ def provider_request(provider, method, url, *, operation=None, transport=None, *
     return _run(provider, operation or method, attempt)
 
 
-def provider_call(provider, operation, callable):
-    """Retry one SDK operation; do not wrap an adapter's retry loop."""
-    return _run(provider, operation, lambda remaining: callable())
+def provider_call(provider, operation, callable, *, maximum_seconds=None):
+    """Retry one SDK operation within its cap and any inherited deadline.
+
+    SDK callbacks remain cooperative. The operation cap limits subsequent
+    retries; it does not forcibly interrupt an already running SDK call.
+    """
+    if maximum_seconds is None:
+        return _run(provider, operation, lambda remaining: callable())
+    if (isinstance(maximum_seconds, bool) or not isinstance(maximum_seconds, (int, float))
+            or not math.isfinite(maximum_seconds) or maximum_seconds <= 0):
+        raise ValueError("invalid SDK operation budget")
+    parent = _CURRENT.get()
+    if parent is not None and parent.provider == provider:
+        deadline = min(parent.deadline, parent.clock() + maximum_seconds)
+        options = dict(clock=parent.clock, sleep=parent.sleep, random_fn=parent.random_fn,
+                       max_attempts=parent.max_attempts, limits=parent.limits,
+                       diagnostics=parent.diagnostics)
+    else:
+        deadline = time.monotonic() + min(60, maximum_seconds)
+        options = {}
+    with provider_budget(provider, deadline, **options):
+        return _run(provider, operation, lambda remaining: callable())

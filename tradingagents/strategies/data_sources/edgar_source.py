@@ -60,6 +60,25 @@ def filing_search_forms(value: str) -> str:
     return normalize_filing_form(value)
 
 
+def _search_failure(message: str, branch: str, offset: int, records: list,
+                    **diagnostic: Any) -> SourceFetchError:
+    """Retain fixed branch labels and numeric/boolean diagnostics, never raw pages."""
+    return SourceFetchError(message, reason_code="invalid_response", partial_data={
+        "filings": records,
+        "coverage": {"mode": "exhaustive_window", "complete": False,
+                     "diagnostic": {"branch": branch, "offset": offset, **diagnostic}},
+    })
+
+
+def _valid_search_cik(value: Any) -> bool:
+    try:
+        return source_text(value) and value.isdigit() and int(value) > 0
+    except ValueError:
+        # Unicode digit categories and excessive integer strings need a safe
+        # invalid-field outcome, preserving any earlier valid page records.
+        return False
+
+
 class EDGARSource:
     """Data source for SEC EDGAR filings.
 
@@ -142,12 +161,14 @@ class EDGARSource:
                 page = self._search_filings_page(form_type, date_from, date_to, ticker, keyword, offset)
             except SourceFetchError as exc:
                 exc.partial_data = {"filings": records + exc.partial_data.get("filings", []),
-                                    "coverage": {"mode": "exhaustive_window", "complete": False}}
+                                    "coverage": {**exc.partial_data.get("coverage", {}),
+                                                 "mode": "exhaustive_window", "complete": False}}
                 raise
             total = page.coverage["provider_total"]
             if expected is not None and total != expected:
-                raise SourceFetchError("EDGAR search total changed", reason_code="invalid_response",
-                                       partial_data={"filings": records})
+                raise _search_failure("EDGAR search total changed", "total_changed", offset,
+                                      records, page_count=len(page), expected_total=expected,
+                                      provider_total=total)
             expected = total
             for row in page:
                 identity = row['adsh']
@@ -160,8 +181,10 @@ class EDGARSource:
                 return CoverageRecords(records, coverage={"mode":"exhaustive_window", "complete":True,
                     "provider_total":total, "returned":len(records), "date_from":date_from, "date_to":date_to})
             if not page or offset >= 10000:
-                raise SourceFetchError("EDGAR search window incomplete", reason_code="invalid_response",
-                                       partial_data={"filings":records, "coverage":{"mode":"exhaustive_window", "complete":False}})
+                raise _search_failure("EDGAR search window incomplete",
+                                      "empty_page" if not page else "query_limit", offset - len(page),
+                                      records, page_count=len(page), expected_total=expected,
+                                      provider_total=total)
 
     def _search_filings_page(
         self,
@@ -206,22 +229,29 @@ class EDGARSource:
         )
         try:
             data = resp.json()
-        except Exception as exc:
-            raise SourceFetchError("EDGAR search response invalid", reason_code="invalid_response") from None
+        except Exception:
+            raise _search_failure("EDGAR search response invalid", "json_decode", offset, []) from None
         hits_container = data.get("hits") if isinstance(data, dict) else None
         hits = hits_container.get("hits") if isinstance(hits_container, dict) else None
         if not isinstance(hits, list):
-            raise SourceFetchError("EDGAR search response invalid", reason_code="invalid_response")
+            raise _search_failure("EDGAR search response invalid", "hits_shape", offset, [])
         results: list[dict[str, Any]] = []
-        for hit in hits:
+        for hit_index, hit in enumerate(hits):
             src = hit.get("_source") if isinstance(hit, dict) else None
-            if (not isinstance(src, dict) or not source_text(src.get("form"))
-                    or not source_date(src.get("file_date")) or not source_text(src.get("adsh"))
-                    or not isinstance(src.get("display_names"), list) or not src["display_names"]
-                    or not all(source_text(value) for value in src["display_names"])
-                    or not isinstance(src.get("ciks"), list) or not src["ciks"]
-                    or not all(source_text(value) and value.isdigit() and int(value) > 0 for value in src["ciks"])):
-                raise SourceFetchError("EDGAR search hit invalid", reason_code="invalid_response", partial_data={"filings": results})
+            fields_valid = {
+                "source": isinstance(src, dict),
+                "form": isinstance(src, dict) and source_text(src.get("form")),
+                "file_date": isinstance(src, dict) and source_date(src.get("file_date")),
+                "adsh": isinstance(src, dict) and source_text(src.get("adsh")),
+                "display_names": (isinstance(src, dict) and isinstance(src.get("display_names"), list)
+                                  and bool(src["display_names"])
+                                  and all(source_text(value) for value in src["display_names"])),
+                "ciks": (isinstance(src, dict) and isinstance(src.get("ciks"), list) and bool(src["ciks"])
+                         and all(_valid_search_cik(value) for value in src["ciks"])),
+            }
+            if not all(fields_valid.values()):
+                raise _search_failure("EDGAR search hit invalid", "hit_fields", offset, results,
+                                      hit_index=hit_index, fields_valid=fields_valid)
             display_names = src.get("display_names", [])
             entity_name = display_names[0] if display_names else ""
             # Extract ticker from display_name format: "Company Name  (TICK)  (CIK ...)"
@@ -249,8 +279,10 @@ class EDGARSource:
         total = total_payload.get("value") if isinstance(total_payload, dict) else total_payload
         relation = total_payload.get("relation", "eq") if isinstance(total_payload, dict) else "eq"
         if type(total) is not int or total < offset + len(hits) or relation != "eq":
-            raise SourceFetchError("EDGAR search total unavailable", reason_code="invalid_response",
-                                   partial_data={"filings":results})
+            raise _search_failure("EDGAR search total unavailable", "total_shape", offset, results,
+                                  page_count=len(hits), total_is_integer=type(total) is int,
+                                  total_covers_page=type(total) is int and total >= offset + len(hits),
+                                  relation_is_exact=relation == "eq")
         return CoverageRecords(results, coverage={"provider_total":total})
 
     def get_company_filings(

@@ -2439,7 +2439,15 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     )
     if conflicts:
         return state.fail_candidate_classification(conflicts)
-    enrichment = state.owner._fetch_openbb_enrichment(all_signals)
+    from tradingagents.strategies.runtime_deadline import DEFAULT_MODEL_BUDGET_S, model_budget
+    from tradingagents.strategies.data_sources.request_policy import provider_budget
+    import time
+    if state.model_deadline is None:
+        state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
+    # Reference/volatility/enrichment wall time consumes the original model
+    # allowance. No later SDK operation may start on a fresh per-call clock.
+    with provider_budget("openbb", state.model_deadline):
+        enrichment = state.owner._fetch_openbb_enrichment(all_signals)
     reference_bars = dict(state.governed_reference_bars)
     reference_bars.update(state.candidate_reference_bars)
     state.shared_data["_execution_reference_bars"] = reference_bars
@@ -2448,10 +2456,6 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
         signals, regime, _ = state.horizon_signals[cfg.horizon]
         summaries = state.governed_summaries_by_cohort.get(cfg.name, [])
         try:
-            from tradingagents.strategies.runtime_deadline import DEFAULT_MODEL_BUDGET_S, model_budget
-            import time
-            if state.model_deadline is None:
-                state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
             with model_budget(state.model_deadline):
                 staged = engine.screen_and_stage(
                     trading_date=state.trading_date,

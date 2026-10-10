@@ -955,7 +955,7 @@ class CohortOrchestrator:
         """
         enrichment: dict[str, Any] = {}
 
-        tickers = list({s.get("ticker", "") for s in signals if s.get("ticker")})
+        tickers = sorted({s.get("ticker", "") for s in signals if s.get("ticker")})
         if not tickers:
             return enrichment
 
@@ -968,12 +968,12 @@ class CohortOrchestrator:
         if openbb_source is None or not openbb_source.is_available():
             return enrichment
 
-        # Fetch profiles for all tickers
-        profiles = {}
-        for ticker in tickers:
-            result = openbb_source.fetch({"method": "equity_profile", "ticker": ticker})
-            if "error" not in result:
-                profiles[ticker] = result
+        # Native profile batches preserve every ticker and explicit failures.
+        errors = {}
+        profile_batch = openbb_source.fetch_profiles(tickers)
+        profiles = profile_batch["profiles"]
+        if profile_batch["errors"]:
+            errors["profiles"] = profile_batch["errors"]
         if profiles:
             enrichment["profiles"] = profiles
 
@@ -985,6 +985,8 @@ class CohortOrchestrator:
             )
             if "error" not in result:
                 short_interest[ticker] = result
+            else:
+                errors.setdefault("short_interest", {})[ticker] = result
         if short_interest:
             enrichment["short_interest"] = short_interest
 
@@ -992,6 +994,8 @@ class CohortOrchestrator:
         factors = openbb_source.fetch({"method": "factors_fama_french"})
         if "error" not in factors:
             enrichment["factors"] = factors.get("factors", {})
+        else:
+            errors["factors"] = factors
 
         # Fetch commodity futures curves for commodity signals
         from tradingagents.strategies.modules.commodity_macro import (
@@ -1013,9 +1017,13 @@ class CohortOrchestrator:
                 )
                 if "error" not in result:
                     curves[underlying] = result
+                else:
+                    errors.setdefault("commodity_futures_curves", {})[underlying] = result
             if curves:
                 enrichment["commodity_futures_curves"] = curves
 
+        if errors:
+            enrichment["errors"] = errors
         return enrichment
 
     def reset(self) -> None:

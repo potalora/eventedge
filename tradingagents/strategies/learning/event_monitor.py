@@ -68,6 +68,8 @@ class EventMonitor:
                     scopes[form_type] = filings.coverage
             except SourceFetchError as exc:
                 all_filings.extend(exc.partial_data.get("filings", []))
+                if "coverage" in exc.partial_data:
+                    scopes[form_type] = exc.partial_data["coverage"]
                 failures[operation] = exc.reason_code
                 if exc.http_status is not None:
                     statuses[operation] = exc.http_status
@@ -193,15 +195,39 @@ class EventMonitor:
 
     @staticmethod
     def _strip_html(text: str) -> str:
-        """Remove HTML tags from filing text."""
+        """Extract visible filing text before applying any excerpt length limit.
+
+        Inline-XBRL headers contain large machine-only context blocks. Keeping
+        their text can exhaust an excerpt before the actual filing begins.
+        This cleanup does not certify substantive section or entity coverage.
+        """
         import re
-        # Remove script/style blocks
-        text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        # Remove tags
-        text = re.sub(r"<[^>]+>", " ", text)
-        # Collapse whitespace
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(text, "html.parser")
+        tags = soup.find_all()
+        inline_prefixes, instance_prefixes = {"ix"}, {"xbrli"}
+        for tag in tags:
+            for name, value in tag.attrs.items():
+                if not name.startswith("xmlns:") or not isinstance(value, str):
+                    continue
+                prefix = name.split(":", 1)[1]
+                if value in {"http://www.xbrl.org/2008/inlineXBRL", "http://www.xbrl.org/2013/inlineXBRL"}:
+                    inline_prefixes.add(prefix)
+                elif value == "http://www.xbrl.org/2003/instance":
+                    instance_prefixes.add(prefix)
+        invisible = {"head", "script", "style", "template", "noscript"}
+        invisible.update(f"{prefix}:{name}" for prefix in inline_prefixes
+                         for name in ("header", "hidden", "references", "resources"))
+        invisible.update(f"{prefix}:{name}" for prefix in instance_prefixes
+                         for name in ("context", "unit"))
+        hidden_style = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)", re.I)
+        # Descendants first: decomposing a parent invalidates its child objects.
+        for tag in reversed(tags):
+            if (tag.name in invisible or tag.has_attr("hidden")
+                    or hidden_style.search(str(tag.get("style", "")))):
+                tag.decompose()
+        return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
 
     def poll_13d_filings(self, days_back: int = 14) -> list[dict]:
         """Poll for new SC 13D activist filings."""
@@ -257,6 +283,8 @@ class EventMonitor:
                                                    date_to=date_to, keyword=keyword)
                 except SourceFetchError as exc:
                     filings = exc.partial_data.get("filings", [])
+                    if "coverage" in exc.partial_data:
+                        scopes[operation] = exc.partial_data["coverage"]
                     failures[operation] = exc.reason_code
                     if exc.http_status is not None:
                         statuses[operation] = exc.http_status

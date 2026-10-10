@@ -10,7 +10,9 @@ reports unavailable and fetch() returns graceful errors.
 from __future__ import annotations
 
 import logging
+import math
 import os
+from datetime import date
 from typing import Any
 
 from .request_policy import provider_call
@@ -21,6 +23,19 @@ logger = logging.getLogger(__name__)
 def _getfield(item: Any, field: str, default: Any = None) -> Any:
     """Safely get a field from an OBBject result item."""
     return getattr(item, field, default)
+
+
+def _profile_result(item: Any) -> dict[str, Any]:
+    """Normalize native profile fields, retaining older SDK aliases."""
+    return {
+        "sector": _getfield(item, "sector", ""),
+        "industry": _getfield(item, "industry_category", "") or _getfield(item, "industry", ""),
+        "market_cap": _getfield(item, "market_cap", 0),
+        "name": _getfield(item, "name", ""),
+        "description": str(_getfield(item, "long_description", "") or
+                           _getfield(item, "long_business_summary", "") or
+                           _getfield(item, "description", ""))[:500],
+    }
 
 
 class OpenBBSource:
@@ -60,13 +75,16 @@ class OpenBBSource:
         if handler is None:
             return {"error": f"Unknown method '{method}'"}
         try:
-            return provider_call("openbb", method, lambda: handler(params))
+            result = provider_call("openbb", method, lambda: handler(params), maximum_seconds=60)
+            if "error" in result:
+                result.setdefault("reason_code", "provider_error")
+            return result
         except ImportError:
             logger.error("OpenBB SDK not installed")
-            return {"error": "OpenBB SDK not installed"}
+            return {"error": "OpenBB SDK not installed", "reason_code": "provider_error"}
         except Exception as exc:
             error = source_fetch_error("OpenBB enrichment failed", exc)
-            return {**error.partial_data, "error": str(error)}
+            return {**error.partial_data, "error": str(error), "reason_code": error.reason_code}
 
     def is_available(self) -> bool:
         try:
@@ -75,6 +93,57 @@ class OpenBBSource:
             return mod is not None
         except (ImportError, ModuleNotFoundError):
             return False
+
+    def fetch_profiles(self, tickers: list[str]) -> dict[str, dict]:
+        """Fetch every requested profile using sequential native batches of eight.
+
+        Native responses arrive in completion order. Only exact, unique symbol
+        attribution is cached; every unsuccessful input retains a safe failure.
+        Existing provider scopes, if any, apply to every batch without reset.
+        """
+        ordered = list(dict.fromkeys(tickers))
+        profiles: dict[str, dict] = {}
+        errors: dict[str, dict] = {}
+        pending = []
+        for ticker in ordered:
+            if not isinstance(ticker, str) or not ticker or "," in ticker:
+                errors[ticker] = {"error": "Invalid profile symbol", "reason_code": "invalid_response"}
+            elif f"equity_profile|{ticker}" in self._cache:
+                profiles[ticker] = self._cache[f"equity_profile|{ticker}"]
+            else:
+                pending.append(ticker)
+        for offset in range(0, len(pending), 8):
+            batch = pending[offset:offset + 8]
+            try:
+                response = provider_call(
+                    "openbb", "equity_profile",
+                    lambda: self._get_obb().equity.profile(symbol=",".join(batch), provider="yfinance"),
+                    maximum_seconds=60,
+                )
+                by_symbol: dict[str, list] = {ticker: [] for ticker in batch}
+                for item in response.results or []:
+                    symbol = _getfield(item, "symbol")
+                    if not isinstance(symbol, str) or symbol not in by_symbol:
+                        raise SourceFetchError("Unattributed OpenBB profile response", reason_code="invalid_response")
+                    by_symbol[symbol].append(item)
+                for ticker, items in by_symbol.items():
+                    if len(items) != 1:
+                        errors[ticker] = {
+                            "error": "Missing OpenBB profile" if not items else "Duplicate OpenBB profile",
+                            "reason_code": "invalid_response",
+                        }
+                        continue
+                    result = _profile_result(items[0])
+                    profiles[ticker] = result
+                    self._cache[f"equity_profile|{ticker}"] = result
+            except Exception as exc:
+                error = source_fetch_error("OpenBB profile batch failed", exc)
+                for ticker in batch:
+                    errors[ticker] = {"error": str(error), "reason_code": error.reason_code}
+        return {
+            "profiles": {ticker: profiles[ticker] for ticker in ordered if ticker in profiles},
+            "errors": {ticker: errors[ticker] for ticker in ordered if ticker in errors},
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -127,14 +196,7 @@ class OpenBBSource:
             return {"error": f"No profile data for {ticker}"}
 
         item = resp.results[0]
-        result = {
-            "sector": _getfield(item, "sector", ""),
-            "industry": _getfield(item, "industry", ""),
-            "market_cap": _getfield(item, "market_cap", 0),
-            "name": _getfield(item, "name", ""),
-            "description": str(_getfield(item, "long_business_summary", "") or
-                               _getfield(item, "description", ""))[:500],
-        }
+        result = _profile_result(item)
         self._cache[ckey] = result
         return result
 
@@ -215,16 +277,52 @@ class OpenBBSource:
         if not resp.results:
             return {"error": f"No short interest data for {ticker}"}
 
-        item = resp.results[0]
-        short_pos = _getfield(item, "current_short_position", 0)
-        avg_vol = _getfield(item, "average_daily_volume", 1)
-        result = {
-            "short_interest": short_pos,
-            "short_pct_of_float": _getfield(item, "short_percent_of_float", 0.0),
-            "days_to_cover": _getfield(item, "days_to_cover", 0.0)
-                             or (short_pos / avg_vol if avg_vol else 0.0),
-            "date": str(_getfield(item, "settlement_date", "")),
-        }
+        dated = []
+        for item in resp.results:
+            symbol = _getfield(item, "symbol")
+            if symbol is not None and symbol != ticker:
+                raise SourceFetchError("Mismatched FINRA symbol", reason_code="invalid_response")
+            try:
+                settlement = date.fromisoformat(str(_getfield(item, "settlement_date", "")))
+            except (TypeError, ValueError):
+                raise SourceFetchError("Invalid FINRA settlement date", reason_code="invalid_response") from None
+            dated.append((settlement, item))
+        latest = max(settlement for settlement, _ in dated)
+        normalized = []
+        for settlement, item in dated:
+            if settlement != latest:
+                continue
+            short_pos = _getfield(item, "current_short_position")
+            coverage = _getfield(item, "days_to_cover")
+            avg_vol = _getfield(item, "avg_daily_volume", _getfield(item, "average_daily_volume"))
+            try:
+                if isinstance(short_pos, bool) or not math.isfinite(float(short_pos)) or float(short_pos) < 0:
+                    raise ValueError
+                if coverage is None:
+                    if isinstance(avg_vol, bool) or not math.isfinite(float(avg_vol)) or float(avg_vol) <= 0:
+                        raise ValueError
+                    coverage = float(short_pos) / float(avg_vol)
+                if isinstance(coverage, bool) or not math.isfinite(float(coverage)) or float(coverage) < 0:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                raise SourceFetchError("Invalid FINRA coverage data", reason_code="invalid_response") from None
+            short_pct = _getfield(item, "short_percent_of_float")
+            if short_pct is not None:
+                try:
+                    if isinstance(short_pct, bool) or not math.isfinite(float(short_pct)) or float(short_pct) < 0:
+                        raise ValueError
+                    short_pct = float(short_pct)
+                except (TypeError, ValueError, OverflowError):
+                    raise SourceFetchError("Invalid FINRA float percentage", reason_code="invalid_response") from None
+            normalized.append({
+                "short_interest": float(short_pos),
+                "short_pct_of_float": short_pct,
+                "days_to_cover": float(coverage),
+                "date": latest.isoformat(),
+            })
+        result = normalized[0]
+        if any(row != result for row in normalized[1:]):
+            raise SourceFetchError("Conflicting latest FINRA rows", reason_code="invalid_response")
         self._cache[ckey] = result
         return result
 

@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import json
+import re
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -46,6 +47,29 @@ _DIAGNOSTIC_HOLDING_SESSIONS = 5
 # Shared fetch uses OpenBB only for optional enrichment/expansion, not for
 # required screen inputs. Keep this distinction consistent with preflight.
 OPTIONAL_ENRICHMENT_SOURCES = frozenset({"openbb"})
+
+
+def _enrichment_failures(enrichment: Mapping[str, Any]) -> list[dict]:
+    """Retain optional failure identities without provider messages or URLs."""
+    errors = enrichment.get("errors", {})
+    if not isinstance(errors, Mapping):
+        return []
+    reasons = {"timeout", "transport_error", "http_error", "invalid_response",
+               "provider_error", "batch_failure"}
+    failures = []
+    for operation in ("commodity_futures_curves", "factors", "profiles", "short_interest"):
+        entries = errors.get(operation)
+        if not isinstance(entries, Mapping):
+            continue
+        items = [(None, entries)] if operation == "factors" else entries.items()
+        for symbol, details in items:
+            safe_symbol = (symbol if isinstance(symbol, str) and
+                           re.fullmatch(r"[A-Za-z0-9.^=_-]{1,32}", symbol) else "unknown")
+            reason = details.get("reason_code") if isinstance(details, Mapping) else None
+            failures.append({"operation": operation,
+                             "symbol": None if operation == "factors" else safe_symbol,
+                             "reason_code": reason if isinstance(reason, str) and reason in reasons else "provider_error"})
+    return sorted(failures, key=lambda item: (item["operation"], item["symbol"] or "", item["reason_code"]))
 
 
 def _provider_errors(
@@ -1100,6 +1124,9 @@ class MultiStrategyEngine:
                 model_coverage=phase_model_coverage,
             )
             decision_status = dict(committee.last_decision_status)
+            failures = _enrichment_failures(enrichment or {})
+            if failures:
+                decision_status["enrichment_failures"] = failures
             decision_status["selected_signal_ids"] = sorted({
                 record.signal_id for _, record in timely for rec in recommendations
                 if record.ticker == rec.ticker and record.direction == rec.direction

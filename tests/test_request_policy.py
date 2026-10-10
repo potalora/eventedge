@@ -19,6 +19,41 @@ class Clock:
         self.now += delay
 
 
+@pytest.mark.parametrize("aggregate,expected", [(300, 60), (20, 20)])
+def test_sdk_operation_cap_preserves_absolute_parent_clock_and_diagnostics(aggregate, expected):
+    p, clock, seen, diagnostics = policy(), Clock(), [], []
+    with p.provider_budget("openbb", aggregate, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), max_attempts=1, diagnostics=diagnostics):
+        def sdk():
+            seen.append(p.current_provider_deadline("openbb"))
+            clock.now = expected
+            raise requests.Timeout("PRIVATE")
+        with pytest.raises(SourceFetchError):
+            p.provider_call("openbb", "profile", sdk, maximum_seconds=60)
+        assert p.current_provider_deadline("openbb") == aggregate
+        if aggregate == expected:
+            with pytest.raises(SourceFetchError):
+                p.provider_call("openbb", "shorts", lambda: seen.append("late"), maximum_seconds=60)
+    assert seen == [expected]
+    assert diagnostics[0]["reason_code"] == "timeout"
+    assert diagnostics[0]["attempts"] == 1
+    assert "PRIVATE" not in str(diagnostics)
+
+
+def test_sdk_operation_retries_do_not_restart_per_operation_clock():
+    p, clock, seen = policy(), Clock(), []
+    with p.provider_budget("openbb", 300, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), max_attempts=3):
+        def sdk():
+            seen.append(p.current_provider_deadline("openbb"))
+            clock.now += 40
+            raise requests.Timeout()
+        with pytest.raises(SourceFetchError):
+            p.provider_call("openbb", "profile", sdk, maximum_seconds=60)
+    assert seen == [60, 60]
+    assert clock.waits == [.5]
+
+
 def response(status=200, headers=None):
     return SimpleNamespace(status_code=status, headers=headers or {})
 
