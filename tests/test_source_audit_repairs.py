@@ -1,4 +1,5 @@
 """Provider-shaped transport regressions for the 2026-10-09 source audit."""
+import json
 from types import SimpleNamespace as NS
 import sys
 
@@ -17,7 +18,7 @@ def offline(monkeypatch):
 
 
 def response(payload=None, text=''):
-    return NS(status_code=200, headers={}, json=lambda: payload, text=text)
+    return NS(status_code=200, headers={}, json=lambda: payload, text=text, iter_content=lambda chunk_size: iter([text.encode() if text else json.dumps(payload).encode()]), close=lambda: None)
 
 
 def test_edgar_exhaustive_window_and_primary_document_not_directory(monkeypatch):
@@ -44,7 +45,7 @@ def test_edgar_exhaustive_window_and_primary_document_not_directory(monkeypatch)
 @pytest.mark.parametrize('code,ad,direction,open_market', [('J','D','sell',False), ('J','A','buy',False), ('P','A','buy',True), ('A','A','buy',False), ('M','A','buy',False), ('P','D','other',False)])
 def test_form4_preserves_direction_and_economic_transaction(code, ad, direction, open_market, monkeypatch):
     from tradingagents.strategies.data_sources.edgar_source import EDGARSource
-    xml = f'<ownershipDocument><reportingOwner><reportingOwnerId><rptOwnerCik>123</rptOwnerCik><rptOwnerName>Officer</rptOwnerName></reportingOwnerId></reportingOwner><nonDerivativeTransaction><transactionCoding><transactionCode>{code}</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>100</value></transactionShares><transactionPricePerShare><value>20</value></transactionPricePerShare><transactionAcquiredDisposedCode><value>{ad}</value></transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction></ownershipDocument>'
+    xml = f'<ownershipDocument><documentType>4</documentType><periodOfReport>2026-10-01</periodOfReport><issuer><issuerCik>1</issuerCik><issuerName>Fixture issuer</issuerName><issuerTradingSymbol>TEST</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId><rptOwnerCik>123</rptOwnerCik><rptOwnerName>Officer</rptOwnerName></reportingOwnerId></reportingOwner><nonDerivativeTransaction><transactionCoding><transactionCode>{code}</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>100</value></transactionShares><transactionPricePerShare><value>20</value></transactionPricePerShare><transactionAcquiredDisposedCode><value>{ad}</value></transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction></ownershipDocument>'
     monkeypatch.setattr('tradingagents.strategies.data_sources.edgar_source.provider_request', lambda *a, **k: response(text=xml))
     row = EDGARSource()._parse_form4_xml('1', {'accession_number':'0001-26-000001','primary_document':'form4.xml'})[0]
     assert row['transaction_type'] == direction
@@ -161,12 +162,12 @@ def test_bounded_sample_metadata_is_explicit_and_serializable(provider,monkeypat
     from tradingagents.strategies.data_sources.regulations_source import RegulationsSource
     from tradingagents.strategies.data_sources.congress_source import CongressSource
     from tradingagents.strategies.orchestration.source_inputs import _transform
-    payloads={'courtlistener':{'results':[],'count':200,'next':'https://example/next'},'regulations':{'data':[],'meta':{'totalPages':2,'totalElements':200}},'congress':[]}
+    payloads={'courtlistener':{'results':[],'count':0,'next':None},'regulations':{'data':[],'meta':{'totalPages':2,'totalElements':200}},'congress':[]}
     monkeypatch.setattr(f'tradingagents.strategies.data_sources.{provider}_source.provider_request',lambda *a, **kw:response(payloads[provider]))
     source={'courtlistener':CourtListenerSource(token='x'),'regulations':RegulationsSource(api_key='x'),'congress':CongressSource(fmp_api_key='x')}[provider]
     out=source.fetch({'method':{'courtlistener':'search_dockets','regulations':'search_documents','congress':'recent_trades'}[provider]})
-    assert out['coverage']['mode']=='bounded_sample'
-    assert out['coverage']['complete'] is False
+    assert out['coverage']['mode']==('exhaustive_window' if provider=='courtlistener' else 'bounded_sample')
+    assert out['coverage']['complete'] is (provider=='courtlistener')
     assert _transform(_transform(out, decoding=False), decoding=True)['coverage']==out['coverage']
 
 
@@ -282,7 +283,7 @@ def test_native_sample_scope_survives_freeze_and_reaches_strategy_health(provide
     from tradingagents.strategies.modules.congressional_trades import CongressionalTradesStrategy
     from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
     from tradingagents.strategies.orchestration.source_inputs import SourceInputStore
-    payloads={'courtlistener':{'results':[],'count':200,'next':'https://example/next'},'regulations':{'data':[],'meta':{'totalPages':2,'totalElements':200}},'congress':[]}
+    payloads={'courtlistener':{'results':[],'count':0,'next':None},'regulations':{'data':[],'meta':{'totalPages':2,'totalElements':200}},'congress':[]}
     monkeypatch.setattr(f'tradingagents.strategies.data_sources.{provider}_source.provider_request',lambda *a, **kw:response(payloads[provider]))
     registry=DataSourceRegistry()
     registry.register({'courtlistener':CourtListenerSource(token='x'),'regulations':RegulationsSource(api_key='x'),'congress':CongressSource(fmp_api_key='x')}[provider])
@@ -327,11 +328,13 @@ def test_environment_dispatch_defaults_use_new_york_asof(monkeypatch):
     assert source.fetch({})['as_of']=='2026-06-12'
 
 
-def test_native_form4_forty_filing_sample_has_explicit_scope(monkeypatch, tmp_path):
+def test_native_form4_complete_window_scope_survives_freeze_and_health(monkeypatch, tmp_path):
     from tradingagents.strategies.data_sources.edgar_source import EDGARSource
+    # Synthetic identity mapping for every issuer in the fixed eight-issuer caller.
+    monkeypatch.setattr(EDGARSource,'ticker_to_cik',lambda self,ticker:'1')
     dates=['2026-10-01']*41
-    submissions={'filings':{'recent':{'form':['4']*41,'filingDate':dates,'accessionNumber':[f'0001-26-{i:06}' for i in range(41)],'primaryDocument':['form4.xml']*41},'files':[{'name':'CIK0000000001-submissions-001.json','filingFrom':'2025-01-01','filingTo':'2026-09-30'}]}}
-    xml='<ownershipDocument><reportingOwner><reportingOwnerId><rptOwnerCik>123</rptOwnerCik><rptOwnerName>Officer</rptOwnerName></reportingOwnerId></reportingOwner><nonDerivativeTransaction><transactionCoding><transactionCode>P</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>100</value></transactionShares><transactionPricePerShare><value>20</value></transactionPricePerShare><transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction></ownershipDocument>'
+    submissions={'cik':1,'filings':{'recent':{'form':['4']*41,'filingDate':dates,'accessionNumber':[f'0000000001-26-{i:06}' for i in range(41)],'primaryDocument':['form4.xml']*41},'files':[{'name':'CIK0000000001-submissions-001.json','filingFrom':'2025-01-01','filingTo':'2025-12-31','filingCount':1}]}}
+    xml='<ownershipDocument><documentType>4</documentType><periodOfReport>2026-10-01</periodOfReport><issuer><issuerCik>1</issuerCik><issuerName>Fixture issuer</issuerName><issuerTradingSymbol>TEST</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId><rptOwnerCik>123</rptOwnerCik><rptOwnerName>Officer</rptOwnerName></reportingOwnerId></reportingOwner><nonDerivativeTransaction><transactionCoding><transactionCode>P</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>100</value></transactionShares><transactionPricePerShare><value>20</value></transactionPricePerShare><transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode></transactionAmounts></nonDerivativeTransaction></ownershipDocument>'
     def transport(*a,**kw):
         url=a[2]
         if 'search-index' in url:
@@ -339,15 +342,15 @@ def test_native_form4_forty_filing_sample_has_explicit_scope(monkeypatch, tmp_pa
         if url.endswith('company_tickers.json'):
             return response({'0':{'cik_str':1,'ticker':'AAPL','title':'Example'}})
         if 'submissions' in url:
-            return response(submissions)
+            out=response(submissions); out.url=url; return out
         return response(text=xml)
     monkeypatch.setattr('tradingagents.strategies.data_sources.edgar_source.provider_request',transport)
     rows=EDGARSource().get_recent_form4('AAPL',days_back=14,as_of='2026-10-06')
-    assert len(rows)==40
-    assert rows.coverage['mode']=='bounded_sample' and rows.coverage['complete'] is False
-    assert rows.coverage['source_total']==41 and rows.coverage['has_more'] is True
-    assert rows.coverage['archived_possible'] is True
-    assert rows.coverage['limit']==40 and rows.coverage['date_to']=='2026-10-06'
+    assert len(rows)==41
+    assert rows.coverage['mode']=='exhaustive_window' and rows.coverage['complete'] is True
+    assert rows.coverage['recent_metadata_count']==41
+    assert rows.coverage['archive_files_consulted']==[]
+    assert rows.coverage['matching_filings']==41 and rows.coverage['date_to']=='2026-10-06'
 
     from tradingagents.strategies.data_sources.registry import DataSourceRegistry
     from tradingagents.strategies.modules.insider_activity import InsiderActivityStrategy
@@ -358,12 +361,12 @@ def test_native_form4_forty_filing_sample_has_explicit_scope(monkeypatch, tmp_pa
     engine=MultiStrategyEngine({'autoresearch':{'state_dir':str(tmp_path)}},registry=registry,strategies=[InsiderActivityStrategy()],use_llm=False)
     acquired={'edgar':engine._fetch_edgar_events('2026-10-06')}
     frozen=SourceInputStore.decode(SourceInputStore.encode(acquired))
-    assert len(frozen['edgar']['form4']['AAPL'])==40
+    assert len(frozen['edgar']['form4']['AAPL'])==41
     _,_,health=engine.screen_and_enrich('2026-10-06',frozen,epoch_id='audit',policy_id='30d')
     scope=health[0].evidence['source_coverage']['edgar']['form4']
-    assert scope['mode']=='bounded_sample' and scope['complete'] is False
+    assert scope['mode']=='exhaustive_window' and scope['complete'] is True
     assert scope['issuers']['AAPL']==rows.coverage
-    assert scope['issuers']['AAPL']['source_total']==41
+    assert scope['issuers']['AAPL']['matching_filings']==41
 
 
 @pytest.mark.parametrize('outer,expected', [(None,190),(400,190),(150,150)])

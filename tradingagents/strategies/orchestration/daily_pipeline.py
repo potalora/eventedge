@@ -117,6 +117,9 @@ class DailyRunState:
     shared_volatility_evidence: dict[str, Any] | None = None
     model_deadline: float | None = None
     model_coverage: dict[str, Any] = field(default_factory=lambda: {"complete": True})
+    source_digest: str = ''
+    new_entry_eligibility: dict[str, Any] | None = None
+    ineligible_new_entries: set[str] = field(default_factory=set)
 
     def finalize(self, finalized: dict[str, Any] | None = None) -> dict[str, Any]:
         return finalize_daily_results(
@@ -1263,6 +1266,20 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
                 str(error),
                 original_error=error,
             )
+    if state.completed:
+        try:
+            from .decision_clock import validate_completed_replay
+            validate_completed_replay(owner, session, state.epoch_id, state.completed)
+        except Exception as error:
+            _log_boundary_failure('decision_replay', session, error)
+            assign_failures(state.results, [*state.completed, *state.stage_only],
+                            'prospective_replay_evidence_invalid', execution_valid=True,
+                            staging_valid=False)
+            for cohort in state.execution_needed:
+                state.results.setdefault(cohort['config'].name,
+                    failure_result('prospective_replay_evidence_invalid', execution_valid=False,
+                                   staging_valid=False))
+            return state.finalize()
     return None
 
 
@@ -1540,10 +1557,15 @@ def _include_retained_late_signals(
 
     retained: dict[tuple[str, str], dict] = {}
     evidence: dict[tuple[str, str], str] = {}
+    from .decision_clock import policy, PROSPECTIVE
+    retained_options = {}
+    if policy(state.owner._base_config) == PROSPECTIVE:
+        retained_options['information_cutoff'] = datetime.fromisoformat(
+            state.shared_data['_decision_acquisition']['started_at'])
     for cohort in [*state.valid, *state.completed]:
         if cohort["config"].horizon != horizon:
             continue
-        for signal in cohort["engine"].pending_late_signals(state.session, state.epoch_id):
+        for signal in cohort["engine"].pending_late_signals(state.session, state.epoch_id, **retained_options):
             key = identity(signal)
             original = {**signal, "metadata": {
                 name: value for name, value in signal["metadata"].items()
@@ -1639,6 +1661,13 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
             state.shared_data = source_store.freeze(source_identity, acquired, deadline=deadline)
         if not isinstance(state.shared_data, dict):
             raise SourceInputError("shared source bundle must be a mapping")
+        from .decision_clock import policy, PROSPECTIVE
+        if policy(owner._base_config) == PROSPECTIVE:
+            from .source_inputs import source_codec_limits
+            state.source_digest = hashlib.sha256(source_store.encode(
+                state.shared_data, **source_codec_limits(owner._base_config)).encode()).hexdigest()
+            if 'deadline' in locals() and deadline is not None and time.monotonic() >= deadline:
+                raise SourceInputError('source acquisition deadline exhausted before clock binding')
         yfinance_inputs = state.shared_data.get("yfinance")
         shared_prices = yfinance_inputs.get("prices", {}) if isinstance(yfinance_inputs, dict) else {}
         if isinstance(shared_prices, dict) and hasattr(state.first_engine, "_price_cache"):
@@ -1861,6 +1890,41 @@ def _accepted_candidate_bar(state: DailyRunState, ticker: str, record: Any) -> A
     return bar
 
 
+def _eligibility_protected_tickers(state: DailyRunState) -> set[str]:
+    return set(state.governed_reference_bars) | {
+        ticker for scope in state.cohort_scopes.values() for ticker in scope
+    }
+
+
+def _retain_new_entry_eligibility(state: DailyRunState, evidence: dict) -> None:
+    state.new_entry_eligibility = evidence
+    state.ineligible_new_entries = {
+        ticker for ticker, decision in evidence['decisions'].items()
+        if decision['status'] == 'excluded_from_new_entry'
+    }
+
+
+def _save_candidate_bar_attempts(state: DailyRunState, ticker: str, serialized_attempts: tuple,
+                                outcome: str, signals: list[dict]) -> None:
+    from tradingagents.strategies.metrics.models import CandidateBarRecoveryRecord
+    identities = tuple(
+        {'event_key': event_key, 'strategy': strategy}
+        for event_key, strategy in _candidate_signal_identity_pairs(signals, ticker, state.session)
+    )
+    recovery = CandidateBarRecoveryRecord(
+        recovery_id=_candidate_bar_recovery_id(
+            epoch_id=state.epoch_id, session=state.session, ticker=ticker, outcome=outcome,
+            attempts=serialized_attempts, signal_identities=identities),
+        epoch_id=state.epoch_id, session=state.session, ticker=ticker, outcome=outcome,
+        attempts=serialized_attempts, signal_identities=identities)
+    state.owner._metric_store.save_candidate_bar_recovery(recovery)
+    if outcome == 'quarantined':
+        issue = _candidate_reference_issue(recovery, signal_identity_scope=state.issue_identity_scope,
+                                           cohorts=state.owner.cohorts)
+        state.owner._metric_store.save_candidate_input_issue(issue)
+        state.candidate_issue_references.append(issue.reference())
+
+
 def _resolve_candidate_bars(
     state: DailyRunState,
     unresolved: set[str],
@@ -1870,7 +1934,6 @@ def _resolve_candidate_bars(
         CandidateBarAttempt,
         CandidateBarResolution,
     )
-    from tradingagents.strategies.metrics.models import CandidateBarRecoveryRecord
     from tradingagents.strategies.orchestration.session_executor import (
         ensure_reference_bars,
     )
@@ -1978,45 +2041,28 @@ def _resolve_candidate_bars(
             if bar_session == state.session
         }
     )
+    from tradingagents.strategies.execution.session_activity import POLICY, resolve_new_entry_eligibility
+    if (quarantined and state.owner._base_config.get('autoresearch', {}).get('new_entry_eligibility_policy') == POLICY):
+        eligibility = resolve_new_entry_eligibility(
+            state.owner, state.session, sorted(quarantined), _eligibility_protected_tickers(state),
+            listing_snapshot=state.shared_data.get('equity_universe', {}).get('snapshot'),
+            daily_attempts={ticker: [asdict(attempt) for attempt in attempts_by_ticker[ticker]]
+                            for ticker in sorted(quarantined)},
+            daily_evidence={ticker: (resolution.eligibility_evidence or {}).get(ticker)
+                            for ticker in sorted(quarantined)}, deadline=state.model_deadline)
+        _retain_new_entry_eligibility(state, eligibility)
+        quarantined -= state.ineligible_new_entries
     state.quarantined_tickers.update(quarantined)
     for ticker, attempts in attempts_by_ticker.items():
+        if ticker in state.ineligible_new_entries:
+            continue  # The immutable eligibility record retains every failed daily attempt.
         serialized_attempts = tuple(asdict(attempt) for attempt in attempts)
         outcome = (
             "quarantined"
             if ticker in quarantined
             else "recovered" if ticker in recovered else "accepted"
         )
-        identities = tuple(
-            {"event_key": event_key, "strategy": strategy}
-            for event_key, strategy in _candidate_signal_identity_pairs(
-                signals, ticker, state.session
-            )
-        )
-        recovery = CandidateBarRecoveryRecord(
-            recovery_id=_candidate_bar_recovery_id(
-                epoch_id=state.epoch_id,
-                session=state.session,
-                ticker=ticker,
-                outcome=outcome,
-                attempts=serialized_attempts,
-                signal_identities=identities,
-            ),
-            epoch_id=state.epoch_id,
-            session=state.session,
-            ticker=ticker,
-            outcome=outcome,
-            attempts=serialized_attempts,
-            signal_identities=identities,
-        )
-        state.owner._metric_store.save_candidate_bar_recovery(recovery)
-        if outcome == "quarantined":
-            issue = _candidate_reference_issue(
-                recovery,
-                signal_identity_scope=state.issue_identity_scope,
-                cohorts=state.owner.cohorts,
-            )
-            state.owner._metric_store.save_candidate_input_issue(issue)
-            state.candidate_issue_references.append(issue.reference())
+        _save_candidate_bar_attempts(state, ticker, serialized_attempts, outcome, signals)
     return None
 
 
@@ -2092,6 +2138,28 @@ def run_candidate_reference_validation(
         return state.fail_candidate_classification(classification_conflicts)
     existing = {ticker: record for ticker, record in stored.items() if ticker in candidate_only}
     try:
+        from tradingagents.strategies.execution.session_activity import load_new_entry_eligibility
+        full_candidate_scope = {
+            identity['ticker'] for identity in state.issue_identity_scope
+        } - set(state.governed_reference_bars)
+        eligibility = load_new_entry_eligibility(
+            state.owner, state.session, full_candidate_scope, _eligibility_protected_tickers(state),
+            listing_snapshot=state.shared_data.get('equity_universe', {}).get('snapshot'),
+            deadline=state.model_deadline)
+        frozen_failed = set()
+        if eligibility is not None:
+            _retain_new_entry_eligibility(state, eligibility)
+            frozen_failed = set(eligibility['candidate_tickers'])
+            if state.ineligible_new_entries & set(stored):
+                raise ValueError('excluded new entry conflicts with persisted reference obligation')
+            # Repair a crash between the immutable eligibility freeze and its
+            # unresolved recovery records without another native price request.
+            for ticker in sorted(frozen_failed - state.ineligible_new_entries - set(stored)):
+                attempts = tuple(eligibility['daily_attempts'][ticker])
+                if not attempts or attempts[-1].get('validation_error') is None:
+                    raise ValueError('frozen failed daily evidence is invalid')
+                _save_candidate_bar_attempts(state, ticker, attempts, 'quarantined', signals)
+                state.quarantined_tickers.add(ticker)
         for ticker, record in existing.items():
             if record.outcome == "quarantined":
                 state.quarantined_tickers.add(ticker)
@@ -2100,7 +2168,7 @@ def run_candidate_reference_validation(
                     state, ticker, record
                 )
         conflicts = _resolve_candidate_bars(
-            state, candidate_only - set(existing), signals
+            state, candidate_only - set(existing) - frozen_failed, signals
         )
         if conflicts:
             return state.fail_candidate_classification(conflicts)
@@ -2114,9 +2182,9 @@ def run_candidate_reference_validation(
             degraded=True,
             quarantines=quarantines,
         )
-    if state.quarantined_tickers:
+    if state.quarantined_tickers or state.ineligible_new_entries:
         state.horizon_signals = filter_horizon_signals(
-            state.horizon_signals, state.quarantined_tickers
+            state.horizon_signals, state.quarantined_tickers | state.ineligible_new_entries
         )
     state.candidate_bar_quarantines = sorted(
         set(state.existing_quarantines) | state.quarantined_tickers
@@ -2453,8 +2521,18 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
         state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
     # Reference/volatility/enrichment wall time consumes the original model
     # allowance. No later SDK operation may start on a fresh per-call clock.
-    with provider_budget("openbb", state.model_deadline):
-        enrichment = state.owner._fetch_openbb_enrichment(all_signals)
+    from .decision_clock import prepare_decision_inputs
+    try:
+        with provider_budget("openbb", state.model_deadline):
+            enrichment, decision_context = prepare_decision_inputs(
+                state.owner, state.session, state.shared_data, state.source_digest,
+                lambda: state.owner._fetch_openbb_enrichment(all_signals),
+                eligibility=state.new_entry_eligibility, deadline=state.model_deadline)
+    except Exception as error:
+        _log_boundary_failure('decision_inputs', state.session, error)
+        return state.fail_candidates('decision_inputs_invalid')
+    if decision_context is not None:
+        state.shared_data['_decision_context'] = decision_context
     reference_bars = dict(state.governed_reference_bars)
     reference_bars.update(state.candidate_reference_bars)
     state.shared_data["_execution_reference_bars"] = reference_bars
@@ -2491,6 +2569,13 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 governed_bar_recoveries=summaries,
                 governed_failure_map={},
             )
+            if state.new_entry_eligibility is not None:
+                staged['new_entry_eligibility'] = {
+                    'policy': state.new_entry_eligibility['policy'],
+                    'reference_session': state.trading_date,
+                    'decisions': state.new_entry_eligibility['decisions'],
+                    'excluded_tickers': sorted(state.ineligible_new_entries),
+                }
             state.results[cfg.name] = staged
         except Exception as error:
             logger.error("Cohort %s staging failed", cfg.name, exc_info=True)

@@ -94,6 +94,7 @@ class CandidateBarResolution:
     attempts: tuple[CandidateBarAttempt, ...]
     recovered_tickers: frozenset[str]
     quarantined_tickers: frozenset[str]
+    eligibility_evidence: Mapping[str, dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -1234,11 +1235,13 @@ class AlpacaSIPPriceSource:
         sip_source: AlpacaHistoricalSIPSource | None = None,
         research_source: PriceSource | None = None,
         now: Callable[[], datetime] | None = None,
+        capture_eligibility: bool = False,
     ) -> None:
         self._sip_source = sip_source or AlpacaHistoricalSIPSource()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._research_source = research_source or YFinancePriceSource(now=self._now)
         self._bars: OrderedDict[tuple[str, date], AlpacaDailyBarResult] = OrderedDict()
+        self._capture_eligibility = capture_eligibility
 
     def _fetch(
         self, ticker: str, session: date, processed_at: datetime, max_age: timedelta,
@@ -1350,11 +1353,12 @@ class AlpacaSIPPriceSource:
         bars = {}
         attempts = []
         failures = set()
+        eligibility_evidence = {}
         symbols = list(dict.fromkeys(tickers))
         batch_fetch = getattr(self._sip_source, "fetch_daily_bars", None)
         # Keep scalar public/provider implementations compatible. Native batches
         # use only the documented exact-symbol endpoint, with no fallback.
-        use_batch = len(symbols) > 1 and callable(batch_fetch)
+        use_batch = (len(symbols) > 1 or self._capture_eligibility) and callable(batch_fetch)
         for offset in range(0, len(symbols), MAX_BATCH_SYMBOLS):
             chunk = symbols[offset:offset + MAX_BATCH_SYMBOLS]
             batch_results = None
@@ -1369,7 +1373,8 @@ class AlpacaSIPPriceSource:
                 )]
                 if pending:
                     try:
-                        batch_results = batch_fetch(pending, session, now=acquired_at)
+                        batch_results = batch_fetch(pending, session, now=acquired_at,
+                            **({'capture_eligibility': True} if self._capture_eligibility else {}))
                     except Exception:
                         batch_results = {ticker: AlpacaDailyBarResult(
                             None, AlpacaBarFailure.TRANSPORT_ERROR, reason_code="transport_error",
@@ -1388,6 +1393,9 @@ class AlpacaSIPPriceSource:
                     ticker, session, processed_at, max_age,
                     supplied_result=result, acquired_at=acquired_at,
                 )
+                if (self._capture_eligibility and result is not None
+                        and result.eligibility_evidence is not None):
+                    eligibility_evidence[ticker] = result.eligibility_evidence
                 error = f"{failure.value} {ticker}/{session}" if failure else None
                 if failure and result is not None and result.reason_code is not None:
                     # New fixed diagnostics fit the historical evidence schema.
@@ -1415,7 +1423,8 @@ class AlpacaSIPPriceSource:
                 else:
                     failures.add(ticker)
         return CandidateBarResolution(
-            bars, tuple(attempts), frozenset(), frozenset(failures)
+            bars, tuple(attempts), frozenset(), frozenset(failures),
+            eligibility_evidence if self._capture_eligibility else None,
         )
 
     def resolve_governed_daily_bars(
@@ -1480,7 +1489,9 @@ def build_price_source(config: Mapping[str, object]) -> PriceSource:
         .get("pricing_version", SIP_PRICING_VERSION)
     )
     if version == SIP_PRICING_VERSION:
-        return AlpacaSIPPriceSource()
+        return AlpacaSIPPriceSource(capture_eligibility=(
+            config.get('autoresearch', {}).get('new_entry_eligibility_policy')
+            == 'reference_session_activity_v1'))
     raise ValueError("unsupported pricing_version")
 
 

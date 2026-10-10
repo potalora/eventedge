@@ -14,7 +14,7 @@ from typing import Any
 
 import requests
 
-from .evidence import current_session_date, require_current_as_of, acquisition_time
+from .evidence import current_session_date, require_current_vintage, acquisition_time
 from .request_policy import provider_request
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -62,6 +62,7 @@ class DroughtMonitorSource:
         states: list[str] | None = None,
         start: str | None = None,
         end: str | None = None,
+        *, vintage_as_of: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Fetch drought category percentages for each state.
 
@@ -83,7 +84,7 @@ class DroughtMonitorSource:
         if start is None:
             start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
-        require_current_as_of(end, current_session_date())
+        require_current_vintage(end, vintage_as_of, today=current_session_date())
 
         # Convert dates to API format (M/d/yyyy)
         start_fmt = datetime.strptime(start, "%Y-%m-%d").strftime("%-m/%-d/%Y")
@@ -147,6 +148,7 @@ class DroughtMonitorSource:
         self,
         states: list[str] | None = None,
         date: str | None = None,
+        *, vintage_as_of: str | None = None,
     ) -> float:
         """Compute a single 0-4 weighted drought score across ag states.
 
@@ -167,7 +169,8 @@ class DroughtMonitorSource:
             date = current_session_date()
 
         start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-        severity = self.fetch_drought_severity(states, start, date)
+        options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+        severity = self.fetch_drought_severity(states, start, date, **options)
 
         if not severity:
             raise SourceFetchError("Drought Monitor observations unavailable", reason_code="invalid_response")

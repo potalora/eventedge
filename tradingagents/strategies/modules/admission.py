@@ -74,6 +74,7 @@ def _parsed_issuer_proof(candidate, filing_corpus):
 
 def _universe_decision(universe, strategy, candidate, filing_corpus=None):
     proof = None
+    ownership = None
     if strategy == 'filing_analysis':
         proof = _parsed_issuer_proof(candidate, filing_corpus)
         membership = universe.filing_decision(proof['issuer_ciks'] if proof else candidate.metadata.get('source_ciks', []))
@@ -83,12 +84,21 @@ def _universe_decision(universe, strategy, candidate, filing_corpus=None):
     else:
         membership = None
         decision = universe.decision(candidate.ticker)
+        if strategy == 'govt_contracts' and candidate.ticker == '':
+            from ..data_sources.award_identity import resolve_award_issuer
+            attribution = resolve_award_issuer(candidate.metadata)
+            if (attribution.get('status') == 'verified_no_listed_target'
+                    and attribution == candidate.metadata.get('issuer_attribution')):
+                ownership = attribution
+                decision = 'outside_sip_exchange_universe'
     evidence = {'policy': universe.evidence['policy'], 'assets_sha256': universe.evidence['assets_sha256'],
                 'decision': decision, 'symbol': candidate.ticker}
     if membership is not None:
         evidence['issuer_membership'] = membership
     if proof is not None:
         evidence['parsed_issuer_proof'] = proof
+    if ownership is not None:
+        evidence['ownership_disposition'] = ownership
     return evidence
 
 

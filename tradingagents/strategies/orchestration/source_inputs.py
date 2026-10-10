@@ -256,7 +256,25 @@ def successful_source(payload: Any) -> bool:
         or coverage.get('status') not in ('success', 'success_empty', 'complete')
     ):
         return False
+    if 'coverage' in payload and (
+        not isinstance(payload['coverage'], Mapping)
+        or _declared_incomplete(payload['coverage'])
+    ):
+        return False
     return True
+
+
+def _declared_incomplete(coverage: Any) -> bool:
+    """Reject partial subscopes without inventing a universal source schema."""
+    if isinstance(coverage, Mapping):
+        return (
+            ('complete' in coverage and coverage['complete'] is not True)
+            or coverage.get('status') in ('failed', 'partial', 'incomplete', 'unavailable')
+            or any(_declared_incomplete(value) for value in coverage.values())
+        )
+    return isinstance(coverage, (list, tuple)) and any(
+        _declared_incomplete(value) for value in coverage
+    )
 
 
 def _utc(value: datetime) -> datetime:

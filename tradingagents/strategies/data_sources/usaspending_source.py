@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
-from .award_identity import native_uei, resolve_award_issuer
+from .award_identity import CROSSWALK_VERSION, native_uei, resolve_award_issuer
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -270,11 +270,16 @@ class USASpendingSource:
 
     @staticmethod
     def _identity_coverage(records: list[dict]) -> dict:
-        verified = sum(bool(row.get("issuer_attribution", {}).get("verified")) for row in records)
-        return {"mode": "reviewed_native_uei_crosswalk", "complete": verified == len(records), "verified": verified,
-                "unresolved": len(records) - verified,
+        # Recompute from native identifiers; a supplied flag is not proof.
+        attributions = [resolve_award_issuer(row) for row in records]
+        verified = sum(row["status"] == "verified_listed_target" for row in attributions)
+        nonlisted = sum(row["status"] == "verified_no_listed_target" for row in attributions)
+        resolved = verified + nonlisted
+        return {"mode": "reviewed_native_uei_crosswalk", "complete": resolved == len(records), "verified": verified,
+                "verified_no_listed_target": nonlisted, "resolved": resolved,
+                "unresolved": len(records) - resolved,
                 "lookup_failures": sum(row.get("recipient_identity_status") == "lookup_failed" for row in records),
-                "crosswalk_version": "reviewed_2026-10-09"}
+                "crosswalk_version": CROSSWALK_VERSION}
 
     def _enrich_recipient_identity(self, contract: dict) -> None:
         """Bind parent identity to this award; failures retain unknown evidence."""
@@ -282,7 +287,7 @@ class USASpendingSource:
         contract["recipient_identity_status"] = "search_recipient"
         contract["recipient_identity_source"] = f"{BASE_URL}search/spending_by_award/"
         contract["issuer_attribution"] = resolve_award_issuer(contract)
-        if contract["issuer_attribution"]["verified"]:
+        if contract["issuer_attribution"]["resolved"]:
             return
         if not (contract["recipient_uei"] or contract["recipient_id"]):
             contract["recipient_identity_status"] = "missing_native_recipient"

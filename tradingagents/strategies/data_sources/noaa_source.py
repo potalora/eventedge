@@ -16,7 +16,7 @@ from typing import Any
 
 import requests
 
-from .evidence import current_session_date, require_current_as_of, acquisition_time
+from .evidence import current_session_date, require_current_as_of, require_current_vintage, acquisition_time
 from .request_policy import provider_request, provider_budget, current_provider_deadline
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -191,6 +191,7 @@ class NOAASource:
         self,
         date: str,
         lookback_days: int = 30,
+        *, vintage_as_of: str | None = None,
     ) -> dict[str, Any]:
         """Aggregate station means to state-days, then unique regional days.
 
@@ -199,14 +200,14 @@ class NOAASource:
         verifies sample coverage, not a census of every station in the state.
         Seasonal reference values remain documented approximations.
         """
-        require_current_as_of(date, current_session_date())
+        require_current_vintage(date, vintage_as_of, today=current_session_date())
         if type(lookback_days) is not int or lookback_days < 1:
             raise SourceFetchError("NOAA lookback invalid", reason_code="invalid_response")
         deadline = current_provider_deadline("noaa")
         native_deadline = time.monotonic() + REGIONAL_BUDGET_SECONDS
         if deadline is None or deadline > native_deadline:
             with provider_budget("noaa", native_deadline):
-                return self.fetch_ag_weather_summary(date, lookback_days)
+                return self.fetch_ag_weather_summary(date, lookback_days, vintage_as_of=vintage_as_of)
         as_of_date = datetime.strptime(date, "%Y-%m-%d")
         fetch_start = as_of_date - timedelta(days=lookback_days - 1 + MAX_OBSERVATION_LAG_DAYS)
         failures, statuses, state_groups = {}, {}, {}

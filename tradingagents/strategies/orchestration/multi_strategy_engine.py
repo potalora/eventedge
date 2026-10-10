@@ -551,7 +551,7 @@ class MultiStrategyEngine:
 
         return deduped_signals, regime_model, health
 
-    def pending_late_signals(self, session: date, epoch_id: str) -> list[dict]:
+    def pending_late_signals(self, session: date, epoch_id: str, *, information_cutoff: datetime | None = None) -> list[dict]:
         """Return frozen actionable observations awaiting their first timely offer.
 
         Callers include these candidates before pricing and quarantine filtering.
@@ -559,6 +559,14 @@ class MultiStrategyEngine:
         initial candidate set, even after staging today's timely observation.
         """
         from tradingagents.strategies.orchestration.trading_calendar import session_close
+        from tradingagents.strategies.orchestration.decision_clock import policy, PROSPECTIVE, require_reference
+
+        if policy(self.config) == PROSPECTIVE:
+            if information_cutoff is None:
+                raise ValueError('prospective retained-signal cutoff required')
+            require_reference(session, information_cutoff)
+        else:
+            information_cutoff = session_close(session)
 
         if self.ledger is None:
             raise ValueError("pending_late_signals requires an authoritative ledger")
@@ -593,7 +601,7 @@ class MultiStrategyEngine:
                     or (metadata.get("needs_llm_analysis")
                         and metadata.get("analysis_status") != "validated"
                         and not metadata.get("deterministic_evidence_complete"))
-                    or record.observed_at > session_close(session)):
+                    or record.observed_at > information_cutoff):
                 continue
             # read_signals is session ordered; retain the first accepted thesis,
             # rather than substituting a newly acquired source or model analysis.
@@ -673,12 +681,16 @@ class MultiStrategyEngine:
             )
         )
         epoch_id = marked_account.epoch_id
-        cutoff = session_close(session)
+        from tradingagents.strategies.orchestration.decision_clock import resolve_cutoff, policy, PROSPECTIVE, require_live_staging
+        decision_context = data.get('_decision_context')
+        cutoff = resolve_cutoff(self.config, session, decision_context)
         eligible_session = next_session(session)
         expected_staging_state_digest = self.ledger.verify_session_phase_chain(
             session, PHASES
         )
         replaying = self.ledger.staging_completed(session, epoch_id, policy_id)
+        if decision_context is not None and not replaying:
+            require_live_staging(self.config, session, decision_context)
 
         raw_bars = data.get("_execution_reference_bars", {})
         if not isinstance(raw_bars, dict):
@@ -693,6 +705,8 @@ class MultiStrategyEngine:
             if policy_enabled
             else None
         )
+        if policy(self.config) == PROSPECTIVE and policy_config is None:
+            raise ValueError('prospective decision clock requires governed staging policy')
         if replaying and policy_config is None:
             persisted_binding = self.ledger.read_policy_session_context(
                 session, binding_kind="staging"
@@ -731,6 +745,8 @@ class MultiStrategyEngine:
                     raise LedgerConflictError(
                         "staging policy binding mismatch on replay"
                     )
+                if policy_binding['context'].get('decision_clock') != decision_context:
+                    raise LedgerConflictError('staging decision clock binding mismatch on replay')
                 risk_context = portfolio_risk_context_from_document(
                     policy_binding["context"], policy_config
                 )
@@ -832,7 +848,8 @@ class MultiStrategyEngine:
                     epoch_id=epoch_id,
                     policy_version=policy_config.version,
                     policy_config=portfolio_policy_config_document(policy_config),
-                    context=portfolio_risk_context_document(risk_context),
+                    context={**portfolio_risk_context_document(risk_context),
+                             **({'decision_clock': decision_context} if decision_context is not None else {})},
                     bound_at=cutoff,
                 )
         if replaying:
@@ -911,7 +928,8 @@ class MultiStrategyEngine:
                 or bar.ticker != ticker
                 or bar.session != session
                 or bar.adjusted
-                or bar.fetched_at < cutoff
+                or bar.fetched_at < session_close(session)
+                or (decision_context is not None and bar.fetched_at > cutoff)
             ):
                 raise ValueError(
                     f"missing exact raw reference bar for {ticker}/{session}"
@@ -1294,18 +1312,24 @@ class MultiStrategyEngine:
             )
             rec_specs.append((recommendation, contributor_records))
 
-        exit_specs, cancellations = self._build_exit_specs(
+        exit_specs, cancellations = (self._build_exit_specs(
             session, cutoff, eligible_session, raw_bars, data, horizon
-        )
+        ) if decision_context is None else ([], []))
         staged_ids: list[str] = []
 
         def persist_staging() -> None:
+            publication_at = cutoff
+            current_exit_specs, current_cancellations = exit_specs, cancellations
+            if decision_context is not None:
+                publication_at = require_live_staging(self.config, session, decision_context)
+                current_exit_specs, current_cancellations = self._build_exit_specs(
+                    session, publication_at, eligible_session, raw_bars, data, horizon)
             zero_share_candidates: set[tuple[str, str]] = set()
-            for intent in cancellations:
+            for intent in current_cancellations:
                 self.ledger.cancel_intent(
-                    intent.intent_id, cutoff, "strategy exit superseded resting stop"
+                    intent.intent_id, publication_at, "strategy exit superseded resting stop"
                 )
-            for intent, lot_quantities in exit_specs:
+            for intent, lot_quantities in current_exit_specs:
                 self.ledger.stage_exit_intent(intent, lot_quantities)
                 staged_ids.append(intent.intent_id)
             held = {
@@ -1321,7 +1345,7 @@ class MultiStrategyEngine:
                         recommendation,
                         contributor_records,
                         self.ledger.account_state(),
-                        cutoff,
+                        publication_at,
                         eligible_session,
                     )
                 except ZeroShareIntentError:
@@ -1410,6 +1434,8 @@ class MultiStrategyEngine:
                     committee_not_selected_ids=nonselected_ids,
                     recorded_at=cutoff,
                 )
+            if decision_context is not None:
+                require_live_staging(self.config, session, decision_context)
 
         executed, _ = self.ledger.complete_staging(
             session,
@@ -1737,6 +1763,9 @@ class MultiStrategyEngine:
 
         acquisition_start = time.monotonic()
         acquisition_cutoff = datetime.now(timezone.utc)
+        from tradingagents.strategies.orchestration.decision_clock import mutable_vintage, policy, PROSPECTIVE
+        decision_policy = policy(self.config)
+        vintage = mutable_vintage(self.config, date.fromisoformat(end_date), now=acquisition_cutoff)
         fetch_timeout_s = max(0.0, _fetch_timeout_s())
         outer_deadline = acquisition_deadline
         if outer_deadline is not None:
@@ -1782,6 +1811,9 @@ class MultiStrategyEngine:
 
         self._emit("phase", phase="data_fetch", status="starting")
         data: dict[str, Any] = {}
+        if decision_policy == PROSPECTIVE:
+            data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
+                                            'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
         universe_policy = self.ar_config.get("equity_universe_policy")
         if universe_policy:
             from tradingagents.strategies.data_sources.equity_universe import fetch_equity_universe, POLICY
@@ -1824,11 +1856,11 @@ class MultiStrategyEngine:
         if "congress" in needed_sources and "congress" in available:
             api_fetches["congress"] = (self._fetch_congress_data, (end_date,))
         if "noaa" in needed_sources and "noaa" in available:
-            api_fetches["noaa"] = (self._fetch_noaa_data, (end_date,))
+            api_fetches["noaa"] = (self._fetch_noaa_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
         if "usda" in needed_sources and "usda" in available:
-            api_fetches["usda"] = (self._fetch_usda_data, (end_date,))
+            api_fetches["usda"] = (self._fetch_usda_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
         if "drought_monitor" in needed_sources and "drought_monitor" in available:
-            api_fetches["drought_monitor"] = (self._fetch_drought_data, (end_date,))
+            api_fetches["drought_monitor"] = (self._fetch_drought_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
 
         # Also fetch EDGAR events for paper-trade strategies
         if "edgar" in needed_sources and "edgar" in available:
@@ -1837,13 +1869,15 @@ class MultiStrategyEngine:
         if "usaspending" in needed_sources and "usaspending" in available:
             api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
         if "cftc" in needed_sources and "cftc" in available:
-            api_fetches["cftc"] = (self._fetch_cftc_data, (end_date,))
+            api_fetches["cftc"] = (self._fetch_cftc_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
 
         pending_fetches = {}
         cache_keys = {}
         cache_stores = {}
         for name, (fetcher, args) in api_fetches.items():
             source_fingerprint = config_fingerprint
+            if decision_policy == PROSPECTIVE and name in {'noaa', 'usda', 'drought_monitor', 'cftc'}:
+                source_fingerprint += ':current-vintage:' + vintage
             if name == "edgar" and universe_policy:
                 snapshot = data["equity_universe"].get("snapshot", {})
                 # A changed asset master may admit previously excluded filings.
@@ -2314,7 +2348,7 @@ class MultiStrategyEngine:
 
         result: dict[str, Any] = {}
         try:
-            trades = source.get_recent_trades(days_back=30, as_of=trading_date)
+            trades = source.get_recent_trades(days_back=30, as_of=trading_date, complete_window=True)
             result["recent_trades"] = list(trades)
             if hasattr(trades, "coverage"):
                 result["coverage"] = trades.coverage
@@ -2345,26 +2379,31 @@ class MultiStrategyEngine:
             if hasattr(contracts, "coverage"):
                 result["coverage"] = contracts.coverage
             logger.info("USASpending fetch: %d large contracts", len(contracts))
-            return {"data": result, **({"coverage": contracts.coverage} if hasattr(contracts, "coverage") else {})}
+            payload = {"data": result, **({"coverage": contracts.coverage} if hasattr(contracts, "coverage") else {})}
+            if (hasattr(contracts, "coverage")
+                    and contracts.coverage.get('issuer_attribution', {}).get('complete') is False):
+                payload['error'] = 'USASpending issuer attribution incomplete'
+            return payload
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.error("%s", safe_error)
             return {**safe_error.partial_data, "error": str(safe_error)}
 
-    def _fetch_noaa_data(self, trading_date: str) -> dict[str, Any]:
+    def _fetch_noaa_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
         source = self.registry.get("noaa")
         if source is None:
             return {}
 
         try:
-            return source.fetch_ag_weather_summary(trading_date, lookback_days=30)
+            options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+            return source.fetch_ag_weather_summary(trading_date, lookback_days=30, **options)
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
             error = source_fetch_error("Source acquisition failed", exc)
             return {**error.partial_data, "error": str(error)}
 
-    def _fetch_usda_data(self, trading_date: str) -> dict[str, Any]:
+    def _fetch_usda_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Preserve crops fetched before any required crop failure."""
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         from tradingagents.strategies.data_sources.usda_source import condition_scope
@@ -2376,7 +2415,8 @@ class MultiStrategyEngine:
             scope = condition_scope(commodity, trading_date)
             year = scope["reporting_year"]
             try:
-                observations = source.fetch_crop_progress(commodity, year, as_of=trading_date)
+                options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+                observations = source.fetch_crop_progress(commodity, year, as_of=trading_date, **options)
                 crop_progress[commodity] = list(observations)
                 crop_coverage[commodity] = getattr(observations, "coverage", {**scope, "complete": False, "reason": "missing_survey_coverage"})
                 if crop_coverage[commodity].get("complete") is not True:
@@ -2398,7 +2438,7 @@ class MultiStrategyEngine:
             result["error"] = "; ".join(failures)
         return result
 
-    def _fetch_drought_data(self, trading_date: str) -> dict[str, Any]:
+    def _fetch_drought_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch Drought Monitor severity and composite score."""
         source = self.registry.get("drought_monitor")
         if source is None:
@@ -2409,8 +2449,9 @@ class MultiStrategyEngine:
             start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime(
                 "%Y-%m-%d"
             )
-            severity = source.fetch_drought_severity(start=start, end=end)
-            composite = source.fetch_composite_score(date=trading_date)
+            options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+            severity = source.fetch_drought_severity(start=start, end=end, **options)
+            composite = source.fetch_composite_score(date=trading_date, **options)
             result = {"composite_score": composite, "states": severity}
             acquisition_times = [str(row["available_at"]) for row in severity.values() if isinstance(row, dict) and row.get("available_at")]
             if acquisition_times:
@@ -2422,7 +2463,7 @@ class MultiStrategyEngine:
             error = source_fetch_error("Source acquisition failed", exc)
             return {**error.partial_data, "error": str(error)}
 
-    def _fetch_cftc_data(self, trading_date: str | None = None) -> dict[str, Any]:
+    def _fetch_cftc_data(self, trading_date: str | None = None, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch CFTC COT positioning data for commodity strategy."""
         source = self.registry.get("cftc")
         if source is None:
@@ -2434,6 +2475,7 @@ class MultiStrategyEngine:
                 "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
                 "lookback_weeks": 52,
                 "as_of": trading_date,
+                **({'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}),
             }
         )
 

@@ -137,9 +137,13 @@ class TransportFixture:
             return self.response({str(i): {"ticker": symbol, "title": symbol + " Corporation", "cik_str": i + 1000}
                                   for i, symbol in enumerate(symbols)})
         if "data.sec.gov/submissions" in url:
-            return self.response({"filings": {"recent": {
+            # Synthetic native complete-recent inventory for the requested CIK.
+            cik = int(url.rsplit("/", 1)[-1].removeprefix("CIK").removesuffix(".json"))
+            response = self.response({"cik": cik, "filings": {"recent": {
                 "form": [], "filingDate": [], "accessionNumber": [], "primaryDocument": [],
-            }}})
+            }, "files": []}})
+            response.url = url
+            return response
         if "financialmodelingprep.com" in url:
             return self.response([])
         if "api.regulations.gov" in url:

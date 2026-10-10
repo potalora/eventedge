@@ -166,7 +166,7 @@ def test_conflicting_verified_recipient_and_parent_are_not_actionable():
         "recipient_uei": "WZWRLY4G3PL8", "parent_recipient_uei": "ZFN2JJXBLZT3",
         "recipient_identity_status": "native_award_verified",
     })
-    assert result == {"verified": False, "reason": "conflicting_recipient_issuer"}
+    assert result == {"verified": False, "resolved": False, "status": "unresolved", "reason": "conflicting_recipient_issuer"}
 
 
 def test_failed_native_identity_lookup_preserves_award_and_coverage_without_error_text():

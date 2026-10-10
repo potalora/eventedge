@@ -1,5 +1,5 @@
 """Acquisition clocks and explicit collection scopes shared by source adapters."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from .fetch_errors import SourceFetchError
@@ -19,6 +19,20 @@ def require_current_as_of(as_of: str, today: str) -> None:
     if as_of[:10] != today:
         raise SourceFetchError('historical_vintage_unavailable: fresh acquisition requires current as-of date',
                                reason_code='provider_error')
+
+
+def require_current_vintage(observation_end: str, vintage_as_of: str | None = None,
+                            *, today: str | None = None) -> str:
+    """Keep observation dates separate from the real mutable dataset vintage."""
+    vintage = observation_end if vintage_as_of is None else vintage_as_of
+    require_current_as_of(vintage, today or current_session_date())
+    try:
+        end, version = date.fromisoformat(observation_end), date.fromisoformat(vintage)
+    except (TypeError, ValueError):
+        raise SourceFetchError('invalid observation window or vintage', reason_code='invalid_response') from None
+    if end > version:
+        raise SourceFetchError('observation window is after current vintage', reason_code='invalid_response')
+    return vintage
 
 
 class CoverageRecords(list):

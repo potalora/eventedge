@@ -332,3 +332,70 @@ def test_utf8_bom_still_cannot_contain_entity_declaration():
     evidence = build_evidence(parse(raw, form='SC 13D'))
     assert evidence['issues'][0]['code'] == 'unsafe_xml_declaration'
     assert evidence['units'] == []
+
+
+@pytest.mark.parametrize('newline', ['\r', '\n', '\r\n'])
+def test_framing_tags_embedded_in_document_content_are_not_boundaries(newline):
+    body = ('Narrative x<DOCUMENT>\rnot a document\r'
+            'embedded<TEXT> payload embedded</TEXT> and embedded</DOCUMENT>\r'
+            'embedded</SUBMISSION> is narrative.')
+    raw = submission([('8-K', 'main.txt', body)], newline=newline)
+    parsed = parse(raw)
+    assert len(parsed['documents']) == 1
+    assert parsed['documents'][0]['body'] == (newline + body.replace('\r', newline) + newline).encode()
+    assert parsed['documents'][0]['body_sha256'] == hashlib.sha256(parsed['documents'][0]['body']).hexdigest()
+
+
+@pytest.mark.parametrize(('token', 'code'), [
+    (b'<DOCUMENT>', 'invalid_document_count'),
+    (b'<TEXT>', 'incomplete_document_text'),
+    (b'</TEXT>', 'incomplete_document_text'),
+    (b'</DOCUMENT>', 'incomplete_document'),
+    (b'</SUBMISSION>', 'incomplete_submission'),
+])
+@pytest.mark.parametrize('prefix', [b'x', b' ', b'\t'])
+def test_framing_tokens_require_exact_start_or_cr_lf_boundary(token, code, prefix):
+    with pytest.raises(EvidenceError, match=code):
+        parse(submission().replace(token, prefix + token))
+
+
+def test_large_unselected_attachment_does_not_make_framing_scan_bytewise():
+    """Native complete submissions retain large image/encoded attachments.
+
+    Compare to one old zero-width boundary scan on the same bytes, rather than
+    an absolute machine-speed threshold. Full parsing should be much cheaper
+    than that one scan while still retaining every attachment byte and offset.
+    """
+    import re
+    import time
+    attachment = 'M' * (8 * 1024 * 1024)
+    raw = submission([('8-K', 'main.htm', '<p>Complete narrative.</p>'),
+                      ('GRAPHIC', 'image.jpg', attachment)])
+    reference = []
+    for _ in range(3):
+        began = time.perf_counter()
+        list(re.finditer(rb'(?:\A|(?<=[\r\n]))<DOCUMENT>[\r\n]', raw))
+        reference.append(time.perf_counter() - began)
+    elapsed = []
+    for _ in range(3):
+        began = time.perf_counter()
+        parsed = parse(raw)
+        elapsed.append(time.perf_counter() - began)
+    assert len(parsed['documents']) == 2
+    image = parsed['documents'][1]
+    assert image['body'] == b'\r' + attachment.encode() + b'\r'
+    assert raw[image['body_start']:image['body_end']] == image['body']
+    assert image['body_sha256'] == hashlib.sha256(image['body']).hexdigest()
+    assert min(elapsed) < min(reference) * .5
+
+
+@pytest.mark.parametrize(('prefix', 'expected'), [
+    (b'', True), (b'\r', True), (b'\n', True), (b'\r\n', True),
+    (b'x', False), (b' ', False), (b'\t', False), (b'\x00', False),
+])
+def test_framing_search_preserves_zero_width_start_and_line_boundaries(prefix, expected):
+    from tradingagents.strategies.data_sources.filing_evidence import _line_finditer
+    raw = prefix + b'<TEXT>body\r</TEXT>'
+    matches = list(_line_finditer(rb'<TEXT>', raw))
+    assert [(match.start(), match.end()) for match in matches] == (
+        [(len(prefix), len(prefix) + len(b'<TEXT>'))] if expected else [])

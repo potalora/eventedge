@@ -1,4 +1,5 @@
 """Offline regressions for symbol-free bond and LLC disclosure scope."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -34,8 +35,8 @@ def mock_feed(monkeypatch, house, senate=None):
     calls = []
     def request(url, **kwargs):
         calls.append((url, kwargs))
-        payload = house if url.endswith("house-latest") else (senate or [])
-        return SimpleNamespace(status_code=200, json=lambda: payload)
+        payload = (house if url.endswith("house-latest") else (senate or [])) if kwargs["params"]["page"] == 0 else []
+        return SimpleNamespace(status_code=200, headers={}, json=lambda: payload, iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda: None)
     monkeypatch.setattr("requests.get", request)
     return calls
 

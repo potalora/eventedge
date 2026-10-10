@@ -110,8 +110,19 @@ class ExecutionBridge:
             )
 
         reference_session = signals[0].reference_session
-        cutoff = session_close(reference_session)
-        if decision_at > cutoff:
+        from tradingagents.strategies.orchestration.decision_clock import policy, PROSPECTIVE, resolve_cutoff, require_live_staging
+        decision_context = None
+        if policy(self.config) == PROSPECTIVE:
+            binding = self.ledger.read_policy_session_context(reference_session, binding_kind='staging')
+            if binding is None or binding['epoch_id'] != signals[0].epoch_id:
+                raise ValueError('matching persisted decision context required')
+            decision_context = binding['context'].get('decision_clock')
+        cutoff = resolve_cutoff(self.config, reference_session, decision_context)
+        if decision_context is not None:
+            publication_at = require_live_staging(self.config, reference_session, decision_context)
+            if decision_at < cutoff or decision_at > publication_at:
+                raise ValueError('intent decision is outside cutoff and publication clocks')
+        elif decision_at > cutoff:
             raise ValueError("intent decision is after the session cutoff")
         for signal in signals:
             self._require_aware(signal.observed_at, "signal observed_at")

@@ -18,7 +18,7 @@ SECRET='fixture-secret-token'
 
 
 def response(payload,status=200):
-    return SimpleNamespace(status_code=status, headers={}, json=lambda:payload, text='')
+    return SimpleNamespace(status_code=status, headers={}, json=lambda:payload, text='', iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda:None)
 
 
 @pytest.fixture(autouse=True)

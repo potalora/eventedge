@@ -66,7 +66,7 @@ def _engine(tmp_path, source):
 
 
 def _response(payload, status=200):
-    return SimpleNamespace(status_code=status, json=lambda: payload)
+    return SimpleNamespace(status_code=status, headers={}, json=lambda: payload, iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda: None)
 
 
 def _assert_failure_visible(config, engine, source):
@@ -129,7 +129,7 @@ def test_successful_empty_provider_is_legitimate_no_event(
 ):
     monkeypatch.setattr(
         "requests.post" if provider == "usaspending" else "requests.get",
-        lambda *args, **kwargs: _response({"results": [], "page_metadata": {"page": 1, "hasNext": False}}),
+        lambda *args, **kwargs: _response({"results": [], "count": 0, "next": None, "page_metadata": {"page": 1, "hasNext": False}}),
     )
     source = (
         USASpendingSource()
@@ -148,7 +148,7 @@ def test_successful_empty_provider_is_legitimate_no_event(
 def test_usaspending_failure_is_not_cached_as_empty_success(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "requests.post",
-        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": [], "page_metadata": {"page": 1, "hasNext": False}})]),
+        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": [], "next": None, "page_metadata": {"page": 1, "hasNext": False}})]),
     )
     source = USASpendingSource()
     _, engine = _engine(tmp_path, source)
@@ -194,7 +194,7 @@ def test_courtlistener_partial_failure_retains_other_query_results(
         if kwargs["params"]["q"] == "SEC enforcement":
             raise requests.Timeout(_SECRET)
         return _response(
-            {"results": [{"docket_id": 123, "caseName": "Fixture litigation", "dateFiled": "2026-09-30", "court": "cacd"}]}
+            {"results": [{"docket_id": 123, "caseName": "Fixture litigation", "dateFiled": "2026-09-30", "court": "cacd"}], "count":1, "next":None}
         )
 
     monkeypatch.setattr("requests.get", request)
@@ -478,7 +478,7 @@ def test_fred_direct_diagnostic_retains_safe_series_identity(monkeypatch):
 @pytest.mark.parametrize("provider", ["usaspending", "courtlistener"])
 def test_invalid_json_is_a_safe_invalid_response(provider, monkeypatch):
     response = SimpleNamespace(
-        status_code=200, json=Mock(side_effect=json.JSONDecodeError(_SECRET, "", 0))
+        status_code=200, headers={}, close=lambda:None, iter_content=lambda chunk_size: iter([b"invalid synthetic JSON"]), json=Mock(side_effect=json.JSONDecodeError(_SECRET, "", 0))
     )
     monkeypatch.setattr(
         "requests.post" if provider == "usaspending" else "requests.get",

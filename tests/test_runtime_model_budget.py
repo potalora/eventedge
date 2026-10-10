@@ -426,7 +426,8 @@ def test_filtered_timeout_horizon_holds_earlier_and_retained_late_samples(tmp_pa
     monkeypatch.setattr(engine,"pending_late_signals",lambda *a:[])
     cohorts = [dict(config=SimpleNamespace(horizon=horizon,name="cohort_"+horizon),engine=which,
                     executor=SimpleNamespace(validated_execution_reference_bars=lambda *a:{})) for horizon,which in (("14d",first_engine),("30d",engine))]
-    owner = SimpleNamespace(cohorts=cohorts,_screen_for_horizon=lambda data,dt,horizon:([earlier],{},early_health) if horizon=="14d" else failed)
+    owner = SimpleNamespace(cohorts=cohorts,_base_config=config,
+        _screen_for_horizon=lambda data,dt,horizon:([earlier],{},early_health) if horizon=="14d" else failed)
     state = daily_pipeline.DailyRunState(owner,str(session),session,datetime.now(timezone.utc),epoch_id="epoch",valid=cohorts)
     monkeypatch.setattr(source_inputs,"daily_source_store",lambda *a:(SimpleNamespace(load_frozen=lambda *a:{}),"identity"))
     persisted = []

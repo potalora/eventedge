@@ -14,8 +14,9 @@ from __future__ import annotations
 import os
 import re
 import json
+import hashlib
 import time as clock_time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -79,6 +80,7 @@ class AlpacaDailyBarResult:
     reason_code: str | None = None
     http_status: int | None = None
     attempts: int = 0
+    eligibility_evidence: dict | None = None
 
     def __post_init__(self) -> None:
         if (self.bar is None) == (self.failure is None):
@@ -123,7 +125,8 @@ class AlpacaHistoricalSIPSource:
         self._get = get or requests.get
 
     def fetch_daily_bars(
-        self, tickers: list[str], session: date, *, now: datetime | None = None
+        self, tickers: list[str], session: date, *, now: datetime | None = None,
+        capture_eligibility: bool = False,
     ) -> dict[str, AlpacaDailyBarResult]:
         """Collect an exact-symbol SIP batch before publishing any observations.
 
@@ -135,15 +138,22 @@ class AlpacaHistoricalSIPSource:
         """
         if current_provider_deadline("alpaca") is None:
             with provider_budget("alpaca", clock_time.monotonic() + 300):
-                return self.fetch_daily_bars(tickers, session, now=now)
+                return self.fetch_daily_bars(tickers, session, now=now,
+                                             capture_eligibility=capture_eligibility)
         symbols = list(dict.fromkeys(tickers))
         fetched_at = now if now is not None else datetime.now(timezone.utc)
         start = end = None
+        eligibility_pages = []
 
         def fail_all(reason, reason_code, *, http_status=None, attempts=0):
+            evidence = None
+            if capture_eligibility and isinstance(session, date) and isinstance(fetched_at, datetime):
+                evidence = {'source': SOURCE, 'session': session.isoformat(),
+                            'symbols': symbols, 'observed_at': fetched_at.isoformat(),
+                            'complete': False, 'pages': eligibility_pages}
             return {symbol: AlpacaDailyBarResult(
                 None, reason, start, end, reason_code=reason_code,
-                http_status=http_status, attempts=attempts,
+                http_status=http_status, attempts=attempts, eligibility_evidence=evidence,
             ) for symbol in symbols}
 
         try:
@@ -204,6 +214,13 @@ class AlpacaHistoricalSIPSource:
                     response, provider="alpaca", max_bytes=MAX_BATCH_BYTES - total_bytes,
                 )
                 total_bytes += len(content)
+                if capture_eligibility:
+                    eligibility_pages.append({
+                        'url': 'https://data.alpaca.markets/v2/stocks/bars',
+                        'params': {**params, **({'page_token': token} if token is not None else {})},
+                        'status': response.status_code, 'body': content.decode('utf-8'),
+                        'sha256': hashlib.sha256(content).hexdigest(),
+                    })
                 provider_timeout("alpaca")
                 payload = json.loads(content, parse_float=Decimal, object_pairs_hook=unique_fields)
                 provider_timeout("alpaca")
@@ -287,6 +304,13 @@ class AlpacaHistoricalSIPSource:
                 results[symbol] = AlpacaDailyBarResult(
                     None, AlpacaBarFailure.INVALID_RESPONSE, start, end, reason_code="invalid_response",
                 )
+        if capture_eligibility:
+            evidence = {'source': SOURCE, 'session': session.isoformat(),
+                        'symbols': symbols, 'observed_at': fetched_at.isoformat(),
+                        'complete': True, 'pages': eligibility_pages}
+            results = {symbol: replace(result, eligibility_evidence=evidence)
+                       if result.failure is not None else result
+                       for symbol, result in results.items()}
         try:
             provider_timeout("alpaca")
         except SourceFetchError:

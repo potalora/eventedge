@@ -1,4 +1,5 @@
 """Consumed records and bounded collection completeness are source contracts."""
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -18,7 +19,7 @@ def offline_policy(monkeypatch):
 
 
 def response(payload, status=200):
-    return SimpleNamespace(status_code=status, headers={}, json=lambda: payload)
+    return SimpleNamespace(status_code=status, headers={}, json=lambda: payload, iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda: None)
 
 
 def trade(symbol='AAPL', transaction='2026-10-01', disclosure='2026-10-02'):
@@ -51,7 +52,7 @@ def test_empty_environment_is_unavailable_and_empty_event_sample_is_valid(provid
     rows = [{}] if malformed else []
     payloads = {'congress': rows, 'noaa': {'results': rows, 'metadata': {'resultset': {'count': len(rows)}}},
                 'drought_monitor': rows, 'usda': {'data': rows},
-                'regulations': {'data': [{'attributes': {}}] if malformed else []}}
+                'regulations': {'data': [{'attributes': {}}] if malformed else [], 'meta':{'totalPages':0,'totalElements':0}}}
     request = lambda *a, **kw: response(payloads[provider])
     monkeypatch.setattr(requests, 'get', request)
     sources = {'congress': CongressSource(fmp_api_key='offline'), 'noaa': NOAASource(token='offline'),

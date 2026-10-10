@@ -50,7 +50,7 @@ def test_insider_native_xml_requires_open_market(tag, code, ad, direction, monke
 
     rows = []
     for owner in ('123', '456'):
-        xml = f'''<ownershipDocument><reportingOwner><reportingOwnerId>
+        xml = f'''<ownershipDocument><documentType>4</documentType><periodOfReport>2026-10-01</periodOfReport><issuer><issuerCik>1</issuerCik><issuerName>Fixture issuer</issuerName><issuerTradingSymbol>TEST</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId>
             <rptOwnerCik>{owner}</rptOwnerCik><rptOwnerName>Owner {owner}</rptOwnerName>
             </reportingOwnerId></reportingOwner><{tag}><transactionCoding>
             <transactionCode>{code}</transactionCode></transactionCoding><transactionAmounts>
@@ -60,7 +60,8 @@ def test_insider_native_xml_requires_open_market(tag, code, ad, direction, monke
             </transactionAmounts></{tag}></ownershipDocument>'''
         monkeypatch.setattr(
             'tradingagents.strategies.data_sources.edgar_source.provider_request',
-            lambda *a, text=xml, **k: SimpleNamespace(text=text),
+            lambda *a, text=xml, **k: SimpleNamespace(status_code=200, headers={},
+                iter_content=lambda chunk_size: iter([text.encode()]), close=lambda: None),
         )
         filing = {'accession_number': f'0001-26-{owner}', 'primary_document': 'form4.xml', 'filing_date': '2026-10-08'}
         rows.extend({**filing, **row} for row in EDGARSource()._parse_form4_xml('1', filing))

@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from .evidence import current_session_date, require_current_as_of, acquisition_time
+from .evidence import current_session_date, require_current_vintage, acquisition_time
 from .request_policy import provider_call, provider_budget, current_provider_deadline
 from .fetch_errors import SourceFetchError, source_date, source_number, source_text
 
@@ -72,17 +72,19 @@ class CFTCSource:
             return False
 
     def _fetch_raw_report(
-        self, report_type: str = "disaggregated_futures", *, lookback_weeks: int = 52, as_of: str | None = None
+        self, report_type: str = "disaggregated_futures", *, lookback_weeks: int = 52, as_of: str | None = None,
+        vintage_as_of: str | None = None,
     ) -> pd.DataFrame:
         """Fetch raw COT report. Cached per session (data is weekly)."""
         if current_provider_deadline("cftc") is None:
             with provider_budget("cftc", time.monotonic() + 60):
-                return self._fetch_raw_report(report_type, lookback_weeks=lookback_weeks, as_of=as_of)
+                return self._fetch_raw_report(report_type, lookback_weeks=lookback_weeks, as_of=as_of,
+                                              vintage_as_of=vintage_as_of)
         as_of = as_of or current_session_date()
-        require_current_as_of(as_of, current_session_date())
+        vintage = require_current_vintage(as_of, vintage_as_of, today=current_session_date())
         if type(lookback_weeks) is not int or not 4 <= lookback_weeks <= 104:
             raise SourceFetchError("CFTC lookback invalid", reason_code="invalid_response")
-        cache_key = f"{report_type}|{lookback_weeks}|{as_of}"
+        cache_key = f"{report_type}|{lookback_weeks}|{as_of}|{vintage}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
@@ -133,7 +135,8 @@ class CFTCSource:
 
     def _dispatch_cot_report(self, params: dict[str, Any]) -> dict[str, Any]:
         report_type = params.get("report_type", "disaggregated_futures")
-        df = self._fetch_raw_report(report_type, lookback_weeks=params.get("lookback_weeks",52), as_of=params.get("as_of"))
+        options = {'vintage_as_of': params['vintage_as_of']} if params.get('vintage_as_of') is not None else {}
+        df = self._fetch_raw_report(report_type, lookback_weeks=params.get("lookback_weeks",52), as_of=params.get("as_of"), **options)
         return {"data": df.to_dict(orient="records")[:100],
                 "acquired_at":df.attrs["acquired_at"], "available_at":df.attrs["acquired_at"],
                 "coverage":{"mode":"bounded_sample", "complete":len(df)<=100,
@@ -143,11 +146,13 @@ class CFTCSource:
         commodities = params.get("commodities", list(COMMODITY_CODES.keys()))
         lookback_weeks = params.get("lookback_weeks", 52)
 
-        require_current_as_of(params.get("as_of") or current_session_date(), current_session_date())
+        require_current_vintage(params.get("as_of") or current_session_date(), params.get('vintage_as_of'),
+                                today=current_session_date())
         results: dict[str, dict[str, Any]] = {}
         failures = {}
         try:
-            df = self._fetch_raw_report("disaggregated_futures", lookback_weeks=lookback_weeks, as_of=params.get("as_of"))
+            options = {'vintage_as_of': params['vintage_as_of']} if params.get('vintage_as_of') is not None else {}
+            df = self._fetch_raw_report("disaggregated_futures", lookback_weeks=lookback_weeks, as_of=params.get("as_of"), **options)
         except SourceFetchError as exc:
             df = exc.partial_data.get("raw_report")
             if not isinstance(df, pd.DataFrame):

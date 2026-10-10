@@ -119,7 +119,7 @@ def _history_rows(data):
                 or len(document) > 512 or not 1 <= len(document.split('/')) <= 8
                 or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', part)
                        for part in document.split('/'))
-                or '..' in document or accession in seen):
+                or accession in seen):
             raise ValueError('invalid history row')
         seen.add(accession)
         rows.append({'accession_number': accession, 'form': normalize_filing_form(form),
@@ -592,36 +592,68 @@ class EDGARSource:
         """
         from datetime import datetime, timedelta
 
-        cik = self.ticker_to_cik(ticker)
-        if not cik:
-            return []
-
-        filings = self.get_company_filings(cik, form_types=["4", "4/A"], count=40)
-
+        if current_provider_deadline("edgar") is None:
+            with provider_budget("edgar", time.monotonic()+60):
+                return self.get_recent_form4(ticker, days_back, as_of=as_of)
         as_of = as_of or current_session_date()
+        if type(days_back) is not int or days_back < 0 or not source_date(as_of) or len(as_of) != 10:
+            raise SourceFetchError("SEC Form4 window invalid", reason_code="invalid_response")
         cutoff = (datetime.fromisoformat(as_of) - timedelta(days=days_back)).strftime("%Y-%m-%d")
-        recent = [f for f in filings if cutoff <= f.get("filing_date", "") <= as_of]
-        coverage = {**getattr(filings,"coverage",{}), "mode":"bounded_sample", "complete":False,
-                    "limit":40, "ticker":ticker, "date_from":cutoff, "date_to":as_of,
-                    "prefilter_returned":len(filings), "returned_filings":len(recent),
-                    "scope":"latest_40_form4_filings_per_issuer_then_date_filter"}
-
-        # Enrich with parsed transaction details
-        enriched: list[dict[str, Any]] = []
-        for filing in recent:
-            try:
+        coverage = {"mode": "exhaustive_window", "complete": False, "ticker": ticker,
+                    "date_from": cutoff, "date_to": as_of, "archive_files_consulted": [],
+                    "matching_filings": 0, "returned_transactions": 0}
+        enriched = []
+        try:
+            cik = self.ticker_to_cik(ticker)
+            if not cik:
+                raise SourceFetchError("SEC Form4 issuer identity unresolved", reason_code="invalid_response")
+            coverage["cik"] = cik
+            history = self.get_company_submission_history(cik)
+            if history.get("coverage", {}).get("complete") is not True:
+                raise SourceFetchError("SEC Form4 history incomplete", reason_code="invalid_response")
+            rows = list(history["filings"])
+            if len(rows) > 100000:
+                raise SourceFetchError("SEC Form4 metadata limit reached", reason_code="invalid_response")
+            coverage.update(recent_metadata_count=len(rows), history_response_sha256=history["response_sha256"])
+            for descriptor in history["archives"]:
+                if descriptor["filingFrom"] <= as_of and descriptor["filingTo"] >= cutoff:
+                    archive = self.get_company_submission_archive(cik, descriptor)
+                    if archive.get("coverage", {}).get("complete") is not True:
+                        raise SourceFetchError("SEC Form4 archive incomplete", reason_code="invalid_response")
+                    if len(rows)+len(archive["filings"]) > 100000:
+                        raise SourceFetchError("SEC Form4 metadata limit reached", reason_code="invalid_response")
+                    rows.extend(archive["filings"])
+                    coverage["archive_files_consulted"].append(descriptor["name"])
+            unique = {}
+            for row in rows:
+                provider_timeout("edgar")
+                identity = row["accession_number"]
+                if identity in unique and unique[identity] != row:
+                    raise SourceFetchError("SEC Form4 accession conflict", reason_code="invalid_response")
+                unique[identity] = row
+            recent = sorted((row for row in unique.values()
+                if row["form"] in {"4", "4/A"} and cutoff <= row["filing_date"] <= as_of),
+                key=lambda row: (row["filing_date"], row["accession_number"]))
+            coverage["matching_filings"] = len(recent)
+            for filing in recent:
+                provider_timeout("edgar")
                 transactions = self._parse_form4_xml(cik, filing)
-            except SourceFetchError as exc:
-                exc.partial_data = {"form4_filings": CoverageRecords(enriched, coverage={**coverage,"returned_transactions":len(enriched)}),
-                                    "coverage":{**coverage,"returned_transactions":len(enriched)}}
-                raise
-            if transactions:
-                for txn in transactions:
-                    enriched.append({**filing, **txn})
-            else:
-                enriched.append(filing)
-
-        return CoverageRecords(enriched, coverage={**coverage,"returned_transactions":len(enriched)})
+                provider_timeout("edgar")
+                # Identical native transactions remain separate observations.
+                if len(enriched)+max(1, len(transactions)) > 100000:
+                    raise SourceFetchError("SEC Form4 transaction limit reached", reason_code="invalid_response")
+                if transactions:
+                    enriched.extend({**filing, **txn} for txn in transactions)
+                else:
+                    enriched.append(filing)
+            provider_timeout("edgar")
+            coverage.update(complete=True, returned_transactions=len(enriched))
+            return CoverageRecords(enriched, coverage=coverage)
+        except Exception as exc:
+            error = source_fetch_error("SEC Form4 window incomplete", exc)
+            coverage.update(complete=False, returned_transactions=len(enriched))
+            error.partial_data = {"form4_filings": enriched, "coverage": coverage}
+            raise error from None
 
     def _parse_form4_xml(
         self, cik: str, filing: dict[str, Any]
@@ -638,7 +670,7 @@ class EDGARSource:
         accession = filing.get("accession_number", "")
         primary_doc = filing.get("primary_document", "")
         if not accession or not primary_doc:
-            return []
+            raise SourceFetchError("EDGAR Form4 document identity missing", reason_code="invalid_response")
 
         # Strip XSL prefix (e.g. "xslF345X06/file.xml" → "file.xml")
         # SEC serves transformed HTML at the XSL path; raw XML is at the base.
@@ -649,20 +681,70 @@ class EDGARSource:
         accession_nodash = accession.replace("-", "")
         url = f"https://www.sec.gov/Archives/edgar/data/{padded_cik}/{accession_nodash}/{primary_doc}"
 
-        resp = provider_request("edgar", "GET", url,
-                                headers={"User-Agent": self._user_agent}, timeout=15,
-                                operation="form4_xml")
+        response = None
         try:
-            root = ElementTree.fromstring(resp.text)
-            if root.tag.rsplit("}", 1)[-1] != "ownershipDocument":
-                raise ElementTree.ParseError("not ownership XML")
-        except ElementTree.ParseError:
-            raise SourceFetchError("EDGAR Form 4 XML invalid", reason_code="invalid_response") from None
+            response = provider_request("edgar", "GET", url,
+                headers={"User-Agent": self._user_agent}, timeout=provider_timeout("edgar"),
+                operation="form4_xml", stream=True, allow_redirects=False)
+            if response.status_code != 200:
+                raise SourceFetchError("EDGAR Form4 request failed", reason_code="http_error", http_status=response.status_code)
+            raw = read_bounded_response(response, provider="edgar", max_bytes=16*1024*1024)
+            try:
+                root = ElementTree.fromstring(raw)
+                if root.tag.rsplit("}", 1)[-1] != "ownershipDocument":
+                    raise ElementTree.ParseError("not ownership XML")
+            except ElementTree.ParseError:
+                raise SourceFetchError("EDGAR Form 4 XML invalid", reason_code="invalid_response") from None
+            provider_timeout("edgar")
+        except Exception as exc:
+            raise source_fetch_error("EDGAR Form4 acquisition failed", exc) from None
+        finally:
+            if response is not None:
+                response.close()
 
         # Handle XML namespaces
         ns = ""
         if root.tag.startswith("{"):
             ns = root.tag.split("}")[0] + "}"
+
+        # SEC Ownership XML spec table 3.5 requires this envelope even for an
+        # original or amendment with no transactions. An empty root is not a
+        # valid no-event document. Bind the native issuer to the queried issuer;
+        # reporting-owner/accession CIKs cannot substitute for that identity.
+        def one(parent, name):
+            values = parent.findall(f"{ns}{name}")
+            if len(values) != 1:
+                raise ValueError("missing or ambiguous ownership field")
+            return values[0]
+
+        def text(parent, name):
+            element = one(parent, name)
+            if len(element) or not source_text(element.text):
+                raise ValueError("invalid ownership field")
+            return element.text.strip()
+
+        try:
+            form = text(root, "documentType")
+            report_date = text(root, "periodOfReport")
+            filed = filing.get("filing_date")
+            if (form not in {"4", "4/A"} or filing.get("form", form) != form
+                    or len(report_date) != 10 or not source_date(report_date)
+                    or (filed is not None and (not source_date(filed) or len(filed) != 10
+                                              or report_date > filed))):
+                raise ValueError("ownership form or report period mismatch")
+            issuer = one(root, "issuer")
+            if _history_cik(text(issuer, "issuerCik")) != _history_cik(cik):
+                raise ValueError("ownership issuer mismatch")
+            owners = root.findall(f"{ns}reportingOwner")
+            if not owners:
+                raise ValueError("ownership reporting owner missing")
+            for owner in owners:
+                provider_timeout("edgar")
+                _history_cik(text(one(owner, "reportingOwnerId"), "rptOwnerCik"))
+        except (ValueError, TypeError, SourceFetchError) as exc:
+            if isinstance(exc, SourceFetchError) and exc.reason_code == "timeout":
+                raise
+            raise SourceFetchError("EDGAR Form4 ownership envelope invalid", reason_code="invalid_response") from None
 
         # Extract reporting owner info
         owner_name = ""
@@ -692,6 +774,9 @@ class EDGARSource:
         owner_cik = (owner_cik_el.text or "").strip() if owner_cik_el is not None else ""
         for txn_tag in (f"{ns}nonDerivativeTransaction", f"{ns}derivativeTransaction"):
             for txn_el in root.findall(f".//{txn_tag}"):
+                provider_timeout("edgar")
+                if len(transactions) >= 100000:
+                    raise SourceFetchError("SEC Form4 XML transaction limit reached", reason_code="invalid_response")
                 coding_el = txn_el.find(f".//{ns}transactionCoding")
                 tx_code = ""
                 if coding_el is not None:
@@ -743,6 +828,7 @@ class EDGARSource:
                     "is_director": is_director,
                 })
 
+        provider_timeout("edgar")
         return transactions
 
     def get_recent_13d(self, days_back: int = 60, *, as_of: str | None = None) -> list[dict[str, Any]]:

@@ -402,7 +402,7 @@ class EventMonitor:
 
         issuer_coverage = {}
         results = CoverageMapping(coverage={
-            "mode": "bounded_sample", "complete": False,
+            "mode": "exhaustive_window", "complete": False,
             "requested_tickers": list(tickers), "issuers": issuer_coverage,
         })
         failures, statuses = {}, {}
@@ -417,6 +417,8 @@ class EventMonitor:
                 }))
                 if filings:
                     results[ticker] = filings
+                if issuer_coverage[ticker].get("complete") is not True:
+                    failures[ticker] = "invalid_response"
             except SourceFetchError as exc:
                 partial = exc.partial_data.get("form4_filings")
                 if partial:
@@ -427,6 +429,7 @@ class EventMonitor:
                 failures[ticker] = exc.reason_code
                 if exc.http_status is not None:
                     statuses[ticker] = exc.http_status
+        results.coverage["complete"] = not failures and set(issuer_coverage) == set(tickers)
         if failures:
             raise SourceFetchError("EDGAR Form 4 coverage incomplete", reason_code="batch_failure",
                                    failed_operations=failures, failed_http_statuses=statuses,

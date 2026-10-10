@@ -23,7 +23,7 @@ from typing import Any
 
 import requests
 
-from .evidence import current_session_date, require_current_as_of, acquisition_time
+from .evidence import current_session_date, require_current_vintage, acquisition_time
 from .request_policy import provider_request
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -200,7 +200,7 @@ class USDASource:
         commodity: str,
         year: int,
         states: str | None = None,
-        *, as_of: str | None = None,
+        *, as_of: str | None = None, vintage_as_of: str | None = None,
     ) -> list[dict]:
         """Fetch weekly crop condition ratings from NASS.
 
@@ -215,7 +215,7 @@ class USDASource:
             good_pct, fair_pct, poor_pct, very_poor_pct.
         """
         as_of = as_of or current_session_date()
-        require_current_as_of(as_of, current_session_date())
+        vintage = require_current_vintage(as_of, vintage_as_of, today=current_session_date())
         if not self._api_key:
             raise SourceFetchError("USDA access missing", reason_code="provider_error")
 
@@ -225,7 +225,7 @@ class USDASource:
             state.strip().upper()
             for state in (states or default_states).split(",") if state.strip()
         })
-        cache_key = f"{commodity.upper()}|{year}|{','.join(requested_states)}|{as_of}"
+        cache_key = f"{commodity.upper()}|{year}|{','.join(requested_states)}|{as_of}|{vintage}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 

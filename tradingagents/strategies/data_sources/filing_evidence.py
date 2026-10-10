@@ -120,6 +120,15 @@ def _direct_fields(header):
     return values
 
 
+def _line_finditer(pattern: bytes, raw: bytes):
+    """Find literal-prefixed framing tokens at the exact start/CR/LF boundary."""
+    # A leading zero-width boundary makes regex scan every attachment byte.
+    # Search the tag first, then apply the same boundary without consuming it.
+    for match in re.finditer(pattern, raw):
+        if match.start() == 0 or raw[match.start() - 1] in (10, 13):
+            yield match
+
+
 def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
                      expected_date: str, observed_at: str,
                      max_submission_bytes=64 * 1024 * 1024, max_documents=2000) -> dict:
@@ -143,10 +152,10 @@ def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
         source_format, closing_tag = 'sec_complete_submission', rb'</SEC-DOCUMENT>'
     else:
         raise EvidenceError('unsupported_submission_format')
-    final = re.search(_LINE + closing_tag + rb'\s*\Z', raw)
+    final = next(_line_finditer(closing_tag + rb'\s*\Z', raw), None)
     if final is None:
         raise EvidenceError('incomplete_submission')
-    starts = list(re.finditer(_LINE + rb'<DOCUMENT>[\r\n]', raw))
+    starts = list(_line_finditer(rb'<DOCUMENT>[\r\n]', raw))
     if not starts or len(starts) > max_documents:
         raise EvidenceError('invalid_document_count')
     header = raw[:starts[0].start()]
@@ -184,12 +193,12 @@ def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
     for index, start in enumerate(starts):
         limit = starts[index + 1].start() if index + 1 < len(starts) else final.start()
         chunk = raw[start.end():limit]
-        closing = list(re.finditer(_LINE + rb'</DOCUMENT>', chunk))
+        closing = list(_line_finditer(rb'</DOCUMENT>', chunk))
         if len(closing) != 1 or chunk[closing[0].end():].strip():
             raise EvidenceError('incomplete_document')
         chunk = chunk[:closing[0].start()]
-        opening = list(re.finditer(_LINE + rb'<TEXT>', chunk))
-        ending = list(re.finditer(_LINE + rb'</TEXT>', chunk))
+        opening = list(_line_finditer(rb'<TEXT>', chunk))
+        ending = list(_line_finditer(rb'</TEXT>', chunk))
         if (len(opening) != 1 or len(ending) != 1 or ending[0].start() < opening[0].end()
                 or chunk[ending[0].end():].strip()):
             raise EvidenceError('incomplete_document_text')
