@@ -287,6 +287,53 @@ class LLMAnalyzer:
     # Filing analysis (P3: 10-K/10-Q material changes)
     # ------------------------------------------------------------------
 
+    def analyze_filing_evidence(
+        self, analysis_type: str, current_evidence, *, prior_evidence=None,
+        issuer_binding: dict, target_binding: dict | None = None,
+        regime_context: dict | None = None, news_evidence=None,
+        required_material_dependencies=None, comparison_binding=None,
+    ) -> dict[str, Any]:
+        """Opt-in complete selected evidence with strict attribution/citations.
+
+        Existing thesis transport, settings, output cap and inherited aggregate
+        deadline remain authoritative. This does not resolve trading securities.
+        """
+        from tradingagents.strategies.data_sources.filing_assessment import (
+            prepare_request, validate_assessment,
+        )
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        self.last_call_provenance = {}
+        self.last_call_failure = ""
+        try:
+            model_timeout()
+            override = self._prompt_overrides.get(analysis_type)
+            if override is None:
+                override = (self.get_prompt("quantum_readiness") if analysis_type == "quantum_readiness"
+                            else self._prompt_overrides.get("filing_analysis"))
+            request = prepare_request(
+                analysis_type, current_evidence, prior_evidence=prior_evidence,
+                issuer_binding=issuer_binding, target_binding=target_binding,
+                regime_context=regime_context, news_evidence=news_evidence,
+                required_material_dependencies=required_material_dependencies,
+                comparison_binding=comparison_binding, system_override=override,
+            )
+            model_timeout()
+            text = self._call_llm(request.system, request.user, max_tokens=4096, role="thesis")
+            model_timeout()
+            if not text and self.last_call_failure == "model_deadline_exhausted":
+                raise ModelDeadlineExceeded("model_deadline_exhausted")
+            result = validate_assessment(text, request.context)
+            model_timeout()
+            return result
+        except ModelDeadlineExceeded:
+            self.last_call_failure = "model_deadline_exhausted"
+            raise
+        except ValueError as exc:
+            if not self.last_call_failure:
+                code = str(exc)
+                self.last_call_failure = code if code.startswith("invalid_filing_") else "analysis_unavailable"
+            raise
+
     def analyze_filing_change(
         self,
         current_text: str,

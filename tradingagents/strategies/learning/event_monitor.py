@@ -13,7 +13,7 @@ from typing import Any
 
 from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError, source_fetch_error
 from tradingagents.strategies.data_sources.evidence import CoverageRecords
-from tradingagents.strategies.data_sources.edgar_source import filing_form_family
+from tradingagents.strategies.data_sources.edgar_source import filing_form_family, normalize_filing_form
 
 logger = logging.getLogger(__name__)
 
@@ -21,15 +21,34 @@ logger = logging.getLogger(__name__)
 class EventMonitor:
     """Polls data sources for actionable events."""
 
-    def __init__(self, registry: Any) -> None:
+    def __init__(self, registry: Any, *, filing_policy: str | None = None) -> None:
         """
         Args:
             registry: DataSourceRegistry instance.
         """
+        if filing_policy not in (None, 'complete_submission_v1'):
+            raise ValueError('Unknown filing acquisition policy')
         self.registry = registry
+        self.filing_policy = filing_policy
         self.as_of: str | None = None
         self.equity_universe = None
         self._last_poll: dict[str, str] = {}  # source -> last poll timestamp
+
+    def hydrate_collections(self, collections: dict, *, company_map=None, max_workers=16) -> dict:
+        """Opt-in full acquisition, once after all fetch_text=False discoveries.
+
+        Individual discovery methods retain their legacy defaults. The complete
+        policy caller gathers all declared scopes before invoking this wrapper,
+        so cross-scope bodies and prior comparisons share one frozen corpus.
+        """
+        if self.filing_policy != 'complete_submission_v1':
+            raise ValueError('Full filing acquisition policy is not enabled')
+        source = self.registry.get('edgar')
+        if source is None or not source.is_available():
+            raise SourceFetchError('Required source access unavailable', reason_code='provider_error')
+        from tradingagents.strategies.data_sources.filing_hydration import hydrate_filings
+        return hydrate_filings(source, collections, equity_universe=self.equity_universe,
+                               company_map=company_map, max_workers=max_workers)
 
     def poll_edgar_filings(
         self,
@@ -279,12 +298,16 @@ class EventMonitor:
         date_to = self.as_of or exchange_date().isoformat()
 
         seen_urls: set[str] = set()
+        complete_policy = self.filing_policy == 'complete_submission_v1'
+        by_accession = {}
         all_filings: list[dict] = []
 
         failures, statuses, scopes = {}, {}, {}
         for form_index, form_type in enumerate(form_types):
             for keyword_index, keyword in enumerate(keywords):
                 operation = f"keyword_{form_index}_{keyword_index}"
+                query = {'form_type': form_type, 'keyword': keyword,
+                         'date_from': date_from, 'date_to': date_to, 'operation': operation}
                 try:
                     filings = source.search_filings(form_type=form_type, date_from=date_from,
                                                    date_to=date_to, keyword=keyword)
@@ -297,7 +320,30 @@ class EventMonitor:
                         statuses[operation] = exc.http_status
                 if hasattr(filings, "coverage"):
                     scopes[operation] = filings.coverage
+                if complete_policy:
+                    scopes[operation] = {**scopes.get(operation, {'complete': operation not in failures}), **query}
                 for f in filings:
+                    if complete_policy:
+                        accession = f.get('adsh') or f.get('accession_number')
+                        # Missing identities must survive discovery and fail
+                        # explicitly at hydration, rather than disappear here.
+                        identity = accession or f'missing_{operation}_{len(all_filings)}'
+                        if identity not in by_accession:
+                            retained = dict(f, matched_keyword=keyword, matched_queries=[])
+                            by_accession[identity] = retained
+                            all_filings.append(retained)
+                        retained = by_accession[identity]
+                        if query not in retained['matched_queries']:
+                            retained['matched_queries'].append(dict(query))
+                        if (normalize_filing_form(retained.get('form_type', '')), retained.get('file_date')) != (
+                                normalize_filing_form(f.get('form_type', '')), f.get('file_date')):
+                            retained['discovery_identity_conflict'] = True
+                            retained.setdefault('discovery_conflicts', []).append({
+                                'form_type': f.get('form_type'), 'file_date': f.get('file_date'),
+                                'operation': operation})
+                            failures[operation] = 'invalid_response'
+                            scopes[operation]['complete'] = False
+                        continue
                     url = f.get("file_url", "")
                     if url and url not in seen_urls:
                         seen_urls.add(url)
@@ -305,7 +351,7 @@ class EventMonitor:
                         all_filings.append(f)
 
         attempted = 0
-        if fetch_text:
+        if fetch_text and not complete_policy:
             for index, filing in enumerate(all_filings):
                 if attempted >= max_text_fetches:
                     filing["text_status"] = "text_budget_exhausted"

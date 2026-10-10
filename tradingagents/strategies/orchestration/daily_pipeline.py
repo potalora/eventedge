@@ -1614,6 +1614,7 @@ def _persist_screen_health(state: DailyRunState) -> dict[str, Any] | None:
 
 def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     """Run each required horizon once and merge governed reference bars."""
+    import time
     owner, session = state.owner, state.session
     state.first_engine = owner.cohorts[0]["engine"]
     lookback_start = (
@@ -1627,9 +1628,15 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         source_store, source_identity = daily_source_store(owner, state.trading_date)
         state.shared_data = source_store.load_frozen(source_identity)
         if state.shared_data is None:
-            acquired = state.first_engine._fetch_all_data(lookback_start, state.trading_date)
+            deadline = None
+            fetch_options = {}
+            if owner._base_config.get('autoresearch', {}).get('filing_evidence_policy') == 'complete_submission_v1':
+                from tradingagents.strategies.orchestration.multi_strategy_engine import _fetch_timeout_s
+                deadline = time.monotonic() + max(0.0, _fetch_timeout_s())
+                fetch_options['acquisition_deadline'] = deadline
+            acquired = state.first_engine._fetch_all_data(lookback_start, state.trading_date, **fetch_options)
             # Persist and decode before any strategy/model can mutate observations.
-            state.shared_data = source_store.freeze(source_identity, acquired)
+            state.shared_data = source_store.freeze(source_identity, acquired, deadline=deadline)
         if not isinstance(state.shared_data, dict):
             raise SourceInputError("shared source bundle must be a mapping")
         yfinance_inputs = state.shared_data.get("yfinance")

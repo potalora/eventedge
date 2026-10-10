@@ -17,7 +17,8 @@ from bs4 import BeautifulSoup
 VERSION = 'sec-filing-evidence-v1'
 _LINE = rb'(?:\A|(?<=[\r\n]))'
 _ROLES = rb'FILER|SUBJECT-COMPANY|ISSUER|FILED-BY|REPORTING-OWNER'
-_FORMS = {'8-K', '10-K', '10-Q', 'DEF 14A', 'SCHEDULE 13D', 'SCHEDULE 13D/A', 'SCHEDULE 13G', 'SCHEDULE 13G/A'}
+_FORMS = {'8-K', '8-K/A', '10-K', '10-K/A', '10-Q', '10-Q/A', 'DEF 14A',
+          'SCHEDULE 13D', 'SCHEDULE 13D/A', 'SCHEDULE 13G', 'SCHEDULE 13G/A'}
 _OWNERSHIP_NAMESPACES = {'13D': 'http://www.sec.gov/edgar/schedule13D',
                          '13G': 'http://www.sec.gov/edgar/schedule13g'}
 

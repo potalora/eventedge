@@ -13,6 +13,7 @@ from datetime import date
 import hashlib
 import json
 import math
+import re
 from typing import Callable, Iterable
 
 from .base import Candidate
@@ -31,9 +32,51 @@ def candidate_universe(universe):
         _UNIVERSE.reset(token)
 
 
-def _universe_decision(universe, strategy, candidate):
+def _parsed_issuer_proof(candidate, filing_corpus):
+    """Bind the compact source role to the actual shared parsed corpus."""
+    if (candidate.metadata.get('full_filing_evidence_policy') != 'complete_submission_v1'
+            or not isinstance(filing_corpus, dict)):
+        return None
+    reference = candidate.metadata.get('filing_evidence_ref')
+    evidence = filing_corpus.get(reference) if isinstance(reference, str) else None
+    binding = candidate.metadata.get('issuer_binding')
+    if (not isinstance(evidence, dict) or not isinstance(binding, dict)
+            or evidence.get('structural_status') != 'complete'
+            or evidence.get('accession') != reference
+            or candidate.metadata.get('accession_number') != reference
+            or evidence.get('form') != candidate.metadata.get('form_type')
+            or binding.get('status') != 'verified'):
+        return None
+    role = 'SUBJECT-COMPANY' if evidence['form'].startswith('SCHEDULE 13') else 'FILER'
+    roles = evidence.get('roles')
+    if not isinstance(roles, list) or any(not isinstance(item, dict) for item in roles):
+        return None
+    selected = [item for item in roles if item.get('role') == role]
+    if len(selected) != 1 or evidence.get('issuer_candidates') != selected:
+        return None
+    cik = selected[0].get('cik')
+    if (not isinstance(cik, str) or not re.fullmatch(r'[0-9]{10}', cik) or int(cik) == 0
+            or binding.get('role') != role or binding.get('issuer_ciks') != [cik]
+            or binding.get('issuer_cik') != cik):
+        return None
+    for field in ('submission_sha256', 'header_sha256'):
+        digest = evidence.get(field)
+        if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest) or binding.get(field) != digest:
+            return None
+    role_hash = selected[0].get('sha256')
+    if (not isinstance(role_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', role_hash)
+            or binding.get('role_sha256s') != [role_hash]):
+        return None
+    return {'accession': reference, 'role': role, 'issuer_ciks': [cik],
+            'submission_sha256': evidence['submission_sha256'], 'header_sha256': evidence['header_sha256'],
+            'role_sha256s': [role_hash], 'source_ciks': list(candidate.metadata.get('source_ciks', []))}
+
+
+def _universe_decision(universe, strategy, candidate, filing_corpus=None):
+    proof = None
     if strategy == 'filing_analysis':
-        membership = universe.filing_decision(candidate.metadata.get('source_ciks', []))
+        proof = _parsed_issuer_proof(candidate, filing_corpus)
+        membership = universe.filing_decision(proof['issuer_ciks'] if proof else candidate.metadata.get('source_ciks', []))
         decision = ('outside_sip_exchange_universe' if membership['status'] == 'excluded'
                     else 'possible_eligible_issuer' if membership['status'] == 'eligible'
                     else 'unresolved_issuer')
@@ -44,6 +87,8 @@ def _universe_decision(universe, strategy, candidate):
                 'decision': decision, 'symbol': candidate.ticker}
     if membership is not None:
         evidence['issuer_membership'] = membership
+    if proof is not None:
+        evidence['parsed_issuer_proof'] = proof
     return evidence
 
 
@@ -66,7 +111,7 @@ def _source_identity(strategy: str, candidate: Candidate) -> str:
     except ValueError:
         # Invalid source identities remain visible; this ID never substitutes for
         # canonical ledger validation or makes an invalid candidate actionable.
-        ignored = {"llm_analysis", "analysis_status", "analysis_failure_reason",
+        ignored = {"llm_analysis", "document_assessment", "filing_assessment", "analysis_status", "analysis_failure_reason",
                    "non_actionable_reason", "discovery_id", "analysis_admitted", "equity_universe"}
         source = {key: value for key, value in candidate.metadata.items() if key not in ignored}
         payload = json.dumps([strategy, candidate.ticker, source], sort_keys=True, default=str)
@@ -80,6 +125,7 @@ def admit_candidates(
     *,
     rank_key: Callable[[Candidate], tuple] | None = None,
     policy: str = "score_desc_ticker_source_identity_v1",
+    filing_corpus: dict | None = None,
 ) -> CandidatePopulation:
     """Snapshot every discovered hypothesis, then admit a deterministic budget.
 
@@ -104,7 +150,7 @@ def admit_candidates(
                "score": candidate.score if valid_score else None,
                "journal_only": candidate.journal_only}
         if universe is not None:
-            row['universe'] = _universe_decision(universe, strategy, candidate)
+            row['universe'] = _universe_decision(universe, strategy, candidate, filing_corpus)
             candidate.metadata['equity_universe'] = deepcopy(row['universe'])
         candidate.metadata.pop('analysis_admitted', None)
         if valid_score:

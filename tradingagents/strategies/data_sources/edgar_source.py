@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from .evidence import current_session_date, CoverageRecords, collection_envelope
-from .request_policy import provider_request, provider_budget, current_provider_deadline
+from .request_policy import (provider_request, provider_budget, current_provider_deadline,
+                             provider_timeout, read_bounded_response)
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,50 @@ def _valid_search_cik(value: Any) -> bool:
         # Unicode digit categories and excessive integer strings need a safe
         # invalid-field outcome, preserving any earlier valid page records.
         return False
+
+
+def _history_cik(cik):
+    if not isinstance(cik, str) or not re.fullmatch(r'[0-9]{1,10}', cik) or int(cik) == 0:
+        raise SourceFetchError('Invalid SEC history CIK', reason_code='invalid_response')
+    return cik.zfill(10)
+
+
+def _history_archive(cik, descriptor):
+    if (not isinstance(descriptor, dict)
+            or not isinstance(descriptor.get('name'), str)
+            or not re.fullmatch(r'CIK' + cik + r'-submissions-[0-9]{3,6}\.json', descriptor['name'])
+            or type(descriptor.get('filingCount')) is not int
+            or not 0 < descriptor['filingCount'] <= 50_000
+            or not source_date(descriptor.get('filingFrom'))
+            or not source_date(descriptor.get('filingTo'))
+            or len(descriptor['filingFrom']) != 10 or len(descriptor['filingTo']) != 10
+            or descriptor['filingFrom'] > descriptor['filingTo']):
+        raise SourceFetchError('Invalid SEC archive descriptor', reason_code='invalid_response')
+    return {key: descriptor[key] for key in ('name', 'filingCount', 'filingFrom', 'filingTo')}
+
+
+def _history_rows(data):
+    keys = ('form', 'filingDate', 'accessionNumber', 'primaryDocument')
+    if (not isinstance(data, dict) or any(not isinstance(data.get(key), list) for key in keys)
+            or len(data['form']) > 50_000
+            or any(not isinstance(value, list) or len(value) != len(data['form'])
+                   for value in data.values())):
+        raise ValueError('invalid history arrays')
+    rows, seen = [], set()
+    for form, filed, accession, document in zip(*(data[key] for key in keys)):
+        if (not source_text(form) or len(form) > 32 or not source_date(filed) or len(filed) != 10
+                or not isinstance(accession, str)
+                or not re.fullmatch(r'[0-9]{10}-[0-9]{2}-[0-9]{6}', accession)
+                or not isinstance(document, str)
+                or len(document) > 512 or not 1 <= len(document.split('/')) <= 8
+                or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', part)
+                       for part in document.split('/'))
+                or '..' in document or accession in seen):
+            raise ValueError('invalid history row')
+        seen.add(accession)
+        rows.append({'accession_number': accession, 'form': normalize_filing_form(form),
+                     'filing_date': filed, 'primary_document': document})
+    return rows
 
 
 class EDGARSource:
@@ -347,6 +395,97 @@ class EDGARSource:
                     "archived_possible":bool(archive_files) if isinstance(archive_files,list) else True,
                     "scope":"latest_matching_forms_in_current_submissions", "cik":cik}
         return CoverageRecords(results, coverage=coverage)
+
+    def _get_submission_metadata(self, filename: str) -> tuple[dict, dict]:
+        """One bounded metadata response; caller validates its native schema."""
+        url = f'{SUBMISSIONS_BASE}/{filename}'
+        response = None
+        def unique_fields(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError('duplicate history field')
+                result[key] = value
+            return result
+        try:
+            provider_timeout('edgar')
+            response = provider_request('edgar', 'GET', url,
+                headers={'User-Agent': self._user_agent}, timeout=15,
+                operation='submission_history', stream=True, allow_redirects=False)
+            if response.status_code != 200 or response.url != url:
+                raise ValueError('unexpected history response')
+            raw = read_bounded_response(response, provider='edgar', max_bytes=16 * 1024 * 1024)
+            data = json.loads(raw, object_pairs_hook=unique_fields)
+            if not isinstance(data, dict):
+                raise ValueError('invalid history object')
+            provider_timeout('edgar')
+            provenance = {'source_url': url, 'response_sha256': hashlib.sha256(raw).hexdigest(),
+                          'observed_at': datetime.now(timezone.utc).isoformat()}
+            return data, provenance
+        except SourceFetchError:
+            raise
+        except (ValueError, TypeError, UnicodeError):
+            raise SourceFetchError('SEC history response invalid', reason_code='invalid_response') from None
+        finally:
+            if response is not None:
+                response.close()
+
+    def get_company_submission_history(self, cik: str) -> dict:
+        """Complete recent metadata plus archive inventory, not complete filing history."""
+        cik = _history_cik(cik)
+        if current_provider_deadline('edgar') is None:
+            with provider_budget('edgar', time.monotonic() + 60):
+                return self.get_company_submission_history(cik)
+        data, provenance = self._get_submission_metadata(f'CIK{cik}.json')
+        try:
+            native_cik = data.get('cik')
+            if type(native_cik) is int:
+                native_cik = str(native_cik)
+            if _history_cik(native_cik) != cik:
+                raise ValueError('history CIK mismatch')
+            filings = data['filings']
+            rows = _history_rows(filings['recent'])
+            files = filings['files']
+            if not isinstance(files, list) or len(files) > 1000:
+                raise ValueError('invalid archive inventory')
+            archives = [_history_archive(cik, entry) for entry in files]
+            if len({entry['name'] for entry in archives}) != len(archives):
+                raise ValueError('duplicate archive')
+        except (ValueError, TypeError, KeyError, SourceFetchError):
+            raise SourceFetchError('SEC history metadata invalid', reason_code='invalid_response') from None
+        provider_timeout('edgar')
+        return {'cik': cik, 'filings': rows, 'archives': archives, **provenance,
+                'coverage': {'complete': True, 'mode': 'complete_recent_and_archive_inventory'}}
+
+    def get_company_submission_archive(self, cik: str, descriptor: dict) -> dict:
+        """Exact native archive arrays with count/range checks, under the same budget."""
+        cik = _history_cik(cik)
+        descriptor = _history_archive(cik, descriptor)
+        if current_provider_deadline('edgar') is None:
+            with provider_budget('edgar', time.monotonic() + 60):
+                return self.get_company_submission_archive(cik, descriptor)
+        data, provenance = self._get_submission_metadata(descriptor['name'])
+        try:
+            rows = _history_rows(data)
+            if (len(rows) != descriptor['filingCount'] or any(
+                    not descriptor['filingFrom'] <= row['filing_date'] <= descriptor['filingTo']
+                    for row in rows)):
+                raise ValueError('archive range/count mismatch')
+        except (ValueError, TypeError):
+            raise SourceFetchError('SEC archive metadata invalid', reason_code='invalid_response') from None
+        provider_timeout('edgar')
+        return {'cik': cik, 'filings': rows, 'descriptor': descriptor, **provenance,
+                'coverage': {'complete': True, 'mode': 'complete_archive_metadata'}}
+
+    def get_complete_submission(self, url: str, *, accession: str, form_type: str,
+                                filing_date: str, required_exhibits=(),
+                                max_submission_bytes=64 * 1024 * 1024) -> dict:
+        """Acquire full selected filing evidence under the existing source deadline."""
+        from .filing_acquisition import acquire_complete_submission
+        return acquire_complete_submission(
+            self._user_agent, url, accession=accession, form_type=form_type,
+            filing_date=filing_date, required_exhibits=required_exhibits,
+            max_submission_bytes=max_submission_bytes)
 
     def get_primary_document_url(self, url: str, form_type: str | None = None) -> str:
         """Resolve the matching main filing document, independently of identity URL."""

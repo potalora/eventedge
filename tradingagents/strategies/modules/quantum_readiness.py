@@ -24,6 +24,7 @@ from typing import Any
 
 from .base import Candidate
 from .admission import admit_candidates
+from ..data_sources.filing_news import immutable_source_locator, prepare_filing_news
 
 logger = logging.getLogger(__name__)
 
@@ -135,23 +136,38 @@ class QuantumReadinessStrategy:
         # Gather signals
         edgar_data = data.get("edgar", {})
         pqc_filings = edgar_data.get("pqc_filings", [])
-
+        evidence_graph = edgar_data.get("filing_evidence", {})
+        full_evidence = evidence_graph.get("policy") == "complete_submission_v1"
+        corpus = evidence_graph.get("corpus", {}) if full_evidence else {}
         finnhub_data = data.get("finnhub", {})
         pqc_news = finnhub_data.get("pqc_news", [])
+        filing_locator_fields = ("accession_number", "adsh", "file_url", "url")
+        news_locator_fields = ("article_id", "id", "url")
+
+        if full_evidence:
+            missing_filings = sum(immutable_source_locator(row, filing_locator_fields) is None for row in pqc_filings)
+            missing_news = sum(immutable_source_locator(row, news_locator_fields) is None for row in pqc_news)
+            if missing_filings or missing_news:
+                raise ValueError(f"invalid_pqc_immutable_locators filings={missing_filings} news={missing_news}")
+            try:
+                prepare_filing_news(pqc_news)
+            except ValueError as error:
+                raise ValueError(f"invalid_pqc_news_evidence news={len(pqc_news)}") from error
 
         def distinct(records, fields):
             retained = {}
             for record in sorted(records, key=lambda item: json.dumps(item, sort_keys=True, default=str)):
-                identity = next((str(record[k]) for k in fields if record.get(k)), None)
+                identity = immutable_source_locator(record, fields) if full_evidence else next(
+                    (str(record[k]) for k in fields if record.get(k)), None)
                 if identity:
                     retained.setdefault(identity, record)
             return [retained[key] for key in sorted(retained)]
-        pqc_filings = distinct(pqc_filings, ("accession_number", "adsh", "file_url", "url"))
-        pqc_news = distinct(pqc_news, ("article_id", "id", "url"))
+        pqc_filings = distinct(pqc_filings, filing_locator_fields)
+        pqc_news = distinct(pqc_news, news_locator_fields)
 
         source_ids: set[str] = set()
         for filing in pqc_filings:
-            locator = (
+            locator = immutable_source_locator(filing, filing_locator_fields) if full_evidence else (
                 filing.get("accession_number")
                 or filing.get("adsh")
                 or filing.get("file_url")
@@ -160,7 +176,7 @@ class QuantumReadinessStrategy:
             if locator:
                 source_ids.add(f"EDGAR:{locator}")
         for article in pqc_news:
-            locator = (
+            locator = immutable_source_locator(article, news_locator_fields) if full_evidence else (
                 article.get("id") or article.get("article_id") or article.get("url")
             )
             if locator:
@@ -169,8 +185,35 @@ class QuantumReadinessStrategy:
             logger.warning("Quantum readiness: source records lack immutable locators")
             return []
 
-        # Compute regime score from signal balance
-        regime_score = self._compute_regime_score(pqc_filings, pqc_news)
+        # Full text is used transiently for the existing keyword screen only.
+        scoring_filings = pqc_filings
+        filing_refs, unavailable_refs = set(), set()
+        missing_ref_count = 0
+        if full_evidence:
+            scoring_filings = []
+            for filing in pqc_filings:
+                reference = (filing.get("filing_evidence_ref") or filing.get("accession_number")
+                             or filing.get("adsh"))
+                evidence = corpus.get(reference) if isinstance(reference, str) else None
+                units = evidence.get("units", []) if isinstance(evidence, dict) else []
+                complete = (isinstance(evidence, dict) and evidence.get("accession") == reference
+                            and evidence.get("structural_status") == "complete"
+                            and isinstance(units, list) and bool(units)
+                            and all(isinstance(unit, dict) and isinstance(unit.get("text"), str)
+                                    and bool(unit["text"].strip()) for unit in units))
+                if isinstance(reference, str) and reference:
+                    filing_refs.add(reference)
+                    if not complete:
+                        unavailable_refs.add(reference)
+                else:
+                    missing_ref_count += 1
+                # Missing dependencies do not erase available keyword evidence.
+                # The full referenced corpus remains mandatory for model validation.
+                text = "\n".join(unit["text"] for unit in units
+                                 if isinstance(unit, dict) and isinstance(unit.get("text"), str)) \
+                    if isinstance(evidence, dict) and evidence.get("accession") == reference and isinstance(units, list) else ""
+                scoring_filings.append({**filing, "filing_text": text})
+        regime_score = self._compute_regime_score(scoring_filings, pqc_news)
         threshold = params.get("regime_threshold", 0.3)
 
         candidates: list[Candidate] = []
@@ -204,9 +247,19 @@ class QuantumReadinessStrategy:
             if filing.get("file_date") or filing.get("filing_date")
         )
         for candidate in candidates:
-            candidate.metadata["analysis_text"] = "\n".join(
-                str(f.get("current_text") or f.get("filing_text") or "") for f in pqc_filings
-            ) + "\n" + "\n".join(str(a.get("headline", "")) + " " + str(a.get("summary", "")) for a in pqc_news)
+            if full_evidence:
+                candidate.metadata.update({
+                    "full_filing_evidence_policy": "complete_submission_v1",
+                    "filing_evidence_refs": sorted(filing_refs),
+                    "news_evidence_refs": sorted(source for source in source_ids if source.startswith("FINNHUB:")),
+                    "filing_evidence_status": "unavailable" if unavailable_refs or missing_ref_count else "complete",
+                    "filing_evidence_unavailable_refs": sorted(unavailable_refs),
+                    "filing_evidence_missing_ref_count": missing_ref_count,
+                })
+            else:
+                candidate.metadata["analysis_text"] = "\n".join(
+                    str(f.get("current_text") or f.get("filing_text") or "") for f in pqc_filings
+                ) + "\n" + "\n".join(str(a.get("headline", "")) + " " + str(a.get("summary", "")) for a in pqc_news)
             candidate.metadata["evidence_interpretation"] = "heuristic_timeline_evidence_not_probability"
             if published_times:
                 candidate.metadata["published_at"] = published_times[-1]

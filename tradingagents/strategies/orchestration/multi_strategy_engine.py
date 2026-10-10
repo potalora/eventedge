@@ -130,6 +130,8 @@ def _positions_to_price(
 
 _MUTABLE_EVIDENCE_KEYS = {
     "llm_analysis",
+    "document_assessment",
+    "filing_assessment",
     "model_provenance",
     "llm_conviction",
     "needs_llm_analysis",
@@ -446,7 +448,9 @@ class MultiStrategyEngine:
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
             if candidates:
-                candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model)
+                filing_options = ({'filing_data': data, 'universe': universe}
+                    if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' else {})
+                candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model, **filing_options)
             universe_assessments = []
             if universe is not None:
                 for candidate in candidates:
@@ -484,6 +488,27 @@ class MultiStrategyEngine:
             source_coverage = {source: data[source]["coverage"] for source in strategy.data_sources if isinstance(data.get(source), dict) and "coverage" in data[source]}
             if source_coverage:
                 health_record.evidence["source_coverage"] = source_coverage
+            full_filing_candidates = [c for c in candidates
+                if c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1']
+            if full_filing_candidates:
+                from copy import deepcopy
+                # Blank/unresolved securities do not become priceable signals,
+                # but their completed or failed document assessments are still
+                # authoritative evidence for every admitted discovery.
+                health_record.evidence['filing_assessments'] = [deepcopy({
+                    'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
+                    'analysis_type': c.metadata.get('analysis_type'),
+                    'filing_evidence_ref': c.metadata.get('filing_evidence_ref'),
+                    'filing_evidence_refs': c.metadata.get('filing_evidence_refs'),
+                    'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
+                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason'),
+                    'document_assessment': c.metadata.get('document_assessment'),
+                    'journal_only': c.journal_only,
+                    'assessment': c.metadata.get('llm_analysis') or c.metadata.get('filing_assessment'),
+                    'model_provenance': c.metadata.get('model_provenance'),
+                }) for c in full_filing_candidates]
+            if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' and 'edgar' in strategy.data_sources:
+                health_record.evidence['filing_source_coverage'] = data.get('edgar', {}).get('filing_evidence', {}).get('coverage', {})
             health.append(health_record)
             for c in candidates:
                 if c.metadata.get("equity_universe_excluded"):
@@ -1696,7 +1721,8 @@ class MultiStrategyEngine:
     # Data fetching
     # ------------------------------------------------------------------
 
-    def _fetch_all_data(self, start_date: str, end_date: str) -> dict[str, Any]:
+    def _fetch_all_data(self, start_date: str, end_date: str, *,
+                        acquisition_deadline: float | None = None) -> dict[str, Any]:
         """Fetch all data needed by active strategies.
 
         Returns nested dict: {source_name: {data_type: data}}.
@@ -1706,13 +1732,19 @@ class MultiStrategyEngine:
         from tradingagents.strategies.data_sources.request_policy import provider_budget
         from tradingagents.strategies.orchestration.source_inputs import (
             SourceInputError, SourceInputStore, cache_identity,
-            source_configuration_fingerprint, registered_source_fingerprint,
+            source_configuration_fingerprint, registered_source_fingerprint, source_codec_limits,
         )
 
         acquisition_start = time.monotonic()
         acquisition_cutoff = datetime.now(timezone.utc)
         fetch_timeout_s = max(0.0, _fetch_timeout_s())
-        acquisition_deadline = acquisition_start + fetch_timeout_s
+        outer_deadline = acquisition_deadline
+        if outer_deadline is not None:
+            if (isinstance(outer_deadline, bool) or not isinstance(outer_deadline, (int, float))
+                    or not math.isfinite(outer_deadline)):
+                raise SourceInputError("invalid source acquisition deadline")
+        acquisition_deadline = min(acquisition_start + fetch_timeout_s,
+                                   outer_deadline if outer_deadline is not None else float('inf'))
         cache_dir = self.ar_config.get("source_cache_dir") or os.environ.get("EVENTEDGE_SOURCE_CACHE_DIR")
         cache_store = None
         config_fingerprint = ""
@@ -1809,6 +1841,7 @@ class MultiStrategyEngine:
 
         pending_fetches = {}
         cache_keys = {}
+        cache_stores = {}
         for name, (fetcher, args) in api_fetches.items():
             source_fingerprint = config_fingerprint
             if name == "edgar" and universe_policy:
@@ -1821,7 +1854,12 @@ class MultiStrategyEngine:
                 registered_source_fingerprint(source_fingerprint, self.registry.get(name)),
             )
             cache_keys[name] = identity
-            cached = cache_store.load_cached(identity, cutoff=acquisition_cutoff) if cache_store else None
+            store = cache_store
+            limits = source_codec_limits(self.config, source=name)
+            if store and limits:
+                store = SourceInputStore(cache_dir, ttl_s=store.ttl_s, **limits)
+            cache_stores[name] = store
+            cached = store.load_cached(identity, cutoff=acquisition_cutoff) if store else None
             if cached is not None:
                 data[name] = cached
             else:
@@ -1834,10 +1872,12 @@ class MultiStrategyEngine:
             if cache_store:
                 for name, payload in fetched.items():
                     try:
-                        cache_store.save_cached(cache_keys[name], payload)
+                        cache_stores[name].save_cached(cache_keys[name], payload)
                     except (OSError, SourceInputError):
                         logger.warning("Successful source %s could not be cached", name)
 
+        if outer_deadline is not None and time.monotonic() >= acquisition_deadline:
+            raise SourceInputError("source acquisition deadline exhausted before acceptance")
         self._emit("phase", phase="data_fetch", status="done")
         return data
 
@@ -2122,9 +2162,12 @@ class MultiStrategyEngine:
         """Preserve valid EDGAR categories while exposing every failed operation."""
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        monitor = EventMonitor(self.registry)
+        filing_policy = self.ar_config.get('filing_evidence_policy')
+        monitor = EventMonitor(self.registry, filing_policy=filing_policy) if filing_policy else EventMonitor(self.registry)
         monitor.as_of = trading_date
         result, failures = {}, []
+        company_map = None
+        collections = {}
         if universe_data is not None:
             from tradingagents.strategies.data_sources.equity_universe import EquityUniverse
             if universe_data.get("error"):
@@ -2133,17 +2176,20 @@ class MultiStrategyEngine:
             company_map = source.company_ticker_map()
             monitor.equity_universe = EquityUniverse(universe_data.get("snapshot"), company_map=company_map)
             result["company_tickers"] = company_map
+        text_options = {'fetch_text': False} if filing_policy else {}
         operations = {
-            "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14),
+            "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14, **text_options),
             "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
-            "activist_13d": lambda: monitor.poll_edgar_filings(["SCHEDULE 13D"], days_back=14),
-            "passive_13g": lambda: monitor.poll_edgar_filings(["SCHEDULE 13G"], days_back=14),
+            "activist_13d": lambda: monitor.poll_edgar_filings(["SCHEDULE 13D"], days_back=14, **text_options),
+            "passive_13g": lambda: monitor.poll_edgar_filings(["SCHEDULE 13G"], days_back=14, **text_options),
             "pqc_filings": lambda: monitor.poll_keyword_filings(["8-K", "10-K", "10-Q"],
-                ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30),
+                ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30, **text_options),
         }
         for name, operation in operations.items():
             try:
                 result[name] = operation()
+                if name != 'form4':
+                    collections[name] = result[name]
                 if hasattr(result[name], "coverage"):
                     result.setdefault("coverage", {})[name] = result[name].coverage
                     result[name] = dict(result[name]) if isinstance(result[name], dict) else list(result[name])
@@ -2153,10 +2199,24 @@ class MultiStrategyEngine:
                 if partial is None and name in {"activist_13d", "passive_13g"}:
                     partial = error.partial_data.get("filings")
                 if partial is not None:
+                    if name != 'form4':
+                        collections[name] = partial
                     result[name] = list(partial) if isinstance(partial, list) else partial
                     if hasattr(partial, "coverage"):
                         result.setdefault("coverage", {})[name] = partial.coverage
                 failures.append(f"{name}: {error}")
+        if filing_policy:
+            try:
+                graph = monitor.hydrate_collections(
+                    {name: collections.get(name, []) for name in operations if name != 'form4'},
+                    company_map=company_map)
+                result.update(graph['collections'])
+                result['filing_evidence'] = {key: value for key, value in graph.items() if key != 'collections'}
+                if graph.get('coverage', {}).get('complete') is not True:
+                    failures.append('full filing evidence incomplete')
+            except Exception as exc:
+                error = source_fetch_error('Full filing evidence acquisition incomplete', exc)
+                failures.append(str(error))
         if failures:
             result["error"] = "; ".join(failures)
         return result
@@ -2483,6 +2543,7 @@ class MultiStrategyEngine:
         candidates: list[Candidate],
         strategy_name: str,
         regime_context: dict | None = None,
+        *, filing_data: dict | None = None, universe=None,
     ) -> list[Candidate]:
         """Run LLM analysis on candidates that have needs_llm_analysis=True."""
         from tradingagents.strategies.runtime_deadline import (
@@ -2492,12 +2553,14 @@ class MultiStrategyEngine:
         if current_model_deadline() is None:
             import time
             with model_budget(time.monotonic() + DEFAULT_MODEL_BUDGET_S):
-                return self._enrich_with_llm(candidates, strategy_name, regime_context)
+                return self._enrich_with_llm(candidates, strategy_name, regime_context,
+                                             filing_data=filing_data, universe=universe)
         enriched = list(candidates)
         required = [c for c in enriched if c.metadata.get("needs_llm_analysis")]
         try:
             outcomes = analyze_candidates(required, analyzer=self._analyzer,
-                analyze_one=lambda c, worker: self._analyze_candidate(c, strategy_name, regime_context, worker),
+                analyze_one=lambda c, worker: self._analyze_candidate(c, strategy_name, regime_context, worker,
+                    filing_data=filing_data, universe=universe),
                 max_workers=self.ar_config.get("candidate_analysis_workers", 1))
         except ValueError:
             # A configuration/client refusal retains every discovered input and
@@ -2523,12 +2586,14 @@ class MultiStrategyEngine:
                                   non_actionable_reason="model_sample_incomplete")
         return enriched
 
-    def _analyze_candidate(self, c: Candidate, strategy_name: str, regime_context: dict | None, analyzer) -> None:
+    def _analyze_candidate(self, c: Candidate, strategy_name: str, regime_context: dict | None, analyzer, *,
+                           filing_data: dict | None = None, universe=None) -> None:
         """Validate one assessment using this worker's independent analyzer state."""
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
         from tradingagents.strategies.candidate_response_reuse import begin_candidate_response, commit_candidate_response, end_candidate_response
         analysis_type = c.metadata.get("analysis_type", "")
         llm_result = {}
+        full_filing = c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1'
         optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
 
         reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
@@ -2544,9 +2609,18 @@ class MultiStrategyEngine:
                 "litigation": ("case_name", "nature_of_suit", "cause"),
             }
             fields = required_text_fields.get(analysis_type)
-            if fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
+            if not full_filing and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
                 raise ValueError("missing_source_text")
-            if analysis_type == "earnings_call":
+            if full_filing:
+                from tradingagents.strategies.orchestration.filing_inputs import filing_analysis_inputs
+                filing_arguments = filing_analysis_inputs(c, filing_data, universe)
+                llm_result = analyzer.analyze_filing_evidence(
+                    analysis_type, regime_context=regime_context, **filing_arguments)
+                c.metadata['document_assessment'] = llm_result['document_assessment']
+                if llm_result['filing_evidence_status'] != 'sufficient':
+                    c.metadata['filing_assessment'] = llm_result
+                    raise ValueError('missing_required_filing_analysis')
+            elif analysis_type == "earnings_call":
                 llm_result = analyzer.analyze_earnings_call(
                     c.metadata.get(
                         "analysis_text", c.metadata.get("transcript_text", "")
@@ -2688,7 +2762,12 @@ class MultiStrategyEngine:
                 if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
                     raise ValueError("invalid_secondary_impacts")
             ticker = c.ticker
-            if not ticker:
+            if full_filing and not ticker:
+                if llm_result.get('document_assessment') != 'assessed_no_directional_thesis':
+                    raise ValueError('unresolved_issuer')
+                c.journal_only = True
+                c.metadata['non_actionable_reason'] = 'equity_universe_unresolved'
+            elif not ticker:
                 ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
                 ticker = ticker.strip().upper()
                 edgar = self.registry.get("edgar")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any
 
 from .base import Candidate
@@ -56,6 +57,9 @@ class FilingAnalysisStrategy:
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
         """Screen EDGAR filings for material changes, exec comp shifts and material events."""
         edgar_data = data.get("edgar", {})
+        evidence_graph = edgar_data.get("filing_evidence", {})
+        full_evidence = evidence_graph.get("policy") == "complete_submission_v1"
+        corpus = evidence_graph.get("corpus", {}) if full_evidence else {}
         filings = [*edgar_data.get("filings", []), *edgar_data.get("activist_13d", []), *edgar_data.get("passive_13g", [])]
 
         if not filings:
@@ -70,12 +74,28 @@ class FilingAnalysisStrategy:
             form_family = filing_form_family(form_type)
             entity_name = filing.get("entity_name", "")
             ticker = filing.get("ticker", "")
+            binding = filing.get("issuer_binding", {}) if full_evidence else {}
+            execution_verified = (binding.get("status") == "verified"
+                                  and binding.get("execution_status") == "verified"
+                                  and isinstance(binding.get("ticker"), str) and bool(binding["ticker"]))
+            if full_evidence:
+                ticker = binding["ticker"] if execution_verified else ""
             filing_identity = {
                 "accession_number": filing.get("accession_number")
                 or filing.get("adsh"),
                 "file_url": filing.get("file_url", ""),
                 "source_ciks": list(filing.get("ciks", [])),
             }
+
+            if full_evidence:
+                filing_identity.update({
+                    "full_filing_evidence_policy": "complete_submission_v1",
+                    "filing_evidence_ref": filing.get("filing_evidence_ref"),
+                    "prior_evidence_ref": filing.get("prior_evidence_ref"),
+                    "comparison_binding": deepcopy(filing.get("comparison_binding")),
+                    "issuer_binding": deepcopy(binding),
+                    "filing_evidence_status": filing.get("filing_evidence_status", "unavailable"),
+                })
 
             # 10-K / 10-Q → material changes analysis (from P3)
             if form_type in ("10-K", "10-Q") and form_type in forms_to_analyze:
@@ -150,7 +170,10 @@ class FilingAnalysisStrategy:
                 is_activist = form_family == "SCHEDULE 13D"
                 # Schedule 13 reporters may differ from the subject issuer.
                 # Generic EDGAR display-name tickers are not subject attribution.
-                subject_ticker = filing.get("subject_ticker")
+                subject_ticker = (binding.get("ticker") if execution_verified and binding.get("role") == "SUBJECT-COMPANY"
+                                  else None) if full_evidence else filing.get("subject_ticker")
+                if full_evidence and not subject_ticker:
+                    ticker = ""
                 candidates.append(
                     Candidate(
                         ticker=subject_ticker or ticker,
@@ -184,10 +207,36 @@ class FilingAnalysisStrategy:
             if identity in seen:
                 continue
             seen.add(identity)
-            text = candidate.metadata.get("current_text") or candidate.metadata.get("proxy_text")
-            if not text:
-                candidate.journal_only = True
-                candidate.metadata["non_actionable_reason"] = "missing_source_text"
+            if full_evidence:
+                for field in ("current_text", "prior_text", "proxy_text"):
+                    candidate.metadata.pop(field, None)
+                reference = candidate.metadata.get("filing_evidence_ref")
+                evidence = corpus.get(reference) if isinstance(reference, str) else None
+                units = evidence.get("units", []) if isinstance(evidence, dict) else []
+                complete = (isinstance(evidence, dict) and evidence.get("accession") == reference
+                            and evidence.get("structural_status") == "complete"
+                            and isinstance(units, list) and bool(units)
+                            and all(isinstance(unit, dict) and isinstance(unit.get("text"), str)
+                                    and bool(unit["text"].strip()) for unit in units))
+                binding = candidate.metadata["issuer_binding"]
+                if not complete:
+                    candidate.journal_only = True
+                    insufficient = isinstance(evidence, dict) and evidence.get("structural_status") == "insufficient"
+                    candidate.metadata["filing_evidence_status"] = (
+                        "insufficient" if insufficient else "unavailable")
+                    candidate.metadata["non_actionable_reason"] = (
+                        "incomplete_filing_evidence" if insufficient else "missing_source_text")
+                elif binding.get("status") != "verified":
+                    candidate.journal_only = True
+                    candidate.metadata["non_actionable_reason"] = "unresolved_source_issuer"
+                elif binding.get("execution_status") != "verified" or not binding.get("ticker"):
+                    candidate.journal_only = True
+                    candidate.metadata["non_actionable_reason"] = "unresolved_execution_security"
+            else:
+                text = candidate.metadata.get("current_text") or candidate.metadata.get("proxy_text")
+                if not text:
+                    candidate.journal_only = True
+                    candidate.metadata["non_actionable_reason"] = "missing_source_text"
             unique.append(candidate)
 
         # Enrich with analyst consensus for contradiction detection
@@ -206,7 +255,8 @@ class FilingAnalysisStrategy:
             if isinstance(profile_data, dict) and ticker in profile_data:
                 candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
 
-        return admit_candidates(self.name, unique, params.get("analysis_budget"))
+        return admit_candidates(self.name, unique, params.get("analysis_budget"),
+                                filing_corpus=corpus if full_evidence else None)
 
     def check_exit(
         self,
