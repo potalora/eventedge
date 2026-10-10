@@ -185,6 +185,12 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     }
     for key, environment in credentials.items():
         ar[key] = ar.get(key) or os.environ.get(environment, '')
+    if ar.get('equity_universe_policy'):
+        # The asset-master adapter consumes environment credentials exclusively.
+        ar['equity_universe_credentials'] = {
+            'key': os.environ.get('ALPACA_API_KEY', '').strip(),
+            'secret': os.environ.get('ALPACA_SECRET_KEY', '').strip(),
+        }
     omitted = {'state_dir', 'source_cache_dir', 'source_cache_ttl_s'}
     if exclude_horizon:
         omitted.add('horizon')

@@ -28,6 +28,7 @@ class EventMonitor:
         """
         self.registry = registry
         self.as_of: str | None = None
+        self.equity_universe = None
         self._last_poll: dict[str, str] = {}  # source -> last poll timestamp
 
     def poll_edgar_filings(
@@ -93,6 +94,12 @@ class EventMonitor:
                 url = filing.get("primary_document_url") or filing.get("file_url", "")
                 if filing_form_family(form) not in text_forms:
                     continue
+                if self.equity_universe is not None:
+                    membership = self.equity_universe.filing_decision(filing.get("ciks", []))
+                    filing["universe_membership"] = membership
+                    if membership["status"] == "excluded":
+                        filing["text_status"] = "outside_declared_equity_universe"
+                        continue
                 if not url or attempted >= max_text_fetches:
                     filing["text_status"] = "missing_document_url" if not url else "text_budget_exhausted"
                     continue

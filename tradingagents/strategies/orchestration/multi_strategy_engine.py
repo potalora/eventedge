@@ -404,6 +404,20 @@ class MultiStrategyEngine:
         regime_model = self._build_regime_model(data)
         regime_model.setdefault("timestamp", datetime.now().isoformat())
 
+        universe = None
+        universe_failure = False
+        if self.ar_config.get("equity_universe_policy"):
+            from tradingagents.strategies.data_sources.equity_universe import EquityUniverse, POLICY
+            try:
+                if self.ar_config["equity_universe_policy"] != POLICY:
+                    raise ValueError("unsupported equity universe policy")
+                universe_data = data.get("equity_universe", {})
+                if universe_data.get("error"):
+                    raise ValueError("equity universe acquisition failed")
+                universe = EquityUniverse(universe_data.get("snapshot"),
+                    company_map=data.get("edgar", {}).get("company_tickers"))
+            except (ValueError, TypeError, AttributeError):
+                universe_failure = True
         all_signals: list[dict] = []
         health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
@@ -419,10 +433,11 @@ class MultiStrategyEngine:
                 continue
             try:
                 params = strategy.get_default_params(horizon=horizon)
-                from tradingagents.strategies.modules.admission import admit_candidates
-                candidates = strategy.screen(data, trading_date, params)
-                if not hasattr(candidates, "admission_manifest"):
-                    candidates = admit_candidates(strategy.name, candidates, budget=None)
+                from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
+                with candidate_universe(universe):
+                    candidates = strategy.screen(data, trading_date, params)
+                    if not hasattr(candidates, "admission_manifest"):
+                        candidates = admit_candidates(strategy.name, candidates, budget=None)
                 admission_manifest = candidates.admission_manifest
                 error = None
             except Exception as exc:
@@ -432,7 +447,24 @@ class MultiStrategyEngine:
                 logger.exception("Strategy %s screen failed", strategy.name)
             if candidates:
                 candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model)
+            universe_assessments = []
+            if universe is not None:
+                for candidate in candidates:
+                    decision = universe.decision(candidate.ticker)
+                    assessment = {"discovery_id": candidate.metadata.get("discovery_id"),
+                        "symbol": candidate.ticker, "decision": decision,
+                        "policy": universe.evidence["policy"],
+                        "assets_sha256": universe.evidence["assets_sha256"]}
+                    universe_assessments.append(assessment)
+                    candidate.metadata["equity_universe_post_analysis"] = assessment
+                    if decision in {"outside_sip_exchange_universe", "inactive_asset", "absent_from_asset_master"}:
+                        candidate.metadata["equity_universe_excluded"] = True
+                    elif decision != "eligible":
+                        candidate.metadata.setdefault("non_actionable_reason", "equity_universe_unresolved")
+                        candidate.journal_only = True
             provider_errors = _provider_errors(data, strategy.data_sources)
+            if universe_failure:
+                provider_errors = dict(provider_errors, equity_universe="universe_evidence_unavailable")
             non_actionable = sorted({c.metadata["non_actionable_reason"] for c in candidates if c.metadata.get("non_actionable_reason")})
             if non_actionable:
                 provider_errors = dict(provider_errors, analysis="required_evidence_unavailable")
@@ -443,6 +475,9 @@ class MultiStrategyEngine:
                 policy_id=policy_id, strategy=strategy.name,
                 data_sources=tuple(strategy.data_sources), candidates=candidates,
                 provider_errors=provider_errors, exception=error, admission_manifest=admission_manifest)
+            if universe is not None:
+                health_record.evidence["universe_assessments"] = universe_assessments
+                health_record.evidence["universe_policy"] = universe.evidence["policy"]
             if non_actionable:
                 health_record.evidence["non_actionable_reasons"] = non_actionable
                 health_record.evidence["actionable_candidate_count"] = sum(not c.journal_only for c in candidates)
@@ -451,6 +486,8 @@ class MultiStrategyEngine:
                 health_record.evidence["source_coverage"] = source_coverage
             health.append(health_record)
             for c in candidates:
+                if c.metadata.get("equity_universe_excluded"):
+                    continue
                 all_signals.append(
                     {
                         "ticker": c.ticker,
@@ -1709,6 +1746,11 @@ class MultiStrategyEngine:
 
         self._emit("phase", phase="data_fetch", status="starting")
         data: dict[str, Any] = {}
+        universe_policy = self.ar_config.get("equity_universe_policy")
+        if universe_policy:
+            from tradingagents.strategies.data_sources.equity_universe import fetch_equity_universe, POLICY
+            data["equity_universe"] = (acquire("alpaca", fetch_equity_universe, ())
+                if universe_policy == POLICY else {"error": "unsupported equity universe policy"})
 
         # Collect which sources are needed
         needed_sources: set[str] = set()
@@ -1754,7 +1796,8 @@ class MultiStrategyEngine:
 
         # Also fetch EDGAR events for paper-trade strategies
         if "edgar" in needed_sources and "edgar" in available:
-            api_fetches["edgar"] = (self._fetch_edgar_events, (end_date,))
+            api_fetches["edgar"] = (self._fetch_edgar_events,
+                (end_date, data["equity_universe"]) if universe_policy else (end_date,))
         if "usaspending" in needed_sources and "usaspending" in available:
             api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
         if "cftc" in needed_sources and "cftc" in available:
@@ -1763,9 +1806,15 @@ class MultiStrategyEngine:
         pending_fetches = {}
         cache_keys = {}
         for name, (fetcher, args) in api_fetches.items():
+            source_fingerprint = config_fingerprint
+            if name == "edgar" and universe_policy:
+                snapshot = data["equity_universe"].get("snapshot", {})
+                # A changed asset master may admit previously excluded filings.
+                # Such a source set cannot reuse text selected by the old scope.
+                source_fingerprint += ":" + snapshot.get("assets_sha256", "universe_unavailable")
             identity = cache_identity(
                 name, start_date, end_date,
-                registered_source_fingerprint(config_fingerprint, self.registry.get(name)),
+                registered_source_fingerprint(source_fingerprint, self.registry.get(name)),
             )
             cache_keys[name] = identity
             cached = cache_store.load_cached(identity, cutoff=acquisition_cutoff) if cache_store else None
@@ -2064,13 +2113,22 @@ class MultiStrategyEngine:
         logger.info("Regulations.gov fetch: %d proposed rules", len(rules))
         return result
 
-    def _fetch_edgar_events(self, trading_date: str | None = None) -> dict[str, Any]:
+    def _fetch_edgar_events(self, trading_date: str | None = None,
+                            universe_data: dict | None = None) -> dict[str, Any]:
         """Preserve valid EDGAR categories while exposing every failed operation."""
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         monitor = EventMonitor(self.registry)
         monitor.as_of = trading_date
         result, failures = {}, []
+        if universe_data is not None:
+            from tradingagents.strategies.data_sources.equity_universe import EquityUniverse
+            if universe_data.get("error"):
+                return {"error": "equity universe evidence unavailable"}
+            source = self.registry.get("edgar")
+            company_map = source.company_ticker_map()
+            monitor.equity_universe = EquityUniverse(universe_data.get("snapshot"), company_map=company_map)
+            result["company_tickers"] = company_map
         operations = {
             "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14),
             "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
@@ -2424,214 +2482,33 @@ class MultiStrategyEngine:
     ) -> list[Candidate]:
         """Run LLM analysis on candidates that have needs_llm_analysis=True."""
         from tradingagents.strategies.runtime_deadline import (
-            DEFAULT_MODEL_BUDGET_S, ModelDeadlineExceeded, current_model_deadline,
-            model_budget, model_timeout,
+            DEFAULT_MODEL_BUDGET_S, current_model_deadline, model_budget,
         )
-        from tradingagents.strategies.candidate_response_reuse import begin_candidate_response, commit_candidate_response, end_candidate_response
+        from tradingagents.strategies.candidate_parallel import analyze_candidates
         if current_model_deadline() is None:
             import time
             with model_budget(time.monotonic() + DEFAULT_MODEL_BUDGET_S):
                 return self._enrich_with_llm(candidates, strategy_name, regime_context)
-        enriched = []
-        for c in candidates:
-            if not c.metadata.get("needs_llm_analysis"):
-                enriched.append(c)
+        enriched = list(candidates)
+        required = [c for c in enriched if c.metadata.get("needs_llm_analysis")]
+        try:
+            outcomes = analyze_candidates(required, analyzer=self._analyzer,
+                analyze_one=lambda c, worker: self._analyze_candidate(c, strategy_name, regime_context, worker),
+                max_workers=self.ar_config.get("candidate_analysis_workers", 1))
+        except ValueError:
+            # A configuration/client refusal retains every discovered input and
+            # fails required coverage. Never silently change the transport.
+            from tradingagents.strategies.candidate_parallel import CandidateAnalysisOutcome
+            outcomes = [CandidateAnalysisOutcome(c, "analysis_unavailable") for c in required]
+        for outcome in outcomes:
+            if not outcome.failure:
                 continue
-
-            analysis_type = c.metadata.get("analysis_type", "")
-            llm_result = {}
-            optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
-
-            reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
-
-            try:
-                model_timeout()
-                required_text_fields = {
-                    "earnings_call": ("analysis_text", "transcript_text"),
-                    "filing_change": ("current_text",), "exec_comp": ("proxy_text",),
-                    "material_event": ("current_text",), "activist_stake": ("current_text",),
-                    "passive_stake": ("current_text",), "quantum_readiness": ("analysis_text",),
-                    "supply_chain": ("headline", "summary"), "regulation": ("title", "summary"),
-                    "litigation": ("case_name", "nature_of_suit", "cause"),
-                }
-                fields = required_text_fields.get(analysis_type)
-                if fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
-                    raise ValueError("missing_source_text")
-                if analysis_type == "earnings_call":
-                    llm_result = self._analyzer.analyze_earnings_call(
-                        c.metadata.get(
-                            "analysis_text", c.metadata.get("transcript_text", "")
-                        ),
-                        c.ticker,
-                        regime_context=regime_context,
-                        text_source=c.metadata.get("text_source", "earnings_news"),
-                    )
-                elif analysis_type == "regulation":
-                    llm_result = self._analyzer.analyze_regulation(
-                        c.metadata.get("title", ""),
-                        c.metadata.get("summary", ""),
-                        c.metadata.get("agency_id", ""),
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "supply_chain":
-                    llm_result = self._analyzer.analyze_supply_chain(
-                        c.metadata.get("headline", ""),
-                        c.metadata.get("summary", ""),
-                        c.ticker,
-                        c.metadata.get("affected_peers", []),
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "litigation":
-                    llm_result = self._analyzer.analyze_litigation(
-                        c.metadata.get("case_name", ""),
-                        c.metadata.get("nature_of_suit", ""),
-                        c.metadata.get("cause", ""),
-                        c.metadata.get("court", ""),
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "insider_activity":
-                    cluster_type = c.metadata.get("cluster_type", "")
-                    if cluster_type == "buy_cluster":
-                        llm_result = self._analyzer.analyze_insider_context(
-                            c.metadata.get("filings", []),
-                            c.ticker,
-                            regime_context=regime_context,
-                        )
-                    elif cluster_type == "sell_pattern":
-                        llm_result = self._analyzer.analyze_10b5_1_plan(
-                            c.metadata.get("filings", []),
-                            c.ticker,
-                            regime_context=regime_context,
-                        )
-                elif analysis_type == "filing_change":
-                    llm_result = self._analyzer.analyze_filing_change(
-                        c.metadata.get("current_text", ""),
-                        c.metadata.get("prior_text", ""),
-                        c.ticker,
-                        regime_context=regime_context,
-                    )
-                elif analysis_type in {"material_event", "activist_stake", "passive_stake"}:
-                    text = c.metadata.get("current_text", "")
-                    if not isinstance(text, str) or not text.strip():
-                        raise ValueError("missing_source_text")
-                    llm_result = self._analyzer.analyze_filing_change(text, "", c.ticker, regime_context=regime_context)
-                elif analysis_type == "quantum_readiness":
-                    text = c.metadata.get("analysis_text", "")
-                    if not isinstance(text, str) or not text.strip():
-                        raise ValueError("missing_source_text")
-                    llm_result = self._analyzer.analyze_quantum_readiness(text, c.ticker, text_source="news", regime_context=regime_context)
-                elif analysis_type == "commodity_macro":
-                    llm_result = self._analyzer.analyze_commodity_macro(
-                        ticker=c.ticker, commodity_name=c.metadata.get("commodity", ""),
-                        cot_context=c.metadata.get("cot_evidence", {}),
-                        macro_context=c.metadata.get("macro_evidence", {}),
-                        regime_context=regime_context)
-                elif analysis_type == "exec_comp":
-                    llm_result = self._analyzer.analyze_exec_comp(
-                        c.metadata.get("proxy_text", ""),
-                        c.ticker,
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "ag_weather":
-                    llm_result = self._analyzer.analyze_ag_weather(
-                        ticker=c.ticker,
-                        commodity_name=c.metadata.get("commodity", c.ticker),
-                        ag_context={
-                            "drought_score": c.metadata.get("drought_score", 0),
-                            "drought_states": c.metadata.get("drought_states", {}),
-                            "noaa_data": c.metadata.get("noaa_data", {}),
-                            "usda_data": c.metadata.get("usda_data", {}),
-                        },
-                        trailing_return=c.metadata.get("trailing_return", 0),
-                        hold_days=c.metadata.get("hold_days", 21),
-                        regime_context=regime_context,
-                    )
-                else:
-                    raise ValueError(f"unsupported_required_analysis:{analysis_type}")
-                model_timeout()
-                provenance = getattr(self._analyzer, "last_call_provenance", None)
-                if isinstance(provenance, dict) and provenance:
-                    c.metadata["model_provenance"] = dict(provenance)
-                if getattr(self._analyzer, "last_call_failure", "") == "model_deadline_exhausted":
-                    raise ModelDeadlineExceeded("model_deadline_exhausted")
-                if not isinstance(llm_result, dict) or not llm_result:
-                    raise ValueError("analysis_unavailable")
-                llm_result = dict(llm_result)
-                if llm_result.get("direction") not in {"long", "short", "neutral"}:
-                    raise ValueError("invalid_direction")
-                score_key = "conviction" if "conviction" in llm_result else "score"
-                value = llm_result.get(score_key)
-                if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-                    raise ValueError("invalid_score")
-                score = float(value)
-                if not math.isfinite(score) or not 0 <= score <= 1:
-                    raise ValueError("invalid_score")
-                llm_result[score_key] = score
-                for key in ("defendant_ticker", "primary_ticker"):
-                    if key in llm_result and (not isinstance(llm_result[key], str) or len(llm_result[key]) > 16):
-                        raise ValueError(f"invalid_{key}")
-                for key in ("affected_tickers", "secondary_tickers"):
-                    if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(t, str) or not t.strip() or len(t) > 16 for t in llm_result[key])):
-                        raise ValueError(f"invalid_{key}")
-                if not optional and not any(isinstance(llm_result.get(key), str) and llm_result[key].strip() for key in ("rationale", "reasoning", "evidence_claim")):
-                    raise ValueError("missing_analysis_explanation")
-                for key in ("rationale", "reasoning", "evidence_claim"):
-                    if key in llm_result and not isinstance(llm_result[key], str):
-                        raise ValueError(f"invalid_{key}")
-                for key in ("tone_assessment", "primary_impact", "duration_estimate", "impact_assessment", "case_type", "pqc_readiness", "crypto_dependency"):
-                    if key in llm_result and not isinstance(llm_result[key], str):
-                        raise ValueError(f"invalid_{key}")
-                for key in ("changes", "red_flags", "comp_changes", "guidance_changes", "notable_insiders", "affected_sectors"):
-                    if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(item, str) for item in llm_result[key])):
-                        raise ValueError(f"invalid_{key}")
-                if "severity" in llm_result and llm_result["severity"] not in {"low", "medium", "high", "critical"}:
-                    raise ValueError("invalid_severity")
-                if "regime_signal" in llm_result and llm_result["regime_signal"] not in {"bull", "bear", "neutral", "accelerating", "stalling"}:
-                    raise ValueError("invalid_regime_signal")
-                if "regime_confidence" in llm_result:
-                    value = llm_result["regime_confidence"]
-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
-                        raise ValueError("invalid_regime_confidence")
-                if "cluster_size" in llm_result and (type(llm_result["cluster_size"]) is not int or llm_result["cluster_size"] < 0):
-                    raise ValueError("invalid_cluster_size")
-                if "secondary_impacts" in llm_result:
-                    impacts = llm_result["secondary_impacts"]
-                    if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
-                        raise ValueError("invalid_secondary_impacts")
-                ticker = c.ticker
-                if not ticker:
-                    ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
-                    ticker = ticker.strip().upper()
-                    edgar = self.registry.get("edgar")
-                    if not ticker or edgar is None or not edgar.validate_ticker(ticker):
-                        raise ValueError("unresolved_issuer")
-                # Commit fields only after full schema and entity validation.
-                reuse = commit_candidate_response()
-                if reuse is not None:
-                    self._analyzer.last_call_provenance["request_reuse"] = reuse
-                    c.metadata["model_provenance"] = dict(self._analyzer.last_call_provenance)
-                c.ticker, c.direction, c.score = ticker, llm_result["direction"], score
-                c.metadata["llm_analysis"] = llm_result
-                c.metadata["analysis_status"] = "validated"
-                if c.metadata.get("non_actionable_reason") == "missing_source_text":
-                    c.metadata.pop("non_actionable_reason", None)
-                    c.journal_only = False
-            except Exception as exc:
-                c.metadata["analysis_status"] = "failed"
-                reason = str(exc)
-                if isinstance(exc, ModelDeadlineExceeded):
-                    reason = "model_deadline_exhausted"
-                elif not isinstance(exc, ValueError) or not reason.startswith(("invalid_", "missing_", "unsupported_required_analysis:", "analysis_unavailable", "unresolved_issuer")):
-                    reason = "analysis_unavailable"
-                c.metadata["analysis_failure_reason"] = reason[:160]
-                if not optional or isinstance(exc, ModelDeadlineExceeded):
-                    c.journal_only = True
-                    c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
-                logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
-            finally:
-                end_candidate_response(reuse_token)
-
-            enriched.append(c)
+            c = outcome.candidate
+            c.metadata.update(analysis_status="failed", analysis_failure_reason=outcome.failure)
+            optional = c.metadata.get("analysis_type") in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
+            if not optional or outcome.failure == "model_deadline_exhausted":
+                c.journal_only = True
+                c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
 
         if any(c.metadata.get("analysis_failure_reason") == "model_deadline_exhausted" for c in enriched):
             # A timeout must not select a prefix of the admitted sample or route
@@ -2641,3 +2518,200 @@ class MultiStrategyEngine:
                 c.metadata.update(analysis_status="failed", analysis_failure_reason="model_deadline_exhausted",
                                   non_actionable_reason="model_sample_incomplete")
         return enriched
+
+    def _analyze_candidate(self, c: Candidate, strategy_name: str, regime_context: dict | None, analyzer) -> None:
+        """Validate one assessment using this worker's independent analyzer state."""
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        from tradingagents.strategies.candidate_response_reuse import begin_candidate_response, commit_candidate_response, end_candidate_response
+        analysis_type = c.metadata.get("analysis_type", "")
+        llm_result = {}
+        optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
+
+        reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
+
+        try:
+            model_timeout()
+            required_text_fields = {
+                "earnings_call": ("analysis_text", "transcript_text"),
+                "filing_change": ("current_text",), "exec_comp": ("proxy_text",),
+                "material_event": ("current_text",), "activist_stake": ("current_text",),
+                "passive_stake": ("current_text",), "quantum_readiness": ("analysis_text",),
+                "supply_chain": ("headline", "summary"), "regulation": ("title", "summary"),
+                "litigation": ("case_name", "nature_of_suit", "cause"),
+            }
+            fields = required_text_fields.get(analysis_type)
+            if fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
+                raise ValueError("missing_source_text")
+            if analysis_type == "earnings_call":
+                llm_result = analyzer.analyze_earnings_call(
+                    c.metadata.get(
+                        "analysis_text", c.metadata.get("transcript_text", "")
+                    ),
+                    c.ticker,
+                    regime_context=regime_context,
+                    text_source=c.metadata.get("text_source", "earnings_news"),
+                )
+            elif analysis_type == "regulation":
+                llm_result = analyzer.analyze_regulation(
+                    c.metadata.get("title", ""),
+                    c.metadata.get("summary", ""),
+                    c.metadata.get("agency_id", ""),
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "supply_chain":
+                llm_result = analyzer.analyze_supply_chain(
+                    c.metadata.get("headline", ""),
+                    c.metadata.get("summary", ""),
+                    c.ticker,
+                    c.metadata.get("affected_peers", []),
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "litigation":
+                llm_result = analyzer.analyze_litigation(
+                    c.metadata.get("case_name", ""),
+                    c.metadata.get("nature_of_suit", ""),
+                    c.metadata.get("cause", ""),
+                    c.metadata.get("court", ""),
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "insider_activity":
+                cluster_type = c.metadata.get("cluster_type", "")
+                if cluster_type == "buy_cluster":
+                    llm_result = analyzer.analyze_insider_context(
+                        c.metadata.get("filings", []),
+                        c.ticker,
+                        regime_context=regime_context,
+                    )
+                elif cluster_type == "sell_pattern":
+                    llm_result = analyzer.analyze_10b5_1_plan(
+                        c.metadata.get("filings", []),
+                        c.ticker,
+                        regime_context=regime_context,
+                    )
+            elif analysis_type == "filing_change":
+                llm_result = analyzer.analyze_filing_change(
+                    c.metadata.get("current_text", ""),
+                    c.metadata.get("prior_text", ""),
+                    c.ticker,
+                    regime_context=regime_context,
+                )
+            elif analysis_type in {"material_event", "activist_stake", "passive_stake"}:
+                text = c.metadata.get("current_text", "")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("missing_source_text")
+                llm_result = analyzer.analyze_filing_change(text, "", c.ticker, regime_context=regime_context)
+            elif analysis_type == "quantum_readiness":
+                text = c.metadata.get("analysis_text", "")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("missing_source_text")
+                llm_result = analyzer.analyze_quantum_readiness(text, c.ticker, text_source="news", regime_context=regime_context)
+            elif analysis_type == "commodity_macro":
+                llm_result = analyzer.analyze_commodity_macro(
+                    ticker=c.ticker, commodity_name=c.metadata.get("commodity", ""),
+                    cot_context=c.metadata.get("cot_evidence", {}),
+                    macro_context=c.metadata.get("macro_evidence", {}),
+                    regime_context=regime_context)
+            elif analysis_type == "exec_comp":
+                llm_result = analyzer.analyze_exec_comp(
+                    c.metadata.get("proxy_text", ""),
+                    c.ticker,
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "ag_weather":
+                llm_result = analyzer.analyze_ag_weather(
+                    ticker=c.ticker,
+                    commodity_name=c.metadata.get("commodity", c.ticker),
+                    ag_context={
+                        "drought_score": c.metadata.get("drought_score", 0),
+                        "drought_states": c.metadata.get("drought_states", {}),
+                        "noaa_data": c.metadata.get("noaa_data", {}),
+                        "usda_data": c.metadata.get("usda_data", {}),
+                    },
+                    trailing_return=c.metadata.get("trailing_return", 0),
+                    hold_days=c.metadata.get("hold_days", 21),
+                    regime_context=regime_context,
+                )
+            else:
+                raise ValueError(f"unsupported_required_analysis:{analysis_type}")
+            model_timeout()
+            provenance = getattr(analyzer, "last_call_provenance", None)
+            if isinstance(provenance, dict) and provenance:
+                c.metadata["model_provenance"] = dict(provenance)
+            if getattr(analyzer, "last_call_failure", "") == "model_deadline_exhausted":
+                raise ModelDeadlineExceeded("model_deadline_exhausted")
+            if not isinstance(llm_result, dict) or not llm_result:
+                raise ValueError("analysis_unavailable")
+            llm_result = dict(llm_result)
+            if llm_result.get("direction") not in {"long", "short", "neutral"}:
+                raise ValueError("invalid_direction")
+            score_key = "conviction" if "conviction" in llm_result else "score"
+            value = llm_result.get(score_key)
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError("invalid_score")
+            score = float(value)
+            if not math.isfinite(score) or not 0 <= score <= 1:
+                raise ValueError("invalid_score")
+            llm_result[score_key] = score
+            for key in ("defendant_ticker", "primary_ticker"):
+                if key in llm_result and (not isinstance(llm_result[key], str) or len(llm_result[key]) > 16):
+                    raise ValueError(f"invalid_{key}")
+            for key in ("affected_tickers", "secondary_tickers"):
+                if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(t, str) or not t.strip() or len(t) > 16 for t in llm_result[key])):
+                    raise ValueError(f"invalid_{key}")
+            if not optional and not any(isinstance(llm_result.get(key), str) and llm_result[key].strip() for key in ("rationale", "reasoning", "evidence_claim")):
+                raise ValueError("missing_analysis_explanation")
+            for key in ("rationale", "reasoning", "evidence_claim"):
+                if key in llm_result and not isinstance(llm_result[key], str):
+                    raise ValueError(f"invalid_{key}")
+            for key in ("tone_assessment", "primary_impact", "duration_estimate", "impact_assessment", "case_type", "pqc_readiness", "crypto_dependency"):
+                if key in llm_result and not isinstance(llm_result[key], str):
+                    raise ValueError(f"invalid_{key}")
+            for key in ("changes", "red_flags", "comp_changes", "guidance_changes", "notable_insiders", "affected_sectors"):
+                if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(item, str) for item in llm_result[key])):
+                    raise ValueError(f"invalid_{key}")
+            if "severity" in llm_result and llm_result["severity"] not in {"low", "medium", "high", "critical"}:
+                raise ValueError("invalid_severity")
+            if "regime_signal" in llm_result and llm_result["regime_signal"] not in {"bull", "bear", "neutral", "accelerating", "stalling"}:
+                raise ValueError("invalid_regime_signal")
+            if "regime_confidence" in llm_result:
+                value = llm_result["regime_confidence"]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError("invalid_regime_confidence")
+            if "cluster_size" in llm_result and (type(llm_result["cluster_size"]) is not int or llm_result["cluster_size"] < 0):
+                raise ValueError("invalid_cluster_size")
+            if "secondary_impacts" in llm_result:
+                impacts = llm_result["secondary_impacts"]
+                if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
+                    raise ValueError("invalid_secondary_impacts")
+            ticker = c.ticker
+            if not ticker:
+                ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
+                ticker = ticker.strip().upper()
+                edgar = self.registry.get("edgar")
+                if not ticker or edgar is None or not edgar.validate_ticker(ticker):
+                    raise ValueError("unresolved_issuer")
+            # Commit fields only after full schema and entity validation.
+            reuse = commit_candidate_response()
+            if reuse is not None:
+                analyzer.last_call_provenance["request_reuse"] = reuse
+                c.metadata["model_provenance"] = dict(analyzer.last_call_provenance)
+            c.ticker, c.direction, c.score = ticker, llm_result["direction"], score
+            c.metadata["llm_analysis"] = llm_result
+            c.metadata["analysis_status"] = "validated"
+            if c.metadata.get("non_actionable_reason") == "missing_source_text":
+                c.metadata.pop("non_actionable_reason", None)
+                c.journal_only = False
+        except Exception as exc:
+            c.metadata["analysis_status"] = "failed"
+            reason = str(exc)
+            if isinstance(exc, ModelDeadlineExceeded):
+                reason = "model_deadline_exhausted"
+            elif not isinstance(exc, ValueError) or not reason.startswith(("invalid_", "missing_", "unsupported_required_analysis:", "analysis_unavailable", "unresolved_issuer")):
+                reason = "analysis_unavailable"
+            c.metadata["analysis_failure_reason"] = reason[:160]
+            if not optional or isinstance(exc, ModelDeadlineExceeded):
+                c.journal_only = True
+                c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
+            logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
+        finally:
+            end_candidate_response(reuse_token)

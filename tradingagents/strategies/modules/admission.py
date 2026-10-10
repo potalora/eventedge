@@ -7,6 +7,8 @@ The manifest is a pre-analysis snapshot and must be saved even at budget zero.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date
 import hashlib
 import json
@@ -14,6 +16,35 @@ import math
 from typing import Callable, Iterable
 
 from .base import Candidate
+
+
+_UNIVERSE = ContextVar('candidate_equity_universe', default=None)
+
+
+@contextmanager
+def candidate_universe(universe):
+    """Scope the declared source-bound universe to one strategy screen."""
+    token = _UNIVERSE.set(universe)
+    try:
+        yield
+    finally:
+        _UNIVERSE.reset(token)
+
+
+def _universe_decision(universe, strategy, candidate):
+    if strategy == 'filing_analysis':
+        membership = universe.filing_decision(candidate.metadata.get('source_ciks', []))
+        decision = ('outside_sip_exchange_universe' if membership['status'] == 'excluded'
+                    else 'possible_eligible_issuer' if membership['status'] == 'eligible'
+                    else 'unresolved_issuer')
+    else:
+        membership = None
+        decision = universe.decision(candidate.ticker)
+    evidence = {'policy': universe.evidence['policy'], 'assets_sha256': universe.evidence['assets_sha256'],
+                'decision': decision, 'symbol': candidate.ticker}
+    if membership is not None:
+        evidence['issuer_membership'] = membership
+    return evidence
 
 
 class CandidatePopulation(list[Candidate]):
@@ -36,7 +67,7 @@ def _source_identity(strategy: str, candidate: Candidate) -> str:
         # Invalid source identities remain visible; this ID never substitutes for
         # canonical ledger validation or makes an invalid candidate actionable.
         ignored = {"llm_analysis", "analysis_status", "analysis_failure_reason",
-                   "non_actionable_reason", "discovery_id", "analysis_admitted"}
+                   "non_actionable_reason", "discovery_id", "analysis_admitted", "equity_universe"}
         source = {key: value for key, value in candidate.metadata.items() if key not in ignored}
         payload = json.dumps([strategy, candidate.ticker, source], sort_keys=True, default=str)
         return "unresolved_source_" + hashlib.sha256(payload.encode()).hexdigest()[:24]
@@ -59,6 +90,7 @@ def admit_candidates(
     if any(type(limit) is not int or limit < 0 for limit in limits):
         raise ValueError("analysis admission budget must be a nonnegative integer")
     entries = []
+    universe = _UNIVERSE.get()
     for candidate in candidates:
         source_id = _source_identity(strategy, candidate)
         payload = json.dumps([strategy, source_id, candidate.direction], separators=(",", ":"))
@@ -71,6 +103,10 @@ def admit_candidates(
                "ticker": candidate.ticker, "direction": candidate.direction,
                "score": candidate.score if valid_score else None,
                "journal_only": candidate.journal_only}
+        if universe is not None:
+            row['universe'] = _universe_decision(universe, strategy, candidate)
+            candidate.metadata['equity_universe'] = deepcopy(row['universe'])
+        candidate.metadata.pop('analysis_admitted', None)
         if valid_score:
             rank = rank_key(candidate) if rank_key else (-float(candidate.score), candidate.ticker)
             order = (0, *rank, discovery_id)
@@ -87,6 +123,10 @@ def admit_candidates(
         limit = budget.get(candidate.direction, 0) if isinstance(budget, dict) else budget
         used = direction_counts.get(candidate.direction, 0) if isinstance(budget, dict) else len(selected)
         reason = "admitted" if limit is None or used < limit else "analysis_budget"
+        if row.get('universe', {}).get('decision') in {
+            'outside_sip_exchange_universe', 'inactive_asset', 'absent_from_asset_master'
+        }:
+            reason = 'equity_universe:' + row['universe']['decision']
         if not valid_score:
             reason = "invalid_score"
         snapshot = dict(row, reason=reason)
@@ -101,4 +141,6 @@ def admit_candidates(
     manifest = {"version": 1, "strategy": strategy, "budget": budget,
                 "population": "screen_qualifying_hypotheses", "policy": policy,
                 "discovered": discovered, "admitted": admitted, "excluded": excluded}
+    if universe is not None:
+        manifest['universe_policy'] = universe.evidence['policy']
     return CandidatePopulation(selected, manifest)

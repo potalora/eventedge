@@ -81,6 +81,63 @@ def provider_timeout(provider, maximum=15):
     return min(maximum, remaining)
 
 
+def read_bounded_response(response, *, provider: str, max_bytes: int,
+                          chunk_size: int = 65536) -> bytes:
+    """Read streamed, decompressed bytes within the caller's active budget.
+
+    The request must use stream=True. The caller owns response.close in a
+    finally block. Checks surround every read; an existing socket inactivity
+    timeout remains cooperative, but a late chunk is never accepted.
+    """
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("invalid response byte limit")
+    if type(chunk_size) is not int or not 1 <= chunk_size <= 65536:
+        raise ValueError("invalid response chunk size")
+    provider_timeout(provider)
+    length = response.headers.get("Content-Length")
+    if isinstance(length, str) and length.isascii() and length.isdigit():
+        # A declared over-limit wire body can be rejected before acquisition.
+        # Never trust a smaller declaration: the decompressed count is final.
+        if len(length) > 20 or int(length) > max_bytes:
+            raise SourceFetchError("Provider response exceeds byte limit", reason_code="invalid_response")
+    content = bytearray()
+    try:
+        chunks = iter(response.iter_content(chunk_size=chunk_size))
+        while True:
+            provider_timeout(provider)
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                provider_timeout(provider)
+                break
+            provider_timeout(provider)
+            if not isinstance(chunk, bytes):
+                raise SourceFetchError("Provider response chunk invalid", reason_code="invalid_response")
+            if len(content) + len(chunk) > max_bytes:
+                raise SourceFetchError("Provider response exceeds byte limit", reason_code="invalid_response")
+            content.extend(chunk)
+        provider_timeout(provider)
+        result = bytes(content)
+        provider_timeout(provider)
+        return result
+    except Exception as error:
+        # requests wraps urllib3 body-read timeouts in ConnectionError or
+        # ChunkedEncodingError. Preserve a typed timeout in that bounded chain,
+        # without inspecting messages, URLs or provider bodies.
+        failure = source_fetch_error("Provider response acquisition failed", error)
+        current, seen = error, set()
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            classified = source_fetch_error("Provider response acquisition failed", current)
+            if classified.reason_code == "timeout":
+                failure = classified
+                break
+            current = current.__cause__ or current.__context__
+        raise failure from None
+
+
 def _safe_identity(value):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) else "unknown"
 

@@ -46,8 +46,22 @@ def _source(monkeypatch, *, mutation=None, now=NOW):
     monkeypatch.setenv("ALPACA_SECRET_KEY", "offline-secret")
 
     def get(url, **kwargs):
-        ticker = url.split("/")[-2]
         session = date.fromisoformat(kwargs["params"]["start"][:10])
+        if url == "https://data.alpaca.markets/v2/stocks/bars":
+            body = {
+                "bars": {ticker: [dict(t=f"{session}T04:00:00Z", **dict(zip("ohlc", OBSERVED[ticker, session])))]
+                         for ticker in kwargs["params"]["symbols"].split(",")},
+                "next_page_token": None,
+            }
+            assert mutation is None  # Existing mutation cases exercise scalar scope.
+            import json
+            import requests
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(body).encode()
+            response._content_consumed = True
+            return response
+        ticker = url.split("/")[-2]
         body = {
             "symbol": ticker,
             "bars": [dict(t=f"{session}T04:00:00Z", **dict(zip("ohlc", OBSERVED[ticker, session])))],

@@ -26,6 +26,7 @@ from tradingagents.strategies.execution.alpaca_daily_bar import (
     ADJUSTMENT as SIP_ADJUSTMENT,
     FEED as SIP_FEED,
     HISTORICAL_DELAY,
+    MAX_BATCH_SYMBOLS,
     SOURCE as SIP_SOURCE,
     TIMEFRAME as SIP_TIMEFRAME,
     AlpacaBarFailure,
@@ -1240,9 +1241,11 @@ class AlpacaSIPPriceSource:
         self._bars: OrderedDict[tuple[str, date], AlpacaDailyBarResult] = OrderedDict()
 
     def _fetch(
-        self, ticker: str, session: date, processed_at: datetime, max_age: timedelta
+        self, ticker: str, session: date, processed_at: datetime, max_age: timedelta,
+        *, supplied_result: AlpacaDailyBarResult | None = None,
+        acquired_at: datetime | None = None,
     ) -> tuple[MarketBar | None, AlpacaBarFailure | None, datetime]:
-        fetched_at = self._now()
+        fetched_at = acquired_at if acquired_at is not None else self._now()
         if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
             raise BarValidationError("now must return a timezone-aware datetime")
         if processed_at.tzinfo is None or processed_at.utcoffset() is None:
@@ -1255,10 +1258,13 @@ class AlpacaSIPPriceSource:
             del self._bars[key]
             result = None
         if result is None:
-            try:
-                result = self._sip_source.fetch_daily_bar(ticker, session, now=fetched_at)
-            except Exception:
-                return None, AlpacaBarFailure.TRANSPORT_ERROR, fetched_at
+            if supplied_result is not None:
+                result = supplied_result
+            else:
+                try:
+                    result = self._sip_source.fetch_daily_bar(ticker, session, now=fetched_at)
+                except Exception:
+                    return None, AlpacaBarFailure.TRANSPORT_ERROR, fetched_at
         if not isinstance(result, AlpacaDailyBarResult):
             return None, AlpacaBarFailure.INVALID_RESPONSE, fetched_at
         if result.failure is not None:
@@ -1344,22 +1350,70 @@ class AlpacaSIPPriceSource:
         bars = {}
         attempts = []
         failures = set()
-        for ticker in dict.fromkeys(tickers):
-            bar, failure, fetched_at = self._fetch(ticker, session, processed_at, max_age)
-            attempts.append(
-                CandidateBarAttempt(
-                    ticker, session, 1, SIP_SOURCE, fetched_at,
-                    bar.open if bar else None,
-                    bar.high if bar else None,
-                    bar.low if bar else None,
-                    bar.close if bar else None,
-                    f"{failure.value} {ticker}/{session}" if failure else None,
+        symbols = list(dict.fromkeys(tickers))
+        batch_fetch = getattr(self._sip_source, "fetch_daily_bars", None)
+        # Keep scalar public/provider implementations compatible. Native batches
+        # use only the documented exact-symbol endpoint, with no fallback.
+        use_batch = len(symbols) > 1 and callable(batch_fetch)
+        for offset in range(0, len(symbols), MAX_BATCH_SYMBOLS):
+            chunk = symbols[offset:offset + MAX_BATCH_SYMBOLS]
+            batch_results = None
+            acquired_at = None
+            if use_batch:
+                acquired_at = self._now()
+                if acquired_at.tzinfo is None or acquired_at.utcoffset() is None:
+                    raise BarValidationError("now must return a timezone-aware datetime")
+                pending = [ticker for ticker in chunk if (
+                    (cached := self._bars.get((ticker, session))) is None
+                    or cached.bar is None or acquired_at - cached.bar.fetched_at > max_age
+                )]
+                if pending:
+                    try:
+                        batch_results = batch_fetch(pending, session, now=acquired_at)
+                    except Exception:
+                        batch_results = {ticker: AlpacaDailyBarResult(
+                            None, AlpacaBarFailure.TRANSPORT_ERROR, reason_code="transport_error",
+                        ) for ticker in pending}
+                    if not isinstance(batch_results, dict) or set(batch_results) != set(pending):
+                        batch_results = {ticker: AlpacaDailyBarResult(
+                            None, AlpacaBarFailure.INVALID_RESPONSE, reason_code="invalid_response",
+                        ) for ticker in pending}
+            for ticker in chunk:
+                result = batch_results.get(ticker) if batch_results is not None else None
+                if batch_results is not None and ticker in batch_results and not isinstance(result, AlpacaDailyBarResult):
+                    result = AlpacaDailyBarResult(
+                        None, AlpacaBarFailure.INVALID_RESPONSE, reason_code="invalid_response",
+                    )
+                bar, failure, fetched_at = self._fetch(
+                    ticker, session, processed_at, max_age,
+                    supplied_result=result, acquired_at=acquired_at,
                 )
-            )
-            if bar is not None:
-                bars[(ticker, session)] = bar
-            else:
-                failures.add(ticker)
+                error = f"{failure.value} {ticker}/{session}" if failure else None
+                if failure and result is not None and result.reason_code is not None:
+                    # New fixed diagnostics fit the historical evidence schema.
+                    # Do not remap old strings: immutable replay derives their
+                    # original coarse issue category from that exact prefix.
+                    prefix = failure.value
+                    if result.reason_code == "missing_data":
+                        prefix = "missing"
+                    elif failure in {AlpacaBarFailure.TRANSPORT_ERROR, AlpacaBarFailure.HTTP_ERROR,
+                                     AlpacaBarFailure.MISSING_CREDENTIALS}:
+                        prefix = "provider_error"
+                    elif failure == AlpacaBarFailure.SESSION_NOT_READY:
+                        prefix = "pre-close"
+                    details = f"failure={failure.value};reason={result.reason_code};attempts={result.attempts}"
+                    if result.http_status is not None:
+                        details += f";http_status={result.http_status}"
+                    error = f"{prefix} {ticker}/{session} [{details}]"
+                attempts.append(CandidateBarAttempt(
+                    ticker, session, 1, SIP_SOURCE, fetched_at,
+                    bar.open if bar else None, bar.high if bar else None,
+                    bar.low if bar else None, bar.close if bar else None, error,
+                ))
+                if bar is not None:
+                    bars[(ticker, session)] = bar
+                else:
+                    failures.add(ticker)
         return CandidateBarResolution(
             bars, tuple(attempts), frozenset(), frozenset(failures)
         )

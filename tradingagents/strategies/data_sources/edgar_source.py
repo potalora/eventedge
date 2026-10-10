@@ -715,6 +715,12 @@ class EDGARSource:
             raise SourceFetchError("EDGAR company tickers invalid", reason_code="invalid_response") from None
         self._session_cache[cache_key] = data
 
+    def company_ticker_map(self) -> dict:
+        """Return a detached native CIK/ticker map for the frozen source evidence."""
+        from copy import deepcopy
+        self._ensure_company_tickers()
+        return deepcopy(self._session_cache["_company_tickers"])
+
     def name_to_ticker(
         self,
         company_name: str,

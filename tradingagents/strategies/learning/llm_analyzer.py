@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import copy, deepcopy
 from typing import Any
 
 import httpx
@@ -144,6 +145,36 @@ class LLMAnalyzer:
         self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
         self._client = None
         self._prompt_overrides: dict[str, str] = {}
+
+    def fork_for_parallel(self) -> "LLMAnalyzer":
+        """Isolate mutable analysis state while retaining exact native settings.
+
+        Native clients are read only at the supported constructor-property
+        boundary in call_analysis_model; actual calls use disposable processes.
+        Their lifecycle remains with the original owner. Lazy clients initialize
+        in the fork as before. Injected direct-call clients must explicitly fork.
+        """
+        def fork_client(client):
+            if client is None:
+                return None
+            native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
+            if native_bases & {"openai", "anthropic"}:
+                return client
+            fork = getattr(client, "fork_for_parallel", None)
+            if callable(fork):
+                result = fork()
+                if result is not None and result is not client:
+                    return result
+            raise ValueError("parallel_client_unsupported")
+
+        result = copy(self)
+        result.config = deepcopy(self.config)
+        result._prompt_overrides = dict(self._prompt_overrides)
+        result.last_call_provenance = {}
+        result.last_call_failure = ""
+        result._client = fork_client(self._client)
+        result._provider_clients = {name: fork_client(client) for name, client in self._provider_clients.items()}
+        return result
 
     def get_prompt(self, strategy_name: str) -> str:
         """Return the active system prompt for a strategy."""

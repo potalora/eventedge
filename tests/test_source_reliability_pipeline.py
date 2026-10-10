@@ -74,18 +74,24 @@ class TransportFixture:
         params = kwargs.get("params") or {}
         self.request_trace.append((url, dict(params)))
         if "data.alpaca.markets" in url:
-            ticker = url.split("/")[-2]
             requested = params["start"][:10]
             opening = 184 if requested == "2026-10-05" else 182
-            payload = {"symbol": ticker, "bars": [
-                {"t": f"{requested}T04:00:00Z", "o": opening,
-                 "h": opening + 4, "l": opening - 2, "c": opening + 2,
-                 "v": 1_000_000, "n": 45_000, "vw": opening + 1}
-            ], "next_page_token": None}
-            if self.fault == "sip_incoherent" and ticker == "NVDA":
-                payload["bars"][0]["l"] = opening + 1
-            if self.fault == "sip_unsupported" and ticker == "NVDA":
-                return self.response({}, 404)
+            def bars(ticker):
+                values = [{"t": f"{requested}T04:00:00Z", "o": opening,
+                           "h": opening + 4, "l": opening - 2, "c": opening + 2,
+                           "v": 1_000_000, "n": 45_000, "vw": opening + 1}]
+                if self.fault == "sip_incoherent" and ticker == "NVDA":
+                    values[0]["l"] = opening + 1
+                return values
+            if url == "https://data.alpaca.markets/v2/stocks/bars":
+                payload = {"bars": {ticker: bars(ticker) for ticker in params["symbols"].split(",")
+                                    if not (self.fault == "sip_unsupported" and ticker == "NVDA")},
+                           "next_page_token": None}
+            else:
+                ticker = url.split("/")[-2]
+                if self.fault == "sip_unsupported" and ticker == "NVDA":
+                    return self.response({}, 404)
+                payload = {"symbol": ticker, "bars": bars(ticker), "next_page_token": None}
             return self.response(payload)
         if "finnhub.io" in url:
             if url.endswith("/calendar/earnings"):
@@ -426,7 +432,10 @@ def test_current_full_pipeline_has_44_healthy_and_4_excluded_records_and_16_vali
     assert all(float(signal["reference_close"]) == 184 for row in wire.values() for signal in row["signals"] if signal["ticker"] == "NVDA")
     requests = [(url, params) for url, params in fixture.request_trace if "data.alpaca.markets" in url]
     assert requests and all(params["feed"] == "sip" and params["adjustment"] == "raw" and params["timeframe"] == "1Day" for _, params in requests)
-    assert {url.split("/")[-2] for url, _ in requests} >= {"SPY", "BIL", "NVDA"}
+    requested_symbols = {symbol for url, params in requests
+                         for symbol in (params["symbols"].split(",") if "symbols" in params
+                                        else [url.split("/")[-2]])}
+    assert requested_symbols >= {"SPY", "BIL", "NVDA"}
     for cohort in orchestrator.cohorts:
         context = cohort["ledger"]._connection.execute("SELECT economic_inputs_json FROM session_execution_contexts WHERE session=?", (str(SESSION),)).fetchone()
         frozen = json.loads(context[0])["market"]

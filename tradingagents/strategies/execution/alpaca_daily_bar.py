@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import re
+import json
+import time as clock_time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -23,7 +25,10 @@ from zoneinfo import ZoneInfo
 import requests
 
 from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
-from tradingagents.strategies.data_sources.request_policy import provider_request
+from tradingagents.strategies.data_sources.request_policy import (
+    current_provider_deadline, provider_budget, provider_request,
+    provider_timeout, read_bounded_response,
+)
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.orchestration.trading_calendar import session_close
 
@@ -35,6 +40,14 @@ HISTORICAL_DELAY = timedelta(minutes=15)
 REQUEST_TIMEOUT = (5.0, 20.0)  # connect/read, clipped to remaining budget
 _ET = ZoneInfo("America/New_York")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,15}\Z")
+MAX_BATCH_SYMBOLS = 100
+MAX_BATCH_PAGES = 128
+MAX_BATCH_ROWS = 10000
+MAX_BATCH_BYTES = 8 * 1024 * 1024
+_DIAGNOSTIC_REASONS = frozenset({
+    "timeout", "transport_error", "http_error", "provider_error", "invalid_response",
+    "missing_data", "invalid_request", "missing_credentials", "session_not_ready",
+})
 
 
 class AlpacaBarFailure(str, Enum):
@@ -61,10 +74,23 @@ class AlpacaDailyBarResult:
     response_symbol: str | None = None
     row_count: int | None = None
     pagination_complete: bool = False
+    # Optional new-acquisition diagnostics. Historical recovery records keep
+    # their existing ten fields and validation_error strings unchanged.
+    reason_code: str | None = None
+    http_status: int | None = None
+    attempts: int = 0
 
     def __post_init__(self) -> None:
         if (self.bar is None) == (self.failure is None):
             raise ValueError("exactly one bar or failure is required")
+        if self.reason_code is not None and self.reason_code not in _DIAGNOSTIC_REASONS:
+            raise ValueError("invalid safe SIP diagnostic")
+        if self.http_status is not None and (
+            type(self.http_status) is not int or not 100 <= self.http_status <= 599
+        ):
+            raise ValueError("invalid safe SIP HTTP status")
+        if type(self.attempts) is not int or not 0 <= self.attempts <= 5:
+            raise ValueError("invalid safe SIP attempt count")
 
 
 def _price(value: object) -> Decimal:
@@ -81,6 +107,176 @@ class AlpacaHistoricalSIPSource:
 
     def __init__(self, *, get: Callable | None = None) -> None:
         self._get = get or requests.get
+
+    def fetch_daily_bars(
+        self, tickers: list[str], session: date, *, now: datetime | None = None
+    ) -> dict[str, AlpacaDailyBarResult]:
+        """Collect an exact-symbol SIP batch before publishing any observations.
+
+        The documented multi-stock endpoint can omit symbols with no data.
+        Pagination must complete globally; malformed known-symbol rows fail
+        only that symbol. Unknown identities and incomplete pagination invalidate
+        the whole batch. Every page consumes the same acquisition deadline.
+        https://docs.alpaca.markets/us/reference/stockbars
+        """
+        if current_provider_deadline("alpaca") is None:
+            with provider_budget("alpaca", clock_time.monotonic() + 300):
+                return self.fetch_daily_bars(tickers, session, now=now)
+        symbols = list(dict.fromkeys(tickers))
+        fetched_at = now if now is not None else datetime.now(timezone.utc)
+        start = end = None
+
+        def fail_all(reason, reason_code, *, http_status=None, attempts=0):
+            return {symbol: AlpacaDailyBarResult(
+                None, reason, start, end, reason_code=reason_code,
+                http_status=http_status, attempts=attempts,
+            ) for symbol in symbols}
+
+        try:
+            if (
+                not symbols or len(symbols) > MAX_BATCH_SYMBOLS
+                or any(not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None for symbol in symbols)
+                or type(session) is not date
+                or not isinstance(fetched_at, datetime) or fetched_at.tzinfo is None
+                or fetched_at.utcoffset() is None
+            ):
+                raise ValueError("invalid request")
+            close_at = session_close(session)
+            start = datetime.combine(session, time.min, _ET)
+            next_midnight = datetime.combine(session + timedelta(days=1), time.min, _ET)
+            end = min(fetched_at - HISTORICAL_DELAY, next_midnight - timedelta(microseconds=1))
+        except (ValueError, TypeError, OverflowError):
+            return fail_all(AlpacaBarFailure.INVALID_REQUEST, "invalid_request")
+        if fetched_at < close_at + HISTORICAL_DELAY:
+            return fail_all(AlpacaBarFailure.SESSION_NOT_READY, "session_not_ready")
+        key = os.environ.get("ALPACA_API_KEY", "").strip()
+        secret = os.environ.get("ALPACA_SECRET_KEY", "").strip()
+        if not key or not secret:
+            return fail_all(AlpacaBarFailure.MISSING_CREDENTIALS, "missing_credentials")
+
+        params = {
+            "symbols": ",".join(symbols), "feed": FEED, "adjustment": ADJUSTMENT,
+            "timeframe": TIMEFRAME, "start": start.isoformat(), "end": end.isoformat(),
+            "asof": "-", "currency": "USD", "sort": "asc", "limit": 201,
+        }
+        rows = {symbol: [] for symbol in symbols}
+        invalid_symbols = set()
+        seen_tokens = set()
+        token = None
+        total_bytes = total_rows = 0
+
+        def unique_fields(pairs):
+            result = {}
+            for field, value in pairs:
+                if field in result:
+                    raise ValueError("duplicate response field")
+                result[field] = value
+            return result
+
+        for _ in range(MAX_BATCH_PAGES):
+            response = None
+            try:
+                response = provider_request(
+                    "alpaca", "GET", "https://data.alpaca.markets/v2/stocks/bars",
+                    operation="raw_daily_bars", transport=self._get,
+                    params={**params, **({"page_token": token} if token is not None else {})},
+                    headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                    timeout=REQUEST_TIMEOUT, allow_redirects=False, stream=True,
+                )
+                provider_timeout("alpaca")
+                if response.status_code != 200:
+                    return fail_all(AlpacaBarFailure.HTTP_ERROR, "http_error", http_status=response.status_code)
+                content = read_bounded_response(
+                    response, provider="alpaca", max_bytes=MAX_BATCH_BYTES - total_bytes,
+                )
+                total_bytes += len(content)
+                provider_timeout("alpaca")
+                payload = json.loads(content, parse_float=Decimal, object_pairs_hook=unique_fields)
+                provider_timeout("alpaca")
+                if (
+                    not isinstance(payload, dict) or not isinstance(payload.get("bars"), dict)
+                    or "next_page_token" not in payload
+                    or any(symbol not in rows for symbol in payload["bars"])
+                ):
+                    raise ValueError("invalid batch envelope")
+                next_token = payload["next_page_token"]
+                if next_token is not None and (
+                    not isinstance(next_token, str) or not next_token or len(next_token) > 1024
+                    or next_token in seen_tokens
+                ):
+                    raise ValueError("invalid pagination")
+                for symbol, page_rows in payload["bars"].items():
+                    if not isinstance(page_rows, list):
+                        invalid_symbols.add(symbol)
+                        continue
+                    total_rows += len(page_rows)
+                    if total_rows > MAX_BATCH_ROWS:
+                        raise ValueError("batch row limit")
+                    # More than one row is already a per-symbol failure. Keep
+                    # only enough rows to prove that fact, not full vendor data.
+                    rows[symbol].extend(page_rows[:max(0, 2 - len(rows[symbol]))])
+                if next_token is None:
+                    break
+                seen_tokens.add(next_token)
+                token = next_token
+            except SourceFetchError as error:
+                if error.reason_code == "invalid_response":
+                    return fail_all(AlpacaBarFailure.INVALID_RESPONSE, "invalid_response")
+                return fail_all(
+                    AlpacaBarFailure.HTTP_ERROR if error.http_status is not None else AlpacaBarFailure.TRANSPORT_ERROR,
+                    error.reason_code, http_status=error.http_status, attempts=error.attempts,
+                )
+            except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+                return fail_all(AlpacaBarFailure.INVALID_RESPONSE, "invalid_response")
+            except Exception:
+                return fail_all(AlpacaBarFailure.TRANSPORT_ERROR, "transport_error")
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass  # Cleanup cannot replace validated data or leak provider text.
+        else:
+            return fail_all(AlpacaBarFailure.INVALID_RESPONSE, "invalid_response")
+
+        try:
+            provider_timeout("alpaca")
+        except SourceFetchError:
+            return fail_all(AlpacaBarFailure.TRANSPORT_ERROR, "timeout")
+        results = {}
+        for symbol in symbols:
+            symbol_rows = rows[symbol]
+            if symbol not in invalid_symbols and not symbol_rows:
+                results[symbol] = AlpacaDailyBarResult(
+                    None, AlpacaBarFailure.INVALID_RESPONSE, start, end,
+                    response_symbol=symbol, row_count=0, pagination_complete=True, reason_code="missing_data",
+                )
+                continue
+            try:
+                if symbol in invalid_symbols or len(symbol_rows) != 1:
+                    raise ValueError("invalid symbol rows")
+                row = symbol_rows[0]
+                if not isinstance(row, dict) or not isinstance(row.get("t"), str):
+                    raise ValueError("invalid row")
+                stamp = datetime.fromisoformat(row["t"].replace("Z", "+00:00"))
+                if stamp.tzinfo is None or stamp.utcoffset() is None or stamp != start:
+                    raise ValueError("invalid timestamp")
+                op, high, low, close = (_price(row[field]) for field in ("o", "h", "l", "c"))
+                if high < max(op, close) or low > min(op, close) or high < low:
+                    raise ValueError("incoherent prices")
+                results[symbol] = AlpacaDailyBarResult(
+                    MarketBar(symbol, session, op, high, low, close, SOURCE, fetched_at, False),
+                    None, start, end, stamp, response_symbol=symbol, row_count=1, pagination_complete=True,
+                )
+            except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError):
+                results[symbol] = AlpacaDailyBarResult(
+                    None, AlpacaBarFailure.INVALID_RESPONSE, start, end, reason_code="invalid_response",
+                )
+        try:
+            provider_timeout("alpaca")
+        except SourceFetchError:
+            return fail_all(AlpacaBarFailure.TRANSPORT_ERROR, "timeout")
+        return results
 
     def fetch_daily_bar(
         self, ticker: str, session: date, *, now: datetime | None = None

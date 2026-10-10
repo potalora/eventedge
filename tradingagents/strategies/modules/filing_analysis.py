@@ -74,6 +74,7 @@ class FilingAnalysisStrategy:
                 "accession_number": filing.get("accession_number")
                 or filing.get("adsh"),
                 "file_url": filing.get("file_url", ""),
+                "source_ciks": list(filing.get("ciks", [])),
             }
 
             # 10-K / 10-Q → material changes analysis (from P3)

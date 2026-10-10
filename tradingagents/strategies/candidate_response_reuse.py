@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
+from threading import Lock
 
 from .runtime_deadline import model_timeout
 
@@ -27,6 +28,7 @@ class _Memo:
     # Exact private settings comparisons assign opaque, invocation-local IDs.
     # Credentials/headers/endpoints never enter serialized keys or provenance.
     client_settings: list[tuple] = field(default_factory=list)
+    lock: Lock = field(default_factory=Lock, repr=False)
 
 
 @dataclass(repr=False)
@@ -76,11 +78,12 @@ def _client_namespace(memo: _Memo, client) -> int | None:
                 client.project if provider == "openai" else None)
     if any(value is not None and not isinstance(value, str) for value in settings[1:3] + settings[4:]):
         return None
-    for index, accepted in enumerate(memo.client_settings):
-        if accepted == settings:
-            return index
-    memo.client_settings.append(settings)
-    return len(memo.client_settings) - 1
+    with memo.lock:
+        for index, accepted in enumerate(memo.client_settings):
+            if accepted == settings:
+                return index
+        memo.client_settings.append(settings)
+        return len(memo.client_settings) - 1
 
 
 def reused_candidate_response(client, *, model: str, system: str, prompt: str,
@@ -103,7 +106,8 @@ def reused_candidate_response(client, *, model: str, system: str, prompt: str,
         digest = _request_digest(key)
         request.key = key
         request.digest = digest
-        accepted = request.memo.entries.get(key)
+        with request.memo.lock:
+            accepted = request.memo.entries.get(key)
     except (AttributeError, TypeError, ValueError):
         return None
     if accepted is None:
@@ -137,6 +141,9 @@ def commit_candidate_response():
     if request is None or request.key is None or request.pending is None:
         return None
     accepted = request.pending
-    request.memo.entries[request.key] = _Response(accepted.text, deepcopy(accepted.provenance))
+    response = _Response(accepted.text, deepcopy(accepted.provenance))
+    with request.memo.lock:
+        model_timeout()
+        request.memo.entries[request.key] = response
     request.pending = None
     return {"reused": False, "scope": "horizon_screening", "request_digest": request.digest}
