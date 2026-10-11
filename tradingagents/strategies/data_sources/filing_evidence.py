@@ -504,9 +504,10 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
                    max_total_text_bytes=32 * 1024 * 1024, body_reader=None, check=None) -> dict:
     """Build whole selected-document evidence, not a semantic completeness verdict.
 
-    Includes primary and exact local exhibit href targets; callers specify further
-    task-required filenames or exact exhibit types. External/internal hrefs remain
-    an inventory for assessment, never guessed into missing SEC exhibit numbers.
+    Includes primary and exact local exhibit href targets. Ownership XML also
+    includes every native same-submission EX-* document; its schema fields do
+    not provide HTML href selection. Callers specify further task-required
+    filenames or exact exhibit types. No missing exhibit numbers are guessed.
     """
     _check(check)
     documents = parsed['documents']
@@ -515,6 +516,11 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
     primary = documents[primary_index]
     by_name = {d['filename']: i for i, d in enumerate(documents)}
     selected = {primary_index}
+    if parsed['form'].startswith('SCHEDULE 13') and primary['filename'].lower().endswith('.xml'):
+        # The native document role identifies local exhibits without inferring
+        # filenames from prose. XML and every selected body still validate below.
+        selected.update(index for index, document in enumerate(documents)
+                        if document['type'].upper().startswith('EX-'))
     dependencies, issues = [], []
     primary_soup = None
     primary_size = (primary['body_end'] - primary['body_start']) if body_reader else len(primary['body'])

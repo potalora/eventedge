@@ -39,6 +39,7 @@ Audit IDs are qualified by component because the source and strategy audits each
 | B3/B4: committee semantics and evidence | Successful empty response abstains; invalid/error response degrades and holds cash; all admitted theses and marked positions visible; immutable decision before staging | `test_decision_visibility.py`, `test_decision_visibility_pipeline.py`, partial staging replay |
 | B5: hidden sampling | Deterministic discovered/admitted/excluded manifests for bounded screens and Finnhub acquisition, including article limits | Decision visibility and acquisition admission regressions |
 | B6: modern ownership filings | Modern/legacy base queries include amendments, accession identities retained, subject verification still required | `test_provider_meaning_contracts.py` |
+| Ownership XML omitted local exhibits | Select every same-submission native `EX-*` inventory document without prose/filename inference; retain body/hash/format/size and insufficient-assessment checks | `test_filing_ownership_dependencies.py`, parser/assessment/hydration/dispatch regressions |
 | B7: old award edits as new wins | Base obligation window and native award identity; amount explicitly means observed cumulative obligations on a newly originated award | Provider meaning and USAspending source tests |
 | B8: unsupported wheat geography | Declared crop/class/state comparison scope and season; full current active coverage; explicit inactive classes | `test_environmental_contract_repairs.py`, USDA and source reliability pipeline tests |
 | B9: opinion identity | Cluster, docket and nested opinion identities remain distinct | Provider meaning contracts |
@@ -48,6 +49,8 @@ Audit IDs are qualified by component because the source and strategy audits each
 | Research interpretation | Cost stress, realized contribution concentration, lagged exposure attribution, dependence-aware uncertainty and explicit empirical-evidence limits | `test_research_diagnostics.py` |
 
 The execution model settles prior open exits/gap stops before opening entries, then intraday stops. Known carrying charges and entry costs affect admission; marked short collateral blocks further exposure on deficiency. This is a conservative daily-bar paper model, without locates, broker liquidation, intraday trajectories or option-accounting claims.
+
+The ownership XML exhibit repair is locally verified. Missing external agreements and ownership base/prior chains remain unresolved and cannot become neutral or sufficient through this repair. The current native attempt did not pass full readiness; no additional quarantine or history waiver is implied.
 
 ## Forward-readiness repairs
 
