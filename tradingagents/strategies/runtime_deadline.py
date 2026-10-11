@@ -25,7 +25,9 @@ class ModelDeadlineExceeded(TimeoutError):
 
 
 class ModelTransportError(RuntimeError):
-    def __init__(self, reason: str, status_code: int | None = None):
+    def __init__(self, reason: str, status_code: int | None = None, *, error_metadata=None):
+        from tradingagents.strategies.transport_worker import validate_error_metadata
+        self.error_metadata = validate_error_metadata(error_metadata)
         self.status_code = status_code
         super().__init__(f"Model transport failed ({reason}, status={status_code})")
 

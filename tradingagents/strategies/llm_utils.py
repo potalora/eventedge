@@ -140,7 +140,8 @@ def call_analysis_model(
     if result.get("error") == "timeout":
         raise ModelDeadlineExceeded("model_deadline_exhausted")
     if result.get("error"):
-        raise ModelTransportError(result["error"], result.get("status_code"))
+        raise ModelTransportError(result["error"], result.get("status_code"),
+                                  error_metadata=result.get("error_metadata"))
     if provenance is not None:
         provenance.update(result["provenance"])
     model_timeout()  # A response arriving after the shared deadline is unusable.
