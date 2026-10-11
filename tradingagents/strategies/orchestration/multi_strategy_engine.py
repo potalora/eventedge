@@ -2338,6 +2338,8 @@ class MultiStrategyEngine:
             days_back=14,
             **({'evidence_policy': self.ar_config['regulation_evidence_policy']}
                if self.ar_config.get('regulation_evidence_policy') is not None else {}),
+            **({'retrieval_policy': self.ar_config['regulation_retrieval_policy']}
+               if self.ar_config.get('regulation_retrieval_policy') is not None else {}),
         )
         result["proposed_rules"] = list(rules)
         if hasattr(rules, "coverage"):
@@ -2883,9 +2885,15 @@ class MultiStrategyEngine:
                     c.metadata['filing_assessment'] = llm_result
                     raise ValueError('missing_required_filing_analysis')
             elif full_regulation:
-                from tradingagents.strategies.orchestration.regulation_inputs import regulation_analysis_inputs
+                from tradingagents.strategies.orchestration.regulation_inputs import (
+                    regulation_analysis_inputs, validate_regulation_policy,
+                )
                 if self.ar_config.get('regulation_evidence_policy') not in (None, 'complete_document_text_v1'):
                     raise ValueError('invalid_regulation_evidence_policy')
+                source_graph = (filing_data or {}).get('regulations', {}).get('regulation_evidence', {})
+                if (self.ar_config.get('regulation_retrieval_policy') is not None
+                        or source_graph.get('retrieval_policy') is not None):
+                    validate_regulation_policy(filing_data, self.ar_config)
                 regulation_arguments = regulation_analysis_inputs(c, filing_data, universe)
                 regulation_call_started = True
                 llm_result = analyzer.analyze_regulation_evidence(

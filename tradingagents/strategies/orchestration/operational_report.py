@@ -529,6 +529,8 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
         from .regulation_inputs import validate_regulation_policy
         regulation_config = ({'regulation_evidence_policy': regulation_graph.get('policy')}
                              if isinstance(regulation_graph, dict) else {})
+        if isinstance(regulation_graph, dict) and 'retrieval_policy' in regulation_graph:
+            regulation_config['regulation_retrieval_policy'] = regulation_graph['retrieval_policy']
         regulation_scope = validate_regulation_policy(envelope['payload'], regulation_config)
         if regulation_scope is not None:
             result['regulation_source_coverage'] = regulation_scope
@@ -710,7 +712,9 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                     and not getattr(strategy, 'retirement_reason', None)}
                 report['sources']['regulation_analysis_coverage'] = validate_regulation_health(
                     retained_sources, health, {row['policy_id'] for row in health}, strategy_sources,
-                    {'regulation_evidence_policy': expected_regulation['policy']})
+                    {'regulation_evidence_policy': expected_regulation['policy'],
+                     **({'regulation_retrieval_policy': expected_regulation['retrieval_policy']}
+                        if 'retrieval_policy' in expected_regulation else {})})
             elif any('regulation_source_coverage' in row['evidence'] for row in health):
                 raise ValueError('unbound regulation health')
         except (ValueError, TypeError, KeyError):
@@ -854,6 +858,8 @@ def render_operational_report(report: dict) -> str:
         lines.extend(['', f"Regulatory acquisition complete: {str(scope['content_complete']).lower()}; "
             f"{scope['complete_rows']} of {scope['required_rows']} document occurrences acquired completely; "
             f"{scope['failed_rows']} failed occurrences."])
+        if scope.get('retrieval_policy'):
+            lines.append(f"Regulatory retrieval policy: {scope['retrieval_policy']}.")
         analysis = report['sources'].get('regulation_analysis_coverage')
         if analysis is not None:
             lines.append(f"Regulatory analysis complete across configured horizons: {str(analysis['analysis_complete']).lower()}. "

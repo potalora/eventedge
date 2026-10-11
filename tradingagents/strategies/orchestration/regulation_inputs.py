@@ -11,8 +11,14 @@ def validate_regulation_policy(data, config):
     """Recheck the declared source contract without fetching or exempting failures."""
     try:
         policy = config.get('regulation_evidence_policy')
+        retrieval = config.get('regulation_retrieval_policy')
+        if retrieval is not None and (
+                retrieval != 'verified_government_copy_v1' or policy != POLICY):
+            raise ValueError('invalid regulation retrieval policy')
         source = data.get('regulations', {})
         graph = source.get('regulation_evidence')
+        if graph is not None and graph.get('retrieval_policy') != retrieval:
+            raise ValueError('regulation retrieval policy differs from configured scope')
         labeled = any(any(key in row for key in ('regulation_evidence_ref',
             'regulation_evidence_status', 'regulation_failure')) for row in source.get('proposed_rules', []))
         if policy is None:

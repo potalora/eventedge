@@ -4,3 +4,6 @@ tests/fixtures/edgar-ownership-index-*.html -text whitespace=-blank-at-eol
 # Raw SEC framing fixtures retain native CR/CRLF bytes and source whitespace.
 tests/fixtures/filing_evidence/*.nc -text -diff
 tests/fixtures/filing_evidence/native_13g_direct.txt -text -diff
+
+# Government originals retain native preformatted columns and trailing spaces.
+tests/fixtures/regulation_govinfo_*.htm -text whitespace=-blank-at-eol

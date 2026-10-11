@@ -219,11 +219,12 @@ def _retry_after(response):
     return max(0.0, delay) if math.isfinite(delay) else 0.0
 
 
-def _run(provider, operation, attempt, *, before_attempt=None):
+def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=()):
     budget = _CURRENT.get()
     if budget is None or budget.provider != provider:
         with provider_budget(provider, time.monotonic() + 60):
-            return _run(provider, operation, attempt, before_attempt=before_attempt)
+            return _run(provider, operation, attempt, before_attempt=before_attempt,
+                        return_statuses=return_statuses)
     error = None
     attempts = 0
     response = None
@@ -237,6 +238,15 @@ def _run(provider, operation, attempt, *, before_attempt=None):
             response = attempt(budget.deadline - budget.clock())
             status = getattr(response, "status_code", None)
             if isinstance(status, int) and not 200 <= status < 300:
+                if status in return_statuses:
+                    # Explicitly transfer this non-retryable HTTP error to a
+                    # bounded body owner. The status remains an error in the
+                    # diagnostics; returning it does not certify acquisition.
+                    provider_timeout(provider)
+                    budget.diagnostics.append({"provider": _safe_identity(provider),
+                        "operation": _safe_identity(operation), "reason_code": "http_error",
+                        "http_status": status, "attempts": attempts, "recovered": False})
+                    return response
                 raise SourceFetchError("Provider HTTP request failed", reason_code="http_error", http_status=status)
             budget.diagnostics.append({"provider": _safe_identity(provider), "operation": _safe_identity(operation),
                                        "reason_code": None, "http_status": status if isinstance(status, int) else None,
@@ -270,14 +280,22 @@ def _run(provider, operation, attempt, *, before_attempt=None):
 
 
 def provider_request(provider, method, url, *, operation=None, transport=None,
-                     before_attempt=None, **kwargs):
+                     before_attempt=None, return_statuses=(), **kwargs):
     """Request with bounded retries, retaining requests.get/post monkeypatches.
 
     transport optionally supplies a session's bound get/post for providers with
     required transport adapters. It has the same (url, **kwargs) protocol.
     before_attempt can reject a capped acquisition before any rate slot is
     reserved. It runs for every retry and must not acquire or count requests.
+    return_statuses explicitly transfers selected non-retryable HTTP errors to
+    the caller, which must bound the body read and close the response. It cannot
+    disable transient retries or create a fresh deadline.
     """
+    if (type(return_statuses) is not tuple or len(return_statuses) > 16
+            or any(type(status) is not int or not 300 <= status <= 599
+                   or status in _RETRY_STATUS for status in return_statuses)
+            or len(set(return_statuses)) != len(return_statuses)):
+        raise ValueError("invalid returned HTTP status policy")
     method = method.lower()
     request = transport or getattr(requests, method)
     def attempt(remaining):
@@ -290,9 +308,10 @@ def provider_request(provider, method, url, *, operation=None, transport=None,
         else:
             options["timeout"] = max(0.001, min(timeout or 15, remaining))
         return request(url, **options)
-    if before_attempt is None:
-        return _run(provider, operation or method, attempt)
-    return _run(provider, operation or method, attempt, before_attempt=before_attempt)
+    options = {'return_statuses': return_statuses} if return_statuses else {}
+    if before_attempt is not None:
+        options['before_attempt'] = before_attempt
+    return _run(provider, operation or method, attempt, **options)
 
 
 def provider_call(provider, operation, callable, *, maximum_seconds=None):

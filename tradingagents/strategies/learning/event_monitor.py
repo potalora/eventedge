@@ -525,7 +525,7 @@ class EventMonitor:
 
     def poll_proposed_rules(
         self, agencies: list[str] | None = None, days_back: int = 14,
-        *, evidence_policy: str | None = None,
+        *, evidence_policy: str | None = None, retrieval_policy: str | None = None,
     ) -> list[dict]:
         """Poll regulations.gov for recently proposed rules."""
         source = self.registry.get("regulations")
@@ -537,6 +537,8 @@ class EventMonitor:
         options = {"agencies": agencies, "days_back": days_back}
         if evidence_policy is not None:
             options['evidence_policy'] = evidence_policy
+        if retrieval_policy is not None:
+            options['retrieval_policy'] = retrieval_policy
         if self.as_of:
             options["as_of"] = self.as_of
         rules = source.get_recent_proposed_rules(**options)

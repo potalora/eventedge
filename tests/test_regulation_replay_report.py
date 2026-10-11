@@ -21,10 +21,19 @@ POLICIES = {'foundation-' + value for value in ('30d', '3m', '6m', '1y')}
 STRATEGIES = {'regulatory_pipeline': RegulatoryPipelineStrategy.data_sources}
 
 
-def completed(tmp_path, monkeypatch, *, insufficient=False):
-    _, data, assets = inputs(monkeypatch)
+def completed(tmp_path, monkeypatch, *, insufficient=False, government_copy=False):
+    config = dict(CONFIG)
+    if government_copy:
+        from test_regulation_government_acquisition import setup_transport, acquire, payload
+        from test_regulation_assessment import universe
+        setup_transport(monkeypatch)
+        assets, companies = universe()
+        data = {'regulations': payload(acquire()), 'edgar': {'company_tickers': companies}}
+        config['regulation_retrieval_policy'] = 'verified_government_copy_v1'
+    else:
+        _, data, assets = inputs(monkeypatch)
     data.update(yfinance={}, openbb={}, equity_universe={'snapshot': assets.evidence})
-    engine = MultiStrategyEngine(config={'autoresearch': {**CONFIG, 'state_dir': str(tmp_path),
+    engine = MultiStrategyEngine(config={'autoresearch': {**config, 'state_dir': str(tmp_path),
         'equity_universe_policy': 'us_exchange_listed_sip_v1'}}, strategies=[RegulatoryPipelineStrategy()])
     monkeypatch.setattr(engine, '_build_regime_model', lambda _: {})
     engine._analyzer = LLMAnalyzer()
@@ -39,12 +48,14 @@ def completed(tmp_path, monkeypatch, *, insufficient=False):
     return data, rows
 
 
-def test_completed_no_thesis_is_recomputed_without_source_or_model_calls(tmp_path, monkeypatch):
-    data, records = completed(tmp_path, monkeypatch)
+@pytest.mark.parametrize('government_copy', [False, True])
+def test_completed_no_thesis_is_recomputed_without_source_or_model_calls(tmp_path, monkeypatch, government_copy):
+    data, records = completed(tmp_path, monkeypatch, government_copy=government_copy)
     original = deepcopy(data)
     monkeypatch.setattr(LLMAnalyzer, '_call_llm', lambda *a, **k: pytest.fail('new model call'))
     monkeypatch.setattr(source, 'provider_request', lambda *a, **k: pytest.fail('new source call'))
-    result = validate_regulation_health(data, records, POLICIES, STRATEGIES, CONFIG)
+    config = {**CONFIG, **({'regulation_retrieval_policy': 'verified_government_copy_v1'} if government_copy else {})}
+    result = validate_regulation_health(data, records, POLICIES, STRATEGIES, config)
     assert result['analysis_complete'] is True
     assert len(result['horizons']) == 4
     assert all(row['assessed_documents'] == 1 for row in result['horizons'])
@@ -131,10 +142,11 @@ from test_prospective_replay_integrity import rewrite_payload
 
 
 @pytest.mark.parametrize('tamper', [False, True])
-def test_operational_report_separates_acquisition_and_analysis(native_evidence, tmp_path, monkeypatch, tamper):
+@pytest.mark.parametrize('government_copy', [False, True])
+def test_operational_report_separates_acquisition_and_analysis(native_evidence, tmp_path, monkeypatch, tamper, government_copy):
     from tradingagents.strategies.orchestration.operational_report import render_operational_report
     repo, state, wire = native_evidence
-    data, records = completed(tmp_path / 'engine', monkeypatch)
+    data, records = completed(tmp_path / 'engine', monkeypatch, government_copy=government_copy)
     rewrite_payload(next((state / 'source_inputs').glob('*.json')), lambda payload: payload.update(data))
     with sqlite3.connect(state / 'metrics_v2.sqlite3') as connection:
         changed = False
@@ -159,9 +171,13 @@ def test_operational_report_separates_acquisition_and_analysis(native_evidence, 
     _attempt(repo, wire)
     report = _report(repo)
     assert report['sources']['regulation_source_coverage']['content_complete'] is True
+    if government_copy:
+        assert report['sources']['regulation_source_coverage']['retrieval_policy'] == 'verified_government_copy_v1'
     assert ({'code': 'regulation_evidence_conflict'} in report['diagnostics']) is tamper
     rendered = render_operational_report(report)
     assert 'Regulatory acquisition complete: true' in rendered
+    if government_copy:
+        assert 'Regulatory retrieval policy: verified_government_copy_v1' in rendered
     if not tamper:
         assert report['sources']['regulation_analysis_coverage']['analysis_complete'] is True
         assert 'Regulatory analysis complete across configured horizons: true' in rendered

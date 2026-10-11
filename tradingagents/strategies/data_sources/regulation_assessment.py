@@ -117,10 +117,19 @@ at most {MAX_STRING} characters. Never stitch fields, paragraphs, lines or ellip
 State only conclusions supported by all relevant rule text. Missing incorporated material,
 unresolved applicability or an unproved issuer/exposure relationship remains insufficient.
 '''
+    request_units = []
+    for unit in evidence['units']:
+        projected = {key: unit[key] for key in ('unit_id', 'resource_id', 'role', 'text', 'text_sha256', 'representation')}
+        annotations = [{'kind': 'subscript', 'text_codepoint_start': change['text_codepoint_start'],
+                        'text_codepoint_end': change['text_codepoint_end']}
+                       for change in unit.get('government_copy', {}).get('transformations', [])
+                       if change['kind'] == 'govinfo_inf_notation_v1']
+        if annotations:
+            projected['text_annotations'] = annotations
+        request_units.append(projected)
     user = _json({'contract_version': VERSION, 'identity': evidence['identity'],
         'evidence_sha256': evidence['manifest_sha256'], 'resources': evidence['resources'],
-        'units': [{key: unit[key] for key in ('unit_id', 'resource_id', 'role', 'text', 'text_sha256', 'representation')}
-                  for unit in evidence['units']], 'target_bindings': list(targets.values()),
+        'units': request_units, 'target_bindings': list(targets.values()),
         'regime_context': regime_context})
     if len(system.encode('utf-8')) + len(user.encode('utf-8')) > MAX_PROMPT_BYTES:
         fail('prompt_limit')
