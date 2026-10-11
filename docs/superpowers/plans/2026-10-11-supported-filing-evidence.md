@@ -20,6 +20,8 @@ The structural-v2 checkpoint `65e679c` passed 6,269 local non-live tests (four l
 
 ## Global constraints
 
+The source-bound follow-up also proves one required raw HTML exhibit exceeds the fixed 16 MiB document cap (22,834,891 bytes), four nonempty image-only exhibits have empty text projections, and two whole-exhibit incorporation records exceed their unchanged quote cap. See `docs/verification/structural-visual-pdf.md` for the exact sources and pending proposals. No resource cap or unresolved acquisition duty has been waived. The requested HTML-only 24 MiB budget decision remains pending; HTML structural scope and native disk headroom also remain unresolved.
+
 - Existing worktree `.worktrees/governed-sip-release`, branch `codex/audit-reliability-fixes`, base `8f69cc90ab854f5290d10eb43360d1b624a1084b`. Root owns Git operations.
 - No merge, main push, production changes, service/timer changes, paid API fallback, or budget increases. Future deployment requires a new generation.
 - Retain source900/model2400/per-call120 seconds and all existing memory, byte, worker, corpus and spool caps. All evidence and private reports remain local and private.
