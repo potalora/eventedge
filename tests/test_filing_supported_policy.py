@@ -92,7 +92,10 @@ def test_image_only_deferred_without_interpreting_materiality():
 
 
 def test_mixed_visual_plus_text_capability_gap_stays_failed():
-    receipt = run(pdf_source(image=True))
+    # V2 now verifies ordinary Tj/TJ shows beside an image. Keep a real
+    # unresolved mixed-font layout capability in this failure-precedence case.
+    receipt = run(pdf_source(image=True,
+        text=b'BT /F1 12 Tf 72 700 Td (Hello.) Tj /F1 10 Tf 0 -30 Td (Small.) Tj ET'))
     assert receipt['status'] == 'failed'
     assert receipt['reasons'][0]['code'] == 'unsupported_selected_visual_content'
     assert receipt['residual_failures'][0]['failure']['code'] == 'pdf_capability_limit'
@@ -136,7 +139,8 @@ def test_rehashed_invented_model_semantic_claim_rejected_by_raw_audit():
 
 
 def test_rehashed_stripped_capability_failure_rejected_by_parent_binding():
-    case = pdf_source(image=True)
+    case = pdf_source(image=True,
+        text=b'BT /F1 12 Tf 72 700 Td (Hello.) Tj /F1 10 Tf 0 -30 Td (Small.) Tj ET')
     proof = case[2]['source_proofs'][ACCESSION]
     proof['residual_failures'] = []
     reseal(proof)

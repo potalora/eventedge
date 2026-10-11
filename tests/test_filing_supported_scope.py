@@ -14,7 +14,9 @@ CONFIG = {'filing_material_policy': policy.POLICY, 'filing_evidence_policy':'com
 
 
 def graph_case(*, visual=False, mixed=False, duplicate=False, row_failure=None):
-    evidence, raw, inputs = pdf_source(image=True, text=b'' if not mixed else b'BT /F1 12 Tf 72 700 Td (Text.) Tj ET') if visual else source()
+    # Mixed font sizes retain a real v2 capability gap; plain native text plus
+    # an inventoried image no longer has the historical extraction defect.
+    evidence, raw, inputs = pdf_source(image=True, text=b'' if not mixed else b'BT /F1 12 Tf 72 700 Td (Text.) Tj /F1 10 Tf 0 -30 Td (Small.) Tj ET') if visual else source()
     acc = evidence['accession']
     evidence['supported_document_policy'] = policy.POLICY
     evidence.setdefault('pdf_evidence', {})
@@ -81,6 +83,8 @@ def test_pdf_capability_failure_is_not_deferred():
     edgar = graph_case(visual=True,mixed=True)
     scope = validate_filing_material_policy({'edgar':edgar},CONFIG)
     assert scope['deferred_rows'] == 0 and scope['disposition_failed_rows'] == 1
+    receipt = next(iter(edgar['filing_evidence']['supported_dispositions'].values()))
+    assert receipt['residual_failures'][0]['failure']['code'] == 'pdf_capability_limit'
     assert scope['scoped_complete'] is False
 
 

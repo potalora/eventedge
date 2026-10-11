@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import gzip
 import json
 import errno
 import math
@@ -35,6 +36,11 @@ def _failure(reason='invalid_response'):
     return SourceFetchError('SEC submission spool failed', reason_code=reason)
 
 
+def _encoded_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mode, info.st_uid,
+            info.st_nlink, info.st_mtime_ns, info.st_ctime_ns)
+
+
 @dataclass(frozen=True, eq=False)
 class CompletedSubmission:
     path: Path
@@ -53,6 +59,52 @@ class RetainedLease:
 
 
 @dataclass(frozen=True, eq=False)
+class EncodedOriginalLease:
+    path: Path
+    record: CompletedSubmission
+    size: int
+    sha256: str
+    encoding: str
+
+
+class _EncodedWriter:
+    """Unbuffered gzip sink; capture reservation always precedes owner locking."""
+    def __init__(self, owner, entry, reserve_external):
+        self.owner, self.entry = owner, entry
+        self.reserve_external = reserve_external
+        self.digest = hashlib.sha256()
+
+    def write(self, data):
+        for start in range(0, len(data), 65536):
+            part = data[start:start+65536]
+            self.owner.check()
+            # GzipFile may call close() from a failed constructor's destructor.
+            # A stale sink must not reserve capture quota or revive its ledger.
+            if not self.entry['writing'] or self.entry['fd'] is None:
+                raise _failure()
+            # The caller holds the capture lock for the entire operation.
+            # Calling this under _lock would invert capture -> owner ordering.
+            if self.reserve_external is not None:
+                self.reserve_external(len(part))
+            with self.owner._lock:
+                if not self.entry['writing'] or self.entry['fd'] is None:
+                    raise _failure()
+                self.owner._reserve(len(part))
+                self.entry['size'] += len(part)
+                self.owner._account()
+                offset = 0
+                while offset < len(part):
+                    self.owner.check()
+                    written = os.write(self.entry['fd'], part[offset:])
+                    if not written or written > len(part)-offset:
+                        raise _failure('transport_error')
+                    offset += written
+                    self.owner.check()
+            self.digest.update(part)
+        return len(data)
+
+
+@dataclass(frozen=True, eq=False)
 class ChildCopyLease:
     record: CompletedSubmission
     size: int
@@ -67,6 +119,7 @@ class SpoolScope:
         self._lock = threading.RLock()
         self._closed, self._closing = False, False
         self._entries, self._records, self._retained, self._children = {}, {}, {}, {}
+        self._encoded = {}
         self._reconciliations = {}
         self._counts = {key: 0 for key in ('retained_bytes', 'parent_bytes', 'child_bytes',
             'transient_bytes', 'total_bytes', 'completed_objects', 'failed_objects', 'active_child_copies', 'active_parent_writers', 'active_parent_readers', 'cleanup_failures')}
@@ -228,6 +281,163 @@ class SpoolScope:
             entry['aliases'].remove(lease)
             self._account()
 
+    def retain_encoded(self, record, destination, *, reserve_external=None):
+        """Retain one verified gzip original as a separately charged inode.
+
+        A capture caller must hold its capture lock before entering this method.
+        Its optional callback reserves capture bytes before each bounded write;
+        reservations are deliberately not refunded after an ambiguous failure.
+        """
+        destination = Path(os.path.abspath(destination))
+        entry, lease, close_attempted = None, None, False
+        try:
+            with self.open_completed(record) as source:
+                with self._lock:
+                    self.check()
+                    existing = self._entries.get(destination)
+                    if existing is not None and (existing['parent'] or existing['aliases']
+                                                 or existing['fd'] is not None):
+                        raise _failure()
+                    # Pin the destination directory's identity for publication
+                    # and cleanup; never remove a name in a substituted parent.
+                    parent = destination.parent.lstat()
+                    if not stat.S_ISDIR(parent.st_mode):
+                        raise _failure()
+                    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    entry = {'size': 0, 'parent': True, 'aliases': set(), 'inode': None,
+                        'children': 0, 'readers': 0, 'reader_fds': [], 'discard': False,
+                        'fd': fd, 'writing': True, 'encoded': True,
+                        'directory_inode': (parent.st_dev, parent.st_ino)}
+                    self._entries[destination] = entry
+                    self._account()
+                    info = os.fstat(fd)
+                    entry['inode'] = (info.st_dev, info.st_ino)
+                    self._validate_encoded_name(destination, entry)
+                sink = _EncodedWriter(self, entry, reserve_external)
+                digest, count = hashlib.sha256(), 0
+                # GzipFile emits the fixed canonical header, including OS=255.
+                with gzip.GzipFile(filename='', mode='wb', compresslevel=1,
+                                   fileobj=sink, mtime=0) as encoded:
+                    while True:
+                        self.check()
+                        chunk = source.read(65536)
+                        self.check()
+                        if not chunk:
+                            break
+                        count += len(chunk)
+                        if count > record.size:
+                            raise _failure()
+                        digest.update(chunk)
+                        encoded.write(chunk)
+                    if count != record.size or digest.hexdigest() != record.sha256:
+                        raise _failure()
+                self.check()
+                os.fchmod(entry['fd'], 0o400)
+                with self._lock:
+                    close_attempted = True
+                    self._close_owned_fd(entry)
+                self.check()
+                # Independently read the closed output; the write digest alone
+                # cannot establish the identity or contents of the published file.
+                with self._lock:
+                    stored_identity = _encoded_identity(
+                        self._validate_encoded_name(destination, entry, closed=True))
+                    entry['fd'] = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
+                    close_attempted = False
+                    info = os.fstat(entry['fd'])
+                    if _encoded_identity(info) != stored_identity:
+                        raise _failure()
+                stored_digest, stored_count = hashlib.sha256(), 0
+                while True:
+                    self.check()
+                    chunk = os.read(entry['fd'], 65536)
+                    self.check()
+                    if not chunk:
+                        break
+                    stored_count += len(chunk)
+                    if stored_count > entry['size']:
+                        raise _failure()
+                    stored_digest.update(chunk)
+                if (stored_count != entry['size'] or stored_digest.digest() != sink.digest.digest()
+                        or _encoded_identity(os.fstat(entry['fd'])) != stored_identity):
+                    raise _failure()
+                with self._lock:
+                    close_attempted = True
+                    self._close_owned_fd(entry)
+                self.check()
+            # Even a failed raw reader close prevents lease publication.
+            with self._lock:
+                self.check()
+                if _encoded_identity(self._validate_encoded_name(destination, entry,
+                                                                closed=True)) != stored_identity:
+                    raise _failure()
+                lease = EncodedOriginalLease(destination, record, entry['size'],
+                    stored_digest.hexdigest(), 'gzip_original_v1')
+                entry['aliases'].add(lease)
+                entry['parent'] = False
+                self._encoded[lease] = entry
+                self._account()
+            return lease
+        except Exception as error:
+            raise source_fetch_error('SEC submission spool failed', error) from None
+        finally:
+            if entry is not None:
+                with self._lock:
+                    cleanup_error = None
+                    try:
+                        if not close_attempted:
+                            self._close_owned_fd(entry)
+                    except SourceFetchError as error:
+                        cleanup_error = error
+                    finally:
+                        entry['writing'] = False
+                    if lease is None:
+                        try:
+                            self._discard_entry(destination, entry)
+                        except SourceFetchError as error:
+                            cleanup_error = error
+                    self._account()
+                    self._finish_close()
+                    if cleanup_error is not None:
+                        raise cleanup_error from None
+
+    def _validate_encoded_name(self, path, entry, *, closed=False):
+        """Fail closed on missing/substituted names and destination directories."""
+        parent, info = path.parent.lstat(), path.lstat()
+        if (not stat.S_ISDIR(parent.st_mode)
+                or (parent.st_dev, parent.st_ino) != entry['directory_inode']
+                or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or (info.st_dev, info.st_ino) != entry['inode']
+                or (closed and (info.st_size != entry['size']
+                                or stat.S_IMODE(info.st_mode) != 0o400))):
+            raise _failure()
+        return info
+
+    def _unlink_encoded(self, path, entry):
+        try:
+            self._validate_encoded_name(path, entry)
+            path.unlink()
+            # A successful syscall alone is not proof that our name is absent.
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return
+            raise _failure()
+        except (OSError, SourceFetchError):
+            self._counts['cleanup_failures'] += 1
+            raise _failure('transport_error') from None
+
+    def release_encoded(self, lease):
+        with self._lock:
+            entry = self._encoded.get(lease)
+            if entry is None:
+                raise ValueError('Unknown SEC encoded-original lease')
+            self._unlink_encoded(lease.path, entry)
+            del self._encoded[lease]
+            entry['aliases'].remove(lease)
+            self._account()
+
     def discard(self, record):
         with self._lock:
             entry = self._entry(record)
@@ -240,6 +450,10 @@ class SpoolScope:
         entry['discard'] = True
         if (entry['parent'] and not entry['children'] and not entry['readers']
                 and not entry['writing'] and entry['fd'] is None):
+            if entry.get('encoded'):
+                self._unlink_encoded(path, entry)
+                entry['parent'] = False
+                return
             try:
                 path.unlink(missing_ok=True)
             except OSError:

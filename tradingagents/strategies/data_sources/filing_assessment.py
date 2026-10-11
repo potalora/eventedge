@@ -242,14 +242,19 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
             if referenced is None or (referenced['type'].upper().startswith('EX-') and item['filename'] not in selected):
                 fail('structural_evidence')
     if supported:
+        from .filing_pdf import VERSION as PDF_VERSION
         pdf_units = {item['filename']: item for item in evidence['units'] if item['representation'] == 'native_pdf_text'}
         if set(evidence['pdf_evidence']) != set(pdf_units):
             fail('pdf_inventory')
         for name, unit in pdf_units.items():
             receipt = evidence['pdf_evidence'][name]
             try:
-                if (receipt['version'] != 'sec-native-pdf-evidence-v1' or receipt['schema_version'] != 1
+                if (receipt['version'] != PDF_VERSION or type(receipt['schema_version']) is not int
+                        or receipt['schema_version'] != 2
                         or receipt['native_text_complete'] is not True
+                        or receipt['mapping_trust'] != 'source_declared_unicode'
+                        or receipt['text_order'] != 'content_invocation_order_with_recorded_baseline_separators'
+                        or receipt['visual_meaning_verified'] is not False
                         or receipt['input_sha256'] != unit['body_sha256']
                         or receipt['input_bytes'] != unit['body_end'] - unit['body_start']
                         or receipt['text'] != unit['text'] or receipt['text_sha256'] != unit['text_sha256']
@@ -257,7 +262,10 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
                         or len(receipt['pages']) != receipt['page_count']
                         or [page['page_number'] for page in receipt['pages']] != list(range(1, receipt['page_count'] + 1))
                         or '\n'.join(page['text'] for page in receipt['pages']) != unit['text']
-                        or any(_sha(page['text']) != page['text_sha256'] or len(page['text']) != page['text_chars'] for page in receipt['pages'])
+                        or any(_sha(page['text']) != page['text_sha256'] or len(page['text']) != page['text_chars']
+                            or page['mapping_trust'] != 'source_declared_unicode'
+                            or any(type(page[key]) is not list for key in ('fonts', 'text_shows', 'geometry_operations'))
+                            for page in receipt['pages'])
                         or (not allow_unsupported_documents and (receipt['support_limitations']
                             or receipt['supported_text_layout'] is not True))):
                     fail('pdf_inventory')

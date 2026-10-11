@@ -13,11 +13,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import hashlib
 import io
+import json
 import logging
 import math
 import re
 
-VERSION = 'sec-native-pdf-evidence-v1'
+VERSION = 'sec-native-pdf-evidence-v2'
 _TEXT = {b'Tj', b'TJ', b"'", b'"'}
 _PAINT = {b'S', b's', b'f', b'F', b'f*', b'B', b'B*', b'b', b'b*', b'sh'}
 _PLAIN = {b'BT', b'ET', b'Tf', b'Td', b'TD', b'Tm', b'T*', b'TL', b'Tj'}
@@ -250,6 +251,9 @@ def _ext_gstate(value):
         elif key in ('/LC', '/LJ', '/OPM'):
             if not isinstance(item, int) or item not in range(2 if key == '/OPM' else 3):
                 raise FilingPDFError('pdf_invalid_extgstate')
+        elif key == '/BM':
+            if not isinstance(item, NameObject) or item != '/Normal':
+                raise FilingPDFError('pdf_unsupported_extgstate_capability')
         elif key == '/D':
             _dash(item)
         elif key == '/RI':
@@ -263,15 +267,48 @@ def _ext_gstate(value):
             raise FilingPDFError('pdf_unsupported_extgstate_capability')
 
 
-def _properties(value):
+def _properties(value, tag):
+    from pypdf.generic import NameObject, TextStringObject
     if not isinstance(value, dict):
         raise FilingPDFError('pdf_invalid_marked_properties')
     for key, reference in value.items():
         item = _object(reference)
-        if key != '/MCID':
+        if key == '/MCID':
+            if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+                raise FilingPDFError('pdf_invalid_marked_properties')
+        elif key == '/Lang':
+            if not isinstance(item, TextStringObject) or not re.fullmatch(r'[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*', item):
+                raise FilingPDFError('pdf_invalid_marked_properties')
+        elif tag == '/Artifact' and key == '/Type':
+            if not isinstance(item, NameObject) or item not in ('/Pagination', '/Layout', '/Page', '/Background'):
+                raise FilingPDFError('pdf_invalid_marked_properties')
+        elif tag == '/Artifact' and key == '/Subtype':
+            if not isinstance(item, NameObject) or item not in ('/Header', '/Footer', '/Watermark') or value.get('/Type') != '/Pagination':
+                raise FilingPDFError('pdf_invalid_marked_properties')
+        elif tag == '/Artifact' and key == '/Attached':
+            if not isinstance(item, list) or not item or any(not isinstance(v, NameObject) or v not in ('/Top','/Bottom','/Left','/Right') for v in item):
+                raise FilingPDFError('pdf_invalid_marked_properties')
+        else:
             raise FilingPDFError('pdf_unsupported_marked_properties')
-        if not isinstance(item, int) or item < 0:
-            raise FilingPDFError('pdf_invalid_marked_properties')
+
+
+def _page_group(value, resources):
+    from pypdf.generic import NameObject, BooleanObject
+    value = _object(value)
+    if not isinstance(value, dict) or value.get('/S') != '/Transparency':
+        raise FilingPDFError('pdf_unsupported_page_object_capability')
+    for key, item in value.items():
+        item = _object(item)
+        if key == '/Type' and isinstance(item, NameObject) and item == '/Group':
+            continue
+        if key == '/S' and isinstance(item, NameObject) and item == '/Transparency':
+            continue
+        if key == '/CS':
+            _color_components(item, resources)
+            continue
+        if key in ('/I','/K') and isinstance(item, BooleanObject) and not item.value:
+            continue
+        raise FilingPDFError('pdf_unsupported_page_object_capability')
 
 
 def _visual_operator(operator, operands, resources, colors):
@@ -319,19 +356,25 @@ def _visual_operator(operator, operands, resources, colors):
         value = operands[1]
         if isinstance(value, NameObject):
             value = _resource(resources, '/Properties', value)
-        _properties(value)
+        _properties(value, operands[0])
     elif operator in (b'd0', b'd1'):
         raise FilingPDFError('pdf_unsupported_type3_glyph_capability')
 
 
 def _image_components(image, resources):
     from pypdf.generic import NameObject, BooleanObject
-    if any(key in image for key in ('/Mask', '/SMask', '/Alternates', '/OPI', '/F', '/OC', '/Matte')):
+    allowed = {'/Type','/Subtype','/Width','/Height','/BitsPerComponent','/ColorSpace','/Filter','/DecodeParms',
+               '/Decode','/Length','/ImageMask','/Interpolate','/Intent'}
+    if not set(image) <= allowed:
         raise FilingPDFError('pdf_unsupported_image_dependency')
     if '/ImageMask' in image:
         mask = _object(image['/ImageMask'])
         if not isinstance(mask, BooleanObject) or mask.value:
             raise FilingPDFError('pdf_unsupported_or_invalid_image_mask')
+    if '/Interpolate' in image and not isinstance(image['/Interpolate'],BooleanObject):
+        raise FilingPDFError('pdf_invalid_image_interpolation')
+    if '/Intent' in image and image['/Intent'] not in _RENDER_INTENTS:
+        raise FilingPDFError('pdf_invalid_image_rendering_intent')
     bits = image.get('/BitsPerComponent')
     if not isinstance(bits, int) or bits not in (1, 2, 4, 8, 16):
         raise FilingPDFError('pdf_invalid_image_bit_depth')
@@ -409,9 +452,217 @@ def _annotation_inventory(page):
     return len(annotations)
 
 
-def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, active=(), graphics=(1, 1)):
+def _matrix(a, b):
+    result = (a[0]*b[0]+a[1]*b[2], a[0]*b[1]+a[1]*b[3],
+              a[2]*b[0]+a[3]*b[2], a[2]*b[1]+a[3]*b[3],
+              a[4]*b[0]+a[5]*b[2]+b[4], a[4]*b[1]+a[5]*b[3]+b[5])
+    if not all(math.isfinite(value) for value in result):
+        raise FilingPDFError('pdf_invalid_derived_geometry')
+    return result
+
+
+def _operand_receipt(value):
+    from pypdf.generic import TextStringObject, ByteStringObject, NameObject, BooleanObject
+    value = _object(value)
+    if isinstance(value, NameObject): return str(value)
+    if isinstance(value, BooleanObject): return value.value
+    if isinstance(value, (TextStringObject, ByteStringObject)):
+        raw = _raw_text(value)
+        return {'string_bytes':len(raw), 'string_sha256':_sha(raw)}
+    if isinstance(value, (list, tuple)): return [_operand_receipt(v) for v in value]
+    if isinstance(value, dict): return {str(k):_operand_receipt(v) for k,v in value.items()}
+    if isinstance(value, (int,float)) and math.isfinite(value): return value
+    if value is None: return None
+    raise FilingPDFError('pdf_uninventoried_operand')
+
+
+def _raw_text(value):
+    if isinstance(value, bytes): return bytes(value)
+    try: return value.original_bytes
+    except Exception: raise FilingPDFError('pdf_text_original_bytes_unavailable') from None
+
+
+def _inventory_append(state, target, value):
+    size = len(json.dumps(value, sort_keys=True, separators=(',',':'), ensure_ascii=True, allow_nan=False).encode())
+    state['inventory_bytes'] += size
+    if state['inventory_bytes'] > state['inventory_limit']:
+        raise FilingPDFError('pdf_stream_limit_provenance')
+    target.append(value)
+
+
+def _validate_stream_dictionary(stream, kind):
+    """Reject untraversed dependencies before asking a generic decoder for bytes."""
+    from pypdf.generic import NameObject, NullObject
+    if not hasattr(stream,'get_data') or not isinstance(stream,dict):
+        raise FilingPDFError('pdf_invalid_stream_object')
+    extra = {
+        'embedded_font':{'/Length1'}, 'font_cmap':set(), 'font_cid_map':set(), 'page':set(),
+        'form':{'/Type','/Subtype','/BBox','/Matrix','/Resources','/FormType'},
+    }[kind]
+    if not set(stream) <= {'/Length','/Filter','/DecodeParms'} | extra:
+        raise FilingPDFError('pdf_unsupported_font_stream_dependency' if kind.startswith('font') or kind=='embedded_font'
+                             else 'pdf_unsupported_content_stream_dependency')
+    if kind=='form' and '/FormType' in stream and (type(stream['/FormType']) is bool or stream['/FormType'] != 1):
+        raise FilingPDFError('pdf_invalid_form_type')
+    filters = _object(stream.get('/Filter', []))
+    filters = [filters] if isinstance(filters, NameObject) else filters
+    lossless = {'/FlateDecode','/Fl','/ASCIIHexDecode','/AHx','/ASCII85Decode','/A85',
+                '/LZWDecode','/LZW','/RunLengthDecode','/RL'}
+    if not isinstance(filters, list) or any(not isinstance(f,NameObject) or f not in lossless for f in filters):
+        raise FilingPDFError('pdf_unsupported_content_stream_filter')
+    parameters = _object(stream.get('/DecodeParms'))
+    if parameters is not None and not isinstance(parameters,NullObject):
+        parameters = parameters if isinstance(parameters,list) else [parameters]
+        if len(parameters) != len(filters): raise FilingPDFError('pdf_invalid_stream_parameters')
+        for filter_name, param in zip(filters,parameters):
+            param = _object(param)
+            if isinstance(param,NullObject): continue
+            keys = ({'/Predictor','/Colors','/BitsPerComponent','/Columns'} if filter_name in ('/FlateDecode','/Fl','/LZWDecode','/LZW') else set())
+            if filter_name in ('/LZWDecode','/LZW'): keys = keys | {'/EarlyChange'}
+            if not isinstance(param,dict) or not set(param)<=keys:
+                raise FilingPDFError('pdf_unsupported_stream_parameters')
+            if any(not isinstance(v,int) or isinstance(v,bool) for v in param.values()):
+                raise FilingPDFError('pdf_invalid_stream_parameters')
+            if param.get('/Predictor',1) != 1:
+                raise FilingPDFError('pdf_unsupported_stream_predictor')
+            if param.get('/EarlyChange',1) not in (0,1):
+                raise FilingPDFError('pdf_invalid_stream_parameters')
+
+
+def _font_decoder(font, state, check, max_stream_bytes):
+    from .filing_pdf_fonts import build_font, FontError
+    cache = state['font_cache']
+    key = id(font)
+    if key not in cache:
+        def consume(stream, kind):
+            _validate_stream_dictionary(stream, kind)
+            declared = stream.get('/Length1')
+            if declared is not None and (not isinstance(declared,int) or isinstance(declared,bool) or declared <= 0):
+                raise FilingPDFError('pdf_invalid_font_stream_length')
+            if declared is not None and declared > max_stream_bytes-state['stream_bytes']:
+                raise FilingPDFError('pdf_stream_limit')
+            _pulse(check)
+            data = stream.get_data()
+            if declared is not None and declared != len(data):
+                raise FilingPDFError('pdf_invalid_font_stream_length')
+            if not data: raise FilingPDFError('pdf_empty_font_stream')
+            state['stream_bytes'] += len(data)
+            if state['stream_bytes'] > max_stream_bytes: raise FilingPDFError('pdf_stream_limit')
+            state['streams'].append({'kind':kind,'sha256':_sha(data),'bytes':len(data)})
+            return data
+        try: cache[key] = build_font(font, consume_stream=consume, check=lambda:_pulse(check))
+        except FontError as error: raise FilingPDFError(str(error)) from None
+    decoder = cache[key]
+    receipt = decoder.receipt
+    identity = _sha(json.dumps(receipt, sort_keys=True, separators=(',',':')).encode())
+    if identity not in state['fonts']:
+        state['fonts'][identity] = receipt
+        _inventory_append(state, state['font_inventory'], {'font_id':identity, **receipt})
+    return identity, decoder
+
+
+def _text_state():
+    return dict(cm=(1.,0.,0.,1.,0.,0.), tm=(1.,0.,0.,1.,0.,0.), line=(1.,0.,0.,1.,0.,0.),
+                font=None, font_id=None, font_size=0., char_space=0., word_space=0., scale=1., leading=0., rise=0., render=0,
+                fill_color=(0.,), fill_alpha=1.)
+
+
+def _move_line(g, x, y):
+    g['line'] = _matrix((1.,0.,0.,1.,x,y), g['line'])
+    g['tm'] = g['line']
+
+
+def _show(state, g, strings, operator, stream_hash, index, check):
+    from .filing_pdf_fonts import FontError
+    parts=[]; decoded_parts=[]; start=g['tm']; glyph_count=0
+    for value in strings:
+        _pulse(check)
+        if isinstance(value,(int,float)):
+            if not math.isfinite(value): raise FilingPDFError('pdf_invalid_text_operands')
+            advance=-float(value)/1000*g['font_size']*g['scale']
+            g['tm']=_matrix((1.,0.,0.,1.,advance,0.),g['tm'])
+            parts.append({'adjustment':float(value),'advance':advance})
+            continue
+        raw=_raw_text(value)
+        try: decoded=g['font'].decode(raw, state['inventory_limit']-state['inventory_bytes'])
+        except FontError as error: raise FilingPDFError(str(error)) from None
+        text=decoded['text']; decoded_parts.append(text)
+        glyph_count+=len(decoded['glyphs'])
+        advance=sum((glyph['width']/1000*g['font_size']+g['char_space']+
+                     (g['word_space'] if g['font'].code_bytes==1 and glyph['code']==32 else 0))*g['scale']
+                    for glyph in decoded['glyphs'])
+        parts.append({'raw_sha256':_sha(raw),'raw_bytes':len(raw),'unicode':text,'glyphs':decoded['glyphs'],
+                      'text_matrix':list(g['tm']),'advance':advance})
+        g['tm']=_matrix((1.,0.,0.,1.,advance,0.),g['tm'])
+    text=''.join(decoded_parts)
+    if not all(math.isfinite(v) for v in (*g['tm'],*g['cm'],g['char_space'],g['word_space'],g['scale'],g['rise'])):
+        raise FilingPDFError('pdf_invalid_text_geometry')
+    row={'stream_sha256':stream_hash,'operator_index':index,'operator':operator.decode(),
+         'font_id':g['font_id'],'font_size':g['font_size'],'ctm':list(g['cm']),
+         'text_matrix':list(start),'end_text_matrix':list(g['tm']),
+         'char_space':g['char_space'],'word_space':g['word_space'],'horizontal_scale':g['scale'],
+         'rise':g['rise'],'render_mode':g['render'],'parts':parts,'unicode':text,'glyph_count':glyph_count}
+    _inventory_append(state,state['text_shows'],row)
+    # Content invocation order is authoritative; the only inserted separator is
+    # a recorded line break when source-derived baseline changes.
+    baseline=_matrix(start,g['cm'])[5]
+    separator='\n' if state['text_chunks'] and text and abs(baseline-state['last_baseline'])>.01 else ''
+    row['separator_before']=separator
+    state['text_chars']+=len(text)+len(separator)
+    if state['text_chars']>state['max_text_chars']:raise FilingPDFError('pdf_text_limit')
+    state['text_chunks'].append(separator+text)
+    state['last_baseline']=baseline
+    state['plain_runs'].append((text,tuple(g['cm']),tuple(start),g['font_size']))
+    if text and g['render'] != 0:
+        state['findings'].add('nondefault_text_rendering')
+    if text and (g['char_space'] or g['word_space'] or g['scale'] != 1 or g['rise'] or any(p.get('adjustment',0) for p in parts)):
+        state['findings'].add('positioned_text_layout')
+    black = ((0.,0.,0.,1.) if len(g['fill_color']) == 4 else (0.,)*len(g['fill_color']))
+    if text and (g['fill_alpha'] != 1 or g['fill_color'] != black):
+        state['support_limitations'].add('text_visibility_state_not_validated')
+
+
+def _content_operations(data, check):
+    """Read exact operator boundaries; reject operands stranded at EOF.
+
+    pypdf's general ContentStream parser drops final operands at EOF. This
+    bounded native subset uses its object lexer but requires full consumption.
+    Inline image decoding is deliberately outside this finite subset.
+    """
+    from pypdf.generic import read_object, NameObject
+    from pypdf._utils import read_non_whitespace, read_until_regex
+    stream = io.BytesIO(data)
+    operands = []
+    start = 0
+    while True:
+        _pulse(check)
+        token = read_non_whitespace(stream)
+        if not token:
+            if operands: raise FilingPDFError('pdf_trailing_content_operands')
+            return
+        if token == b'%':
+            while token not in (b'\r',b'\n',b''):
+                token = stream.read(1)
+            continue
+        stream.seek(-1,1)
+        if not operands: start = stream.tell()
+        if token.isalpha() or token in (b"'",b'"'):
+            operator = read_until_regex(stream=stream, regex=NameObject.delimiter_pattern, length=64)
+            if operator == b'BI': raise FilingPDFError('pdf_unsupported_inline_image_capability')
+            yield operands, operator, start, stream.tell()
+            operands = []
+        else:
+            operands.append(read_object(stream, None))
+
+
+def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, active=(), graphics=(1, 1), inherited=None):
     from pypdf.generic import ContentStream, TextStringObject, ByteStringObject, NameObject
     _pulse(check)
+    resolved = _object(stream)
+    if resolved is not None:
+        references = resolved if isinstance(resolved,list) else [resolved]
+        for reference in references:
+            _validate_stream_dictionary(_object(reference), 'form' if active else 'page')
     content = ContentStream(stream, reader)
     data = content.get_data()
     state['stream_bytes'] += len(data)
@@ -425,9 +676,11 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
     # Refuse unvalidated remapping before it can become visual-deferral proof.
     for space in _DEVICE_COLORS:
         _color_components(NameObject(space), resources)
-    depth, saved, marked, font = 0, 0, 0, None
+    depth, saved, marked, compatibility, font = 0, 0, 0, 0, None
     colors, graphics_stack = list(graphics), []
-    for operands, operator in content.operations:
+    g = dict(inherited) if inherited else _text_state()
+    text_stack = []
+    for operator_index, (operands, operator, byte_start, byte_end) in enumerate(_content_operations(data, check)):
         _pulse(check)
         if operator not in _KNOWN:
             raise FilingPDFError('pdf_unknown_content_operator')
@@ -438,10 +691,26 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
             raise FilingPDFError('pdf_invalid_content_operands')
         _visual_operator(operator, operands, resources, colors)
         state['operators'].add(operator)
-        if operator == b'BT':
+        _inventory_append(state, state['geometry_operations'], {'stream_sha256':digest, 'operator_index':operator_index,
+            'operator':operator.decode(), 'operands':_operand_receipt(operands), 'ctm':list(g['cm']),
+            'source_byte_start':byte_start, 'source_byte_end':byte_end})
+        if operator == b'BX':
+            compatibility += 1
+        elif operator == b'EX':
+            compatibility -= 1
+            if compatibility < 0: raise FilingPDFError('pdf_unbalanced_compatibility')
+        elif operator == b'gs':
+            ext = _resource(resources, '/ExtGState', operands[0])
+            if '/ca' in ext: g['fill_alpha'] = float(ext['/ca'])
+            if any(key in ext for key in ('/OP','/op','/OPM','/SA','/AIS','/TK')):
+                state['support_limitations'].add('graphics_semantics_not_validated')
+            _inventory_append(state, state['graphics_resources'], {'category':'ExtGState','name':str(operands[0]),
+                'parameters':_operand_receipt(ext)})
+        elif operator == b'BT':
             if depth:
                 raise FilingPDFError('pdf_unbalanced_text')
             depth = 1
+            g['tm'] = g['line'] = (1.,0.,0.,1.,0.,0.)
         elif operator == b'ET':
             if not depth:
                 raise FilingPDFError('pdf_unbalanced_text')
@@ -449,11 +718,15 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
         elif operator == b'q':
             saved += 1
             graphics_stack.append(colors[:])
+            text_stack.append(dict(g))
         elif operator == b'Q':
             saved -= 1
             if saved < 0:
                 raise FilingPDFError('pdf_unbalanced_graphics')
             colors[:] = graphics_stack.pop()
+            prior = text_stack.pop()
+            prior['tm'], prior['line'] = g['tm'], g['line']
+            g = prior
         elif operator in (b'BMC', b'BDC'):
             marked += 1
             state['findings'].add('marked_content')
@@ -470,15 +743,14 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
             font = _object(fonts.get(operands[0]))
             if not isinstance(font, dict):
                 raise FilingPDFError('pdf_missing_font')
-            encoding = _object(font.get('/Encoding'))
-            standard = (font.get('/Subtype') == '/Type1' and font.get('/BaseFont') in _STANDARD
-                        and '/FontDescriptor' not in font and encoding in (None, '/StandardEncoding', '/WinAnsiEncoding'))
-            if not standard and '/ToUnicode' not in font:
-                raise FilingPDFError('pdf_unverified_font_encoding')
-            if not standard or any(key in font for key in ('/Widths', '/FirstChar', '/LastChar')):
+            g['font_id'], g['font'] = _font_decoder(font, state, check, max_stream_bytes)
+            g['font_size'] = float(operands[1])
+            if g['font'].standard and any(key in font for key in ('/Widths','/FirstChar','/LastChar')):
                 state['support_limitations'].add('font_geometry_not_validated')
+            if not g['font'].standard:
+                state['advanced_font'] = True
         elif operator in _TEXT:
-            if not depth or font is None:
+            if not depth or g['font'] is None:
                 raise FilingPDFError('pdf_text_without_font_or_object')
             arity = 3 if operator == b'\"' else 1
             if len(operands) != arity:
@@ -494,14 +766,36 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
                         not isinstance(value, (int, float)) for value in operands[:2])):
                     raise FilingPDFError('pdf_invalid_text_operands')
                 strings = [operands[-1]]
+            if operator in (b"'", b'"'):
+                if operator == b'"':
+                    g['word_space'], g['char_space'] = map(float, operands[:2])
+                _move_line(g, 0., -g['leading'])
+            _show(state, g, strings, operator, digest, operator_index, check)
+            state['text_shows'][-1].update(source_byte_start=byte_start,source_byte_end=byte_end)
             state['native_text_operations'] += 1
             if any(isinstance(value, string_types) and len(value) for value in strings):
                 state['nonempty_text_operations'] += 1
+        elif operator == b'cs':
+            g['fill_color'] = (0.,0.,0.,1.) if colors[1] == 4 else (0.,)*colors[1]
+        elif operator in (b'g',b'rg',b'k',b'sc',b'scn'):
+            g['fill_color'] = tuple(map(float, operands))
+        elif operator == b'cm':
+            g['cm'] = _matrix(tuple(map(float,operands)), g['cm'])
+        elif operator == b'Tm':
+            g['tm'] = g['line'] = tuple(map(float,operands))
+        elif operator in (b'Td', b'TD'):
+            if operator == b'TD': g['leading'] = -float(operands[1])
+            _move_line(g, *map(float,operands))
+        elif operator == b'T*':
+            _move_line(g, 0., -g['leading'])
+        elif operator in (b'Tc',b'Tw',b'Tz',b'TL',b'Ts'):
+            key = {b'Tc':'char_space',b'Tw':'word_space',b'Tz':'scale',b'TL':'leading',b'Ts':'rise'}[operator]
+            g[key] = float(operands[0]) / (100 if operator == b'Tz' else 1)
         elif operator == b'Tr':
             if len(operands) != 1 or not isinstance(operands[0], int) or not 0 <= operands[0] <= 7:
                 raise FilingPDFError('pdf_invalid_text_render_mode')
-            if operands[0] != 0:
-                state['findings'].add('nondefault_text_rendering')
+            g['render'] = int(operands[0])
+
         elif operator in _PAINT:
             state['vector_paint_operations'] += 1
             state['findings'].add('vector_graphics')
@@ -543,10 +837,11 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
                 state['form_operations'] += 1
                 state['findings'].add('form_xobject')
                 _inspect_stream(obj, _object(obj.get('/Resources', resources)), reader, state,
-                                check, max_stream_bytes, (*active, id(obj)), tuple(colors))
+                                check, max_stream_bytes, (*active, id(obj)), tuple(colors),
+                                {**g, 'cm':_matrix(tuple(map(float,obj.get('/Matrix',(1,0,0,1,0,0)))),g['cm'])})
             else:
                 raise FilingPDFError('pdf_unsupported_xobject')
-    if depth or saved or marked:
+    if depth or saved or marked or compatibility:
         raise FilingPDFError('pdf_unbalanced_content')
     return data
 
@@ -556,11 +851,10 @@ def _plain_layout(page, state, runs):
 
     Every show is one literal Tj, with an identity user transform, upright text
     matrix, equal left edges, descending baselines and conservative one-em glyph
-    bounds within an unrotated, uncropped page. Custom fonts and other syntax
-    have a capability limit, which is not independent visual-deferral evidence.
+    bounds within an unrotated, uncropped page. V2 fully inventories the finite
+    advanced native subset separately, without asserting its visual layout is
+    plain. Any actual residual capability limit remains a technical failure.
     """
-    if state['native_text_operations'] and not state['operators'] <= _PLAIN:
-        state['support_limitations'].add('plain_text_operator_subset_exceeded')
     if not runs:
         return state['findings'] == {'blank_page'} and not state['operators']
     box = [float(value) for value in page.mediabox]
@@ -577,14 +871,15 @@ def _plain_layout(page, state, runs):
                 or (previous is not None and previous - y < 1.2 * font_size)):
             state['findings'].add('positioned_text_layout')
             return False
-        if size is not None and size != font_size:
+        if not state['advanced_font'] and size is not None and size != font_size:
             state['support_limitations'].add('mixed_font_geometry_not_validated')
             return False
         if not (box[0] <= x and x + len(text) * font_size <= box[2]
                 and box[1] + font_size <= y <= box[3] - font_size):
             state['findings'].add('text_outside_conservative_page_bounds')
         previous, left, size = y, x, font_size
-    return not state['findings'] and not state['support_limitations']
+    return (not state['advanced_font'] and not (state['findings'] - {'marked_content'})
+            and not state['support_limitations'])
 
 
 def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int,
@@ -629,49 +924,31 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
                     raise FilingPDFError('pdf_page_count_mismatch')
                 document_findings = _document_findings(reader.root_object)
                 pages, chars, stream_bytes = [], 0, 0
+                font_cache = {}
+                inventory_bytes = 0
                 for index, page in enumerate(reader.pages):
                     _pulse(check)
                     state = dict(stream_bytes=stream_bytes, streams=[], operators=set(), findings=set(document_findings),
                         support_limitations=set(), native_text_operations=0, nonempty_text_operations=0,
-                        image_operations=0, vector_paint_operations=0, form_operations=0)
+                        image_operations=0, vector_paint_operations=0, form_operations=0,
+                        font_cache=font_cache, fonts={}, font_inventory=[], text_shows=[], geometry_operations=[], graphics_resources=[],
+                        text_chunks=[], text_chars=chars, max_text_chars=max_text_chars, last_baseline=0.,
+                        inventory_bytes=inventory_bytes, inventory_limit=max_stream_bytes, advanced_font=False, plain_runs=[])
                     if page.rotation % 360:
                         state['findings'].add('rotated_page')
                     annotation_count = _annotation_inventory(page)
                     if annotation_count:
                         state['findings'].add('annotations')
-                    if any(key in page for key in ('/Group', '/AF', '/AA', '/PresSteps', '/VP')):
+                    if any(key in page for key in ('/AF', '/AA', '/PresSteps', '/VP')):
                         raise FilingPDFError('pdf_unsupported_page_object_capability')
                     resources = _object(page.get('/Resources', {}))
+                    if '/Group' in page:
+                        _page_group(page['/Group'], resources)
                     data = _inspect_stream(page.get('/Contents'), resources, reader, state, check, max_stream_bytes)
                     stream_bytes = state['stream_bytes']
-                    runs, visited_chars, current_size = [], 0, 0.
-                    def before(operator, operands, cm, tm):
-                        nonlocal current_size
-                        _pulse(check)
-                        if operator == b'Tf':
-                            current_size = float(operands[1])
-                        if operator in _TEXT:
-                            matrices = tuple(float(value) for value in (*cm, *tm))
-                            if not all(math.isfinite(value) for value in matrices):
-                                raise FilingPDFError('pdf_invalid_text_geometry')
-                            # Operand provenance; text is read again below only for layout checks.
-                            if operator == b'Tj' and operands and isinstance(operands[0], (str, bytes)):
-                                literal = operands[0].decode('latin-1') if isinstance(operands[0], bytes) else str(operands[0])
-                                runs.append((literal, tuple(map(float, cm)), tuple(map(float, tm)), current_size))
-                    def visitor(text, cm, tm, font, font_size):
-                        nonlocal visited_chars
-                        _pulse(check)
-                        if text:
-                            if font is None:
-                                raise FilingPDFError('pdf_missing_font')
-                            visited_chars += len(text)
-                            if chars + visited_chars > max_text_chars:
-                                raise FilingPDFError('pdf_text_limit')
-                    text = page.extract_text(orientations=(0, 90, 180, 270),
-                        visitor_operand_before=before, visitor_text=visitor)
-                    _pulse(check)
-                    if not isinstance(text, str):
-                        raise FilingPDFError('pdf_text_extraction_failed')
+                    text = ''.join(state['text_chunks'])
+                    inventory_bytes = state['inventory_bytes']
+                    runs = state['plain_runs']
                     if any((ord(char) < 32 and char not in '\n\r\t') or char == '\ufffd'
                            or 0xD800 <= ord(char) <= 0xDFFF for char in text):
                         raise FilingPDFError('pdf_text_encoding_loss')
@@ -694,7 +971,11 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
                         raise FilingPDFError('pdf_parser_recovery_warning')
                     pages.append(dict(page_number=index + 1, text=text, text_sha256=_sha(text.encode('utf-8')),
                         text_chars=len(text), content_sha256=_sha(data), content_bytes=len(data),
-                        streams=state['streams'], findings=sorted(state['findings']),
+                        streams=state['streams'], fonts=state['font_inventory'], text_shows=state['text_shows'],
+                        geometry_operations=state['geometry_operations'], graphics_resources=state['graphics_resources'],
+                        page_geometry={'media_box':list(map(float,page.mediabox)),
+                            'crop_box':list(map(float,page.cropbox)), 'rotation':page.rotation,
+                            'group':_operand_receipt(page.get('/Group'))}, mapping_trust='source_declared_unicode', findings=sorted(state['findings']),
                         support_limitations=sorted(state['support_limitations']), supported_text_layout=supported,
                         observations={key: state[key] for key in ('native_text_operations', 'image_operations',
                             'vector_paint_operations', 'form_operations')}, annotation_count=annotation_count))
@@ -702,14 +983,15 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
                 _pulse(check)
                 if notices:
                     raise FilingPDFError('pdf_parser_recovery_warning')
-                return dict(version=VERSION, schema_version=1, input_sha256=_sha(body), input_bytes=len(body),
+                return dict(version=VERSION, schema_version=2, input_sha256=_sha(body), input_bytes=len(body),
                     decoded_sha256=_sha(decoded), decoded_bytes=len(decoded), encoding=encoding,
                     library='pypdf', library_version=pypdf.__version__, page_count=count, pages=pages,
                     decoded_stream_bytes=stream_bytes,
                     text=text, text_sha256=_sha(text.encode('utf-8')), text_chars=len(text),
                     findings=sorted({item for page in pages for item in page['findings']}),
                     support_limitations=sorted({item for page in pages for item in page['support_limitations']}),
-                    native_text_complete=True, supported_text_layout=all(page['supported_text_layout'] for page in pages),
+                    native_text_complete=True, mapping_trust='source_declared_unicode',
+                    text_order='content_invocation_order_with_recorded_baseline_separators', supported_text_layout=all(page['supported_text_layout'] for page in pages),
                     visual_meaning_verified=False)
             except LimitReachedError:
                 raise FilingPDFError('pdf_stream_or_structure_limit') from None

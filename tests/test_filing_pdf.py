@@ -333,10 +333,12 @@ def test_fully_inventoried_graphics_only_has_no_spurious_text_capability_gap():
     assert 'vector_only_page' in vector['findings']
 
 
-def test_image_does_not_erase_unsupported_native_text_operator_capability():
+def test_v2_validated_mixed_native_operators_have_complete_provenance():
     mixed = extract(pdf_bytes(image=True))
-    assert 'plain_text_operator_subset_exceeded' in mixed['support_limitations']
+    assert mixed['support_limitations'] == []
+    assert mixed['pages'][0]['text_shows'][0]['unicode'] == 'Revenue grew.'
     assert 'raster_image' in mixed['findings']
+    assert mixed['supported_text_layout'] is False
 
 
 @pytest.mark.parametrize('content', [

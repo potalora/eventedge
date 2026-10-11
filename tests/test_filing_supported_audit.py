@@ -231,3 +231,130 @@ def test_exact_quarantine_raw_inventory_is_reframed_not_merely_hashed(tmp_path,m
     result=audit(data,paths)
     assert result['quarantined_originals']==1 and result['verified_source_proofs']==0
     assert result['completed_originals']==1 and result['raw_audit_complete']
+
+
+def gzip_store(data, paths, check):
+    import gzip
+    import hashlib
+    import io
+    from tradingagents.strategies.data_sources.filing_original_store import GzipOriginalStore
+    expected = {item['identity']['accession']: item for item in data['edgar']['filing_evidence']['acquisition_scope']['originals']}
+    stored, receipts = {}, {}
+    for acc, original in expected.items():
+        output = io.BytesIO()
+        with gzip.GzipFile(fileobj=output, mode='wb', compresslevel=1, mtime=0, filename='') as stream:
+            stream.write(paths[acc].read_bytes())
+        payload = output.getvalue()
+        path = paths[acc].parent / f'sec-original-{acc}.bin.gz'
+        path.write_bytes(payload); path.chmod(0o400); stored[acc] = path
+        receipt = {'contract': 'sec-original-v2', **original, 'encoding': 'gzip_original_v1',
+            'stored_name': path.name, 'stored_size': len(payload), 'stored_sha256': hashlib.sha256(payload).hexdigest()}
+        path = paths[acc].parent / f'sec-original-{acc}.json'
+        path.write_text(json.dumps(receipt)); path.chmod(0o400); receipts[acc] = path
+    scratch = next(iter(paths.values())).parent.parent / 'scratch'
+    scratch.mkdir(mode=0o700)
+    return GzipOriginalStore(expected, stored, receipts, check=check, scratch_directory=scratch), stored, receipts
+
+
+def test_gzip_audit_preserves_independent_proofs_and_closes_scratch(tmp_path, monkeypatch):
+    data, paths = capture(tmp_path, monkeypatch)
+    check = lambda: 10
+    value, stored, receipts = gzip_store(data, paths, check)
+    result = validate_supported_raw_capture(data, CONFIG, value, check=check)
+    assert result['raw_audit_complete'] and result['verified_source_proofs'] == 2
+    stats = result['original_store']
+    assert stats['scratch_closed'] and stats['scratch_bytes'] == stats['cleanup_failures'] == 0
+    assert stats['retained_bytes'] == sum(path.stat().st_size for path in stored.values())
+    assert stats['peak_total_bytes'] == stats['retained_bytes'] + max(path.stat().st_size for path in paths.values())
+
+
+@pytest.mark.parametrize('kind', ['payload', 'receipt', 'ancestor'])
+def test_final_gzip_identity_recheck_follows_graph_reconstruction(tmp_path, monkeypatch, kind):
+    from tradingagents.strategies.orchestration import filing_supported_scope
+    data, paths = capture(tmp_path, monkeypatch)
+    check = lambda: 10
+    value, stored, receipts = gzip_store(data, paths, check)
+    original = filing_supported_scope.build_supported_dispositions
+    reconstructed = []
+    def replaced(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if value.stats()['peak_total_bytes'] == value.stats()['retained_bytes']:
+            return result
+        assert value.stats()['scratch_closed']
+        reconstructed.append(True)
+        if kind == 'ancestor':
+            root = next(iter(stored.values())).parent
+            root.rename(tmp_path / 'moved')
+            root.mkdir()
+            for source in (tmp_path / 'moved').iterdir():
+                target = root / source.name; target.write_bytes(source.read_bytes()); target.chmod(0o400)
+        else:
+            path = next(iter((stored if kind == 'payload' else receipts).values()))
+            raw = path.read_bytes(); path.unlink(); path.write_bytes(raw); path.chmod(0o400)
+        return result
+    monkeypatch.setattr(filing_supported_scope, 'build_supported_dispositions', replaced)
+    with pytest.raises(ValueError, match='invalid_supported_raw_capture'):
+        validate_supported_raw_capture(data, CONFIG, value, check=check)
+    assert reconstructed
+    value.assert_closed()
+
+
+def test_store_must_bind_the_audit_inventory_and_exact_deadline_callback(tmp_path, monkeypatch):
+    from tradingagents.strategies.data_sources.filing_original_store import RawOriginalStore
+    data, paths = capture(tmp_path, monkeypatch)
+    originals = {entry['identity']['accession']: entry for entry in data['edgar']['filing_evidence']['acquisition_scope']['originals']}
+    check = lambda: 10
+    value = RawOriginalStore(originals, paths, check=check)
+    with pytest.raises(ValueError, match='invalid_supported_raw_capture') as failure:
+        validate_supported_raw_capture(data, CONFIG, value, check=lambda: 10)
+    assert str(failure.value.__cause__) == 'original_store_deadline_mismatch'
+    class UntrustedStore(RawOriginalStore):
+        pass
+    value = UntrustedStore(originals, paths, check=check)
+    with pytest.raises(ValueError, match='invalid_supported_raw_capture') as failure:
+        validate_supported_raw_capture(data, CONFIG, value, check=check)
+    assert str(failure.value.__cause__) == 'untrusted_original_store'
+    changed = deepcopy(originals); next(iter(changed.values()))['sha256'] = '0' * 64
+    value = RawOriginalStore(changed, paths, check=check)
+    with pytest.raises(ValueError, match='invalid_supported_raw_capture') as failure:
+        validate_supported_raw_capture(data, CONFIG, value, check=check)
+    assert str(failure.value.__cause__) == 'original_store_inventory_mismatch'
+
+
+def test_audit_success_seals_before_final_callback_concurrent_decode(tmp_path, monkeypatch):
+    import threading
+    data, paths = capture(tmp_path, monkeypatch)
+    state = {'armed': False}
+    start, finished = threading.Event(), threading.Event()
+    refused, unexpected = [], []
+    def check():
+        if state['armed']:
+            state['armed'] = False
+            start.set()
+            assert finished.wait(1), 'final audit callback held admission lock'
+        return 10
+    value, _, _ = gzip_store(data, paths, check)
+    original = value._open_bound
+    calls = []
+    final_count = len(value.expected_originals) + len(value._identities)
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls.append(True)
+        if len(calls) == final_count: state['armed'] = True
+        return result
+    monkeypatch.setattr(value, '_open_bound', observed)
+    accession = next(iter(value.expected_originals))
+    def worker():
+        try:
+            assert start.wait(1)
+            with value.open_original(accession): unexpected.append('decode admitted after final audit recheck')
+        except ValueError as error: refused.append(str(error))
+        except BaseException as error: unexpected.append(error)
+        finally: finished.set()
+    thread = threading.Thread(target=worker); thread.start()
+    try: result = validate_supported_raw_capture(data, CONFIG, value, check=check)
+    finally: start.set(); thread.join(2)
+    assert refused == ['original_store_sealed'] and not unexpected
+    assert result['raw_audit_complete'] and result['original_store']['sealed']
+    assert result['original_store']['scratch_closed'] and result['original_store']['scratch_bytes'] == 0
+    assert result['original_store']['active_originals'] == result['original_store']['cleanup_failures'] == 0
