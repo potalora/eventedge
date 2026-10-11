@@ -247,6 +247,10 @@ class LLMAnalyzer:
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
         model = self._model_name if role == "bounded" else self._thesis_model
         effort = self._effort if role == "bounded" else self._thesis_effort
+        self.last_call_response = {'received': False, 'text': None}
+        def observed_response(text):
+            if type(text) is str:
+                self.last_call_response = {'received': True, 'text': text}
         self.last_call_failure = ""
         self.last_call_provenance = {"configured_model": model, "returned_model": None,
                                      "returned_revision": None, "identity_status": "unpinned",
@@ -279,12 +283,14 @@ class LLMAnalyzer:
                                                 effort=effort, role=role)
             if reused is not None:
                 text, self.last_call_provenance = reused
+                observed_response(text)
                 model_timeout()
                 return text
             text = call_analysis_model(
                 client, model=model, max_tokens=max_tokens,
                 system=system, prompt=user, temperature=self._temperature,
                 effort=effort, provenance=self.last_call_provenance,
+                response_observer=observed_response,
             )
             self.last_call_provenance["role"] = role
             retain_candidate_response(text, self.last_call_provenance)
@@ -305,7 +311,7 @@ class LLMAnalyzer:
         self, analysis_type: str, current_evidence, *, prior_evidence=None,
         issuer_binding: dict, target_binding: dict | None = None,
         regime_context: dict | None = None, news_evidence=None,
-        required_material_dependencies=None, comparison_binding=None,
+        required_material_dependencies=None, comparison_binding=None, ownership_bundles=None,
     ) -> dict[str, Any]:
         """Opt-in complete selected evidence with strict attribution/citations.
 
@@ -330,6 +336,7 @@ class LLMAnalyzer:
                 regime_context=regime_context, news_evidence=news_evidence,
                 required_material_dependencies=required_material_dependencies,
                 comparison_binding=comparison_binding, system_override=override,
+                ownership_bundles=ownership_bundles,
             )
             model_timeout()
             text = self._call_llm(request.system, request.user, max_tokens=4096, role="thesis")
@@ -562,6 +569,78 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
     # ------------------------------------------------------------------
     # Regulatory analysis (P5: proposed rule impact)
     # ------------------------------------------------------------------
+
+    def analyze_regulation_evidence(
+        self, evidence: dict, *, target_bindings=(), regime_context: dict | None = None,
+    ) -> dict[str, Any]:
+        """Assess all retained text and preserve the original attempt on failure."""
+        import hashlib
+        from tradingagents.strategies.data_sources.regulation_assessment import (
+            MAX_RESPONSE_BYTES, prepare_request, validate_assessment,
+        )
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        self.last_call_provenance = {}
+        self.last_call_failure = ''
+        self.last_call_response = None
+        attempt = {'version': 'regulation-model-attempt-v1', 'source_provenance': None,
+            'model_provenance': {}, 'model_call_started': False, 'response_received': False,
+            'response_text': None, 'response_sha256': None, 'response_bytes': None,
+            'response_encoding': None,
+            'response_over_limit': False, 'validation_status': 'not_started', 'failure_reason': None}
+        self.last_regulation_attempt = attempt
+        try:
+            model_timeout()
+            request = prepare_request(evidence, target_bindings=target_bindings, regime_context=regime_context)
+            attempt['source_provenance'] = json.loads(request.context.provenance_json)
+            model_timeout()
+            attempt['model_call_started'] = True
+            text = self._call_llm(request.system, request.user, max_tokens=4096, role='thesis')
+            observed = self.last_call_response
+            response_text = (observed['text'] if isinstance(observed, dict)
+                and observed.get('received') is True else None) if observed is not None else text
+            # Retain before checking the elapsed budget or validating JSON. A
+            # returned but invalid/late original must not vanish from the audit.
+            if type(response_text) is str:
+                encoding = 'utf-8'
+                try:
+                    raw = response_text.encode('utf-8')
+                except UnicodeEncodeError:
+                    # Preserve invalid Unicode scalars without replacement or
+                    # silently claiming valid UTF-8. JSON storage escapes them.
+                    raw = response_text.encode('utf-8', errors='surrogatepass')
+                    encoding = 'utf-8-surrogatepass'
+                attempt.update(response_received=True, response_sha256=hashlib.sha256(raw).hexdigest(),
+                    response_bytes=len(raw), response_over_limit=len(raw) > MAX_RESPONSE_BYTES,
+                    response_encoding=encoding,
+                    response_text=response_text if len(raw) <= MAX_RESPONSE_BYTES else None)
+                if attempt['response_over_limit']:
+                    raise ValueError('invalid_regulation_response_limit')
+                if encoding != 'utf-8':
+                    raise ValueError('invalid_regulation_response_encoding')
+            model_timeout()
+            if not text and self.last_call_failure == 'model_deadline_exhausted':
+                raise ModelDeadlineExceeded('model_deadline_exhausted')
+            result = validate_assessment(text, request.context)
+            model_timeout()
+            attempt['validation_status'] = 'validated'
+            return result
+        except ModelDeadlineExceeded:
+            self.last_call_failure = 'model_deadline_exhausted'
+            raise
+        except ValueError as error:
+            if not self.last_call_failure:
+                code = str(error)
+                self.last_call_failure = code if code.startswith('invalid_regulation_') else 'analysis_unavailable'
+            raise
+        except Exception:
+            if not self.last_call_failure:
+                self.last_call_failure = 'analysis_unavailable'
+            raise
+        finally:
+            attempt['model_provenance'] = deepcopy(self.last_call_provenance)
+            if attempt['validation_status'] != 'validated':
+                attempt['validation_status'] = 'failed'
+                attempt['failure_reason'] = self.last_call_failure or 'analysis_unavailable'
 
     def analyze_regulation(
         self,

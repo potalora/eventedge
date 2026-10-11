@@ -148,7 +148,8 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY, attribution_binding, build_scope
     if attribution_policy not in (None, ATTRIBUTION_POLICY):
         raise ValueError('invalid_filing_attribution')
-    from .filing_material_policy import SUPPORTED_POLICIES, validate_quarantined_evidence
+    from .filing_material_policy import (SUPPORTED_POLICIES, SUPPORTED_DOCUMENT_POLICY,
+        validate_quarantined_evidence)
     if material_policy is not None and (not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES):
         raise ValueError('invalid_filing_material_policy')
     if current_provider_deadline('edgar') is None:
@@ -165,8 +166,11 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     discovery_complete = all(value.get('complete') is True for value in discovery_coverage.values())
     symbols = EquityUniverse.company_symbols(company_map) if company_map is not None else {}
     refs, specs, failures, corpus, histories, archives = {}, {}, {}, {}, {}, {}
+    prospective = material_policy == SUPPORTED_DOCUMENT_POLICY
+    supported_proofs, supported_originals, ownership_facts, ownership_lineages = {}, {}, {}, {}
     accepted_bytes, accepted_objects, rejected_bytes, rejected_objects = 0, 0, 0, 0
     resource_exhausted = False
+    ownership_acquisition_failures = {}
     for category, rows in copied.items():
         for index, row in enumerate(rows):
             row['requires_prior'] = False
@@ -216,15 +220,43 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             required_exhibits=tuple(sorted(spec['required_exhibits'])),
             **({'material_policy': material_policy} if material_policy else {})))
 
+    def account_metadata(value):
+        nonlocal accepted_bytes, accepted_objects, rejected_bytes, rejected_objects, resource_exhausted
+        provider_timeout('edgar')
+        size = len(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                              ensure_ascii=True, allow_nan=False).encode('utf-8'))
+        provider_timeout('edgar')
+        if resource_exhausted or accepted_bytes + size > max_evidence_bytes:
+            resource_exhausted = True
+            rejected_objects += 1
+            rejected_bytes += size
+            return False
+        accepted_bytes += size
+        accepted_objects += 1
+        return True
+
     def accept(results, failed):
         nonlocal accepted_bytes, accepted_objects, rejected_bytes, rejected_objects, resource_exhausted
         for (kind, key), value in results.items():
+            additions, proof, original, facts = {}, None, None, None
             if kind == 'body':
                 spec = specs[key]
                 if (not isinstance(value, dict) or value.get('accession') != key
                         or value.get('form') != spec['form'] or value.get('filing_date') != spec['date']
                         or value.get('structural_status') not in ('complete', 'insufficient')):
                     failures[key] = _failure('mismatched_submission_evidence')
+                    continue
+                proof = value.pop('supported_source_proof', None)
+                if prospective and 'material_quarantine' not in value:
+                    if isinstance(proof, dict):
+                        original = proof.get('original')
+                    facts = value.get('ownership_facts')
+                    additions = {'supported_source_proofs': {key: proof},
+                                 'supported_originals': {key: original}}
+                    if facts is not None:
+                        additions['ownership_facts'] = {key: facts}
+                elif proof is not None:
+                    failures[key] = _failure('undeclared_supported_source_proof')
                     continue
                 if 'material_quarantine' in value:
                     if not material_policy:
@@ -237,6 +269,9 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             try:
                 size = len(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                       ensure_ascii=True, allow_nan=False).encode('utf-8'))
+                if additions:
+                    size += len(json.dumps(additions, sort_keys=True, separators=(',', ':'),
+                        ensure_ascii=True, allow_nan=False).encode('utf-8'))
             except (ValueError, TypeError, RecursionError):
                 failed[(kind, key)] = _failure('invalid_evidence_serialization')
                 continue
@@ -251,6 +286,11 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             accepted_objects += 1
             if kind == 'body':
                 corpus[key] = value
+                if additions:
+                    supported_proofs[key] = proof
+                    supported_originals[key] = original
+                    if facts is not None:
+                        ownership_facts[key] = facts
             elif kind == 'history':
                 histories[key] = value
             else:
@@ -388,6 +428,17 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
 
     remaining = [body_task(key) for key in sorted(specs) if key not in corpus and key not in failures]
     _run_tasks(remaining, max_workers, accept)
+    if prospective:
+        from .filing_ownership_hydration import hydrate_ownership_dependencies
+        ownership_currents = [key for key in refs if key in corpus and
+            filing_form_family(corpus[key]['form']) in _OWNERSHIP and
+            'material_quarantine' not in corpus[key]]
+        hydrate_ownership_dependencies(source, ownership_currents, corpus=corpus,
+            histories=histories, archives=archives, specs=specs, failures=failures,
+            facts=ownership_facts, lineages=ownership_lineages, run_tasks=_run_tasks,
+            accept=accept, body_task=body_task, max_workers=max_workers,
+            account_metadata=account_metadata, acquisition_failures=ownership_acquisition_failures)
+
     for key, comparison in comparisons.items():
         if comparison['status'] != 'selected':
             continue
@@ -423,6 +474,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                 'archive_refs': archive_refs, 'history_snapshot_sha256': digest}
 
     failed_rows, unresolved_ownership, outside_ownership = 0, 0, 0
+    failed_row_ids = set()
     for key, rows in refs.items():
         value = corpus.get(key)
         for row in rows:
@@ -451,6 +503,9 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                         row['prior_status'] = 'not_assessed_material_quarantine'
                 failed = failed or (binding['status'] != 'verified' and not attribution_permission)
                 if filing_form_family(value['form']) in _OWNERSHIP:
+                    if prospective and key in ownership_lineages:
+                        row['ownership_lineage_ref'] = key
+                        row['ownership_lineage_status'] = ownership_lineages[key]['status']
                     row['subject_attribution_verified'] = binding['execution_status'] == 'verified'
                     row['subject_ticker'] = binding.get('ticker', '')
                     row['ticker'] = binding.get('ticker', '')
@@ -474,6 +529,8 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                     else:
                         failed = True
             failed_rows += int(failed)
+            if failed:
+                failed_row_ids.add(id(row))
     deadline_exhausted = provider_clock_time('edgar') >= current_provider_deadline('edgar')
     result = {'policy': POLICY, 'collections': copied, 'corpus': dict(sorted(corpus.items())),
             'history_corpus': dict(sorted(histories.items())),
@@ -508,6 +565,34 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     if attribution_policy:
         result['coverage']['attribution_policy'] = attribution_policy
         result['attribution_scope'] = build_scope(result, copied, equity_universe, company_map)
+    if prospective:
+        from tradingagents.strategies.orchestration.filing_supported_scope import build_supported_dispositions
+        result.update(supported_source_proofs=dict(sorted(supported_proofs.items())),
+            supported_originals=dict(sorted(supported_originals.items())),
+            ownership_facts=dict(sorted(ownership_facts.items())),
+            ownership_lineages=dict(sorted(ownership_lineages.items())),
+            ownership_acquisition_failures=dict(sorted(ownership_acquisition_failures.items())))
+        def accept_disposition(accession, receipt):
+            if account_metadata({'supported_dispositions': {accession: receipt}}):
+                for row in refs[accession]:
+                    row['filing_material_disposition'] = receipt['status']
+                    if receipt['status'] != 'admitted':
+                        failed_row_ids.add(id(row))
+                return True
+            result.setdefault('supported_disposition_failures', {})[accession] = {'code': 'evidence_byte_limit'}
+            for row in refs[accession]:
+                row['filing_failure'] = _failure('evidence_byte_limit')
+                row['filing_material_disposition'] = 'failed'
+                failed_row_ids.add(id(row))
+            return False
+        result['supported_dispositions'] = build_supported_dispositions(result, copied,
+            on_receipt=accept_disposition, check=lambda: provider_timeout('edgar'))
+        deadline_exhausted = provider_clock_time('edgar') >= current_provider_deadline('edgar')
+        result['coverage'].update(failed_rows=len(failed_row_ids), deadline_exhausted=deadline_exhausted,
+            complete=not failed_row_ids and not deadline_exhausted and discovery_complete and not resource_exhausted,
+            accepted_evidence_bytes=accepted_bytes, accepted_evidence_objects=accepted_objects,
+            rejected_evidence_bytes=rejected_bytes, rejected_evidence_objects=rejected_objects,
+            acquired_accessions=len(corpus))
     if material_policy:
         from tradingagents.strategies.orchestration.filing_material_validation import build_material_scope
         result['coverage']['material_policy'] = material_policy

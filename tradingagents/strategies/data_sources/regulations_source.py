@@ -9,6 +9,9 @@ import json
 import logging
 import os
 import time
+from contextvars import ContextVar
+from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any
 
 from .evidence import current_session_date, CoverageRecords, bounded_coverage, collection_envelope
@@ -19,6 +22,28 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.regulations.gov/v4"
 _RATE_DELAY = 0.5  # Conservative rate limiting
+MAX_REGULATION_SOURCE_BYTES = 32 * 1024**2
+_CONTENT_BUDGET = ContextVar('regulations_content_bytes', default=None)
+
+
+def _read_response(response, maximum):
+    """Charge discovery, details and originals to one opt-in source byte owner."""
+    owner = _CONTENT_BUDGET.get()
+    if owner is not None:
+        maximum = min(maximum, owner['limit'] - owner['used'] - owner['reserved'])
+        if owner['exhausted'] or maximum <= 0:
+            raise SourceFetchError('Regulations source byte limit reached', reason_code='invalid_response')
+    try:
+        raw = read_bounded_response(response, provider='regulations', max_bytes=maximum)
+    except Exception:
+        # The bounded reader does not expose partial consumed bytes. Reserve the
+        # remaining capacity on any failed stream rather than recycling it.
+        if owner is not None:
+            owner.update(reserved=owner['limit'] - owner['used'], exhausted=True)
+        raise
+    if owner is not None:
+        owner['used'] += len(raw)
+    return raw
 
 
 def _page_json(raw: bytes):
@@ -43,9 +68,14 @@ class RegulationsSource:
     name: str = "regulations"
     requires_api_key: bool = True
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, *, pdf_parser=None) -> None:
         self._api_key = api_key or os.environ.get("REGULATIONS_API_KEY", "")
         self._cache: dict[str, Any] = {}
+        # Optional bounded-child adapter: (body, *, check) -> PDF evidence.
+        # Never import or invoke pypdf inside the acquisition parent.
+        if pdf_parser is not None:
+            raise ValueError('regulation_pdf_parser_unavailable')
+        self._pdf_parser = None
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "search_documents")
@@ -110,13 +140,14 @@ class RegulationsSource:
             for page in range(1, 201):
                 response = None
                 try:
+                    provider_timeout('regulations')
                     response = provider_request("regulations", "GET", f"{BASE_URL}/documents",
                         params={**params, "page[number]": page},
                         headers={"X-Api-Key": self._api_key}, timeout=provider_timeout("regulations"),
                         stream=True, allow_redirects=False)
                     if response.status_code != 200:
                         raise SourceFetchError("Regulations request failed", reason_code="http_error", http_status=response.status_code)
-                    raw = read_bounded_response(response, provider="regulations", max_bytes=32*1024*1024-used_bytes)
+                    raw = _read_response(response, 32*1024*1024-used_bytes)
                     used_bytes += len(raw)
                     data = _page_json(raw)
                     provider_timeout("regulations")
@@ -185,10 +216,20 @@ class RegulationsSource:
         self,
         agencies: list[str] | None = None,
         days_back: int = 30,
-        *, as_of: str | None = None,
+        *, as_of: str | None = None, evidence_policy: str | None = None,
     ) -> list[dict]:
         """Get recently proposed rules, optionally filtered by agency."""
         from datetime import datetime, timedelta
+
+        if evidence_policy is not None:
+            from .regulation_evidence import POLICY
+            if evidence_policy != POLICY:
+                raise ValueError('invalid_regulation_evidence_policy')
+            if current_provider_deadline('regulations') is None:
+                with provider_budget('regulations', time.monotonic() + 60):
+                    return self.get_recent_proposed_rules(agencies, days_back, as_of=as_of,
+                                                         evidence_policy=evidence_policy)
+            return self._complete_recent_rules(agencies, days_back, as_of=as_of)
 
         date_from = ((datetime.fromisoformat(as_of) if as_of else datetime.fromisoformat(current_session_date())) - timedelta(days=days_back)).strftime("%Y-%m-%d")
         results = []
@@ -219,6 +260,118 @@ class RegulationsSource:
 
         return CoverageRecords(results, coverage={"mode":"exhaustive_window", "complete":True, "samples":coverages, "as_of":as_of})
 
+    def _content_request(self, url, *, maximum, api=False):
+        response = None
+        try:
+            provider_timeout('regulations')
+            response = provider_request('regulations', 'GET', url,
+                **({'params': {'include': 'attachments'}} if api else {}),
+                headers={'X-Api-Key': self._api_key} if api else {},
+                timeout=provider_timeout('regulations'), stream=True, allow_redirects=False)
+            if response.status_code != 200:
+                raise SourceFetchError('Regulations content request failed', reason_code='http_error',
+                                       http_status=response.status_code)
+            return _read_response(response, maximum)
+        finally:
+            if response is not None:
+                response.close()
+
+    def _complete_recent_rules(self, agencies, days_back, *, as_of):
+        from .regulation_evidence import (
+            POLICY, MAX_DETAIL_BYTES, MAX_BODY_BYTES, build_regulation_evidence,
+            detail_plan, digest, original_receipt,
+        )
+        if _CONTENT_BUDGET.get() is not None:
+            raise ValueError('nested_regulation_content_scope')
+        owner = {'limit': MAX_REGULATION_SOURCE_BYTES, 'used': 0, 'reserved': 0, 'exhausted': False}
+        token = _CONTENT_BUDGET.set(owner)
+        try:
+            discovery_error = None
+            try:
+                discovered = self.get_recent_proposed_rules(agencies, days_back, as_of=as_of)
+                discovery = deepcopy(discovered.coverage)
+                rows = deepcopy(list(discovered))
+            except SourceFetchError as error:
+                discovery_error = error
+                discovery = deepcopy(error.partial_data.get('coverage', {'complete': False}))
+                rows = deepcopy(error.partial_data.get('proposed_rules', []))
+            corpus, failures, identities = {}, {}, {}
+            for row in rows:
+                docid = row['document_id']
+                row['regulation_evidence_ref'] = docid
+                if docid in identities and identities[docid] != row:
+                    retained = corpus.get(docid)
+                    failures[docid] = {'identity': deepcopy(row),
+                                      'detail_receipt': retained['detail_receipt'] if retained else None,
+                                      'resources': retained['resources'] if retained else [],
+                                      'body_receipts': {unit['resource_id']: unit['receipt'] for unit in retained['units']} if retained else {},
+                                      'failure': {'code': 'invalid_regulation_identity',
+                                      'reason_code': 'invalid_response', 'http_status': None}}
+                    corpus.pop(docid, None)
+                if docid not in identities:
+                    identities[docid] = deepcopy(row)
+                    detail_receipt, body_receipts, resources = None, {}, []
+                    try:
+                        provider_timeout('regulations')
+                        # Identity grammar is enforced before constructing an API URL.
+                        from .regulation_evidence import _ID
+                        if not isinstance(docid, str) or not _ID.fullmatch(docid):
+                            raise ValueError('invalid_regulation_identity')
+                        raw_detail = self._content_request(BASE_URL + '/documents/' + docid,
+                                                           maximum=MAX_DETAIL_BYTES, api=True)
+                        observed = datetime.now(timezone.utc).isoformat()
+                        detail_receipt = original_receipt(raw_detail, observed_at=observed,
+                            url=BASE_URL + '/documents/' + docid + '?include=attachments')
+                        plan = detail_plan(row, raw_detail, observed_at=observed)
+                        resources = plan['resources']
+                        bodies, observed_bodies, pdfs = {}, {}, {}
+                        for resource in resources:
+                            rid, selected = resource['resource_id'], resource['selected']
+                            body = self._content_request(selected['fileUrl'], maximum=MAX_BODY_BYTES)
+                            stamp = datetime.now(timezone.utc).isoformat()
+                            body_receipts[rid] = original_receipt(body, observed_at=stamp,
+                                                                 url=selected['fileUrl'])
+                            bodies[rid], observed_bodies[rid] = body, stamp
+                            if selected['format'] == 'pdf':
+                                raise ValueError('regulation_pdf_parser_unavailable')
+                                provider_timeout('regulations')
+                        corpus[docid] = build_regulation_evidence(row, raw_detail, bodies,
+                            observed_at=observed, body_observed_at=observed_bodies, pdf_results=pdfs,
+                            check=lambda: provider_timeout('regulations'))
+                    except Exception as error:
+                        failure = source_fetch_error('Regulations document evidence failed', error)
+                        code = str(error) if isinstance(error, ValueError) and str(error).startswith(
+                            ('invalid_regulation_', 'missing_regulation_', 'unsupported_regulation_',
+                             'restricted_regulation_', 'empty_regulation_', 'ambiguous_regulation_', 'regulation_')) else failure.reason_code
+                        failures[docid] = {'identity': deepcopy(row), 'detail_receipt': detail_receipt,
+                            'resources': resources, 'body_receipts': body_receipts,
+                            'failure': {'code': code, 'reason_code': failure.reason_code,
+                                        'http_status': failure.http_status}}
+            for row in rows:
+                docid = row['document_id']
+                row['regulation_evidence_status'] = 'complete' if docid in corpus else 'failed'
+                if docid in failures:
+                    row['regulation_failure'] = deepcopy(failures[docid]['failure'])
+            complete_rows = sum(row['regulation_evidence_status'] == 'complete' for row in rows)
+            graph = {'policy': POLICY, 'corpus': corpus, 'acquisition_failures': failures,
+                'rows': [{'index': index, 'document_id': row['document_id'], 'row_sha256': digest(row)}
+                         for index, row in enumerate(rows)],
+                'coverage': {'discovery_complete': discovery.get('complete') is True,
+                    'content_complete': discovery.get('complete') is True and not failures and not owner['exhausted'],
+                    'required_rows': len(rows), 'complete_rows': complete_rows,
+                    'failed_rows': len(rows) - complete_rows, 'consumed_bytes': owner['used'],
+                    'reserved_bytes': owner['reserved'],
+                    'byte_limit': owner['limit'], 'byte_budget_exhausted': owner['exhausted']}}
+            graph['manifest_sha256'] = digest(graph)
+            if discovery_error is not None or not graph['coverage']['content_complete']:
+                raise SourceFetchError('Regulations required content incomplete', reason_code='batch_failure',
+                    partial_data={'proposed_rules': rows, 'coverage': discovery, 'regulation_evidence': graph})
+            result = CoverageRecords(rows, coverage=discovery)
+            result.regulation_evidence = graph
+            return result
+        finally:
+            _CONTENT_BUDGET.reset(token)
+
     def clear_cache(self) -> None:
         self._cache.clear()
 
@@ -233,8 +386,13 @@ class RegulationsSource:
         ))
 
     def _dispatch_recent_proposed(self, params: dict[str, Any]) -> dict[str, Any]:
-        return collection_envelope(self.get_recent_proposed_rules(
+        rules = self.get_recent_proposed_rules(
             agencies=params.get("agencies"),
             days_back=params.get("days_back", 30),
             as_of=params.get("as_of"),
-        ))
+            evidence_policy=params.get('evidence_policy'),
+        )
+        result = collection_envelope(rules)
+        if hasattr(rules, 'regulation_evidence'):
+            result['regulation_evidence'] = rules.regulation_evidence
+        return result

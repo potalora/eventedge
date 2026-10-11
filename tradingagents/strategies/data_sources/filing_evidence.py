@@ -501,7 +501,7 @@ def _inventory(document):
 
 
 def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 * 1024 * 1024,
-                   max_total_text_bytes=32 * 1024 * 1024, body_reader=None, check=None) -> dict:
+                   max_total_text_bytes=32 * 1024 * 1024, body_reader=None, check=None, supported_document_policy=None) -> dict:
     """Build whole selected-document evidence, not a semantic completeness verdict.
 
     Includes primary and exact local exhibit href targets. Ownership XML also
@@ -510,6 +510,8 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
     filenames or exact exhibit types. No missing exhibit numbers are guessed.
     """
     _check(check)
+    if supported_document_policy not in (None, 'verified_supported_documents_v1'):
+        raise EvidenceError('invalid_supported_document_policy')
     documents = parsed['documents']
     read_body = body_reader or (lambda document: document['body'])
     primary_index = parsed['primary_index']
@@ -567,7 +569,8 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
             issues.append({'code': 'ambiguous_required_dependency', 'required': required})
         else:
             selected.add(matches[0])
-    units, total = [], 0
+    units, total, pdf_evidence = [], 0, {}
+    ownership_primary_body = None
     for index in sorted(selected):
         document = documents[index]
         try:
@@ -582,12 +585,24 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
             if index == primary_index and parsed['form'].startswith('SCHEDULE 13') and suffix.endswith('.xml'):
                 text = _ownership_text(document, parsed, check=check)
                 representation = 'ownership_form_data'
+                if supported_document_policy:
+                    ownership_primary_body = document['body']
             elif suffix.endswith(('.htm', '.html', '.txt')):
                 text = _visible_text(document['body'], soup=primary_soup if index == primary_index else None, check=check)
                 representation = 'full_visible_text'
+            elif suffix.endswith('.pdf') and supported_document_policy:
+                from .filing_pdf import extract_pdf_evidence, FilingPDFError
+                try:
+                    receipt = extract_pdf_evidence(document['body'], max_pdf_bytes=max_document_bytes,
+                        max_text_chars=max_total_text_bytes, max_pages=2000,
+                        max_stream_bytes=max_total_text_bytes, check=check)
+                except FilingPDFError as error:
+                    raise EvidenceError(str(error)) from None
+                pdf_evidence[document['filename']] = receipt
+                text, representation = receipt['text'], 'native_pdf_text'
             else:
                 raise EvidenceError('unsupported_document_format')
-            if not text:
+            if not text and representation != 'native_pdf_text':
                 raise EvidenceError('empty_selected_document')
             _check(check)
             size = len(text.encode('utf-8'))
@@ -600,13 +615,27 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
         except EvidenceError as error:
             issues.append({'code': str(error), 'filename': document['filename'],
                            'body_sha256': document['body_sha256']})
-    return {'version': VERSION, **{k: parsed[k] for k in ('format', 'accession', 'form', 'filing_date',
+    result = {'version': VERSION, **{k: parsed[k] for k in ('format', 'accession', 'form', 'filing_date',
             'observed_at', 'accepted_at', 'submission_sha256', 'header_sha256', 'roles', 'issuer_candidates')},
             'structural_status': 'insufficient' if issues else 'complete',
             'structural_scope': 'primary_and_selected_dependencies', 'analysis_adequacy': 'not_assessed',
             'dependency_assessment': 'not_assessed', 'units': units, 'issues': issues,
             'dependencies': dependencies, 'document_inventory': [_inventory(d) for d in documents],
             **({'inventory_reconciliation': parsed['inventory_reconciliation']} if 'inventory_reconciliation' in parsed else {})}
+    if supported_document_policy:
+        result['supported_document_policy'] = supported_document_policy
+        result['pdf_evidence'] = pdf_evidence
+        if ownership_primary_body is not None:
+            import base64
+            from .filing_ownership_lineage import ownership_facts, OwnershipLineageError
+            result['ownership_primary_body'] = base64.b64encode(ownership_primary_body).decode('ascii')
+            try:
+                result['ownership_facts'] = ownership_facts(result, ownership_primary_body, check=check)
+            except (OwnershipLineageError, ValueError, ET.ParseError):
+                result['issues'].append({'code': 'invalid_native_ownership_facts',
+                    'filename': primary['filename'], 'body_sha256': primary['body_sha256']})
+                result['structural_status'] = 'insufficient'
+    return result
 
 
 
@@ -619,7 +648,7 @@ def build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 *
 
 def build_evidence_from_buffer(selected_frame, raw_buffer, *, required_exhibits=(),
                                max_document_bytes=16 * 1024 * 1024,
-                               max_total_text_bytes=32 * 1024 * 1024, check=None):
+                               max_total_text_bytes=32 * 1024 * 1024, check=None, supported_document_policy=None):
     """Materialize only bounded selected documents from original native bytes."""
     _check(check)
     def read_body(document):
@@ -634,4 +663,4 @@ def build_evidence_from_buffer(selected_frame, raw_buffer, *, required_exhibits=
         return body
     return _build_evidence(selected_frame, required_exhibits=required_exhibits,
         max_document_bytes=max_document_bytes, max_total_text_bytes=max_total_text_bytes,
-        body_reader=read_body, check=check)
+        body_reader=read_body, check=check, supported_document_policy=supported_document_policy)

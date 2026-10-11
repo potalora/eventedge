@@ -1,6 +1,28 @@
 # Source reliability verification and release notes
 
-## Problem and resulting behavior
+## October 11 supported-document candidate status
+
+The source-reliability results below are historical. The latest committed XML repair is `8f69cc9`: 5,362 local tests passed, and its CI passed 5,359 tests with three skips. Neither result validates the new topic-branch candidate. The final local non-live suite passed **5,860 tests**, with four deselected, one existing websockets dependency warning, in 220.10 seconds. The closed log is `data/forward-readiness/supported-documents-full-suite.txt`. The exact-current-head CI result is recorded on [PR #50](https://github.com/potalora/eventedge/pull/50) and must pass before a new native freeze. Independent review accepted the filing changes with 186 focused tests, including all 25 reviewer cases; the raw-capture changes with 113 focused tests; and the final regulatory changes with 123 focused tests, including all 23 reviewer cases. No reproduced review blocker remained. These review results do not establish native access, source completeness or accepted replay.
+
+The new opt-in `verified_supported_documents_v1` keeps the exact TEN quarantine. Only independently source-verified visual PDF obligations, closed ambiguous ownership lineages and publisher-reported CBL contradictions can be deferred. Deferral keeps strict full coverage false and removes that source from complete thesis analysis. Unknown capabilities and all retrieval, parser, model, deadline and budget failures remain failed.
+
+SEC HTML tables, redlines, images and capability gaps do not become supported text through flattening. PDF text support is narrow native Type1 text. Valid fully inventoried lossless raster or vector content can establish visual deferral. Opaque codecs, masks and unverified graphics fail. Ownership evidence requires closed subject history and archives, complete roster/security identity, all applicable base/intervening/incorporated originals, strict scalar XML and markup-aware references. Annual prior rules do not change.
+
+Regulatory `complete_document_text_v1` requires the full rule and attachments. It has no first-three or title fallback. Its narrow inert HTML subset rejects CSS, style, forms, tables, lists and embeds. Regulatory PDF acquisition is not wired and fails. Prose issuer bridges and automatic directional regulatory targets are not supported. Complete unresolved-fact-free evidence can support a valid journal-only no-directional-thesis result; missing issuer evidence cannot be called no thesis.
+
+Failed model attempts retain up to 256 KiB of exact response text plus full hash and provenance. Oversized attempts remain failed, and capture must retain their complete response separately. A prefix is never full-response evidence.
+
+The new independent raw audit requires every completed original, including failed and quarantined originals. It verifies private regular files, full hashes, one read-only mapping at a time, regenerated source proofs, ownership lineages and supported dispositions. The caller must provide one positive remaining-time check and a governed resource boundary. All in-pipeline scopes remain provisional until native raw audit and complete immutable replay pass.
+
+The exact advertised EPA HTML download returned 403 on the intended native host at `2026-10-11T16:21:44Z`. Its complete response was 919 bytes, SHA-256 `62cd994ff88bf477e4f335491b90b098617a38587d2c3b5d4f18142b39f1811e`. Three earlier Mac HTML checks returned 403; the metadata API returned 200. The closed diagnostic is `data/forward-readiness/regulations-detail-contract-probe-20261011/native-host-html-accessibility.json`. It is an external-access blocker, not proof of its cause. Do not use metadata as full rule text or launch blind retries.
+
+The closed earlier parent run at `1d8c615` completed acquisition/freeze of 3,016 originals. NOAA took 105.905 seconds for ten states and 7,877 stations. At the stop, 182 model jobs had returned and 32 were in flight; these are not signal counts. The operator stopped the run after filing analyses returned insufficient. Full sixteen-book acceptance was false and accepted replay was ineligible. Closed retrieval verified 5,115 files and 3,358,688,422 bytes. These retained parent facts do not establish a new candidate result or a completed analysis census.
+
+No new native run was launched. The new policy has no verified four-horizon, sixteen-book, model-call or immutable-replay result. A new freeze and capture-adapter wiring are required before launch. Original full coverage remains false; scoped acceptance is pending. Source/model/call limits of 900/2,400/120 seconds, two SEC workers, 16 MiB document, 512 MiB corpus, 4 GiB spool and 8 GiB private-evidence limits remain fixed. Not merged. Not deployed.
+
+The all-original capture must fit the unchanged 4 GiB physical spool cap, which includes retained hard-link originals. The historical corpus contains 7,298,823,168 uncompressed raw bytes and cannot fit that cap. A compressed alternative is unproven and not implemented. This does not authorize a higher cap or omitted originals. The regulatory HTTP 403 remains the primary external blocker.
+
+## Historical problem and resulting behavior
 
 Several provider adapters converted exhausted requests or malformed responses
 into empty data. Strategy health could then appear healthy, and persisted health
@@ -73,7 +95,7 @@ bash -n scripts/daily_trading.sh
 git diff --check
 ```
 
-The integrated non-live suite passed 2,638 tests with four live tests deselected
+The October 6 integrated non-live suite passed 2,638 tests with four live tests deselected
 and one existing websockets deprecation warning. The acceptance campaign passed
 all 13 cases; independent review refreshed 226 focused checks with no remaining
 blockers. Compilation, shell syntax, and whitespace checks passed. PR checks

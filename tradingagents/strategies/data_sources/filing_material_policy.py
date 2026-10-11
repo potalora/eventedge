@@ -14,7 +14,8 @@ import re
 
 POLICY = 'retained_three_material_gaps_v1'
 TEN_POLICY = 'retained_ten_material_gaps_v1'
-SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY})
+SUPPORTED_DOCUMENT_POLICY = 'verified_supported_documents_v1'
+SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY, SUPPORTED_DOCUMENT_POLICY})
 _VERSION = 'sec-filing-evidence-v1'
 _MAX_ORIGINAL = 512 * 1024 * 1024
 _METADATA = ('version', 'format', 'accession', 'form', 'filing_date', 'observed_at',
@@ -93,7 +94,18 @@ def policy_manifest(policy=POLICY) -> dict:
             issuer_cik=cik, issuer_name=name, accepted_at=accepted, document_count=count,
             primary_candidates=[dict(sequence=sequence, type=form, filename=filename)
                                 for sequence, filename in primaries], gap_codes=[gap] + (['ambiguous_primary_document'] if form == 'DEF 14A' else [])))
-    return {'policy': policy, 'identities': identities}
+    result = {'policy': policy, 'identities': identities}
+    if policy == SUPPORTED_DOCUMENT_POLICY:
+        result['supported_scope'] = {
+            'version': 'supported-document-disposition-v1',
+            'broadens': TEN_POLICY,
+            'retains_exact_quarantines': True,
+            'categories': ['unsupported_selected_visual_content', 'ambiguous_ownership_lineage',
+                           'unresolved_publisher_facts'],
+            'source_authority': 'bounded_parser_attestation_requires_raw_capture_audit',
+            'retrieval_parser_model_and_budget_failures_remain_failures': True,
+            'original_full_analysis_acceptance': False}
+    return result
 
 
 def policy_manifest_sha256(policy=POLICY) -> str:

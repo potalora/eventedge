@@ -24,6 +24,7 @@ dependencies = [
     "pyarrow>=24.0.0",
     "plotly>=6.0.0",
     "python-dotenv>=1.0.0",
+    "pypdf>=6.20.0,<7",
     "requests>=2.32.4",
     "streamlit>=1.45.0",
     "yfinance>=0.2.63",

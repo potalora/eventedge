@@ -166,13 +166,19 @@ class _Dispatcher:
             receipt = isinstance(raw, CompletedSubmission)
             material_policy = arguments.get('material_policy')
             reconciliation = 'inventory_reconciliation' in arguments
-            if reconciliation and (not receipt or material_policy is not None
+            from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY
+            supported_mode = material_policy == SUPPORTED_DOCUMENT_POLICY
+            quarantine_mode = material_policy is not None and not supported_mode
+            if reconciliation and (not receipt or (material_policy is not None and not supported_mode)
                     or not isinstance(arguments['inventory_reconciliation'], dict)):
                 raise _failure('invalid_response')
             if 'material_policy' in arguments:
                 from .filing_material_policy import SUPPORTED_POLICIES, approved_identity
                 if (not receipt or not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES
-                        or approved_identity(dict(raw.identity), policy=material_policy) is None):
+                        or (not supported_mode and approved_identity(dict(raw.identity), policy=material_policy) is None)):
+                    raise _failure('invalid_response')
+                quarantine_mode = approved_identity(dict(raw.identity), policy=material_policy) is not None
+                if reconciliation and quarantine_mode:
                     raise _failure('invalid_response')
             if receipt:
                 if raw.owner is not current_submission_spool():
@@ -203,6 +209,9 @@ class _Dispatcher:
             if receipt:
                 metadata['spooled'] = True
                 metadata['max_document_bytes'] = _DOCUMENT_LIMIT
+                if supported_mode:
+                    metadata['original'] = {'identity': dict(raw.identity), 'observed_at': raw.observed_at,
+                        'size': size, 'sha256': digest, 'complete': True}
             started = True
             _frame(child.stdin.fileno(), metadata, check=self._check, limit=_META_LIMIT,
                    io_lock=self._io_locks[child])
@@ -235,7 +244,7 @@ class _Dispatcher:
                 ordinary_rejection = True
                 raise _failure('invalid_response')
             if set(response) == {'job', 'error'} and response['error'] == 'document_count_mismatch':
-                if not receipt or material_policy is not None or reconciliation:
+                if not receipt or quarantine_mode or reconciliation:
                     raise ValueError('unexpected count reconciliation response')
                 ordinary_rejection = True
                 raise SubmissionDocumentCountMismatch()
@@ -255,11 +264,22 @@ class _Dispatcher:
                 validate_reconciled_evidence(result, original={'identity': dict(raw.identity),
                     'sha256': raw.sha256, 'size': raw.size, 'observed_at': raw.observed_at},
                     check=self._check)
-            if material_policy is not None:
+            if quarantine_mode:
                 from .filing_material_policy import validate_quarantined_evidence
                 validate_quarantined_evidence(result, policy=material_policy)
                 if result['material_quarantine']['submission_size'] != size:
                     raise ValueError('parser original size mismatch')
+            elif supported_mode:
+                from .filing_supported_policy import _checked_local_proof
+                proof = result.pop('supported_source_proof')
+                _checked_local_proof(proof, result, metadata['original'])
+                required = list(arguments['required_exhibits'])
+                if '__all_native_exhibits__' in required:
+                    required = sorted(set(name for name in required if name != '__all_native_exhibits__')
+                        | {doc['filename'] for doc in result['document_inventory'] if doc['type'].upper().startswith('EX-')})
+                if proof['required_exhibits'] != required:
+                    raise ValueError('parser required evidence selection mismatch')
+                result['supported_source_proof'] = proof
             self._check()
             return result
         except BaseException as exc:
@@ -378,12 +398,14 @@ def _worker(deadline):
             raise RuntimeError('SEC parser provider import forbidden')
         return native_import(name, *a, **k)
     builtins.__import__ = pure_import
-    spec = importlib.util.spec_from_file_location('_sec_pure_evidence', Path(__file__).with_name('filing_evidence.py'))
-    evidence = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(evidence)
-    material_spec = importlib.util.spec_from_file_location('_sec_pure_material', Path(__file__).with_name('filing_material_policy.py'))
-    material = importlib.util.module_from_spec(material_spec)
-    material_spec.loader.exec_module(material)
+    # Synthetic package permits only these pure relative modules without running
+    # data_sources.__init__, which imports HTTP providers.
+    import types
+    package = types.ModuleType('_sec_pure')
+    package.__path__ = [str(Path(__file__).parent)]
+    sys.modules['_sec_pure'] = package
+    evidence = importlib.import_module('_sec_pure.filing_evidence')
+    material = importlib.import_module('_sec_pure.filing_material_policy')
     def check():
         if time.monotonic() >= deadline or violations:
             raise RuntimeError('SEC parser boundary failed')
@@ -401,11 +423,14 @@ def _worker(deadline):
         spooled = isinstance(meta, dict) and meta.get('spooled') is True
         material_mode = spooled and isinstance(meta, dict) and 'material_policy' in meta
         reconciliation_mode = spooled and isinstance(meta, dict) and 'inventory_reconciliation' in meta
+        supported_mode = material_mode and meta['material_policy'] == material.SUPPORTED_DOCUMENT_POLICY
         allowed = required | {'spooled', 'max_document_bytes'} if spooled else required
         if material_mode:
             allowed |= {'material_policy'}
-        elif reconciliation_mode:
+        if reconciliation_mode:
             allowed |= {'inventory_reconciliation'}
+        if supported_mode:
+            allowed |= {'original'}
         raw_limit = _SPOOL_LIMIT if spooled else _RAW_LIMIT
         if (not isinstance(meta, dict) or set(meta) != allowed or type(meta['job']) is not int
                 or meta['job'] < 1 or type(meta['raw_size']) is not int
@@ -415,7 +440,9 @@ def _worker(deadline):
                 or (spooled and (type(meta['max_document_bytes']) is not int
                                  or meta['max_document_bytes'] != _DOCUMENT_LIMIT))
                 or (material_mode and (not isinstance(meta.get('material_policy'), str) or meta['material_policy'] not in material.SUPPORTED_POLICIES))
-                or (reconciliation_mode and not isinstance(meta.get('inventory_reconciliation'), dict))
+                or (reconciliation_mode and (not isinstance(meta.get('inventory_reconciliation'), dict)
+                    or (material_mode and not supported_mode)))
+                or (supported_mode and not isinstance(meta.get('original'), dict))
                 or not isinstance(meta['required_exhibits'], list)):
             raise ValueError('SEC parser request invalid')
         size, digest = meta.pop('raw_size'), meta.pop('raw_sha256')
@@ -426,6 +453,9 @@ def _worker(deadline):
             document_limit = meta.pop('max_document_bytes')
             if material_mode:
                 selected_material_policy = meta.pop('material_policy')
+            original = meta.pop('original') if supported_mode else None
+            quarantine_mode = material_mode and (not supported_mode
+                or material.approved_identity(original['identity'], policy=selected_material_policy) is not None)
             # No parent pathname crosses IPC. The child owns one anonymous file
             # whose full exact size has already been reserved by the parent.
             # Native launch checks this exact filesystem. Never silently move
@@ -452,7 +482,7 @@ def _worker(deadline):
                     try:
                         framed = evidence.frame_submission(mapped, **meta, check=check)
                         framing = False
-                        if material_mode:
+                        if quarantine_mode:
                             # Quarantine cannot turn an absent native body into
                             # permission merely because its tags were balanced.
                             for document in framed['documents']:
@@ -465,14 +495,24 @@ def _worker(deadline):
                             except ValueError:
                                 raise evidence.EvidenceError('invalid_material_quarantine') from None
                         else:
+                            if supported_mode and '__all_native_exhibits__' in exhibits:
+                                exhibits = sorted(set(name for name in exhibits if name != '__all_native_exhibits__')
+                                    | {doc['filename'] for doc in framed['documents'] if doc['type'].upper().startswith('EX-')})
                             selected = evidence.select_primary(framed, mapped, check=check)
                             result = evidence.build_evidence_from_buffer(selected, mapped,
-                                required_exhibits=exhibits, max_document_bytes=document_limit, check=check)
+                                required_exhibits=exhibits, max_document_bytes=document_limit, check=check,
+                                supported_document_policy=selected_material_policy if supported_mode else None)
+                            if supported_mode:
+                                supported = importlib.import_module('_sec_pure.filing_supported_policy')
+                                result['source_url'] = original['identity']['source_url']
+                                proof = supported.build_local_source_proof(result, original=original,
+                                    raw_submission=mapped, required_exhibits=exhibits, check=check)
+                                result['supported_source_proof'] = proof
                         check()
                         response = {'job': job, 'result': result}
                     except evidence.EvidenceError as error:
                         response = {'job': job, 'error': ('document_count_mismatch'
-                            if framing and not material_mode and not reconciliation_mode
+                            if framing and not quarantine_mode and not reconciliation_mode
                             and isinstance(error, evidence.DocumentCountMismatch) else 'invalid_evidence')}
             # The acknowledgement is constructed only after mmap and file exit.
             response['closed'] = True

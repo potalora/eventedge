@@ -417,6 +417,12 @@ class MultiStrategyEngine:
                        if configured(self.ar_config) else data)
         from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
         scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
+        from .regulation_inputs import validate_regulation_policy
+        regulation_source_scope = None
+        try:
+            regulation_source_scope = validate_regulation_policy(data, self.ar_config)
+        except ValueError:
+            scope_errors['regulations'] = 'invalid_regulation_evidence_policy'
         from .filing_policy_validation import validate_filing_comparison_policy
         filing_comparison_scope = None
         try:
@@ -510,11 +516,18 @@ class MultiStrategyEngine:
                 logger.exception("Strategy %s screen failed", strategy.name)
             if candidates:
                 filing_options = ({'filing_data': signal_data, 'universe': universe}
-                    if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' else {})
+                    if (self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
+                        or self.ar_config.get('regulation_evidence_policy') is not None) else {})
                 candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model, **filing_options)
             universe_assessments = []
             if universe is not None:
                 for candidate in candidates:
+                    if (candidate.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1'
+                            and candidate.metadata.get('analysis_status') == 'validated'
+                            and candidate.metadata.get('document_assessment') == 'assessed_no_directional_thesis'
+                            and candidate.metadata.get('regulation_evidence_status') == 'sufficient'
+                            and candidate.journal_only and not candidate.ticker):
+                        continue
                     decision = universe.decision(candidate.ticker)
                     assessment = {"discovery_id": candidate.metadata.get("discovery_id"),
                         "symbol": candidate.ticker, "decision": decision,
@@ -563,6 +576,35 @@ class MultiStrategyEngine:
                     'actionable_from_docket_metadata': False}
             full_filing_candidates = [c for c in candidates
                 if c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1']
+            regulation_candidates = [c for c in candidates
+                if c.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1']
+            if regulation_candidates:
+                from copy import deepcopy
+                regulation_graph = data.get('regulations', {}).get('regulation_evidence', {})
+                health_record.evidence['regulation_assessments'] = [deepcopy({
+                    'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
+                    'document_id': c.metadata.get('document_id'),
+                    'regulation_evidence_ref': c.metadata.get('regulation_evidence_ref'),
+                    'source_manifest_sha256': regulation_graph.get('manifest_sha256'),
+                    'evidence_sha256': regulation_graph.get('corpus', {}).get(
+                        c.metadata.get('regulation_evidence_ref'), {}).get('manifest_sha256'),
+                    'source_rows': [row for row in regulation_graph.get('rows', [])
+                                    if row['document_id'] == c.metadata.get('document_id')],
+                    'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
+                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason'),
+                    'document_assessment': c.metadata.get('document_assessment'),
+                    'regulation_evidence_status': c.metadata.get('regulation_evidence_status'),
+                    'journal_only': c.journal_only,
+                    'assessment': c.metadata.get('llm_analysis') or c.metadata.get('regulation_assessment'),
+                    'model_provenance': c.metadata.get('model_provenance'),
+                    'model_attempt': c.metadata.get('regulation_model_attempt'),
+                }) for c in regulation_candidates]
+            if 'regulations' in strategy.data_sources and (
+                    regulation_source_scope is not None or self.ar_config.get('regulation_evidence_policy') is not None
+                    or 'regulations' in scope_errors):
+                from copy import deepcopy
+                health_record.evidence['regulation_source_coverage'] = deepcopy(regulation_source_scope)
+                health_record.evidence.setdefault('regulation_assessments', [])
             if full_filing_candidates:
                 from copy import deepcopy
                 # Blank/unresolved securities do not become priceable signals,
@@ -2294,10 +2336,14 @@ class MultiStrategyEngine:
         rules = monitor.poll_proposed_rules(
             agencies=["SEC", "EPA", "FDA", "FTC", "DOL", "CFPB"],
             days_back=14,
+            **({'evidence_policy': self.ar_config['regulation_evidence_policy']}
+               if self.ar_config.get('regulation_evidence_policy') is not None else {}),
         )
         result["proposed_rules"] = list(rules)
         if hasattr(rules, "coverage"):
             result["coverage"] = rules.coverage
+        if hasattr(rules, 'regulation_evidence'):
+            result['regulation_evidence'] = rules.regulation_evidence
 
         logger.info("Regulations.gov fetch: %d proposed rules", len(rules))
         return result
@@ -2806,6 +2852,10 @@ class MultiStrategyEngine:
         analysis_type = c.metadata.get("analysis_type", "")
         llm_result = {}
         full_filing = c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1'
+        full_regulation = analysis_type == 'regulation' and (
+            self.ar_config.get('regulation_evidence_policy') is not None
+            or c.metadata.get('regulation_evidence_policy') is not None)
+        regulation_call_started = False
         optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
 
         reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
@@ -2821,7 +2871,7 @@ class MultiStrategyEngine:
                 "litigation": ("case_name", "nature_of_suit", "cause"),
             }
             fields = required_text_fields.get(analysis_type)
-            if not full_filing and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
+            if not full_filing and not full_regulation and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
                 raise ValueError("missing_source_text")
             if full_filing:
                 from tradingagents.strategies.orchestration.filing_inputs import filing_analysis_inputs
@@ -2832,6 +2882,22 @@ class MultiStrategyEngine:
                 if llm_result['filing_evidence_status'] != 'sufficient':
                     c.metadata['filing_assessment'] = llm_result
                     raise ValueError('missing_required_filing_analysis')
+            elif full_regulation:
+                from tradingagents.strategies.orchestration.regulation_inputs import regulation_analysis_inputs
+                if self.ar_config.get('regulation_evidence_policy') not in (None, 'complete_document_text_v1'):
+                    raise ValueError('invalid_regulation_evidence_policy')
+                regulation_arguments = regulation_analysis_inputs(c, filing_data, universe)
+                regulation_call_started = True
+                llm_result = analyzer.analyze_regulation_evidence(
+                    regime_context=regime_context, **regulation_arguments)
+                c.metadata['document_assessment'] = llm_result['document_assessment']
+                c.metadata['regulation_evidence_status'] = llm_result['regulation_evidence_status']
+                if llm_result['regulation_evidence_status'] != 'sufficient':
+                    c.metadata['regulation_assessment'] = llm_result
+                    provenance = getattr(analyzer, 'last_call_provenance', None)
+                    if isinstance(provenance, dict) and provenance:
+                        c.metadata['model_provenance'] = dict(provenance)
+                    raise ValueError('missing_required_regulation_analysis')
             elif analysis_type == "earnings_call":
                 llm_result = analyzer.analyze_earnings_call(
                     c.metadata.get(
@@ -2974,7 +3040,19 @@ class MultiStrategyEngine:
                 if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
                     raise ValueError("invalid_secondary_impacts")
             ticker = c.ticker
-            if full_filing and not ticker:
+            if full_regulation:
+                if llm_result.get('document_assessment') == 'assessed_no_directional_thesis':
+                    if llm_result.get('target_ticker') is not None:
+                        raise ValueError('invalid_regulation_target')
+                    ticker = ''
+                    c.journal_only = True
+                elif llm_result.get('document_assessment') == 'assessed_directional':
+                    ticker = llm_result.get('target_ticker')
+                    if not ticker or ticker not in {item['ticker'] for item in regulation_arguments['target_bindings']}:
+                        raise ValueError('invalid_regulation_target')
+                else:
+                    raise ValueError('missing_required_regulation_analysis')
+            elif full_filing and not ticker:
                 if llm_result.get('document_assessment') != 'assessed_no_directional_thesis':
                     raise ValueError('unresolved_issuer')
                 c.journal_only = True
@@ -3009,4 +3087,17 @@ class MultiStrategyEngine:
                 c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
             logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
         finally:
+            if regulation_call_started:
+                from copy import deepcopy
+                attempt = getattr(analyzer, 'last_regulation_attempt', None)
+                provenance = getattr(analyzer, 'last_call_provenance', None)
+                if isinstance(attempt, dict):
+                    c.metadata['regulation_model_attempt'] = deepcopy(attempt)
+                    # A successful candidate commit can append its reuse
+                    # receipt after analyzer validation. Keep both retained
+                    # copies bound to the same final transport provenance.
+                    if isinstance(provenance, dict):
+                        c.metadata['regulation_model_attempt']['model_provenance'] = deepcopy(provenance)
+                if isinstance(provenance, dict):
+                    c.metadata['model_provenance'] = deepcopy(provenance)
             end_candidate_response(reuse_token)

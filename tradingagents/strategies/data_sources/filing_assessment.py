@@ -121,10 +121,15 @@ def _inventory(item):
     _hash(item['body_sha256'])
 
 
-def _validate_evidence(evidence, *, allow_joint_issuers=False):
+def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported_documents=False):
     if (type(evidence) is not dict or
-            set(evidence) - {'source_url', 'inventory_reconciliation'} != _EVIDENCE_KEYS):
+            set(evidence) - {'source_url', 'inventory_reconciliation', 'supported_document_policy',
+                'pdf_evidence', 'ownership_primary_body', 'ownership_facts'} != _EVIDENCE_KEYS):
         fail('input')
+    supported = evidence.get('supported_document_policy') == 'verified_supported_documents_v1'
+    extended = {'supported_document_policy', 'pdf_evidence', 'ownership_primary_body', 'ownership_facts'} & set(evidence)
+    if extended and (not supported or not isinstance(evidence.get('pdf_evidence'), dict)):
+        fail('supported_document_policy')
     if evidence['version'] != 'sec-filing-evidence-v1' or evidence['format'] not in ('nc_submission', 'sec_complete_submission'):
         fail('input')
     if type(evidence['accession']) is not str or not re.fullmatch(r'\d{10}-\d{2}-\d{6}', evidence['accession']):
@@ -205,12 +210,15 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False):
         if inventory != documents.get(item['filename']) or item['filename'] in selected:
             fail('input')
         selected.add(item['filename'])
-        _string(item['text'], MAX_PROMPT_BYTES)
+        if not (allow_unsupported_documents and supported and item['representation'] == 'native_pdf_text'
+                and item['text'] == ''):
+            _string(item['text'], MAX_PROMPT_BYTES)
         _hash(item['text_sha256'])
         if (_sha(item['text']) != item['text_sha256'] or type(item['text_start']) is not int or
                 item['text_start'] != 0 or type(item['text_end']) is not int or item['text_end'] != len(item['text'])):
             fail('source_hash')
-        if item['representation'] not in ('full_visible_text', 'ownership_form_data') or item['selection'] not in ('primary', 'dependency'):
+        if item['representation'] not in (('full_visible_text', 'ownership_form_data', 'native_pdf_text')
+                if supported else ('full_visible_text', 'ownership_form_data')) or item['selection'] not in ('primary', 'dependency'):
             fail('input')
         if item['selection'] == 'primary':
             primary.append(item)
@@ -233,6 +241,39 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False):
             referenced = documents.get(item['filename'])
             if referenced is None or (referenced['type'].upper().startswith('EX-') and item['filename'] not in selected):
                 fail('structural_evidence')
+    if supported:
+        pdf_units = {item['filename']: item for item in evidence['units'] if item['representation'] == 'native_pdf_text'}
+        if set(evidence['pdf_evidence']) != set(pdf_units):
+            fail('pdf_inventory')
+        for name, unit in pdf_units.items():
+            receipt = evidence['pdf_evidence'][name]
+            try:
+                if (receipt['version'] != 'sec-native-pdf-evidence-v1' or receipt['schema_version'] != 1
+                        or receipt['native_text_complete'] is not True
+                        or receipt['input_sha256'] != unit['body_sha256']
+                        or receipt['input_bytes'] != unit['body_end'] - unit['body_start']
+                        or receipt['text'] != unit['text'] or receipt['text_sha256'] != unit['text_sha256']
+                        or type(receipt['page_count']) is not int or not 0 < receipt['page_count'] <= 2000
+                        or len(receipt['pages']) != receipt['page_count']
+                        or [page['page_number'] for page in receipt['pages']] != list(range(1, receipt['page_count'] + 1))
+                        or '\n'.join(page['text'] for page in receipt['pages']) != unit['text']
+                        or any(_sha(page['text']) != page['text_sha256'] or len(page['text']) != page['text_chars'] for page in receipt['pages'])
+                        or (not allow_unsupported_documents and (receipt['support_limitations']
+                            or receipt['supported_text_layout'] is not True))):
+                    fail('pdf_inventory')
+            except (KeyError, TypeError):
+                fail('pdf_inventory')
+        ownership = evidence['form'].startswith('SCHEDULE 13')
+        if ownership:
+            try:
+                import base64
+                from .filing_ownership_lineage import validate_ownership_facts
+                validate_ownership_facts(evidence['ownership_facts'], evidence,
+                    base64.b64decode(evidence['ownership_primary_body'], validate=True))
+            except (KeyError, TypeError, ValueError):
+                fail('ownership_facts')
+        elif {'ownership_facts', 'ownership_primary_body'} & set(evidence):
+            fail('ownership_facts')
     return tuple(item['cik'] for item in roles) if allow_joint_issuers else roles[0]['cik']
 
 
@@ -259,7 +300,8 @@ class PreparedFilingRequest:
 
 def prepare_request(analysis_type, current_evidence, *, prior_evidence=None,
                     issuer_binding, target_binding=None, regime_context=None,
-                    news_evidence=None, required_material_dependencies=None, comparison_binding=None, system_override=None):
+                    news_evidence=None, required_material_dependencies=None, comparison_binding=None, system_override=None,
+                    ownership_bundles=None):
     """Render every selected unit; never truncate, summarize, or resolve securities."""
     if type(analysis_type) is not str or analysis_type not in set(_FORMS) | {'quantum_readiness'}:
         fail('analysis_type')
@@ -268,7 +310,36 @@ def prepare_request(analysis_type, current_evidence, *, prior_evidence=None,
     _list(current, MAX_DOCUMENTS, nonempty=not pqc)
     if pqc and prior_evidence is not None:
         fail('comparator')
-    corpora = current + ([prior_evidence] if prior_evidence is not None else [])
+    lineage, lineage_bindings = [], {}
+    ownership_bundles = {} if ownership_bundles is None else ownership_bundles
+    required_ownership = {item['accession'] for item in current
+        if item.get('supported_document_policy') == 'verified_supported_documents_v1'
+        and item['form'].startswith('SCHEDULE 13')}
+    if type(ownership_bundles) is not dict or set(ownership_bundles) != required_ownership:
+        fail('ownership_lineage')
+    for item in current:
+        if item['accession'] not in required_ownership:
+            continue
+        bundle = ownership_bundles[item['accession']]
+        try:
+            from .filing_ownership_lineage import validate_ownership_lineage
+            _keys(bundle, {'receipt', 'facts_by_accession', 'submissions', 'histories', 'archives', 'primary_bodies'}, 'ownership_lineage')
+            receipt = validate_ownership_lineage(bundle['receipt'], item, bundle['facts_by_accession'],
+                bundle['submissions'], bundle['histories'], bundle['archives'], bundle['primary_bodies'])
+            if receipt['status'] != 'complete' or receipt['obligations']:
+                fail('ownership_lineage')
+            lineage_bindings[item['accession']] = receipt
+            refs = set(receipt['chain_accessions']) | set(receipt['incorporated_accessions'])
+            for ref in sorted(refs - {e['accession'] for e in current}):
+                linked = bundle['submissions'][ref]
+                existing = next((entry for entry in lineage if entry['accession'] == ref), None)
+                if existing is not None and existing != linked:
+                    fail('ownership_lineage')
+                if existing is None:
+                    lineage.append(linked)
+        except (KeyError, TypeError, ValueError):
+            fail('ownership_lineage')
+    corpora = current + ([prior_evidence] if prior_evidence is not None else []) + lineage
     issuer_map = {id(item): _validate_evidence(item) for item in corpora}
     accessions = [item['accession'] for item in corpora]
     if len(set(accessions)) != len(accessions):
@@ -347,7 +418,8 @@ def prepare_request(analysis_type, current_evidence, *, prior_evidence=None,
     units, inventory = {}, []
     rendered = []
     for item in corpora:
-        relation = 'prior' if item is prior_evidence else 'current'
+        relation = ('prior' if item is prior_evidence else
+                    'ownership_dependency' if any(item is linked for linked in lineage) else 'current')
         rendered_units = []
         for unit in item['units']:
             uid = unit_id(item, unit)
@@ -360,7 +432,10 @@ def prepare_request(analysis_type, current_evidence, *, prior_evidence=None,
         # Inventory corroboration is acquisition provenance, not filing content.
         # Full corpus digests above still bind its retained raw evidence.
         rendered.append({**{key: value for key, value in item.items()
-                            if key != 'inventory_reconciliation'},
+                            if key not in {'inventory_reconciliation', 'ownership_primary_body', 'pdf_evidence'}},
+                         **({'pdf_inventory': {name: {**{k: v for k, v in receipt.items() if k not in {'text', 'pages'}},
+                            'pages': [{k: v for k, v in page.items() if k != 'text'} for page in receipt['pages']]}
+                            for name, receipt in item['pdf_evidence'].items()}} if item.get('pdf_evidence') else {}),
                          'units': rendered_units, 'relation': relation})
     news = [] if news_evidence is None else news_evidence
     _list(news, MAX_UNITS)
@@ -441,13 +516,15 @@ A sufficient response requires {adequacy}. direction is long/short/neutral and c
 Never treat missing evidence as neutral. Insufficient means direction=null and conviction=null; explain why. No generic non-actionable or not_applicable exemption.
 issuer_cik must equal the verified source issuer for ordinary tasks. PQC instead uses exact sorted issuer_ciks and target_ticker from the supplied bindings, plus regime_signal=bull/bear/neutral, regime_confidence=[0,1], pqc_readiness=proactive/aware/silent/n/a, crypto_dependency=high/medium/low/unknown; these four regime fields must all be null when insufficient.
 rationale and evidence_claim must be nonblank strings, at most {MAX_STRING} characters each. evidence_claim is factual source-grounded evidence, not a return prediction.
-citations must contain exactly one entry {{"unit_id":...,"quote":...}} for EVERY supplied selected current, prior, dependency and news unit, even for insufficient. Use each deterministic unit_id once, and a nonempty exact quote substring at most {MAX_STRING} characters. Never omit trailing units to fit the output allowance. If unable to satisfy this finite contract, report failure; do not invent or clip evidence.
+citations must contain exactly one entry {{"unit_id":...,"quote":...}} for EVERY supplied selected current, prior, dependency and news unit, even for insufficient. Use each deterministic unit_id once. Copy one short, nonempty, contiguous literal substring from that unit, at most {MAX_STRING} characters. Preserve its punctuation and intervening words or field lines exactly. Do not join separated passages, omit intervening fields, add ellipses, paraphrase, or normalize whitespace inside a quote. Prefer a short complete sentence or field line to a long passage. Never omit trailing units to fit the output allowance. If unable to satisfy this finite contract, report failure; do not invent or clip evidence.
 Read the entire unit set and assess every dependency in the full inventory for materiality; decorative/navigation references need not be material. Caller-required declarations are mandatory. Report all unresolved material dependencies as {{"reference":...,"reason":...}}; sufficient requires an empty list. A missing section/dependency/comparator is not no change. Quotation provenance alone does not establish semantic adequacy or investment correctness.
 The target binding is an external caller attestation; this response does not certify security eligibility, full readiness, or absence of equity impact. Empty caller-required declarations mean no additional declarations, not proved completeness.
 '''
     user = _json({'contract_version': VERSION, 'analysis_type': analysis_type,
         'current': [item for item in rendered if item['relation'] == 'current'],
         'prior': [item for item in rendered if item['relation'] == 'prior'],
+        **({'ownership_dependencies': [item for item in rendered if item['relation'] == 'ownership_dependency'],
+            'ownership_lineage_bindings': lineage_bindings} if lineage_bindings else {}),
         'issuer_binding': issuer_binding, 'target_binding': target_binding,
         'news': rendered_news, 'regime_context': regime_context,
         'required_material_dependencies': declarations, 'comparison_binding': comparison_binding})
@@ -460,8 +537,10 @@ The target binding is an external caller attestation; this response does not cer
         'binding_sha256': evidence_digest({'issuer': issuer_binding, 'target': target_binding,
                                          'required_material_dependencies': declarations, 'comparison_binding': comparison_binding}),
         'comparison_binding': comparison_binding,
+        **({'ownership_lineage_bindings': lineage_bindings} if lineage_bindings else {}),
         'prompt_bytes': len(_utf8(system)) + len(_utf8(user)), 'unit_count': len(units), 'units': inventory}
-    context = AssessmentContext(analysis_type, tuple(sorted(set(expected_issuers.values()))), ticker,
+    assessed_issuers = {issuer_map[id(item)] for item in current}
+    context = AssessmentContext(analysis_type, tuple(sorted(assessed_issuers)), ticker,
         MappingProxyType(units), _json(provenance), request_hash)
     return PreparedFilingRequest(system, user, context)
 

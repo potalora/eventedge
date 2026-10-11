@@ -56,12 +56,15 @@ record; it does not invalidate unrelated, already completed execution.
     from tradingagents.strategies.data_sources.filing_material_policy import configured as material_configured
     material_scope = validate_filing_material_policy(data, config)
     material_enabled = material_configured(config)
+    from .regulation_inputs import validate_regulation_policy
+    regulation_scope = validate_regulation_policy(data, config)
+    regulation_enabled = config.get('regulation_evidence_policy') is not None
     from .congress_policy import audit_scope, configured
     congress_scope = audit_scope(data, config, session, now=now, replay=True)
     congress_enabled = configured(config)
     validate_portfolio_targets(data, owner, session)
     errors, _, _ = source_scope_evidence(data, config, session, now=now)
-    if not errors and not congress_enabled and not filing_attribution_enabled and not acquisition_enabled and not material_enabled:
+    if not errors and not congress_enabled and not filing_attribution_enabled and not acquisition_enabled and not material_enabled and not regulation_enabled:
         return
     policy_ids = {owner._policy_id_for_horizon(row['config'].horizon) for row in owner.cohorts}
     records = owner._metric_store.read_strategy_health(epoch, session=date.fromisoformat(session), limit=1000)
@@ -82,6 +85,13 @@ record; it does not invalidate unrelated, already completed execution.
             expected_error_sha256=filing_source_error_sha256(data.get('edgar')),
             strategy_sources=strategy_sources)
         validate_filing_material_health(records, policy_ids, set(strategy_sources), material_scope)
+    if regulation_enabled:
+        from .regulation_validation import validate_regulation_health
+        disabled = {**getattr(owner, '_disabled_strategies', {}), **config.get('disabled_strategies', {})}
+        strategy_sources = {strategy.name: strategy.data_sources for strategy in owner.cohorts[0]['engine'].paper_trade_strategies
+            if 'regulations' in strategy.data_sources and strategy.name not in disabled
+            and not getattr(strategy, 'retirement_reason', None)}
+        validate_regulation_health(data, records, policy_ids, strategy_sources, config)
     if not errors:
         return
     policies = {'courtlistener': ('courtlistener_scope_policy', COURT_POLICY),

@@ -69,10 +69,13 @@ def _acquire_spooled(response, target, *, accession, form_type, filing_date, req
         try:
             result = dispatch_evidence(record, **identity, **arguments)
         except SubmissionDocumentCountMismatch:
-            if material_policy is not None:raise
+            from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY, approved_identity
+            if material_policy is not None and (material_policy != SUPPORTED_DOCUMENT_POLICY
+                    or approved_identity(dict(record.identity), policy=material_policy) is not None):
+                raise
             provider_timeout('edgar')
             proof=_reconciliation_metadata(user_agent,record)
-            result=dispatch_evidence(record,**identity,inventory_reconciliation=proof)
+            result=dispatch_evidence(record,**identity,**arguments,inventory_reconciliation=proof)
         provider_timeout('edgar')
         result['source_url'] = target
         if 'inventory_reconciliation' in result:
@@ -114,14 +117,14 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
     target = complete_submission_url(url, accession)
     selected_material_policy = None
     if material_policy is not None:
-        from .filing_material_policy import SUPPORTED_POLICIES, approved_identity
+        from .filing_material_policy import SUPPORTED_POLICIES, SUPPORTED_DOCUMENT_POLICY, approved_identity
         from .filing_parser_dispatch import current_dispatcher
         if (not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES or current_submission_spool() is None
                 or current_dispatcher() is None):
             raise ValueError('SEC material quarantine requires bounded spool and parser scopes')
         approved = approved_identity(dict(accession=accession, form=form_type,
             filing_date=filing_date, source_url=target), policy=material_policy)
-        if approved is not None:
+        if approved is not None or material_policy == SUPPORTED_DOCUMENT_POLICY:
             selected_material_policy = material_policy
     if type(max_submission_bytes) is not int or not 1 <= max_submission_bytes <= 64 * 1024 * 1024:
         raise ValueError('Invalid SEC submission byte limit')

@@ -479,7 +479,7 @@ def _volatility(state: Path, generation: str, session: str, commit: str, sources
     return result
 
 
-def _sources(state: Path, generation: str, session: str, commit: str, diagnose) -> dict:
+def _sources(state: Path, generation: str, session: str, commit: str, diagnose, *, retained_sources=None) -> dict:
     result = {'recovered':[], 'unresolved':[], 'observations':{}}
     slot = configuration_fingerprint({'generation':generation,'session':session})
     path = state / 'source_inputs' / (slot+'.json')
@@ -525,6 +525,19 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose) 
         attribution_scope = validate_filing_attribution_policy(envelope['payload'], filing_config)
         if attribution_scope is not None:
             result['filing_attribution_scope'] = attribution_scope
+        regulation_graph = envelope['payload'].get('regulations', {}).get('regulation_evidence')
+        from .regulation_inputs import validate_regulation_policy
+        regulation_config = ({'regulation_evidence_policy': regulation_graph.get('policy')}
+                             if isinstance(regulation_graph, dict) else {})
+        regulation_scope = validate_regulation_policy(envelope['payload'], regulation_config)
+        if regulation_scope is not None:
+            result['regulation_source_coverage'] = regulation_scope
+            if retained_sources is not None:
+                # Reuse retained objects only inside this report call; never
+                # publish full rules, originals or universe files in the report.
+                retained_sources.update({key: envelope['payload'][key] for key in
+                    ('regulations', 'equity_universe') if key in envelope['payload']})
+                retained_sources['edgar'] = {'company_tickers': envelope['payload'].get('edgar', {}).get('company_tickers', {})}
         source_error_digest = filing_source_error_sha256(envelope['payload'].get('edgar'))
         if source_error_digest is not None:
             result['filing_source_error_sha256'] = source_error_digest
@@ -644,7 +657,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
              'screen_failure_count':row['screen_failure_count'],'failures':row['failures']}
             for row in attempts if row['action']=='preflight' and (row['preflight_ok'] is not True or row['failures'])
         ]
-        report['sources'] = _sources(state,generation,session,commit,diagnose)
+        retained_sources = {}
+        report['sources'] = _sources(state,generation,session,commit,diagnose, retained_sources=retained_sources)
         disabled = report['sources'].get('declared_exclusions', {})
         epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
         report['epoch_id'] = epoch
@@ -687,6 +701,21 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 raise ValueError('unbound filing material health')
         except (ValueError, TypeError, KeyError):
             diagnose('filing_material_scope_conflict')
+        try:
+            expected_regulation = report['sources'].get('regulation_source_coverage')
+            if expected_regulation is not None:
+                from .regulation_validation import validate_regulation_health
+                strategy_sources = {strategy.name: strategy.data_sources for strategy in get_paper_trade_strategies()
+                    if 'regulations' in strategy.data_sources and strategy.name not in disabled
+                    and not getattr(strategy, 'retirement_reason', None)}
+                report['sources']['regulation_analysis_coverage'] = validate_regulation_health(
+                    retained_sources, health, {row['policy_id'] for row in health}, strategy_sources,
+                    {'regulation_evidence_policy': expected_regulation['policy']})
+            elif any('regulation_source_coverage' in row['evidence'] for row in health):
+                raise ValueError('unbound regulation health')
+        except (ValueError, TypeError, KeyError):
+            diagnose('regulation_evidence_conflict')
+        retained_sources.clear()
         try:
             scope_limits = source_scope_limits_from_health(health)
             expected_congress_scope = report['sources'].get('congress_audit_scope')
@@ -809,11 +838,26 @@ def render_operational_report(report: dict) -> str:
             f"({scope['scoped_failed_rows']} failed rows). "
             f"{scope['quarantined_rows']} quarantined rows across {len(scope['quarantined_accessions'])} approved filings "
             'remain non-actionable material gaps. Scoped completeness excludes these analyses and does not establish model completion.'])
+        if scope.get('prospective_scope_broadened'):
+            lines.extend(['', f"Prospective supported-document scope broadens the exact-ten exception: "
+                f"{scope['admitted_rows']} admitted rows, {scope['deferred_rows']} deferred rows, "
+                f"{scope['disposition_failed_rows']} source-disposition failures. "
+                'Deferrals remain non-actionable. Parser attestations require independent frozen-original audit. '
+                'This scoped verdict does not establish original full-analysis coverage.'])
         if scope['quarantines']:
             lines.append('')
         for quarantine in scope['quarantines']:
             gaps = ', '.join(quarantine['gap_codes'])
             lines.append(f"- {quarantine['accession']}: {gaps}.")
+    if report['sources'].get('regulation_source_coverage'):
+        scope = report['sources']['regulation_source_coverage']
+        lines.extend(['', f"Regulatory acquisition complete: {str(scope['content_complete']).lower()}; "
+            f"{scope['complete_rows']} of {scope['required_rows']} document occurrences acquired completely; "
+            f"{scope['failed_rows']} failed occurrences."])
+        analysis = report['sources'].get('regulation_analysis_coverage')
+        if analysis is not None:
+            lines.append(f"Regulatory analysis complete across configured horizons: {str(analysis['analysis_complete']).lower()}. "
+                'Completed no-directional-thesis assessments carry no order authority; missing content remains a failure.')
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:

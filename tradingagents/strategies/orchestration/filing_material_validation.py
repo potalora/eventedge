@@ -53,6 +53,14 @@ def build_material_scope(graph, collections):
         selected_policy = coverage.get('material_policy', POLICY)
         if not isinstance(selected_policy, str) or selected_policy not in SUPPORTED_POLICIES:
             _fail()
+        from tradingagents.strategies.data_sources.filing_supported_policy import POLICY as SUPPORTED_DOCUMENT_POLICY
+        prospective = selected_policy == SUPPORTED_DOCUMENT_POLICY
+        dispositions = {}
+        if prospective:
+            from .filing_supported_scope import build_supported_dispositions
+            dispositions = build_supported_dispositions(graph, collections)
+            if graph.get('supported_dispositions') != dispositions:
+                _fail()
         approved_accessions = {item['accession'] for item in policy_manifest(selected_policy)['identities']}
         for accession, value in corpus.items():
             if (value.get('accession') != accession
@@ -78,6 +86,8 @@ def build_material_scope(graph, collections):
             if not isinstance(rows, list):
                 _fail()
             counts = {'total_rows': len(rows), 'quarantined_rows': 0}
+            if prospective:
+                counts.update(deferred_rows=0, admitted_rows=0, disposition_failed_rows=0)
             for index, row in enumerate(rows):
                 if not isinstance(row, dict):
                     _fail()
@@ -89,6 +99,13 @@ def build_material_scope(graph, collections):
                 ref, prior_ref = row.get('filing_evidence_ref'), row.get('prior_evidence_ref')
                 value = corpus.get(ref) if isinstance(ref, str) else None
                 quarantine = value is not None and ref in quarantines
+                disposition = dispositions.get(ref, {}).get('status') if prospective else None
+                if prospective and ref in graph.get('supported_disposition_failures', {}):
+                    disposition = 'failed'
+                if prospective and required and value is not None and not quarantine:
+                    if disposition not in {'admitted', 'deferred', 'failed'} or row.get('filing_material_disposition') != disposition:
+                        _fail()
+                    counts[{'deferred':'deferred_rows', 'admitted':'admitted_rows', 'failed':'disposition_failed_rows'}[disposition]] += 1
                 independent = bool(row.get('filing_failure')) or row.get('discovery_identity_conflict') is True
                 if value is not None:
                     if (ref != accession or value['form'] != normalize_filing_form(row.get('form_type', ''))
@@ -118,7 +135,11 @@ def build_material_scope(graph, collections):
                               or row.get('filing_evidence_status') != 'complete' or row.get('text_status') != 'available')
                     if value is not None and value.get('structural_status') == 'complete':
                         if ref not in checked:
-                            _validate_evidence(value, allow_joint_issuers=attribution)
+                            if prospective:
+                                _validate_evidence(value, allow_joint_issuers=attribution,
+                                    allow_unsupported_documents=disposition in {'deferred', 'failed'})
+                            else:
+                                _validate_evidence(value, allow_joint_issuers=attribution)
                             checked.add(ref)
                         binding = row.get('issuer_binding', {})
                         failed |= binding.get('status') != 'verified' and not attribution
@@ -138,13 +159,14 @@ def build_material_scope(graph, collections):
                             failed = True
                     # Quarantined prior evidence never becomes an exception for another current filing.
                     failed |= prior_ref in quarantines
-                    strict_failed += int(failed)
+                    failed |= disposition == 'failed'
+                    strict_failed += int(failed or disposition == 'deferred')
                     scoped_failed += int(failed)
                 elif row.get('filing_material_disposition') is not None or row.get('material_gap_codes') is not None:
                     _fail()
                 entries.append({'collection': category, 'index': index, 'accession': accession,
                     'evidence_ref': ref, 'prior_evidence_ref': prior_ref, 'row_sha256': _digest(row),
-                    'evidence_sha256': hashes.get(ref), 'disposition': 'quarantined' if quarantine else 'unchanged'})
+                    'evidence_sha256': hashes.get(ref), 'disposition': 'quarantined' if quarantine else (disposition or 'unchanged')})
             by_collection[category] = counts
         if (type(coverage.get('required_rows')) is not int or coverage['required_rows'] != required_rows
                 or type(coverage.get('failed_rows')) is not int or coverage['failed_rows'] != strict_failed
@@ -177,6 +199,19 @@ def build_material_scope(graph, collections):
             'strict_complete': coverage['complete'], 'strict_failed_rows': strict_failed,
             'scoped_complete': scoped_failed == 0 and global_complete,
             'scoped_failed_rows': scoped_failed, 'by_collection': by_collection, 'rows': entries}
+        if prospective:
+            deferred = [key for key, receipt in dispositions.items() if receipt['status'] == 'deferred']
+            scope.update(prospective_scope_broadened=True, original_full_analysis_coverage=False,
+                source_proof_authority='bounded_parser_attestation_requires_raw_capture_audit',
+                deferred_rows=sum(item['deferred_rows'] for item in by_collection.values()),
+                admitted_rows=sum(item['admitted_rows'] for item in by_collection.values()),
+                disposition_failed_rows=sum(item['disposition_failed_rows'] for item in by_collection.values()),
+                deferred_accessions=sorted(deferred),
+                disposition_failures=deepcopy(graph.get('supported_disposition_failures', {})),
+                supported_dispositions=[{'accession': key, 'status': receipt['status'],
+                    'manifest_sha256': receipt['manifest_sha256'], 'occurrences': receipt['occurrences'],
+                    'reasons': receipt['reasons'], 'residual_failures': receipt['residual_failures']}
+                    for key, receipt in sorted(dispositions.items())])
         return {**scope, 'manifest_sha256': _digest(scope)}
     except (KeyError, TypeError, AttributeError, ValueError) as error:
         raise ValueError('invalid_filing_material_policy') from error
@@ -222,8 +257,11 @@ def signal_edgar(original_edgar, summary, *, projected_edgar=None):
         scope = build_material_scope(graph, {key: original_edgar.get(key, []) for key in COLLECTIONS})
         if _digest(graph['material_scope']) != _digest(scope) or _digest(summary) != _digest(_summary(scope)):
             _fail()
+        if scope.get('prospective_scope_broadened') and not scope['scoped_complete']:
+            _fail()
         projected = original_edgar if projected_edgar is None else projected_edgar
         quarantines = set(scope['quarantined_accessions'])
+        deferred = set(scope.get('deferred_accessions', []))
         # Accept only unchanged subsets from the previous verified-target projection.
         result = {key: deepcopy(original_edgar[key]) for key in
                   ('company_tickers', 'form4', 'coverage', 'error') if key in original_edgar}
@@ -235,7 +273,7 @@ def signal_edgar(original_edgar, summary, *, projected_edgar=None):
                 if remaining[digest] <= 0:
                     _fail()
                 remaining[digest] -= 1
-                if row.get('filing_evidence_ref') not in quarantines:
+                if row.get('filing_evidence_ref') not in quarantines | deferred:
                     if row.get('prior_evidence_ref') in quarantines:
                         _fail()
                     selected.append(deepcopy(row))
@@ -246,8 +284,18 @@ def signal_edgar(original_edgar, summary, *, projected_edgar=None):
             ('policy', 'history_corpus', 'archive_corpus') if key in graph}
         if 'comparator_policy' in graph['coverage']:
             result['filing_evidence']['coverage'] = {'comparator_policy': graph['coverage']['comparator_policy']}
+        retained_dependencies = {row.get('prior_evidence_ref') for category in COLLECTIONS for row in result[category]}
+        if deferred:
+            for category in COLLECTIONS:
+                for row in result[category]:
+                    receipt = graph.get('ownership_lineages', {}).get(row.get('filing_evidence_ref'), {})
+                    retained_dependencies.update(receipt.get('source_accessions', []))
         result['filing_evidence']['corpus'] = {key: deepcopy(value) for key, value in graph['corpus'].items()
-                                               if key not in quarantines}
+                                               if key not in quarantines and (key not in deferred or key in retained_dependencies)}
+        if scope.get('prospective_scope_broadened'):
+            for key in ('ownership_lineages', 'ownership_facts'):
+                if key in graph:
+                    result['filing_evidence'][key] = deepcopy(graph[key])
         return result
     except (KeyError, TypeError, AttributeError, ValueError) as error:
         raise ValueError('invalid_filing_material_policy') from error

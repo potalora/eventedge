@@ -111,6 +111,23 @@ def filing_analysis_inputs(candidate, shared_data, universe):
             if item['accession'] not in corpus or corpus[item['accession']] != item:
                 _fail()
         all_corpora = current + ([prior] if prior else [])
+        ownership_bundles = {}
+        for item in current:
+            if (item.get('supported_document_policy') == 'verified_supported_documents_v1'
+                    and item['form'].startswith('SCHEDULE 13')):
+                from .filing_supported_scope import ownership_bundle
+                from tradingagents.strategies.data_sources.filing_ownership_lineage import validate_ownership_lineage
+                bundle = ownership_bundle(graph, item)
+                if bundle is None:
+                    _fail('ownership_lineage')
+                verified = validate_ownership_lineage(bundle['receipt'], item, bundle['facts_by_accession'],
+                    bundle['submissions'], bundle['histories'], bundle['archives'], bundle['primary_bodies'])
+                if verified['status'] != 'complete' or verified['obligations']:
+                    _fail('ownership_lineage')
+                ownership_bundles[item['accession']] = bundle
+                refs = set(verified['chain_accessions']) | set(verified['incorporated_accessions'])
+                for ref in sorted(refs - {entry['accession'] for entry in all_corpora}):
+                    all_corpora.append(corpus[ref])
         if any('material_quarantine' in item for item in all_corpora):
             _fail('material_quarantine')
         issuer_map = {item['accession']: _issuer(item) for item in all_corpora}
@@ -146,6 +163,7 @@ def filing_analysis_inputs(candidate, shared_data, universe):
                     required.append(declaration)
         return {'current_evidence': current if pqc else current[0], 'prior_evidence': prior,
                 'issuer_binding': issuer_binding, 'target_binding': target, 'news_evidence': news,
-                'comparison_binding': comparison, 'required_material_dependencies': required}
+                'comparison_binding': comparison, 'required_material_dependencies': required,
+                **({'ownership_bundles': ownership_bundles} if ownership_bundles else {})}
     except (KeyError, TypeError, AttributeError, IndexError) as error:
         raise ValueError('invalid_filing_source') from error

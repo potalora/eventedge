@@ -61,6 +61,9 @@ class RegulatoryPipelineStrategy:
             return []
 
         candidates = []
+        evidence_policy = reg_data.get('regulation_evidence', {}).get('policy')
+        if evidence_policy is not None and evidence_policy != 'complete_document_text_v1':
+            raise ValueError('invalid_regulation_evidence_policy')
 
         for rule in rules:
             if not rule.get("document_id"):
@@ -78,10 +81,15 @@ class RegulatoryPipelineStrategy:
                         "document_id": rule.get("document_id", ""),
                         "title": rule.get("title", ""),
                         "agency_id": agency,
-                        "summary": rule.get("summary", "")[:2000],
+                        "summary": '' if evidence_policy else rule.get("summary", "")[:2000],
                         "posted_date": rule.get("posted_date", ""),
                         "needs_llm_analysis": True,
                         "analysis_type": "regulation",
+                        **({'regulation_evidence_policy': evidence_policy,
+                            'regulation_evidence_ref': rule.get('regulation_evidence_ref'),
+                            'regulation_evidence_status': rule.get('regulation_evidence_status'),
+                            'regulation_failure': rule.get('regulation_failure')}
+                           if evidence_policy else {}),
                     },
                 )
             )
@@ -100,7 +108,9 @@ class RegulatoryPipelineStrategy:
                         "industry", ""
                     )
 
-        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)))
+        budget = (params.get('analysis_budget') if evidence_policy
+                  else params.get('analysis_budget', params.get('max_positions', 3)))
+        return admit_candidates(self.name, candidates, budget)
 
     def check_exit(
         self,

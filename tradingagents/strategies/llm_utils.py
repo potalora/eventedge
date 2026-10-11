@@ -104,6 +104,7 @@ def call_analysis_model(
     client: Any, *, model: str, system: str, prompt: str,
     max_tokens: int, temperature: float, effort: str,
     provenance: dict | None = None,
+    response_observer=None,
 ) -> str:
     """Bound real SDK transport including startup, retries and response reading.
 
@@ -124,6 +125,8 @@ def call_analysis_model(
               "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None)
     if module is None:
         text = _call_model_direct(client, **request, provenance=provenance)
+        if response_observer is not None:
+            response_observer(text)
         model_timeout()
         return text
     # These are supported public SDK constructor properties; preserve explicit
@@ -153,5 +156,7 @@ def call_analysis_model(
                                   error_metadata=result.get("error_metadata"))
     if provenance is not None:
         provenance.update(result["provenance"])
+    if response_observer is not None:
+        response_observer(result["text"])
     model_timeout()  # A response arriving after the shared deadline is unusable.
     return result["text"]

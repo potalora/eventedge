@@ -1,0 +1,197 @@
+<SEC-DOCUMENT>0001062993-26-005078.txt : 20260925
+<SEC-HEADER>0001062993-26-005078.hdr.sgml : 20260925
+<ACCEPTANCE-DATETIME>20260925203938
+ACCESSION NUMBER:		0001062993-26-005078
+CONFORMED SUBMISSION TYPE:	SCHEDULE 13D/A
+PUBLIC DOCUMENT COUNT:		1
+FILED AS OF DATE:		20260925
+DATE AS OF CHANGE:		20260925
+
+SUBJECT COMPANY:	
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			ADURO CLEAN TECHNOLOGIES INC.
+		CENTRAL INDEX KEY:			0001863934
+		STANDARD INDUSTRIAL CLASSIFICATION:	CHEMICALS & ALLIED PRODUCTS [2800]
+		ORGANIZATION NAME:           	08 Industrial Applications and Services
+		EIN:				000000000
+		STATE OF INCORPORATION:			A1
+		FISCAL YEAR END:			0531
+
+	FILING VALUES:
+		FORM TYPE:		SCHEDULE 13D/A
+		SEC ACT:		1934 Act
+		SEC FILE NUMBER:	005-94745
+		FILM NUMBER:		261411798
+
+	BUSINESS ADDRESS:	
+		STREET 1:		542 NEWBOLD STREET
+		CITY:			LONDON
+		STATE:			A6
+		ZIP:			N6E 2S5
+		BUSINESS PHONE:		226-784-8889
+
+	MAIL ADDRESS:	
+		STREET 1:		542 NEWBOLD STREET
+		CITY:			LONDON
+		STATE:			A6
+		ZIP:			N6E 2S5
+
+FILED BY:		
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			VICUS AVSHALOM OFER
+		CENTRAL INDEX KEY:			0002044548
+		ORGANIZATION NAME:           	
+
+	FILING VALUES:
+		FORM TYPE:		SCHEDULE 13D/A
+
+	MAIL ADDRESS:	
+		STREET 1:		52 MCALLISTER ROAD
+		CITY:			NORTH YORK
+		STATE:			A6
+		ZIP:			M3H 2N2
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>SCHEDULE 13D/A
+<SEQUENCE>1
+<FILENAME>primary_doc.xml
+<TEXT>
+<XML>
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:com="http://www.sec.gov/edgar/common">
+
+	<schemaVersion>X0202</schemaVersion>
+<headerData>
+		<submissionType>SCHEDULE 13D/A</submissionType>
+		<previousAccessionNumber>0001062993-24-019213</previousAccessionNumber>
+		<filerInfo>
+			<filer>
+				<filerCredentials>
+					<cik>0002044548</cik>
+					<ccc>REDACTED</ccc>
+				</filerCredentials>
+			</filer>
+			<liveTestFlag>LIVE</liveTestFlag>
+
+
+		</filerInfo>
+	</headerData>
+	<formData>
+		<coverPageHeader>
+			<amendmentNo>1</amendmentNo>
+			<securitiesClassTitle>Common Shares without par value</securitiesClassTitle>
+			<dateOfEvent>09/25/2026</dateOfEvent>
+			<previouslyFiledFlag>false</previouslyFiledFlag>
+			<issuerInfo>
+				<issuerCIK>0001863934</issuerCIK>
+					<issuerCusips>
+						<issuerCusipNumber>007408206</issuerCusipNumber>
+					</issuerCusips>
+				<issuerName>Aduro Clean Technologies Inc.</issuerName>
+				<address>
+					<com:street1>542 Newbold Street</com:street1>
+					<com:city>London</com:city>
+					<com:stateOrCountry>A6</com:stateOrCountry>
+					<com:zipCode>N6E 2S5</com:zipCode>
+				</address>
+			</issuerInfo>
+			<authorizedPersons>
+				<notificationInfo>
+					<personName>Avshalom Ofer Vicus</personName>
+					<personPhoneNum>(226) 784-8889</personPhoneNum>
+					<personAddress>
+						<com:street1>c/o Aduro Clean Technologies Inc.</com:street1>
+							<com:street2>542 Newbold Street</com:street2>
+						<com:city>London</com:city>
+						<com:stateOrCountry>A6</com:stateOrCountry>
+						<com:zipCode>N6E 2S5</com:zipCode>
+					</personAddress>
+				</notificationInfo>
+			</authorizedPersons>
+		</coverPageHeader>
+		<reportingPersons>
+			<reportingPersonInfo>
+				<reportingPersonCIK>0002044548</reportingPersonCIK>
+				<reportingPersonName>Avshalom Ofer Vicus</reportingPersonName>
+				<fundType>SC</fundType>
+				<fundType>PF</fundType>
+				<citizenshipOrOrganization>Z4</citizenshipOrOrganization>
+				<soleVotingPower>8932568</soleVotingPower>
+				<sharedVotingPower>0</sharedVotingPower>
+				<soleDispositivePower>8932568</soleDispositivePower>
+				<sharedDispositivePower>0</sharedDispositivePower>
+				<aggregateAmountOwned>8932568</aggregateAmountOwned>
+				<percentOfClass>24.9</percentOfClass>
+				<typeOfReportingPerson>IN</typeOfReportingPerson>
+			<commentContent>The number of shares beneficially owned by the Reporting Person consists of: (i) 8,794,875 common shares and (ii) 137,693 Shares that may be issued on exercise of Options, of which 47,693 are exercisable at a price of C$6.50 per Share of which 47,693 are exercisable at a price of C$6.50 per Share of which all options have vested and 90,000 are exercisable at a price of C$13.50 per Share of which 52,500 options have vested and 7,500 options will vest within the next 60 days.
+
+Percent of class represented by amount in Row (11) is calculated based on the aggregate of 35,871,442 common shares, which consists of 35,733,749 common shares of the Issuer outstanding as at September 25, 2026 and 137,693 common shares that may be acquired on exercise of stock options.</commentContent>
+			</reportingPersonInfo>
+		</reportingPersons>
+		<items1To7>
+			<item1>
+				<securityTitle>Common Shares without par value</securityTitle>
+				<issuerName>Aduro Clean Technologies Inc.</issuerName>
+				<issuerPrincipalAddress>
+					<com:street1>542 Newbold Street</com:street1>
+					<com:city>London</com:city>
+					<com:stateOrCountry>A6</com:stateOrCountry>
+					<com:zipCode>N6E 2S5</com:zipCode>
+				</issuerPrincipalAddress>
+			</item1>
+			<item2>
+				<filingPersonName>Avshalom Ofer Vicus (the "Reporting Person").</filingPersonName>
+				<principalBusinessAddress>The Reporting Person's business address is c/o Aduro Clean Technologies Inc., at 542 Newbold Street, London, Ontario, N6E 2S5, Canada</principalBusinessAddress>
+				<principalJob>The Reporting Person's principal occupation is serving as the Chief Executive Officer, Chairman and as a director of the Issuer</principalJob>
+				<hasBeenConvicted>During the last five years the Reporting Person has not been convicted in a criminal proceeding (excluding traffic violations or similar misdemeanors).</hasBeenConvicted>
+				<convictionDescription>During the last five years, the Reporting Person was not a party to any civil proceeding of a judicial or administrative body of competent jurisdiction and as a result of such proceeding was or is subject to a judgment, decree or final order enjoining future violations of, or prohibiting or mandating activities subject to, federal or state securities laws or finding any violation with respect to such laws.</convictionDescription>
+				<citizenship>The Reporting Person is a citizen of Canada and Israel</citizenship>
+			</item2>
+			<item3>
+				<fundsSource>On September 25, 2026, the Reporting Person transferred 1,000,000 Shares to a family-owned and controlled company ("FamilyCo") pursuant to a tax-driven estate freeze transaction (the "Transaction"). No cash consideration was paid to the Reporting Person in connection with the Transaction. The Reporting Person received non-voting preferred shares of FamilyCo as part of the Transaction</fundsSource>
+			</item3>
+			<item4>
+				<transactionPurpose>As described in Item 3 above, the Reporting Person is required to file this Schedule 13D/A in connection with the Transaction. The Transaction was undertaken solely for estate planning and succession planning purposes and was not effected through the facilities of any stock exchange. While the Reporting Person no longer exercises voting control or dispositive authority over the transferred Shares, he and members of his family retain an indirect economic interest in the transferred Shares through their ownership interests in FamilyCo. There is no intention for the transferred Shares to be sold into the market.
+The securities described in this Statement are being held by the Reporting Person for investment purposes. The Reporting Person may acquire additional securities through compensatory grants by the Issuer or through public or private purchases of Shares.
+In the ordinary course of his duties as Chief Executive Officer, Chairman and director of the Issuer, the Reporting Person has and expects in the future to discuss and to make decisions regarding plans or proposals with respect to the matters specified in clauses (a) through (j) of this Item 4 with the Issuer.
+Except as described in this Statement or in his capacity as Chief Executive Officer, Chairman or director of the Issuer, the Reporting Person has no plans or proposals which relate to or would result in:
+(a)	The acquisition by any person of additional securities of the issuer, or the disposition of securities of the issuer.
+(b)	An extraordinary corporate transaction, such as a merger, reorganization or liquidation, involving the issuer or any of its subsidiaries.
+(c)	A sale or transfer of a material amount of assets of the issuer or any of its subsidiaries.
+(d)	Any change in the present board of directors or management of the issuer, including any plans or proposals to change the number or term of directors or to fill any existing vacancies on the board.
+(e)	Any material change in the present capitalization or dividend policy of the issuer.
+(f)	Any other material change in the issuer's business or corporate structure, including but not limited to, if the issuer is a registered closed-end investment company, any plans or proposals to make any changes in its investment policy for which a vote is required by Section 13 of the Investment Company Act of 1940.
+(g)	Changes in the issuer's charter, bylaws or instruments corresponding thereto or other actions which may impede the acquisition of control of the issuer by any person.
+(h)	Causing a class of securities of the issuer to be delisted from a national securities exchange or to cease to be authorized to be quoted in an inter-dealer quotation system of registered national securities association.
+(i)	A class of equity securities of the issuer becoming eligible for termination of registration pursuant to Section 12(g)(4) of the Act; or
+(j)	Any action similar to any of those enumerated above.
+The information set forth in Items 5 and 6 are incorporated by reference herein.</transactionPurpose>
+			</item4>
+			<item5>
+				<percentageOfClassSecurities>As of September 25, 2026, the Reporting Person beneficially owns: (i) 8,794,875 Shares and (ii) 137,693 Shares that may be issued on exercise of Options, of which 47,693 are exercisable at a price of C$6.50 per Share of which all options have vested and 90,000 are exercisable at a price of C$13.50 per Share of which 52,500 options have vested and 7,500 options will vest within the next 60 days.
+The Reporting Person owns 24.9% of the Shares, calculated based on 35,871,442 Shares, which consists of 35,733,749 Shares outstanding as of September 25, 2026 and 137,693 Shares that may be acquired on exercise of stock options .</percentageOfClassSecurities>
+				<numberOfShares>The Reporting Person has the sole power to vote or direct the vote, and to dispose or direct the disposition, 8,932,568 Shares</numberOfShares>
+				<transactionDesc>During the past sixty days, the Reporting Person transferred 1,000,000 Shares to FamilyCo pursuant to the Transaction described in Items 3 and 4 above. The Transaction was undertaken solely for estate planning and succession planning purposes, was not effected through the facilities of any stock exchange, and involved no cash consideration. The Reporting Person received non-voting preferred shares of FamilyCo in connection with the Transaction</transactionDesc>
+				<listOfShareholders>No person, other than the Reporting Person, is known to have the right to receive or the power to direct the receipt of dividends from, or the proceeds from the sale, of the Shares underlying the stock options or warrants identified in this Statement</listOfShareholders>
+			</item5>
+			<item6>
+				<contractDescription>Except for the estate freeze Transaction described in Items 3 and 4 above, there are no other contracts, arrangements, understandings or relationships between the Reporting Person and any other person with respect to any securities of the Issuer</contractDescription>
+			</item6>
+		</items1To7>
+		<signatureInfo>
+			<signaturePerson>
+				<signatureReportingPerson>Avshalom Ofer Vicus</signatureReportingPerson>
+				<signatureDetails>
+					<signature>Avshalom Ofer Vicus</signature>
+					<title>CEO, Chairman and Director</title>
+					<date>09/25/2026</date>
+				</signatureDetails>
+			</signaturePerson>
+		</signatureInfo>
+	</formData>
+</edgarSubmission>
+</XML>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>
