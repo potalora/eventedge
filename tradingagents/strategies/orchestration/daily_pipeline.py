@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import traceback
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -57,6 +58,19 @@ _EPOCH_ID_RE = re.compile(
 )
 
 
+def _log_boundary_failure(boundary: str, session: date, error: Exception) -> None:
+    """Retain bounded code locations without provider messages or source lines."""
+    frames = [
+        {"file": frame.f_code.co_filename.replace("\\", "/").rsplit("/", 1)[-1][:160],
+         "function": frame.f_code.co_name[:160], "line": line}
+        for frame, line in traceback.walk_tb(error.__traceback__)
+    ][-8:]
+    logger.error("%s", json.dumps({
+        "event": boundary + "_boundary_failed", "session": session.isoformat(),
+        "exception_type": type(error).__name__[:128], "code_frames": frames,
+    }))
+
+
 @dataclass
 class DailyRunState:
     owner: Any
@@ -84,6 +98,9 @@ class DailyRunState:
     )
     cohort_scopes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     bundle: Any = None
+    outcome_inputs_captured: bool = False
+    outcome_price_failures: dict[str, str] = field(default_factory=dict)
+    outcome_action_failures: dict[str, str] = field(default_factory=dict)
     first_engine: Any = None
     shared_data: dict[str, Any] = field(default_factory=dict)
     horizon_signals: dict[str, tuple[list[dict], dict, list[Any]]] = field(
@@ -98,6 +115,11 @@ class DailyRunState:
     volatility_quarantines: set[str] = field(default_factory=set)
     candidate_bar_quarantines: list[str] = field(default_factory=list)
     shared_volatility_evidence: dict[str, Any] | None = None
+    model_deadline: float | None = None
+    model_coverage: dict[str, Any] = field(default_factory=lambda: {"complete": True})
+    source_digest: str = ''
+    new_entry_eligibility: dict[str, Any] | None = None
+    ineligible_new_entries: set[str] = field(default_factory=set)
 
     def finalize(self, finalized: dict[str, Any] | None = None) -> dict[str, Any]:
         return finalize_daily_results(
@@ -105,6 +127,8 @@ class DailyRunState:
         )
 
     def critical_gap(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        from .outcome_evidence import capture_outcome_inputs
+        capture_outcome_inputs(self)
         return self.finalize(
             self.owner._stop_for_critical_market_data_gap(*args, **kwargs)
         )
@@ -208,7 +232,7 @@ def finalize_daily_results(
             not in state.candidate_issue_reference_suppressions
         }
         if state.epoch_id is not None:
-            issues = state.owner._metric_store.read_candidate_input_issues(
+            issues = state.owner._metric_store.read_session_candidate_input_issues(
                 state.epoch_id, state.session
             )
             for issue in issues:
@@ -275,6 +299,26 @@ def finalize_daily_results(
             - state.candidate_bar_quarantine_suppressions
         )
     apply_source_coverage(state, finalized)
+    from .outcome_evidence import outcome_coverage
+    for cohort in getattr(state.owner, "cohorts", ()):
+        if "executor" not in cohort or "ledger" not in cohort:
+            continue
+        result = finalized.get(cohort["config"].name)
+        if not isinstance(result, dict) or state.epoch_id is None:
+            continue
+        coverage = outcome_coverage(cohort["executor"], state.session)
+        result["outcome_coverage_valid"] = coverage["valid"]
+        result["outcome_evidence_failures"] = coverage["failures"]
+        decision = cohort["ledger"].committee_decision(
+            state.session, state.epoch_id,
+            state.owner._policy_id_for_horizon(cohort["config"].horizon),
+        )
+        if decision is not None:
+            result["committee_decision_status"] = decision["status"]
+            if decision["status"].get("degraded"):
+                result["degraded"] = True
+        if not coverage["valid"]:
+            result["degraded"] = True
     return finalized
 
 
@@ -1110,7 +1154,7 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
     owner, session = state.owner, state.session
     state.session_candidate_quarantines = sorted(
         record.ticker
-        for record in owner._metric_store.read_candidate_bar_recoveries(
+        for record in owner._metric_store.read_session_candidate_bar_recoveries(
             state.epoch_id, session
         )
         if record.outcome == "quarantined"
@@ -1222,12 +1266,28 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
                 str(error),
                 original_error=error,
             )
+    if state.completed:
+        try:
+            from .decision_clock import validate_completed_replay
+            validate_completed_replay(owner, session, state.epoch_id, state.completed)
+        except Exception as error:
+            _log_boundary_failure('decision_replay', session, error)
+            assign_failures(state.results, [*state.completed, *state.stage_only],
+                            'prospective_replay_evidence_invalid', execution_valid=True,
+                            staging_valid=False)
+            for cohort in state.execution_needed:
+                state.results.setdefault(cohort['config'].name,
+                    failure_result('prospective_replay_evidence_invalid', execution_valid=False,
+                                   staging_valid=False))
+            return state.finalize()
     return None
 
 
 def _record_due_outcomes(
     state: DailyRunState, cohorts: Iterable[dict[str, Any]]
 ) -> dict[str, Any] | None:
+    from .outcome_evidence import capture_outcome_inputs
+    capture_outcome_inputs(state)
     for cohort in cohorts:
         name, executor = cohort["config"].name, cohort["executor"]
         if not executor.due_outcome_signals(state.session, state.epoch_id):
@@ -1236,7 +1296,7 @@ def _record_due_outcomes(
             executor.record_due_outcomes(
                 state.session,
                 state.epoch_id,
-                executor.persisted_input_bundle(state.session).bars,
+                {},
             )
         except Exception as error:
             state.results[name] = failure_result(str(error))
@@ -1258,6 +1318,7 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
     )
     from tradingagents.strategies.orchestration.session_executor import (
         CorporateActionBatchError,
+        SessionInputAcquisitionError,
         SessionExecutor,
     )
 
@@ -1290,6 +1351,13 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
         cohort_ids = {
             ticker: tuple(sorted(memberships[ticker])) for ticker in governed_tickers
         }
+        continuity_requirements: dict[date, set[str]] = {}
+        pending_dividends = {}
+        for cohort in state.fresh:
+            for action_session, tickers in cohort["ledger"].inventory_action_requirements(session).items():
+                continuity_requirements.setdefault(action_session, set()).update(tickers)
+            for action in cohort["ledger"].pending_dividend_actions():
+                pending_dividends.setdefault(action.action_id, action)
         try:
             state.bundle = SessionExecutor.fetch_input_bundle(
                 session,
@@ -1301,7 +1369,11 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
                 cohort_ids_by_ticker=cohort_ids,
                 processed_at=state.processed_at,
                 persist=True,
+                continuity_requirements={day: tuple(sorted(tickers)) for day, tickers in continuity_requirements.items()},
+                dividend_actions=tuple(pending_dividends[key] for key in sorted(pending_dividends)),
             )
+            from .outcome_evidence import capture_outcome_inputs
+            capture_outcome_inputs(state)
             if state.bundle.governed_failure_map:
                 raise GovernedMarketDataError(state.bundle.governed_failure_map)
             SessionExecutor.validate_shared_action_response(
@@ -1309,6 +1381,7 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
             )
             state.processed_at = datetime.now(timezone.utc)
         except GovernedMarketDataError as error:
+            state.outcome_price_failures.update(error.failure_map)
             assign_failures(state.results, state.fresh, "critical_market_data_gap")
             return state.critical_gap(
                 session,
@@ -1317,6 +1390,16 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
                 {},
                 "critical_market_data_gap",
                 governed_failure_map=dict(error.failure_map),
+            )
+        except SessionInputAcquisitionError as error:
+            state.bundle = error.bundle
+            state.outcome_price_failures.update(error.bundle.governed_failure_map)
+            state.outcome_action_failures.update(error.action_failures)
+            reason = "shared session input fetch failed"
+            assign_failures(state.results, state.fresh, reason)
+            return state.critical_gap(
+                session, state.processed_at, state.results, error.bundle.bars, reason,
+                governed_failure_map=dict(error.bundle.governed_failure_map),
             )
         except CorporateActionBatchError as error:
             corporate_errors = {}
@@ -1335,7 +1418,8 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
                 "critical_market_data_gap",
                 corporate_action_errors=corporate_errors,
             )
-        except Exception:
+        except Exception as error:
+            _log_boundary_failure("shared_session_input", session, error)
             reason = "shared session input fetch failed"
             assign_failures(state.results, state.fresh, reason)
             return state.critical_gap(
@@ -1347,28 +1431,6 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
             state.governed_summaries_by_cohort[name] = [
                 dict(summary) for summary in scoped.governed_recovery_summaries
             ]
-        critical_gap = False
-        for cohort in state.fresh:
-            executor = cohort["executor"]
-            if not executor.due_outcome_signals(session, state.epoch_id):
-                continue
-            _, invalid = executor.validated_outcome_bars(
-                session, state.epoch_id, state.bundle.bars, state.processed_at
-            )
-            if invalid:
-                reason = "market data validation failed: " + "; ".join(
-                    f"{ticker} {invalid[ticker]}" for ticker in sorted(invalid)
-                )
-                state.results[cohort["config"].name] = failure_result(reason)
-                critical_gap = True
-        if critical_gap:
-            return state.critical_gap(
-                session,
-                state.processed_at,
-                state.results,
-                state.bundle.bars,
-                "critical_market_data_gap",
-            )
         preflight_gap, corporate_errors = False, {}
         for cohort in state.fresh:
             name, executor = cohort["config"].name, cohort["executor"]
@@ -1477,8 +1539,104 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
     return _record_due_outcomes(state, state.valid)
 
 
+def _include_retained_late_signals(
+    state: DailyRunState, horizon: str, signals: list[dict], health: list[Any],
+) -> tuple[list[dict], list[Any]]:
+    """Put frozen late observations through the normal candidate input checks."""
+    from tradingagents.strategies.orchestration.event_identity import (
+        ACTIVE_STRATEGY_NAMES, canonical_event_key,
+    )
+
+    def identity(signal: dict) -> tuple[str, str]:
+        strategy = signal["strategy"]
+        metadata = signal.get("metadata", {})
+        key = metadata.get("event_key") if strategy not in ACTIVE_STRATEGY_NAMES else None
+        return strategy, str(key or canonical_event_key(
+            strategy, signal["ticker"], metadata, state.session,
+        ))
+
+    retained: dict[tuple[str, str], dict] = {}
+    evidence: dict[tuple[str, str], str] = {}
+    from .decision_clock import policy, PROSPECTIVE
+    retained_options = {}
+    if policy(state.owner._base_config) == PROSPECTIVE:
+        retained_options['information_cutoff'] = datetime.fromisoformat(
+            state.shared_data['_decision_acquisition']['started_at'])
+    for cohort in [*state.valid, *state.completed]:
+        if cohort["config"].horizon != horizon:
+            continue
+        for signal in cohort["engine"].pending_late_signals(state.session, state.epoch_id, **retained_options):
+            key = identity(signal)
+            original = {**signal, "metadata": {
+                name: value for name, value in signal["metadata"].items()
+                if name != "retained_from_signal_id"
+            }}
+            serialized = json.dumps(original, sort_keys=True, default=str)
+            if key in evidence and evidence[key] != serialized:
+                raise ValueError("conflicting retained candidate evidence across cohort books")
+            evidence[key] = serialized
+            retained.setdefault(key, signal)
+    if not retained:
+        return signals, health
+    # The original accepted thesis wins over fresh analysis of the same event.
+    # New daily windows remain distinct observations with their own source clock.
+    combined = [retained[key] for key in sorted(retained)]
+    combined.extend(signal for signal in signals if identity(signal) not in retained)
+    counts: dict[str, int] = {}
+    for strategy, _ in retained:
+        counts[strategy] = counts.get(strategy, 0) + 1
+    health = [replace(record, evidence={
+        **record.evidence, "retained_late_candidates": counts[record.strategy],
+    }) if record.strategy in counts else record for record in health]
+    return combined, health
+
+
+def _persist_screen_health(state: DailyRunState) -> dict[str, Any] | None:
+    """Compare every accepted discovery before writing any new horizon health.
+
+    Re-screening cannot replace an accepted admission or analysis classification.
+    Conflicts are staging failures; accepted accounting and health remain intact.
+    """
+    owner = state.owner
+    changed: list[str] = []
+    tickers: set[str] = set()
+    for _horizon, (_signals, _regime, health) in sorted(state.horizon_signals.items()):
+        for record in health:
+            try:
+                accepted = owner._metric_store.load_strategy_health(record.health_id)
+            except KeyError:
+                continue
+            if accepted == record:
+                continue
+            changed.append(record.strategy)
+            old_rows = accepted.evidence.get("admission_manifest", {}).get("discovered", ())
+            new_rows = record.evidence.get("admission_manifest", {}).get("discovered", ())
+            old = {json.dumps(row, sort_keys=True, default=str): row for row in old_rows}
+            new = {json.dumps(row, sort_keys=True, default=str): row for row in new_rows}
+            differences = set(new) - set(old) or set(old) - set(new)
+            tickers.update(str((new.get(key) or old[key]).get("ticker", "")) for key in differences)
+    if changed:
+        state.existing_quarantines = list(state.session_candidate_quarantines)
+        # Preserve already accepted quarantine references without recreating
+        # evidence from the conflicting population or making provider calls.
+        known = {reference["issue_id"] for reference in state.candidate_issue_references}
+        for issue in owner._metric_store.read_session_candidate_input_issues(state.epoch_id, state.session):
+            if issue.issue_id not in known:
+                state.candidate_issue_references.append(issue.reference())
+        reason = _candidate_replay_conflict_reason(sorted(ticker for ticker in tickers if ticker))
+        if not tickers:
+            reason = "deterministic strategy admission classification conflict: " + ", ".join(sorted(set(changed)))
+        return state.fail_candidates(reason, degraded=bool(state.existing_quarantines))
+    for horizon, (_signals, _regime, health) in sorted(state.horizon_signals.items()):
+        if not owner._persist_horizon_health(health, state.session, owner._policy_id_for_horizon(horizon)):
+            assign_failures(state.results, state.valid, "unclassified_strategy_silence")
+            return state.finalize()
+    return None
+
+
 def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     """Run each required horizon once and merge governed reference bars."""
+    import time
     owner, session = state.owner, state.session
     state.first_engine = owner.cohorts[0]["engine"]
     lookback_start = (
@@ -1492,11 +1650,35 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         source_store, source_identity = daily_source_store(owner, state.trading_date)
         state.shared_data = source_store.load_frozen(source_identity)
         if state.shared_data is None:
-            acquired = state.first_engine._fetch_all_data(lookback_start, state.trading_date)
+            deadline = None
+            fetch_options = {}
+            source_config = owner._base_config.get('autoresearch', {})
+            if (source_config.get('filing_evidence_policy') == 'complete_submission_v1'
+                    or source_config.get('courtlistener_scope_policy')
+                    or source_config.get('award_attribution_policy')
+                    or source_config.get('congress_disclosure_policy')):
+                from tradingagents.strategies.orchestration.multi_strategy_engine import _fetch_timeout_s
+                deadline = time.monotonic() + max(0.0, _fetch_timeout_s())
+                fetch_options['acquisition_deadline'] = deadline
+            if source_config.get('courtlistener_scope_policy'):
+                fetch_options['litigation_target_owner'] = owner
+            acquired = state.first_engine._fetch_all_data(lookback_start, state.trading_date, **fetch_options)
             # Persist and decode before any strategy/model can mutate observations.
-            state.shared_data = source_store.freeze(source_identity, acquired)
+            state.shared_data = source_store.freeze(source_identity, acquired, deadline=deadline)
         if not isinstance(state.shared_data, dict):
             raise SourceInputError("shared source bundle must be a mapping")
+        from .scoped_sources import validate_portfolio_targets
+        try:
+            validate_portfolio_targets(state.shared_data, owner, state.trading_date)
+        except (ValueError, TypeError, KeyError):
+            raise SourceInputError('frozen Court portfolio scope invalid') from None
+        from .decision_clock import policy, PROSPECTIVE
+        if policy(owner._base_config) == PROSPECTIVE:
+            from .source_inputs import source_codec_limits
+            state.source_digest = hashlib.sha256(source_store.encode(
+                state.shared_data, **source_codec_limits(owner._base_config)).encode()).hexdigest()
+            if 'deadline' in locals() and deadline is not None and time.monotonic() >= deadline:
+                raise SourceInputError('source acquisition deadline exhausted before clock binding')
         yfinance_inputs = state.shared_data.get("yfinance")
         shared_prices = yfinance_inputs.get("prices", {}) if isinstance(yfinance_inputs, dict) else {}
         if isinstance(shared_prices, dict) and hasattr(state.first_engine, "_price_cache"):
@@ -1505,17 +1687,37 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         logger.error("Accepted shared source bundle invalid for %s", state.trading_date)
         return state.fail_candidates("shared_source_bundle_invalid")
     logger.info("Shared data fetched: %s", list(state.shared_data.keys()))
-    for horizon in sorted({cohort["config"].horizon for cohort in state.valid}):
-        signals, regime, health = owner._screen_for_horizon(
-            state.shared_data, state.trading_date, horizon
-        )
-        if not owner._persist_horizon_health(
-            health, session, owner._policy_id_for_horizon(horizon)
-        ):
-            assign_failures(state.results, state.valid, "unclassified_strategy_silence")
-            return state.finalize()
-        state.horizon_signals[horizon] = (signals, regime, health)
-        logger.info("Horizon %s: %d signals", horizon, len(signals))
+    import time
+    from tradingagents.strategies.runtime_deadline import DEFAULT_MODEL_BUDGET_S, model_budget
+    from tradingagents.strategies.candidate_response_reuse import candidate_response_memo
+    from tradingagents.strategies.orchestration.multi_strategy_engine import hold_incomplete_model_sample, model_sample_incomplete
+    if state.model_deadline is None:
+        state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
+    with candidate_response_memo():
+        for horizon in sorted({cohort["config"].horizon for cohort in state.valid}):
+            with model_budget(state.model_deadline):
+                signals, regime, health = owner._screen_for_horizon(
+                    state.shared_data, state.trading_date, horizon
+                )
+            try:
+                signals, health = _include_retained_late_signals(state, horizon, signals, health)
+            except (KeyError, TypeError, ValueError):
+                logger.error("Retained candidate evidence invalid for %s/%s", state.trading_date, horizon)
+                return state.fail_candidates("retained_candidate_evidence_invalid")
+            state.horizon_signals[horizon] = (signals, regime, health)
+            logger.info("Horizon %s: %d signals", horizon, len(signals))
+    combined = [signal for signals, _, _ in state.horizon_signals.values() for signal in signals]
+    phase_health = [record for _, _, health in state.horizon_signals.values() for record in health]
+    if model_sample_incomplete(combined, phase_health):
+        state.model_coverage = {"complete": False, "reason": "model_deadline_exhausted"}
+        # Health carries failure even when candidate filters removed every
+        # timeout marker. Include retained-late observations merged above.
+        for horizon, (signals, regime, health) in state.horizon_signals.items():
+            _, health = hold_incomplete_model_sample(combined, health, incomplete=True)
+            state.horizon_signals[horizon] = (signals, regime, health)
+    health_failure = _persist_screen_health(state)
+    if health_failure is not None:
+        return health_failure
     try:
         for cohort in [*state.valid, *state.completed]:
             bars = cohort["executor"].validated_execution_reference_bars(
@@ -1611,7 +1813,7 @@ def _replay_candidate_reference_issues(
 ) -> None:
     stored_issues = {
         issue.ticker: issue
-        for issue in state.owner._metric_store.read_candidate_input_issues(
+        for issue in state.owner._metric_store.read_session_candidate_input_issues(
             state.epoch_id, state.session
         )
         if issue.dependency_kind == "reference_bar"
@@ -1699,6 +1901,41 @@ def _accepted_candidate_bar(state: DailyRunState, ticker: str, record: Any) -> A
     return bar
 
 
+def _eligibility_protected_tickers(state: DailyRunState) -> set[str]:
+    return set(state.governed_reference_bars) | {
+        ticker for scope in state.cohort_scopes.values() for ticker in scope
+    }
+
+
+def _retain_new_entry_eligibility(state: DailyRunState, evidence: dict) -> None:
+    state.new_entry_eligibility = evidence
+    state.ineligible_new_entries = {
+        ticker for ticker, decision in evidence['decisions'].items()
+        if decision['status'] == 'excluded_from_new_entry'
+    }
+
+
+def _save_candidate_bar_attempts(state: DailyRunState, ticker: str, serialized_attempts: tuple,
+                                outcome: str, signals: list[dict]) -> None:
+    from tradingagents.strategies.metrics.models import CandidateBarRecoveryRecord
+    identities = tuple(
+        {'event_key': event_key, 'strategy': strategy}
+        for event_key, strategy in _candidate_signal_identity_pairs(signals, ticker, state.session)
+    )
+    recovery = CandidateBarRecoveryRecord(
+        recovery_id=_candidate_bar_recovery_id(
+            epoch_id=state.epoch_id, session=state.session, ticker=ticker, outcome=outcome,
+            attempts=serialized_attempts, signal_identities=identities),
+        epoch_id=state.epoch_id, session=state.session, ticker=ticker, outcome=outcome,
+        attempts=serialized_attempts, signal_identities=identities)
+    state.owner._metric_store.save_candidate_bar_recovery(recovery)
+    if outcome == 'quarantined':
+        issue = _candidate_reference_issue(recovery, signal_identity_scope=state.issue_identity_scope,
+                                           cohorts=state.owner.cohorts)
+        state.owner._metric_store.save_candidate_input_issue(issue)
+        state.candidate_issue_references.append(issue.reference())
+
+
 def _resolve_candidate_bars(
     state: DailyRunState,
     unresolved: set[str],
@@ -1708,7 +1945,6 @@ def _resolve_candidate_bars(
         CandidateBarAttempt,
         CandidateBarResolution,
     )
-    from tradingagents.strategies.metrics.models import CandidateBarRecoveryRecord
     from tradingagents.strategies.orchestration.session_executor import (
         ensure_reference_bars,
     )
@@ -1816,45 +2052,28 @@ def _resolve_candidate_bars(
             if bar_session == state.session
         }
     )
+    from tradingagents.strategies.execution.session_activity import POLICY, resolve_new_entry_eligibility
+    if (quarantined and state.owner._base_config.get('autoresearch', {}).get('new_entry_eligibility_policy') == POLICY):
+        eligibility = resolve_new_entry_eligibility(
+            state.owner, state.session, sorted(quarantined), _eligibility_protected_tickers(state),
+            listing_snapshot=state.shared_data.get('equity_universe', {}).get('snapshot'),
+            daily_attempts={ticker: [asdict(attempt) for attempt in attempts_by_ticker[ticker]]
+                            for ticker in sorted(quarantined)},
+            daily_evidence={ticker: (resolution.eligibility_evidence or {}).get(ticker)
+                            for ticker in sorted(quarantined)}, deadline=state.model_deadline)
+        _retain_new_entry_eligibility(state, eligibility)
+        quarantined -= state.ineligible_new_entries
     state.quarantined_tickers.update(quarantined)
     for ticker, attempts in attempts_by_ticker.items():
+        if ticker in state.ineligible_new_entries:
+            continue  # The immutable eligibility record retains every failed daily attempt.
         serialized_attempts = tuple(asdict(attempt) for attempt in attempts)
         outcome = (
             "quarantined"
             if ticker in quarantined
             else "recovered" if ticker in recovered else "accepted"
         )
-        identities = tuple(
-            {"event_key": event_key, "strategy": strategy}
-            for event_key, strategy in _candidate_signal_identity_pairs(
-                signals, ticker, state.session
-            )
-        )
-        recovery = CandidateBarRecoveryRecord(
-            recovery_id=_candidate_bar_recovery_id(
-                epoch_id=state.epoch_id,
-                session=state.session,
-                ticker=ticker,
-                outcome=outcome,
-                attempts=serialized_attempts,
-                signal_identities=identities,
-            ),
-            epoch_id=state.epoch_id,
-            session=state.session,
-            ticker=ticker,
-            outcome=outcome,
-            attempts=serialized_attempts,
-            signal_identities=identities,
-        )
-        state.owner._metric_store.save_candidate_bar_recovery(recovery)
-        if outcome == "quarantined":
-            issue = _candidate_reference_issue(
-                recovery,
-                signal_identity_scope=state.issue_identity_scope,
-                cohorts=state.owner.cohorts,
-            )
-            state.owner._metric_store.save_candidate_input_issue(issue)
-            state.candidate_issue_references.append(issue.reference())
+        _save_candidate_bar_attempts(state, ticker, serialized_attempts, outcome, signals)
     return None
 
 
@@ -1871,7 +2090,7 @@ def run_candidate_reference_validation(
     candidate_only = signal_tickers - set(state.governed_reference_bars)
     stored = {
         record.ticker: record
-        for record in state.owner._metric_store.read_candidate_bar_recoveries(
+        for record in state.owner._metric_store.read_session_candidate_bar_recoveries(
             state.epoch_id, state.session
         )
     }
@@ -1898,6 +2117,7 @@ def run_candidate_reference_validation(
     try:
         replay_conflicts = _candidate_identity_scope_for_run(state, signals, stored)
     except Exception as error:
+        _log_boundary_failure("candidate_identity", state.session, error)
         return state.fail_candidates(
             f"candidate identity validation failed: {error}",
             degraded=bool(state.existing_quarantines),
@@ -1908,7 +2128,8 @@ def run_candidate_reference_validation(
             stored,
             bool(replay_conflicts or recovery_conflicts or classification_conflicts),
         )
-    except Exception:
+    except Exception as error:
+        _log_boundary_failure("candidate_reference_replay", state.session, error)
         _restore_candidate_reference_issue_references(state, stored)
         return state.fail_candidates(
             "candidate reference-bar validation failed",
@@ -1928,6 +2149,28 @@ def run_candidate_reference_validation(
         return state.fail_candidate_classification(classification_conflicts)
     existing = {ticker: record for ticker, record in stored.items() if ticker in candidate_only}
     try:
+        from tradingagents.strategies.execution.session_activity import load_new_entry_eligibility
+        full_candidate_scope = {
+            identity['ticker'] for identity in state.issue_identity_scope
+        } - set(state.governed_reference_bars)
+        eligibility = load_new_entry_eligibility(
+            state.owner, state.session, full_candidate_scope, _eligibility_protected_tickers(state),
+            listing_snapshot=state.shared_data.get('equity_universe', {}).get('snapshot'),
+            deadline=state.model_deadline)
+        frozen_failed = set()
+        if eligibility is not None:
+            _retain_new_entry_eligibility(state, eligibility)
+            frozen_failed = set(eligibility['candidate_tickers'])
+            if state.ineligible_new_entries & set(stored):
+                raise ValueError('excluded new entry conflicts with persisted reference obligation')
+            # Repair a crash between the immutable eligibility freeze and its
+            # unresolved recovery records without another native price request.
+            for ticker in sorted(frozen_failed - state.ineligible_new_entries - set(stored)):
+                attempts = tuple(eligibility['daily_attempts'][ticker])
+                if not attempts or attempts[-1].get('validation_error') is None:
+                    raise ValueError('frozen failed daily evidence is invalid')
+                _save_candidate_bar_attempts(state, ticker, attempts, 'quarantined', signals)
+                state.quarantined_tickers.add(ticker)
         for ticker, record in existing.items():
             if record.outcome == "quarantined":
                 state.quarantined_tickers.add(ticker)
@@ -1936,11 +2179,12 @@ def run_candidate_reference_validation(
                     state, ticker, record
                 )
         conflicts = _resolve_candidate_bars(
-            state, candidate_only - set(existing), signals
+            state, candidate_only - set(existing) - frozen_failed, signals
         )
         if conflicts:
             return state.fail_candidate_classification(conflicts)
-    except Exception:
+    except Exception as error:
+        _log_boundary_failure("candidate_reference_resolution", state.session, error)
         quarantines = sorted(
             set(state.existing_quarantines) | state.quarantined_tickers
         )
@@ -1949,9 +2193,9 @@ def run_candidate_reference_validation(
             degraded=True,
             quarantines=quarantines,
         )
-    if state.quarantined_tickers:
+    if state.quarantined_tickers or state.ineligible_new_entries:
         state.horizon_signals = filter_horizon_signals(
-            state.horizon_signals, state.quarantined_tickers
+            state.horizon_signals, state.quarantined_tickers | state.ineligible_new_entries
         )
     state.candidate_bar_quarantines = sorted(
         set(state.existing_quarantines) | state.quarantined_tickers
@@ -2082,7 +2326,7 @@ def run_candidate_volatility_validation(
         candidate_boundary = True
         stored_issues = {
             issue.ticker: issue
-            for issue in state.owner._metric_store.read_candidate_input_issues(
+            for issue in state.owner._metric_store.read_session_candidate_input_issues(
                 state.epoch_id, state.session
             )
             if issue.dependency_kind == "volatility_history"
@@ -2224,7 +2468,10 @@ def run_candidate_volatility_validation(
         candidate_boundary = False
         accepted = volatility_store.freeze(volatility_identity, {
             "price_history": {
+                # Full histories were validated above; retain exactly the Close
+                # observations used by the policy, with their pandas metadata.
                 ticker: state.first_engine._price_cache[ticker]
+                .loc[:, ["Close"]].tail(lookback + 1).copy()
                 for ticker in sorted(state.shared_volatility_evidence)
             },
             "expected_sessions": expected_sessions,
@@ -2237,6 +2484,7 @@ def run_candidate_volatility_validation(
             lookback=lookback, floor=floor, expected_sessions=expected_sessions,
         )
     except Exception as error:
+        _log_boundary_failure("staging_volatility", state.session, error)
         reason = (
             "candidate volatility-history validation failed"
             if candidate_boundary
@@ -2277,7 +2525,25 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     )
     if conflicts:
         return state.fail_candidate_classification(conflicts)
-    enrichment = state.owner._fetch_openbb_enrichment(all_signals)
+    from tradingagents.strategies.runtime_deadline import DEFAULT_MODEL_BUDGET_S, model_budget
+    from tradingagents.strategies.data_sources.request_policy import provider_budget
+    import time
+    if state.model_deadline is None:
+        state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
+    # Reference/volatility/enrichment wall time consumes the original model
+    # allowance. No later SDK operation may start on a fresh per-call clock.
+    from .decision_clock import prepare_decision_inputs
+    try:
+        with provider_budget("openbb", state.model_deadline):
+            enrichment, decision_context = prepare_decision_inputs(
+                state.owner, state.session, state.shared_data, state.source_digest,
+                lambda: state.owner._fetch_openbb_enrichment(all_signals),
+                eligibility=state.new_entry_eligibility, deadline=state.model_deadline)
+    except Exception as error:
+        _log_boundary_failure('decision_inputs', state.session, error)
+        return state.fail_candidates('decision_inputs_invalid')
+    if decision_context is not None:
+        state.shared_data['_decision_context'] = decision_context
     reference_bars = dict(state.governed_reference_bars)
     reference_bars.update(state.candidate_reference_bars)
     state.shared_data["_execution_reference_bars"] = reference_bars
@@ -2286,16 +2552,18 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
         signals, regime, _ = state.horizon_signals[cfg.horizon]
         summaries = state.governed_summaries_by_cohort.get(cfg.name, [])
         try:
-            staged = engine.screen_and_stage(
-                trading_date=state.trading_date,
-                data=state.shared_data,
-                shared_signals=signals,
-                shared_regime=regime,
-                enrichment=enrichment,
-                size_profile=cohort.get("size_profile"),
-                marked_account=cohort["marked_account"],
-                annualized_volatility_evidence=state.shared_volatility_evidence,
-            )
+            with model_budget(state.model_deadline):
+                staged = engine.screen_and_stage(
+                    trading_date=state.trading_date,
+                    data=state.shared_data,
+                    shared_signals=signals,
+                    shared_regime=regime,
+                    enrichment=enrichment,
+                    size_profile=cohort.get("size_profile"),
+                    marked_account=cohort["marked_account"],
+                    annualized_volatility_evidence=state.shared_volatility_evidence,
+                    model_coverage=state.model_coverage,
+                )
             fills = cohort["ledger"].read_fills(state.session, state.session)
             staged.update(
                 trades_opened=[
@@ -2312,6 +2580,13 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 governed_bar_recoveries=summaries,
                 governed_failure_map={},
             )
+            if state.new_entry_eligibility is not None:
+                staged['new_entry_eligibility'] = {
+                    'policy': state.new_entry_eligibility['policy'],
+                    'reference_session': state.trading_date,
+                    'decisions': state.new_entry_eligibility['decisions'],
+                    'excluded_tickers': sorted(state.ineligible_new_entries),
+                }
             state.results[cfg.name] = staged
         except Exception as error:
             logger.error("Cohort %s staging failed", cfg.name, exc_info=True)
@@ -2400,6 +2675,10 @@ def summarize_cohort_results(
             label = "candidate data quarantined"
         if source_failures:
             label = (label + "; " if label else "") + "source coverage incomplete"
+        if any(result.get("committee_decision_status", {}).get("degraded") for result in results.values() if isinstance(result, dict)):
+            label = (label + "; " if label else "") + "committee decision unavailable"
+        if any(result.get("outcome_coverage_valid") is False for result in results.values() if isinstance(result, dict)):
+            label = (label + "; " if label else "") + "outcome evidence incomplete"
     outcome = (
         RunOutcome.FAILED.value
         if n_failed

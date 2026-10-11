@@ -124,10 +124,12 @@ class TestUSDARetry:
         with patch("requests.get") as mock_get:
             mock_get.side_effect = [
                 requests.exceptions.Timeout("timeout"),
-                MagicMock(status_code=200, json=lambda: {"data": []}),
+                MagicMock(status_code=200, json=lambda: {"data": [
+                    {"state_alpha":"IA","week_ending":"2026-10-04","unit_desc":unit,"Value":value}
+                    for unit,value in [("PCT GOOD","50"),("PCT EXCELLENT","20")]]}),
             ]
-            result = source.fetch_crop_progress("CORN", 2026)
-            assert result == []
+            result = source.fetch_crop_progress("CORN", 2026, "IA")
+            assert result[0]["good_pct"] == 50
             assert mock_get.call_count == 2
 
     @patch("time.sleep")
@@ -156,12 +158,12 @@ class TestDroughtMonitorRetry:
         with patch("requests.get") as mock_get:
             mock_get.side_effect = [
                 requests.exceptions.Timeout("timeout"),
-                MagicMock(status_code=200, json=lambda: []),
+                MagicMock(status_code=200, json=lambda: [{"MapDate":"20260331","StateAbbreviation":"IA",
+                    "StatisticFormatID":2,"None":100,"D0":0,"D1":0,"D2":0,"D3":0,"D4":0}]),
             ]
-            result = source.fetch_drought_severity(
-                start="2026-03-27", end="2026-04-03"
-            )
-            assert result == {}
+            with patch("tradingagents.strategies.data_sources.drought_monitor_source.current_session_date", return_value="2026-04-03"):
+                result = source.fetch_drought_severity(states=["IA"], start="2026-03-27", end="2026-04-03")
+            assert result["IA"]["None"] == 100
             assert mock_get.call_count == 2
 
 

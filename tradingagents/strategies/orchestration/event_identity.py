@@ -43,8 +43,8 @@ _AVAILABILITY_FIELDS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("observation_date", True),
     ),
     "state_economics": (("window_end", True),),
-    "weather_ag": (("window_end", True),),
-    "commodity_macro": (("window_end", True),),
+    "weather_ag": (("available_at", False), ("window_end", True)),
+    "commodity_macro": (("available_at", False), ("window_end", True)),
     "quantum_readiness": (("published_at", False), ("window_end", True)),
 }
 
@@ -110,7 +110,7 @@ def _required(metadata: dict[str, Any], key: str, strategy: str) -> object:
 def _insider_filing_key(filing: dict[str, Any]) -> object:
     for key in ("accession_number", "accession_no", "filing_id", "id"):
         if _present(filing.get(key)):
-            return (key, filing[key])
+            return (key, filing[key], filing.get("owner_cik") or filing.get("owner_name"), filing.get("transaction_id") or (filing.get("transaction_date"), filing.get("transaction_code"), filing.get("acquired_disposed"), filing.get("shares"), filing.get("price_per_share")))
     identity = {
         key: filing.get(key)
         for key in (
@@ -216,7 +216,7 @@ def canonical_event_key(
         source = _required(metadata, "source", strategy)
         if source == "usaspending":
             family = "federal_award"
-            payload = _required(metadata, "award_id", strategy)
+            payload = metadata.get("award_key") or _required(metadata, "award_id", strategy)
         elif source == "momentum_fallback":
             family = "daily_contract_proxy_state"
             payload = {

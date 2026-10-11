@@ -66,7 +66,7 @@ def _engine(tmp_path, source):
 
 
 def _response(payload, status=200):
-    return SimpleNamespace(status_code=status, json=lambda: payload)
+    return SimpleNamespace(status_code=status, headers={}, json=lambda: payload, iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda: None)
 
 
 def _assert_failure_visible(config, engine, source):
@@ -129,7 +129,7 @@ def test_successful_empty_provider_is_legitimate_no_event(
 ):
     monkeypatch.setattr(
         "requests.post" if provider == "usaspending" else "requests.get",
-        lambda *args, **kwargs: _response({"results": []}),
+        lambda *args, **kwargs: _response({"results": [], "count": 0, "next": None, "page_metadata": {"page": 1, "hasNext": False}}),
     )
     source = (
         USASpendingSource()
@@ -148,14 +148,16 @@ def test_successful_empty_provider_is_legitimate_no_event(
 def test_usaspending_failure_is_not_cached_as_empty_success(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "requests.post",
-        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": []})]),
+        Mock(side_effect=[requests.Timeout(_SECRET)] * 3 + [_response({"results": [], "next": None, "page_metadata": {"page": 1, "hasNext": False}})]),
     )
     source = USASpendingSource()
     _, engine = _engine(tmp_path, source)
     failed = engine._fetch_usaspending_data("2026-10-01")
     recovered = engine._fetch_usaspending_data("2026-10-01")
     assert failed.get("error")
-    assert recovered == {"data": {"contracts": []}}
+    assert not recovered.get("error")
+    assert recovered["data"]["contracts"] == []
+    assert recovered["coverage"]["complete"] is True
 
 
 def test_fred_partial_failure_keeps_valid_series_and_reaches_health(
@@ -166,7 +168,7 @@ def test_fred_partial_failure_keeps_valid_series_and_reaches_health(
             raise requests.Timeout(_SECRET)
         return pd.Series([3.0], index=pd.to_datetime(["2026-09-01"]))
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     source = FREDSource(api_key="offline")
     config, engine = _engine(tmp_path, source)
     payload = _assert_failure_visible(config, engine, "fred")
@@ -177,7 +179,7 @@ def test_fred_partial_failure_keeps_valid_series_and_reaches_health(
 
 def test_fred_successful_empty_series_is_not_fetch_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "fredapi.Fred.get_series", lambda *args, **kwargs: pd.Series(dtype=float)
+        "tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", lambda *args, **kwargs: pd.Series(dtype=float)
     )
     source = FREDSource(api_key="offline")
     config, engine = _engine(tmp_path, source)
@@ -192,7 +194,7 @@ def test_courtlistener_partial_failure_retains_other_query_results(
         if kwargs["params"]["q"] == "SEC enforcement":
             raise requests.Timeout(_SECRET)
         return _response(
-            {"results": [{"docket_id": 123, "caseName": "Fixture litigation", "dateFiled": "2026-09-30", "court": "cacd"}]}
+            {"results": [{"docket_id": 123, "caseName": "Fixture litigation", "dateFiled": "2026-09-30", "court": "cacd"}], "count":1, "next":None}
         )
 
     monkeypatch.setattr("requests.get", request)
@@ -223,9 +225,10 @@ def test_fred_generic_batch_retains_partial_data_and_safe_error(monkeypatch):
             raise requests.Timeout(_SECRET)
         return pd.Series([3.0], index=["2026-09-01"])
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     result = FREDSource(api_key="offline").fetch(
-        {"method": "multi_series", "series_ids": ["CPIAUCSL", "UNRATE"]}
+        {"method": "multi_series", "series_ids": ["CPIAUCSL", "UNRATE"],
+         "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"}
     )
     assert result.get("error")
     assert result["data"]["UNRATE"] == {"2026-09-01": 3.0}
@@ -240,7 +243,7 @@ def test_fred_malformed_series_is_visible_and_not_cached(tmp_path, monkeypatch):
             return {"unexpected": "provider shape"}
         return pd.Series([3.0], index=pd.to_datetime(["2026-09-01"]))
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     _, engine = _engine(tmp_path, FREDSource(api_key="offline"))
     failed = engine._fetch_fred_data("2026-07-01", "2026-10-01")
     assert failed.get("error")
@@ -275,6 +278,7 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
     tmp_path, monkeypatch, missing_required
 ):
     from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
+    from tradingagents.strategies.data_sources.usda_source import ConditionObservations
     from tradingagents.strategies.modules.weather_ag import WeatherAgStrategy
 
     # Keep the real shared fetcher, Yahoo adapter, and weather screen. Only
@@ -302,6 +306,9 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
                 "heat_stress_days": 0,
                 "precip_deficit_pct": 0,
                 "frost_events": 0,
+                "coverage": {"complete": True},
+                "observation_date": "2026-09-30",
+                "available_at": "2026-10-01T20:00:00+00:00",
             },
         )
     )
@@ -310,15 +317,21 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
             SimpleNamespace(
                 name="usda",
                 is_available=lambda: True,
-                fetch_crop_progress=lambda *a, **kw: [],
+                fetch_crop_progress=lambda *a, **kw: ConditionObservations([{
+                    "week_ending": "2026-09-27", "state": "IA", "good_pct": 50,
+                    "excellent_pct": 20, "available_at": "2026-10-01T20:00:00+00:00",
+                }], {"complete": True, "scope_mode": "explicit_states", "requested_states": ["IA"]}),
             )
         )
     registry.register(
         SimpleNamespace(
             name="drought_monitor",
             is_available=lambda: True,
-            fetch_drought_severity=lambda *a, **kw: {},
-            fetch_composite_score=lambda *a, **kw: 0.0,
+            fetch_drought_severity=lambda *a, **kw: {"IA": {
+                "None": 0, "D0": 0, "D1": 0, "D2": 100, "D3": 0, "D4": 0,
+                "observation_date": "2026-09-29", "available_at": "2026-10-01T20:00:00+00:00",
+            }},
+            fetch_composite_score=lambda *a, **kw: 2.0,
         )
     )
     config = {"autoresearch": {"state_dir": str(tmp_path)}}
@@ -328,7 +341,11 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
         strategies=[WeatherAgStrategy()],
         use_llm=False,
     )
-    engine._analyzer = SimpleNamespace(analyze_ag_weather=lambda *a, **kw: {})
+    engine._analyzer = SimpleNamespace(analyze_ag_weather=lambda *a, **kw: {
+        "direction": "long", "conviction": 0.8,
+        "rationale": "Iowa severe drought creates an agricultural supply disruption.",
+        "evidence_claim": "Iowa reports D2 drought across 100 percent of its area.",
+    })
     data = engine._fetch_all_data("2026-07-01", "2026-10-01")
     signals, _, health = engine.screen_and_enrich(
         "2026-10-01",
@@ -339,7 +356,9 @@ def test_weather_optional_openbb_absence_preserves_health_and_preflight(
     assert signals, "real weather screen must exercise its configured universe"
     assert health[0].status == ("data_failure" if missing_required else "signals")
     if missing_required:
-        assert set(health[0].evidence["provider_errors"]) == {"usda"}
+        assert set(health[0].evidence["provider_errors"]) == {"usda", "analysis"}
+        assert health[0].evidence["non_actionable_reasons"] == ["incomplete_environmental_inputs"]
+        assert all(signal["journal_only"] for signal in signals)
     report = run_preflight(config, "2026-10-01", engine=engine)
     assert report["ok"] is (not missing_required)
     assert report["source_warnings"] == [
@@ -410,7 +429,7 @@ def test_fred_batch_preserves_failed_series_and_reason_across_groups(
             return {"malformed": True}
         return pd.Series([3.0], index=["2026-09-01"])
 
-    monkeypatch.setattr("fredapi.Fred.get_series", series)
+    monkeypatch.setattr("tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", series)
     config, engine = _engine(tmp_path, FREDSource(api_key="offline"))
     payload = _assert_failure_visible(config, engine, "fred")
     assert "CPIAUCSL:timeout" in payload["error"]
@@ -422,10 +441,10 @@ def test_fred_batch_preserves_failed_series_and_reason_across_groups(
 def test_generic_dispatch_preserves_safe_reason(provider, monkeypatch):
     if provider == "fred":
         monkeypatch.setattr(
-            "fredapi.Fred.get_series", Mock(side_effect=requests.Timeout(_SECRET))
+            "tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", Mock(side_effect=requests.Timeout(_SECRET))
         )
         result = FREDSource(api_key="offline").fetch(
-            {"method": "series", "series_id": "CPIAUCSL"}
+            {"method": "series", "series_id": "CPIAUCSL", "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"}
         )
     else:
         monkeypatch.setattr(
@@ -446,20 +465,20 @@ def test_fred_direct_diagnostic_retains_safe_series_identity(monkeypatch):
     from urllib.error import URLError
 
     monkeypatch.setattr(
-        "fredapi.Fred.get_series", Mock(side_effect=URLError(TimeoutError(_SECRET)))
+        "tradingagents.strategies.data_sources.fred_source.FREDSource._get_series", Mock(side_effect=URLError(TimeoutError(_SECRET)))
     )
     source = FREDSource(api_key="offline")
-    result = source.fetch({"method": "series", "series_id": "CPIAUCSL"})
+    result = source.fetch({"method": "series", "series_id": "CPIAUCSL", "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"})
     assert "CPIAUCSL:timeout" in result["error"]
     assert _SECRET not in result["error"]
-    unsafe_identity = source.fetch({"method": "series", "series_id": _SECRET})
+    unsafe_identity = source.fetch({"method": "series", "series_id": _SECRET, "start": "2026-07-01", "end": "2026-10-01", "as_of": "2026-10-01"})
     assert _SECRET not in unsafe_identity["error"]
 
 
 @pytest.mark.parametrize("provider", ["usaspending", "courtlistener"])
 def test_invalid_json_is_a_safe_invalid_response(provider, monkeypatch):
     response = SimpleNamespace(
-        status_code=200, json=Mock(side_effect=json.JSONDecodeError(_SECRET, "", 0))
+        status_code=200, headers={}, close=lambda:None, iter_content=lambda chunk_size: iter([b"invalid synthetic JSON"]), json=Mock(side_effect=json.JSONDecodeError(_SECRET, "", 0))
     )
     monkeypatch.setattr(
         "requests.post" if provider == "usaspending" else "requests.get",
@@ -485,19 +504,15 @@ def test_invalid_json_is_a_safe_invalid_response(provider, monkeypatch):
 def test_fred_actual_http_wrapper_retains_status_and_redacts_body(
     tmp_path, monkeypatch, body
 ):
-    from io import BytesIO
-    from urllib.error import HTTPError
-    from urllib.parse import parse_qs, urlsplit
-
-    def urlopen(url):
-        series_id = parse_qs(urlsplit(url).query)["series_id"][0]
+    def transport(url, **options):
+        series_id = options["params"]["series_id"]
         if series_id == "CPIAUCSL":
-            raise HTTPError(url, 502, "fixture-secret", {}, BytesIO(body))
-        return BytesIO(
-            b'<observations><observation date="2026-09-01" value="3.0"/></observations>'
-        )
+            response = _response({})
+            response.status_code = 502
+            return response
+        return _response({"observations": [{"date": "2026-09-01", "value": "3.0"}]})
 
-    monkeypatch.setattr("fredapi.fred.urlopen", urlopen)
+    monkeypatch.setattr(FREDSource, "_transport_get", staticmethod(transport))
     source = FREDSource(api_key="fixture-secret")
     config, engine = _engine(tmp_path, source)
     payload = _assert_failure_visible(config, engine, "fred")

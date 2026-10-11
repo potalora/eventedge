@@ -13,7 +13,7 @@ Direction = Literal["long", "short", "neutral"]
 OutcomeStatus = Literal["pending", "valid", "invalid"]
 EpochStatus = Literal["open", "closed", "invalid"]
 HealthStatus = Literal[
-    "signals", "legitimate_no_event", "data_failure", "strategy_defect"
+    "signals", "legitimate_no_event", "data_failure", "strategy_defect", "disabled_by_policy"
 ]
 CriticalGapStatus = Literal["pending", "completed"]
 CriticalGapDetailStatus = Literal["minimal", "ready", "legacy_unbound"]
@@ -72,6 +72,12 @@ class SignalMetricRecord:
     direction: Direction
     decision_at: datetime
     reference_session: date
+    journal_only: bool = False
+    analysis_status: str = "not_required"
+    analysis_valid: bool = True
+    analysis_admitted: bool = True
+    non_actionable_reason: str = ""
+    discovery_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,6 +114,13 @@ class OutcomeRecord:
     signed_return: Decimal | None
     status: OutcomeStatus
     invalid_reason: str
+    return_basis: str = "legacy_raw_price_return_v1"
+    journal_only: bool = False
+    analysis_status: str = "not_required"
+    analysis_valid: bool = True
+    analysis_admitted: bool = True
+    non_actionable_reason: str = ""
+    discovery_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -410,6 +423,8 @@ class PortfolioMetrics:
     closed_trades: int
     missing_mark_count: int
     stale_mark_count: int
+    sharpe_unavailable_reason: str | None = None
+    information_ratio_unavailable_reason: str | None = None
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,9 @@ from tradingagents.strategies.orchestration.run_outcome import (
     DAILY_RESULT_ENVELOPE_KEYS, DAILY_RESULT_PREFIX, DAILY_RESULT_WIRE_VERSION,
 )
 from tradingagents.strategies.orchestration.runtime_lock import canonical_runtime_lock_path, runtime_lock
-from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures
+from tradingagents.strategies.orchestration.source_coverage import (
+    aggregate_source_health_failures, canonical_source_scope_limits, source_scope_limits_from_health,
+)
 from tradingagents.strategies.orchestration.source_inputs import (
     CONTRACT_VERSION, MAX_BYTES, SourceInputStore, configuration_fingerprint,
 )
@@ -37,6 +39,11 @@ _PROVIDERS = frozenset({'edgar','fred','finnhub','congress','regulations','court
                         'noaa','usda','drought_monitor','usaspending','cftc','yfinance','openbb'})
 _HEALTHY = frozenset({'signals', 'legitimate_no_event'})
 _FAILURES = frozenset({'data_failure', 'strategy_defect'})
+_PREFLIGHT_LABELS = {
+    'screen': 'screen (source screening)',
+    'governed': 'governed (price readiness)',
+    'all': 'all (source screening and price readiness)',
+}
 
 
 def _safe_id(value: Any) -> bool:
@@ -162,6 +169,13 @@ def _attempts(repo: Path, generation: str, session: str, commit: str, diagnose) 
                 raise ValueError('invalid attempt timing')
             if not isinstance(item['result'], dict):
                 raise ValueError('invalid attempt result')
+            mode = item['preflight_mode']
+            if item['action'] == 'preflight':
+                if (not isinstance(mode, str) or mode not in _PREFLIGHT_LABELS or
+                        item['result'].get('preflight_mode', mode) != mode):
+                    raise ValueError('invalid preflight mode')
+            elif mode is not None:
+                raise ValueError('daily attempt has preflight mode')
             entry = {'attempt_id':path.name,'evidence_path':str(path.resolve()),'action':item['action'], 'started_at':start.astimezone(timezone.utc).isoformat(),
                      'finished_at':end.astimezone(timezone.utc).isoformat(),'process_return_code':item['process_return_code'],
                      'process_status':item['process_status'], 'outcome':item['result'].get('outcome'),
@@ -190,6 +204,7 @@ def _attempts(repo: Path, generation: str, session: str, commit: str, diagnose) 
                         item['process_return_code'] not in ({0} if outcome == 'clean' else {0,2})):
                     diagnose('attempt_process_conflict', path.name)
             else:
+                entry['preflight_mode'] = mode
                 entry['preflight_ok'] = item['result'].get('success')
                 entry['screen_failure_count'] = item['result'].get('screen_failure_count')
                 entry['failures'] = _preflight_failures(item)
@@ -236,7 +251,21 @@ def _manifest_history(metadata: dict, attempts: list[dict], latest: dict | None,
         diagnose('manifest_session_latest_missing')
 
 
-def _metrics(state: Path, generation: str, session: str, commit: str, diagnose) -> tuple[str | None, list[dict]]:
+def _declared_exclusion(row: dict, disabled: dict | None = None) -> bool:
+    reason = next((getattr(strategy, 'retirement_reason', None)
+                   for strategy in get_paper_trade_strategies()
+                   if strategy.name == row.get('strategy')), None)
+    evidence = row.get('evidence')
+    if (row.get('strategy') == 'congressional_trades'
+            and (disabled or {}).get('congressional_trades') == 'display_audit_only_v1'
+            and isinstance(evidence, dict) and evidence.get('disclosure_policy') == 'display_audit_only_v1'):
+        reason = 'display_audit_only_v1'
+    return (row.get('status') == 'disabled_by_policy' and reason is not None
+            and row.get('signal_count') == 0 and isinstance(evidence, dict)
+            and evidence.get('reason') == reason)
+
+
+def _metrics(state: Path, generation: str, session: str, commit: str, diagnose, disabled=None) -> tuple[str | None, list[dict]]:
     path = state / 'metrics_v2.sqlite3'
     if not path.exists():
         diagnose('metrics_missing')
@@ -263,7 +292,7 @@ def _metrics(state: Path, generation: str, session: str, commit: str, diagnose) 
                     diagnose('health_identity_conflict', row['health_id'])
                     continue
                 if (not all(_safe_id(value.get(key)) for key in ('health_id','policy_id','strategy')) or
-                        value.get('status') not in _HEALTHY | _FAILURES or
+                        (value.get('status') not in _HEALTHY | _FAILURES and not _declared_exclusion(value, disabled)) or
                         not isinstance(value.get('evidence'),dict)):
                     diagnose('health_contract_invalid', row['health_id'])
                     continue
@@ -362,7 +391,7 @@ def _candidate_issues(state: Path, epoch: str | None, session: str, diagnose) ->
         return []
 
 
-def _health_coverage(health: list[dict], epoch: str | None, session: str, diagnose) -> list[dict]:
+def _health_coverage(health: list[dict], epoch: str | None, session: str, diagnose, disabled=None) -> list[dict]:
     strategies = {strategy.name for strategy in get_paper_trade_strategies()}
     failures = []
     scoped = {}
@@ -382,7 +411,7 @@ def _health_coverage(health: list[dict], epoch: str | None, session: str, diagno
         affected = [name for name in EXPECTED_COHORTS if name.startswith('horizon_'+horizon+'_')]
         for strategy in sorted(strategies):
             row = scoped.get((policy,strategy))
-            if row is not None and row['status'] in _HEALTHY:
+            if row is not None and (row['status'] in _HEALTHY or _declared_exclusion(row, disabled)):
                 continue
             if row is None:
                 diagnose('health_missing', policy+':'+strategy)
@@ -397,9 +426,11 @@ def _health_coverage(health: list[dict], epoch: str | None, session: str, diagno
 
 
 def _accepted_envelope(path: Path, generation: str, session: str, commit: str, *, purpose: str | None = None) -> dict:
-    if path.stat().st_size > MAX_BYTES:
+    from .source_inputs import FULL_FILING_MAX_BYTES, FULL_FILING_MAX_NODES
+    limits = {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES} if purpose is None else {}
+    if path.stat().st_size > limits.get('max_bytes', MAX_BYTES):
         raise ValueError('source byte bound')
-    envelope = SourceInputStore.decode(path.read_text())
+    envelope = SourceInputStore.decode(path.read_text(), **limits)
     identity = envelope['identity']
     keys={'generation','session','commit','configuration'} | ({'purpose'} if purpose else set())
     if (set(envelope) != {'version','identity','acquired_at','payload','digest'} or
@@ -407,7 +438,7 @@ def _accepted_envelope(path: Path, generation: str, session: str, commit: str, *
             set(identity)!=keys or identity.get('purpose')!=purpose or
             identity['generation']!=generation or identity['session']!=session or identity['commit']!=commit or
             not isinstance(identity['configuration'],str) or not identity['configuration'] or
-            envelope['digest']!=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest() or
+            envelope['digest']!=hashlib.sha256(SourceInputStore.encode(envelope['payload'], **limits).encode()).hexdigest() or
             not isinstance(envelope['acquired_at'],datetime) or envelope['acquired_at'].tzinfo is None or
             envelope['acquired_at']>datetime.now(timezone.utc) or not isinstance(envelope['payload'],dict)):
         raise ValueError('source identity/content conflict')
@@ -460,6 +491,43 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose) 
         identity = envelope['identity']
         result['configuration'] = identity['configuration']
         result['acquired_at'] = envelope['acquired_at'].isoformat()
+        from .congress_policy import declared_exclusions, audit_scope, POLICY as CONGRESS_POLICY
+        exclusions = declared_exclusions(envelope['payload'])
+        congress_config = ({'congress_disclosure_policy': CONGRESS_POLICY,
+                            'disabled_strategies': exclusions} if exclusions else {})
+        congress_scope = audit_scope(envelope['payload'], congress_config, session,
+                                    now=envelope['acquired_at'], replay=True)
+        if exclusions:
+            result['declared_exclusions'] = exclusions
+        if congress_scope is not None:
+            result['congress_audit_scope'] = congress_scope
+        from .filing_policy_validation import validate_filing_comparison_policy
+        graph = envelope['payload'].get('edgar', {}).get('filing_evidence')
+        filing_config = ({'filing_evidence_policy': graph.get('policy'),
+                          'filing_comparison_policy': graph.get('coverage', {}).get('comparator_policy'),
+                          'filing_attribution_policy': graph.get('coverage', {}).get('attribution_policy'),
+                          'filing_parser_policy': graph.get('coverage', {}).get('parser_policy'),
+                          'filing_acquisition_policy': graph.get('coverage', {}).get('acquisition_policy'),
+                          'filing_material_policy': graph.get('coverage', {}).get('material_policy')}
+                         if isinstance(graph, dict) else {})
+        from .filing_material_validation import validate_filing_material_policy
+        material_scope = validate_filing_material_policy(envelope['payload'], filing_config)
+        if material_scope is not None:
+            result['filing_material_scope'] = material_scope
+        from .filing_acquisition_validation import validate_filing_acquisition_policy
+        acquisition_scope = validate_filing_acquisition_policy(envelope['payload'], filing_config)
+        if acquisition_scope is not None:
+            result['filing_acquisition_scope'] = acquisition_scope
+        filing_scope = validate_filing_comparison_policy(envelope['payload'], filing_config)
+        if filing_scope is not None:
+            result['filing_comparison_scope'] = filing_scope
+        from .filing_attribution_validation import validate_filing_attribution_policy, filing_source_error_sha256
+        attribution_scope = validate_filing_attribution_policy(envelope['payload'], filing_config)
+        if attribution_scope is not None:
+            result['filing_attribution_scope'] = attribution_scope
+        source_error_digest = filing_source_error_sha256(envelope['payload'].get('edgar'))
+        if source_error_digest is not None:
+            result['filing_source_error_sha256'] = source_error_digest
         required={source for strategy in get_paper_trade_strategies() for source in strategy.data_sources if source!='openbb'}
         for source in sorted(required-set(envelope['payload'])):
             diagnose('accepted_source_missing',source)
@@ -572,10 +640,13 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['attempts'] = [{key:value for key,value in row.items() if key not in {'wire','result','failures'}} for row in attempts]
         report['preflight_incidents'] = [
             {'attempt_id':row['attempt_id'],'process_return_code':row['process_return_code'],
+             'preflight_mode':row['preflight_mode'],
              'screen_failure_count':row['screen_failure_count'],'failures':row['failures']}
             for row in attempts if row['action']=='preflight' and (row['preflight_ok'] is not True or row['failures'])
         ]
-        epoch,health = _metrics(state,generation,session,commit,diagnose)
+        report['sources'] = _sources(state,generation,session,commit,diagnose)
+        disabled = report['sources'].get('declared_exclusions', {})
+        epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
         report['epoch_id'] = epoch
         report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
         report['cohorts'] = {name:_book(state,name,generation,session,epoch,diagnose) for name in EXPECTED_COHORTS}
@@ -587,18 +658,70 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             # Completion records the phase, validity records accepted inputs.
             row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
-        report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose)
+        report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled)
+        try:
+            expected_attribution = report['sources'].get('filing_attribution_scope')
+            source_error_digest = report['sources'].get('filing_source_error_sha256')
+            if expected_attribution is not None or source_error_digest is not None:
+                from .filing_attribution_validation import validate_filing_attribution_health
+                strategy_sources = {strategy.name: strategy.data_sources for strategy in get_paper_trade_strategies()
+                                  if 'edgar' in strategy.data_sources and strategy.name not in disabled
+                                  and not getattr(strategy, 'retirement_reason', None)}
+                validate_filing_attribution_health(health, {row['policy_id'] for row in health},
+                    set(strategy_sources), expected_attribution, expected_error_sha256=source_error_digest,
+                    strategy_sources=strategy_sources)
+            elif any('filing_attribution_scope' in row['evidence'] for row in health):
+                raise ValueError('unbound filing attribution health')
+        except (ValueError, TypeError, KeyError):
+            diagnose('filing_attribution_scope_conflict')
+        try:
+            expected_material = report['sources'].get('filing_material_scope')
+            if expected_material is not None:
+                from .filing_material_validation import validate_filing_material_health
+                strategies = {strategy.name for strategy in get_paper_trade_strategies()
+                              if 'edgar' in strategy.data_sources and strategy.name not in disabled
+                              and not getattr(strategy, 'retirement_reason', None)}
+                validate_filing_material_health(health, {row['policy_id'] for row in health},
+                                               strategies, expected_material)
+            elif any('filing_material_scope' in row['evidence'] for row in health):
+                raise ValueError('unbound filing material health')
+        except (ValueError, TypeError, KeyError):
+            diagnose('filing_material_scope_conflict')
+        try:
+            scope_limits = source_scope_limits_from_health(health)
+            expected_congress_scope = report['sources'].get('congress_audit_scope')
+            if scope_limits.get('congress') != expected_congress_scope:
+                diagnose('congress_audit_scope_conflict')
+            if disabled.get('congressional_trades') == 'display_audit_only_v1':
+                for row in health:
+                    if row['strategy'] != 'congressional_trades':
+                        continue
+                    evidence = row['evidence']
+                    if (not _declared_exclusion(row, disabled)
+                            or type(row.get('signal_count')) is not int
+                            or type(evidence.get('candidate_count')) is not int
+                            or evidence['candidate_count'] != 0
+                            or evidence.get('data_sources') != ['congress', 'yfinance']
+                            or canonical_source_scope_limits(evidence.get('source_scope_limits', {}))
+                               != ({'congress': expected_congress_scope} if expected_congress_scope is not None else {})):
+                        diagnose('congress_audit_scope_conflict', row['policy_id'])
+            if scope_limits:
+                report['source_scope_limits'] = scope_limits
+        except (ValueError, TypeError, KeyError):
+            diagnose('source_scope_limits_invalid')
+        report['disabled_strategies'] = {row['strategy']: row['evidence']['reason'] for row in health if _declared_exclusion(row,disabled)}
         report['input_coverage_valid'] = epoch is not None and not report['source_health_failures']
-        report['sources'] = _sources(state,generation,session,commit,diagnose)
         report['volatility'] = _volatility(state,generation,session,commit,report['sources'],report['candidate_input_issues'],report['cohorts'],diagnose)
         failed_sources = {item['provider'] for item in report['sources']['unresolved']}
-        required_failures = {source for strategy in get_paper_trade_strategies() for source in strategy.data_sources if source!='openbb'} & failed_sources
+        required_failures = {source for strategy in get_paper_trade_strategies()
+            if strategy.name not in report['disabled_strategies']
+            for source in strategy.data_sources if source!='openbb'} & failed_sources
         if required_failures:
             report['input_coverage_valid'] = False
         for item in report['sources']['unresolved']:
             source=item['provider']
             for strategy in get_paper_trade_strategies():
-                if source=='openbb' or source not in strategy.data_sources:
+                if source=='openbb' or source not in strategy.data_sources or strategy.name in report['disabled_strategies']:
                     continue
                 for horizon in ('30d','3m','6m','1y'):
                     failures=[failure for failure in report['source_health_failures'] if failure['strategy']==strategy.name and
@@ -615,6 +738,12 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 if issues!=report['candidate_input_issues']:
                     diagnose('wire_candidate_issues_conflict')
                 for name,row in wire.items():
+                    horizon = name.split('_')[1]
+                    expected_scope = source_scope_limits_from_health(
+                        item for item in health if item['policy_id'] == 'foundation-' + horizon
+                        or item['policy_id'].endswith(':health:' + horizon))
+                    if canonical_source_scope_limits(row.get('source_scope_limits', {})) != expected_scope:
+                        diagnose('wire_source_scope_conflict')
                     book=report['cohorts'][name]
                     if row['execution_valid']!=book['accounting_valid'] or row['staging_valid']!=book['staging_valid']:
                         diagnose('wire_ledger_conflict',name)
@@ -647,12 +776,68 @@ def render_operational_report(report: dict) -> str:
         for attempt in report['attempts']:
             if attempt['action']=='daily':
                 lines.append(f"- {attempt['attempt_id']}: {attempt['outcome']}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
+    preflights = [row for row in report['attempts'] if row['action'] == 'preflight']
+    if preflights:
+        lines.extend(['', '## Preflight attempt evidence', '',
+            'Preflight modes are independent; a successful governed price check does not establish source recovery.', ''])
+        for attempt in preflights:
+            label = _PREFLIGHT_LABELS.get(attempt.get('preflight_mode'), 'unknown mode')
+            status = 'passed' if attempt.get('preflight_ok') is True else 'failed'
+            lines.append(f"- {attempt['attempt_id']}: {label}; {status}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
+    if report.get('disabled_strategies'):
+        lines.extend(['', 'Policy exclusions: ' + ', '.join(f'{name} ({reason})' for name, reason in sorted(report['disabled_strategies'].items())) + '.'])
+    if report['sources'].get('filing_comparison_scope'):
+        scope = report['sources']['filing_comparison_scope']
+        lines.extend(['', f"Rows permitted for current-only filing assessment: {scope['current_only_rows']} "
+            f"({scope['current_only_absent_rows']} without an earlier same-form filing; "
+            f"{scope['current_only_ambiguous_rows']} without a unique earlier comparator). "
+            'The policy requires the full current filing and prohibits comparison claims; these counts do not establish model completion.'])
+    if report['sources'].get('filing_attribution_scope'):
+        scope = report['sources']['filing_attribution_scope']
+        lines.extend(['', f"Filing security attribution: {scope['verified_target_rows']} verified target rows, "
+            f"{scope['outside_rows']} outside the declared universe, {scope['unresolved_rows']} unresolved, "
+            f"from {scope['total_rows']} retained discovery rows. "
+            'Unresolved rows remain non-actionable. These counts establish neither full attribution nor model completion.'])
+    if report['sources'].get('filing_acquisition_scope'):
+        scope = report['sources']['filing_acquisition_scope']
+        lines.extend(['', f"Original filing acquisition: {scope['completed_originals']} completed originals; "
+            f"spool closed: {str(scope['spool_closed']).lower()}."])
+    if report['sources'].get('filing_material_scope'):
+        scope = report['sources']['filing_material_scope']
+        lines.extend(['', f"Strict filing evidence complete: {str(scope['strict_complete']).lower()} "
+            f"({scope['strict_failed_rows']} failed rows); scoped analysis complete: {str(scope['scoped_complete']).lower()} "
+            f"({scope['scoped_failed_rows']} failed rows). "
+            f"{scope['quarantined_rows']} quarantined rows across {len(scope['quarantined_accessions'])} approved filings "
+            'remain non-actionable material gaps. Scoped completeness excludes these analyses and does not establish model completion.'])
+        if scope['quarantines']:
+            lines.append('')
+        for quarantine in scope['quarantines']:
+            gaps = ', '.join(quarantine['gap_codes'])
+            lines.append(f"- {quarantine['accession']}: {gaps}.")
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:
         lines.extend(['','## Candidate input issues',''])
         for row in report['candidate_input_issues']:
             lines.append(f"- {row['ticker']}: {row['dependency_kind']} / {row['reason_code']}; {len(row['affected_cohorts'])} affected books ({row['issue_id']}).")
+    if report.get('source_scope_limits'):
+        lines.extend(['', '## Source scope limitations', '',
+                      'Input coverage validity applies to these declared scopes; it is not a marketwide coverage claim.'])
+        for provider, scope in canonical_source_scope_limits(report['source_scope_limits']).items():
+            if provider == 'usaspending':
+                counts = scope['counts']
+                lines.append(f"- USAspending: verified listed targets only; {counts['verified_listed_target']} verified listed, "
+                    f"{counts['verified_no_listed_target']} proven no-listed, {counts['unresolved']} unresolved awards. "
+                    'Unresolved awards remain nonactionable attribution gaps, not proven exclusions.')
+            elif provider == 'congress':
+                lines.append(f"- Congressional disclosures: display/audit only; trading signals and model context disabled. "
+                    f"{scope['filing_counts']['house']} House and {scope['filing_counts']['senate']} Senate filings, "
+                    f"{scope['printed_row_count']} printed transaction rows; audit status {scope['status']}. "
+                    'Senate coverage, extraction accuracy and historical first availability remain unverified.')
+            else:
+                lines.append(f"- CourtListener: docket metadata only for declared issuer and case queries, not marketwide; "
+                    f"{scope['issuer_count']} issuers, {scope['case_count']} cases, {scope['docket_count']} dockets; "
+                    f"{scope['omitted_issuer_count']} omitted issuers. No full-document or marketwide analysis is implied.")
     for title,key in (('Source coverage failures','source_health_failures'),('Recovered acquisition','recovered'),('Unresolved acquisition','unresolved')):
         rows=report[key] if key=='source_health_failures' else report['sources'][key]
         if rows:
@@ -665,7 +850,8 @@ def render_operational_report(report: dict) -> str:
     if report['preflight_incidents']:
         lines.extend(['','## Preflight incidents',''])
         for item in report['preflight_incidents']:
-            lines.append(f"- {item['attempt_id']}: return code {item['process_return_code']}; " + '; '.join(f"{row['source']} {row['reason_code']} HTTP {row['http_status'] or 'unknown'}" for row in item['failures']))
+            label = _PREFLIGHT_LABELS.get(item.get('preflight_mode'), 'unknown mode')
+            lines.append(f"- {item['attempt_id']}: {label}; return code {item['process_return_code']}; " + '; '.join(f"{row['source']} {row['reason_code']} HTTP {row['http_status'] or 'unknown'}" for row in item['failures']))
     if 'decision_shadow' in report:
         shadow = report['decision_shadow']
         counts = ', '.join(f'{status}: {count}' for status,count in sorted(shadow['event_counts'].items())) or 'no recorded events'

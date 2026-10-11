@@ -80,11 +80,13 @@ def test_committee_model_override_keeps_claude_route(luna_config):
     assert client.messages.create.call_args.kwargs["model"] == "claude-sonnet-5"
 
 
-def test_defaults_select_luna_high_for_both_callers():
+def test_defaults_separate_bounded_luna_from_frontier_thesis_and_committee():
     assert DEFAULT_CONFIG["autoresearch"]["autoresearch_model"] == "gpt-6-luna"
     assert DEFAULT_CONFIG["autoresearch"]["llm_effort"] == "high"
     assert LLMAnalyzer(DEFAULT_CONFIG)._model_name == "gpt-6-luna"
-    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6-luna"
+    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gpt-6-astra"
+    assert DEFAULT_CONFIG["autoresearch"]["thesis_effort"] == "high"
+    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6-astra"
 
 
 @pytest.mark.parametrize("factory", [LLMAnalyzer, PortfolioCommittee])

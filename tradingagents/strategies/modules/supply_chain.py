@@ -1,13 +1,6 @@
-"""P6: Supply Chain Disruption -- multi-hop impact assessment.
+"""Source-company disruption screening with explicit peer context.
 
-Detects supply chain disruptions from news and maps impact to affected
-companies via peer/supplier/customer relationships.
-
-Academic basis: Cohen & Frazzini (2008, JoF) show that supply chain
-links create predictable return momentum. Disruptions propagate with
-a 1-3 week delay to downstream firms.
-
-Data sources: Finnhub (company news + peer relationships).
+Peer relationships do not establish supplier/customer edges or multihop impact.
 """
 
 from __future__ import annotations
@@ -17,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +55,7 @@ class SupplyChainStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 6),
-            "news_lookback_days": (3, 14),
-            "hop_depth": (1, 3),
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
@@ -75,10 +66,7 @@ class SupplyChainStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
             "max_positions": 4,
-            "news_lookback_days": 7,
-            "hop_depth": 2,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -153,8 +141,8 @@ class SupplyChainStrategy:
         for candidate in candidates:
             if isinstance(short_data, dict) and candidate.ticker in short_data:
                 si = short_data[candidate.ticker]
-                short_pct = si.get("short_pct_of_float", 0)
-                if short_pct > 5.0:  # >5% of float shorted
+                short_pct = si.get("short_pct_of_float")
+                if short_pct is not None and short_pct > 5.0:  # >5% of float shorted
                     candidate.score = min(candidate.score * 1.25, 1.0)
                     candidate.metadata["short_pct_of_float"] = short_pct
                     candidate.metadata["days_to_cover"] = si.get("days_to_cover", 0)
@@ -163,7 +151,7 @@ class SupplyChainStrategy:
                     "sector", ""
                 )
 
-        return candidates[: params.get("max_positions", 4)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
 
     def check_exit(
         self,
@@ -173,12 +161,13 @@ class SupplyChainStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         hold_days = params.get("hold_days", 22)
         if holding_days >= hold_days:
             return True, "hold_period"
         # Take profit at 8%
-        pnl_pct = (current_price - entry_price) / entry_price
+        pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
         if abs(pnl_pct) > 0.08:
             return True, "take_profit"
         return False, ""
@@ -186,7 +175,7 @@ class SupplyChainStrategy:
     def build_propose_prompt(self, context: dict) -> str:
         current = context.get("current_params", self.get_default_params())
         return f"""You are optimizing a Supply Chain Disruption strategy that detects
-disruption events and maps multi-hop impacts to affected companies.
+disruption events for the source company with explicitly labeled peer context.
 
 Investment horizon: 30 days. Supply disruptions take weeks to price across
 the chain. The initial reaction captures only part of the move.
@@ -195,9 +184,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (target ~22-25 days for disruption propagation)
-- min_conviction: 0.3-0.8
 - max_positions: 2-6
-- news_lookback_days: 3-14
-- hop_depth: 1-3 (how many supply chain hops to trace)
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

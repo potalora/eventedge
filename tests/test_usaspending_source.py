@@ -31,14 +31,18 @@ def _api_response(rows):
     """Build a mocked spending_by_award response with raw API field names."""
     mock_resp = MagicMock()
     mock_resp.status_code = 200
-    mock_resp.json.return_value = {"results": rows}
+    mock_resp.json.return_value = {"results": rows, "page_metadata":{"page":1,"hasNext":False}}
     return mock_resp
 
 
 # Raw shapes observed from the live API (2026-08-06): naive datetime strings.
 API_ROW = {
     "Award ID": "AWARD-1",
+    "generated_internal_id": "CONT_AWD_AWARD-1_9700_PARENT_9700",
+    "internal_id": 123,
+    "Base Obligation Date": "2026-07-07",
     "Recipient Name": "LOCKHEED MARTIN CORP",
+    "Recipient UEI": "H7PNSVNN5827",
     "Award Amount": 250_000_000,
     "Awarding Agency": "DEFENSE, DEPARTMENT OF",
     "Start Date": "2026-07-01 00:00:00",
@@ -97,7 +101,7 @@ class TestNormalizeAwardDate:
 class TestSearchContractsNormalization:
     def test_naive_api_timestamps_normalized(self, source):
         with patch("requests.post", return_value=_api_response([API_ROW])):
-            results = source.search_contracts(min_amount=10_000_000)
+            results = source.search_contracts(min_amount=10_000_000, date_from="2026-07-01", date_to="2026-08-06")
 
         assert len(results) == 1
         contract = results[0]

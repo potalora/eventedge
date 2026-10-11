@@ -27,7 +27,7 @@ def test_yahoo_mixed_invalid_history_is_partial_not_cached(monkeypatch, method, 
 @pytest.mark.parametrize('bad', [float('inf'), float('-inf'), 'invalid', float('nan')])
 def test_fred_mixed_invalid_series_preserves_partial_through_batch(monkeypatch, bad):
     series = pd.Series([4.0, bad], index=pd.to_datetime(['2026-10-02', '2026-10-05']))
-    monkeypatch.setattr('fredapi.Fred.get_series', lambda *args, **kwargs: series.copy())
+    monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series', lambda *args, **kwargs: series.copy())
     source = FREDSource(api_key='offline')
     with pytest.raises(SourceFetchError) as exc:
         source.fetch_multi_series(['UNRATE'], '2026-10-01', '2026-10-06')
@@ -37,6 +37,6 @@ def test_fred_mixed_invalid_series_preserves_partial_through_batch(monkeypatch, 
 
 def test_fred_ordinary_interior_missing_value_remains_explicit(monkeypatch):
     series = pd.Series([4.0, float('nan'), 5.0])
-    monkeypatch.setattr('fredapi.Fred.get_series', lambda *args, **kwargs: series.copy())
+    monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series', lambda *args, **kwargs: series.copy())
     result = FREDSource(api_key='offline').fetch_series('UNRATE', '2026-10-01', '2026-10-06')
     pd.testing.assert_series_equal(result, series)

@@ -18,6 +18,7 @@ from tradingagents.strategies.orchestration.trading_calendar import (
 )
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -408,15 +409,12 @@ class CongressionalTradesStrategy:
                 )
             )
 
-        purchases = sorted(
-            (candidate for candidate in candidates if candidate.direction == "long"),
-            key=lambda candidate: (-candidate.score, candidate.ticker, candidate.event_key),
-        )[:max_purchases]
-        sales = sorted(
-            (candidate for candidate in candidates if candidate.direction == "short"),
-            key=lambda candidate: (-candidate.score, candidate.ticker, candidate.event_key),
-        )[:max_journal_sales]
-        return purchases + sales
+        return admit_candidates(
+            self.name, candidates, {"long": max_purchases, "short": max_journal_sales},
+            rank_key=lambda candidate: (0 if candidate.direction == "long" else 1,
+                                        -candidate.score, candidate.ticker),
+            policy="separate_purchase_journal_sale_score_identity_v1",
+        )
 
     @staticmethod
     def _dedupe_components(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -510,6 +508,7 @@ class CongressionalTradesStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period or stop loss."""
         hold_days = params.get("hold_days", 28)

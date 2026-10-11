@@ -15,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
+from functools import wraps
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_evidence import (
@@ -137,6 +138,7 @@ def _daily_history_entry(result: dict, trading_date: str) -> dict:
         "execution_valid",
         "input_coverage_valid",
         "source_health_failures",
+        "source_scope_limits",
         "candidate_bar_quarantines",
         "error",
         "evidence_path",
@@ -198,7 +200,7 @@ def _valid_daily_cohort_results(
     from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
     )
-    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures
+    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures, aggregate_source_scope_limits
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         build_default_cohorts,
     )
@@ -211,6 +213,7 @@ def _valid_daily_cohort_results(
             cohort_results, trading_date
         )
         aggregate_source_health_failures(cohort_results, trading_date, require_coverage=True)
+        aggregate_source_scope_limits(cohort_results)
     except ValueError:
         return False
     affected_by_issue = {
@@ -582,6 +585,22 @@ class GenerationInfo:
     run_history: list[dict] = field(default_factory=list)
 
 
+class GenerationManifestError(ValueError):
+    """An existing generation roster cannot be safely interpreted."""
+
+
+def _lifecycle_locked(operation):
+    """Serialize the complete read/modify/write operation with daily workers."""
+    @wraps(operation)
+    def locked(self, *args, **kwargs):
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        with runtime_lock(self._runtime_lock_path, exclusive=True):
+            return operation(self, *args, **kwargs)
+
+    return locked
+
+
 class GenerationManager:
     """Manage multiple frozen code generations via git worktrees."""
 
@@ -613,6 +632,7 @@ class GenerationManager:
     # Public API
     # ------------------------------------------------------------------
 
+    @_lifecycle_locked
     def start_generation(self, description: str) -> GenerationInfo:
         """Create a new generation from current HEAD.
 
@@ -707,7 +727,9 @@ class GenerationManager:
                       "success": bool, "elapsed_s": float, "error"?: str}}
         """
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+
+            trading_date = exchange_date().isoformat()
 
         from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
 
@@ -761,7 +783,9 @@ class GenerationManager:
         if mode not in _PREFLIGHT_MODES:
             raise ValueError(f"invalid preflight mode {mode!r}")
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+
+            trading_date = exchange_date().isoformat()
 
         from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
 
@@ -801,6 +825,7 @@ class GenerationManager:
 
         return results
 
+    @_lifecycle_locked
     def pause_generation(self, gen_id: str) -> None:
         """Set a generation's status to 'paused'."""
         manifest = self._load_manifest()
@@ -813,6 +838,7 @@ class GenerationManager:
         self._save_manifest(manifest)
         logger.info("Paused generation %s", gen_id)
 
+    @_lifecycle_locked
     def resume_generation(self, gen_id: str) -> None:
         """Resume a paused generation back to 'active'."""
         manifest = self._load_manifest()
@@ -827,6 +853,7 @@ class GenerationManager:
         self._save_manifest(manifest)
         logger.info("Resumed generation %s", gen_id)
 
+    @_lifecycle_locked
     def retire_generation(
         self,
         gen_id: str,
@@ -1103,6 +1130,9 @@ class GenerationManager:
                         failure["candidate_input_issues"] = candidate_issues
                     failure["input_coverage_valid"] = summary.input_coverage_valid
                     failure["source_health_failures"] = list(summary.source_health_failures)
+                    from .source_coverage import aggregate_source_scope_limits
+                    if limits := aggregate_source_scope_limits(cohort_results):
+                        failure['source_scope_limits'] = limits
                     return failure
 
                 if n_degraded:
@@ -1136,6 +1166,9 @@ class GenerationManager:
                         degraded_result["candidate_input_issues"] = candidate_issues
                     degraded_result["input_coverage_valid"] = summary.input_coverage_valid
                     degraded_result["source_health_failures"] = list(summary.source_health_failures)
+                    from .source_coverage import aggregate_source_scope_limits
+                    if limits := aggregate_source_scope_limits(cohort_results):
+                        degraded_result['source_scope_limits'] = limits
                     return degraded_result
 
             if proc.returncode != 0:
@@ -1161,12 +1194,15 @@ class GenerationManager:
                 gen_data["gen_id"],
                 elapsed,
             )
+            from .source_coverage import aggregate_source_scope_limits
+            scope_limits = aggregate_source_scope_limits(cohort_results)
             return {
                 "outcome": RunOutcome.CLEAN.value,
                 "success": True,
                 "execution_valid": summary.execution_valid,
                 "input_coverage_valid": summary.input_coverage_valid,
                 "source_health_failures": list(summary.source_health_failures),
+                **({'source_scope_limits': scope_limits} if scope_limits else {}),
                 "elapsed_s": round(elapsed, 2),
             }
 
@@ -1258,18 +1294,34 @@ class GenerationManager:
         return None
 
     def _load_manifest(self) -> dict:
-        """Load manifest.json. Returns empty structure if not found."""
-        if not self._manifest_path.exists():
-            return {"generations": []}
+        """An absent roster is initial state; corrupt existing state fails closed."""
         try:
-            with open(self._manifest_path) as f:
-                data = json.load(f)
-            if "generations" not in data:
-                data["generations"] = []
-            return data
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load manifest: %s", e)
+            with self._manifest_path.open() as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
             return {"generations": []}
+        except (ValueError, OSError) as error:
+            raise GenerationManifestError("generation manifest is unreadable or malformed") from error
+        if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
+            raise GenerationManifestError("generation manifest requires a generations list")
+        required = {item.name for item in fields(GenerationInfo)}
+        seen = set()
+        for row in data["generations"]:
+            if not isinstance(row, dict) or not required.issubset(row):
+                raise GenerationManifestError("generation manifest has an incomplete record")
+            if any(not isinstance(row[key], str) for key in required - {"run_history"}):
+                raise GenerationManifestError("generation manifest has invalid field types")
+            identity = row["gen_id"]
+            if not re.fullmatch(r"gen_[0-9]{3,}", identity) or identity in seen:
+                raise GenerationManifestError("generation manifest has invalid or duplicate identities")
+            if row["status"] not in {"active", "paused", "retired"}:
+                raise GenerationManifestError("generation manifest has an invalid status")
+            if not isinstance(row["run_history"], list) or any(
+                not isinstance(entry, dict) for entry in row["run_history"]
+            ):
+                raise GenerationManifestError("generation manifest has an invalid run history")
+            seen.add(identity)
+        return data
 
     def _save_manifest(self, data: dict) -> None:
         """Atomic write of manifest.json."""

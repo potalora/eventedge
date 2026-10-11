@@ -204,7 +204,8 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                     "AAPL": [
                         {
                             "accession_number": f"FORM4-{ordinal}",
-                            "transaction_type": "buy",
+                            "transaction_type": "buy", "transaction_code": "P",
+                            "acquired_disposed": "A", "open_market": True,
                             "owner_name": f"Owner {ordinal}",
                             "shares": 10,
                             "price_per_share": 100,
@@ -298,8 +299,14 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                     "contracts": [
                         {
                             "recipient_name": "Lockheed Martin",
+                            "recipient_uei": "H7PNSVNN5827",
                             "amount": 50_000_000,
                             "award_id": "AWARD-1",
+                            "award_key": "generated:AWARD-1",
+                            "award_scope": "new_awards_only",
+                            "amount_basis": "cumulative_award_obligations",
+                            "base_obligation_date": "2026-06-30",
+                            "observed_at": "2026-06-30T20:00:00+00:00",
                             "last_modified_date": "2026-06-30",
                         }
                     ]
@@ -325,6 +332,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
             },
         },
         "commodity_macro": {
+            "fred": {"VIXCLS": {"2026-06-30": 20}},
             "cftc": {
                 "gold": {
                     "percentile": 0.9,
@@ -357,6 +365,9 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
         candidates = strategy.screen(
             cases[name], "2026-07-01", strategy.get_default_params(horizon)
         )
+        if getattr(strategy, "retirement_reason", None):
+            assert candidates == []
+            continue
         assert candidates, f"representative {name} source event produced no candidate"
         for candidate in candidates:
             assert canonical_event_key(

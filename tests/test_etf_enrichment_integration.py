@@ -1,4 +1,4 @@
-"""Exercise the strategy -> Luna response -> SEC registry boundary offline."""
+"""Exercise the strategy -> role-routed response -> SEC registry boundary offline."""
 
 import json
 from copy import deepcopy
@@ -27,7 +27,7 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", unexpected)
 
 
-def engine_with_company_registry(tmp_path, output):
+def engine_with_company_registry(tmp_path, output, expected_model="gpt-6-luna"):
     config = deepcopy(DEFAULT_CONFIG)
     config["autoresearch"]["state_dir"] = str(tmp_path)
     edgar = EDGARSource()
@@ -40,7 +40,7 @@ def engine_with_company_registry(tmp_path, output):
     engine = MultiStrategyEngine(config=config, registry=registry, use_llm=True)
 
     def responses_create(**request):
-        assert request["model"] == "gpt-6-luna"
+        assert request["model"] == expected_model
         assert request["reasoning"] == {"effort": "high"}
         return SimpleNamespace(status="completed", output_text=output, output=[])
 
@@ -62,9 +62,9 @@ def test_deterministic_weather_etf_survives_luna_and_company_only_registry(tmp_p
     )
     data = {
         "yfinance": {"prices": {"MOO": prices}},
-        "noaa": {},
-        "usda": {},
-        "drought_monitor": {"composite_score": 1.2, "states": {}},
+        "noaa": {"heat_stress_days": 0, "precip_deficit_pct": 0, "frost_events": 0, "available_at": "2026-10-01T12:00:00+00:00", "coverage": {"complete": True}},
+        "usda": {"crop_progress": {"CORN": [{"week_ending": "2026-09-27", "state": "IA", "good_pct": 50, "excellent_pct": 20}]}, "available_at": "2026-10-01T12:00:00+00:00"},
+        "drought_monitor": {"composite_score": 1.2, "states": {"IA": {"D2": 40, "D3": 0, "D4": 0}}, "available_at": "2026-10-01T12:00:00+00:00"},
     }
     signals, _, health = engine.screen_and_enrich(
         "2026-10-01",
@@ -91,11 +91,12 @@ def test_new_model_resolved_company_still_requires_sec_identity(
         tmp_path,
         json.dumps(
             {
-                "direction": "long",
+                "direction": "long", "rationale": "Source event affects issuer",
                 "score": 0.8,
                 field: [model_ticker] if field == "affected_tickers" else model_ticker,
             }
         ),
+        expected_model="gpt-6-astra",
     )
     candidate = Candidate(
         ticker="",
@@ -103,7 +104,7 @@ def test_new_model_resolved_company_still_requires_sec_identity(
         direction="long",
         score=0.5,
         metadata={
-            "needs_llm_analysis": True,
+            "needs_llm_analysis": True, "title": "SEC filing requirement", "case_name": "Company suit",
             "analysis_type": "litigation"
             if field == "defendant_ticker"
             else "regulation",

@@ -137,7 +137,7 @@ def test_queued_source_deadline_starts_at_acquisition_not_worker_start(tmp_path,
 def _daily_state(tmp_path, fetcher):
     from types import SimpleNamespace
     from tradingagents.strategies.orchestration.daily_pipeline import DailyRunState
-    engine = SimpleNamespace(_fetch_all_data=fetcher)
+    engine = SimpleNamespace(_fetch_all_data=fetcher, pending_late_signals=lambda *args: [])
     cohort = {'engine': engine, 'config': SimpleNamespace(horizon='30d'),
               'executor': SimpleNamespace(validated_execution_reference_bars=lambda *args: {})}
     screened = []
@@ -218,6 +218,37 @@ def test_concurrent_freeze_only_one_bundle_becomes_accepted(tmp_path):
 def test_invalid_or_unsuccessful_coverage_cannot_authorize_cache(tmp_path, coverage):
     store = SourceInputStore(tmp_path)
     assert not store.save_cached(IDENTITY, {'_coverage': coverage, 'value': 1}, acquired_at=NOW)
+
+
+@pytest.mark.parametrize('coverage', [
+    {'mode': 'bounded_sample', 'complete': False},
+    {'securities class action': {'complete': False, 'has_next': True}},
+    {'complete': True, 'issuer_attribution': {'complete': False, 'unresolved': 50}},
+    {'complete': True, 'pages': [{'status': 'failed'}]},
+    {'complete': 1},
+    {'complete': None},
+    'complete',
+    None,
+])
+def test_declared_partial_coverage_never_cached_or_reused(tmp_path, coverage):
+    store = SourceInputStore(tmp_path)
+    payload = {'records': [{'id': 'retained-partial-record'}], 'coverage': coverage}
+    assert not store.save_cached(IDENTITY, payload, acquired_at=NOW)
+    # Reproduce a valid old cache envelope, written before coverage was checked.
+    store._write(store._path(IDENTITY, frozen=False), IDENTITY, payload, NOW, exclusive=False)
+    assert store.load_cached(IDENTITY, now=NOW) is None
+
+
+def test_complete_nested_coverage_cache_and_failed_frozen_evidence_are_preserved(tmp_path):
+    store = SourceInputStore(tmp_path / 'cache', accepted_dir=tmp_path / 'accepted')
+    complete = {'records': [], 'coverage': {
+        'query': {'complete': True, 'has_next': False, 'returned': 0},
+    }}
+    assert store.save_cached(IDENTITY, complete, acquired_at=NOW)
+    assert store.load_cached(IDENTITY, now=NOW) == complete
+    incomplete = {'records': [1], 'coverage': {'complete': False}}
+    assert store.freeze(FROZEN, incomplete, acquired_at=NOW) == incomplete
+    assert store.load_frozen(FROZEN) == incomplete
 
 
 def test_codec_byte_limit_is_enforced_before_decode(monkeypatch):

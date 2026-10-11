@@ -1,6 +1,6 @@
 # EventEdge
 
-An autonomous event-driven trading research system that runs 12 strategies across 16 paper portfolio scenarios (4 time horizons × 4 portfolio sizes). This is a personal research project.
+An autonomous event-driven trading research system with 11 enabled strategies across 16 paper portfolio scenarios (4 time horizons × 4 portfolio sizes). A twelfth strategy identity is retained as an explicit policy exclusion. This is a personal research project.
 
 ## What it does
 
@@ -10,22 +10,23 @@ Strategies examine events such as SEC filings, insider trades, and congressional
   <img src="assets/autoresearch.svg" style="width: 100%; height: auto;">
 </p>
 
-## The 12 strategies
+## Strategy coverage
 
-Each one watches for a different kind of event and generates trade signals:
+Enabled strategies examine these event families; actionable signals require their declared source evidence:
 
 - Earnings calls: clustering around earnings dates and estimate revisions
 - Insider activity: Form 4 filings when executives buy or sell their own stock
 - Filing analysis: anomalies in 10-K and 10-Q filings
 - Regulatory pipeline: FDA approvals, FCC licenses, other regulatory signals
-- Supply chain: stress indicators across supplier/customer networks
+- Supply chain: company news and peer spillover hypotheses; peer lists do not establish supplier/customer relationships
 - Litigation: SEC enforcement actions and major lawsuits
 - Congressional trades: stock trades disclosed by members of Congress
 - Government contracts: federal contract awards from USASpending
-- State economics: FRED macroeconomic indicators by region
 - Weather/agriculture: NOAA weather anomalies, USDA crop conditions, drought severity
-- Commodity macro: CFTC COT positioning extremes, futures curves, macro regime alignment
+- Commodity macro: CFTC COT positioning extremes and macro regime alignment
 - Quantum readiness: post-quantum cryptography migration signals from SEC filings and news, with regime-based selection among PQC vendor, crypto-exposed and quantum hardware baskets
+
+The state-economics proxy is retired because its national indicators and sector momentum did not establish a state event. Filing occurrence and contractor momentum are also insufficient theses. Schedule 13D/G disclosures remain observations unless the subject issuer is verified. Futures term-structure inference is unsupported without maturity-identified contracts.
 
 Event and research inputs come from Finnhub, SEC EDGAR, FMP, FRED, NOAA, USDA, US Drought Monitor, CourtListener, Regulations.gov, USASpending, CFTC and Yahoo/yfinance. OpenBB supplies optional enrichment. Congressional disclosures use the authenticated FMP stable House and Senate feeds; missing access is an explicit coverage failure. The pipeline does not scrape CapitolTrades as a fallback.
 
@@ -35,17 +36,25 @@ Production should be scheduled for 18:00 ET; the repository does not install or 
 
 Each cohort has its own authoritative SQLite `portfolio.db`. It records signals, next-open intents, fills, lots, marks, benchmark observations and account snapshots, with explicit slippage, commission, other fees, borrow costs and financing. JSON files are deterministic projections from SQLite.
 
-Alpaca SIP is the primary source for critical raw daily execution, mark, candidate and reference bars. The adapter requires the exact session's close plus 15 minutes, requests `feed=sip` and `adjustment=raw`, and validates the symbol, session timestamp, pagination and OHLC. Invalid or missing bars fail closed; there is no Yahoo fallback for raw prices. Yahoo remains a declared dependency for corporate actions, dividend-adjusted SPY/BIL benchmarks, research price history, volatility and VIX.
+Prior next-open exits and open-gap stops settle before opening entries; non-gap intraday stops settle afterward and cannot finance earlier entries. Admission includes costs, opening marks, marked short collateral and durable net session losses. Borrow and financing accrue over calendar days on prior accepted closing exposure. Splits precede post-split per-share distributions; missing corporate-action evidence is unavailable.
+
+Alpaca SIP is the primary source for critical raw daily execution, mark, candidate and reference bars. The adapter requires the exact session's close plus 15 minutes, requests `feed=sip` and `adjustment=raw`, and validates the symbol, session timestamp, pagination, OHLC, positive finite volume and positive integer trade count. Zero-activity, invalid or missing bars fail closed; there is no Yahoo fallback for raw prices. Yahoo remains a declared dependency for corporate actions, dividend-adjusted ETF benchmarks (SPY/BIL/VTI/VT by default), research price history, volatility and VIX.
 
 An unresolved candidate-only reference bar or volatility history excludes that candidate from staging and persists a typed input issue. Repeated cohort references become one run-level issue. Existing-position accounting can remain valid while the run is degraded; any ticker needed by an open lot or pending entry remains governed and fail-closed.
 
-Shared acquisition has one bounded deadline, including provider pacing, retries and fanout queue time. Transient transport failures, timeouts, HTTP 429 and eligible 5xx responses receive bounded retries with backoff, jitter and `Retry-After`; malformed data and authentication failures are terminal. SDK calls obey the cooperative deadline, but an in-flight SDK call that cannot be interrupted may continue after the caller stops waiting. Valid partial results remain available with their failure status. Missing required inputs cannot become a healthy empty result.
+Shared acquisition has one deadline, including provider pacing, retries and fanout queue time. Transient transport failures, timeouts, HTTP 429 and eligible 5xx responses receive bounded retries with backoff, jitter and `Retry-After`; malformed data and authentication failures are terminal. Native FRED HTTP and model SDK calls run in killable subprocesses with absolute deadlines. All horizon analysis and committee calls share a 2,400-second model budget. Each physical model transport is capped at 120 seconds; SDK retries are disabled, and explicit retries/backoff consume the shared budget. Other source clients retain cooperative deadlines; an in-flight call that cannot be interrupted may continue after the caller stops waiting. Valid partial results remain available with their failure status. Missing required inputs cannot become a healthy empty result.
 
 Managed workers reuse successful operational source inputs from `data/source_cache`, with a maximum five-minute TTL and session/window/configuration identity checks. Failed or partial results never enter the success cache. Daily screening freezes its shared source bundle before analysis under the generation/session identity. A separate `source_inputs/staging_volatility` bundle freezes accepted volatility histories before committee decisions. An allowed resume reuses both bundles. Accepted execution inputs and source observations remain immutable. Preflight can populate the operational cache without writing accepted generation inputs.
 
-Generations freeze code through git worktrees. Model, reasoning, strategy or other behavior changes require a fresh generation; historical evidence is preserved. Current event analysis and the portfolio committee use OpenAI Responses with `gpt-6-luna` and high reasoning effort. Incomplete or refused responses follow the failure path.
+Generations freeze code through git worktrees. Model, reasoning, strategy or other behavior changes require a fresh generation; historical evidence is preserved. The default OpenAI Responses routing uses `gpt-6-luna` with high reasoning for structured insider-buy, commodity-macro and agricultural-weather assessments, and `gpt-6-astra` with high reasoning for unstructured theses and portfolio synthesis. Incomplete or refused responses follow the failure path. Exactly identical candidate requests can reuse a fully validated response within one frozen-source run; each receiving candidate is independently validated, and horizon-specific requests and committee decisions remain separate.
 
-The 16 scenario books share signals and source observations. Performance views show four separate $100k horizon books and an equal-weighted scenario panel; the panel is not investable fund AUM. Smaller books test concentration constraints. Metrics use XNYS sessions, next-session-open outcomes, persisted SPY/BIL benchmarks, explicit costs and immutable schema-v2 epochs. Policy audits count attributed accept, trim and reject decisions, ingress blocks and committee non-selection. These counts are governance evidence, not alpha validation. Production learning is disabled. Promotion output requires Pedro's review against precommitted 30/60/90-session gates and complete benchmark, cost and provenance evidence.
+The 16 scenario books share signals and source observations. The primary forward test is the $100k, three-month-horizon book; other books are dependent sensitivity scenarios. The equal-weighted scenario panel is not investable fund AUM. Metrics use XNYS sessions, split/distribution-aware next-open signal outcomes, explicit execution costs and immutable schema-v2 epochs. ETF returns chain adjacent adjusted prices from one acquisition vintage; historical unpaired observations retain their labels and cannot establish comparable benchmark metrics. SPY is the fixed primary benchmark, VTI and VT are descriptive secondary comparisons, and BIL/exposure diagnostics remain. Policy audits count attributed accept, trim and reject decisions, ingress blocks and committee non-selection. These counts are governance evidence, not alpha validation. Production learning is disabled.
+
+Committee abstention is an explicit outcome. A valid empty recommendation list creates no orders; unavailable or invalid model responses hold cash and report degraded status. The full accepted thesis, every marked holding and deterministic admission exclusions remain inspectable. Decisions are frozen before staging for consistent crash recovery.
+
+After an accounting gap, held inventory must reconcile every missing session's corporate actions before execution resumes. Standing protective stops survive the gap. Dividend entitlements contribute to equity but remain unavailable as cash until a verified payment date. Untraded signal outcomes have separate immutable evidence: an outcome-only data gap affects that diagnostic obligation while healthy portfolio accounting continues. Reports retain prior-epoch obligations and separate provisional, validated, selected and executed signal populations.
+
+The [forward-test protocol](docs/research/2026-10-09-forward-test-protocol.md) fixes 30/60/90-session diagnostic readouts and a minimum of 252 valid out-of-sample returns before a strong alpha assessment. Its research hurdle is 5 percentage points of annualized net excess over SPY, positive exposure-matched excess, Sharpe at least 1 and maximum drawdown no worse than 15%. Passing a short window never triggers automatic promotion.
 
 <p align="center">
   <img src="assets/daily-cycle.svg" style="width: 100%; height: auto;">
@@ -94,6 +103,10 @@ evidence supports the candidate claim and company attribution. Its answers do
 not feed trade selection, sizing, accounting or source-health checks. The default
 budget is 20 seconds per session, with at most three seconds per request. Events
 without usable source evidence are marked insufficient without an API call.
+Coverage is explicit for earnings, filings, regulation, peer news, litigation and
+government awards. Other strategy families remain unsupported. Classification
+requires a retained atomic factual claim and untruncated provider-bound evidence;
+model rationale alone is not a source-support result.
 
 Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the production environment
 to activate hosted `@cf/cloudflare/clef`. The token needs Workers AI Read and Edit
@@ -162,13 +175,17 @@ python scripts/email_dashboard.py
 ```
 
 The readiness command exits 0 only when all five sessions have one clean daily
-result, valid completed accounting and SPY/BIL benchmarks in all 16 cohorts,
+result, valid completed accounting and the generation's frozen configured benchmark set
+(SPY/BIL/VTI/VT by default) in all 16 cohorts,
 completed staging in all 16 cohorts, no quarantined candidate bars or input
-issues, and healthy evidence from all 12 strategies across four horizons. It
+issues, and classified evidence for all 12 strategy identities across four horizons. Enabled
+strategies must be healthy; the retired state-economics proxy must carry its
+explicit policy exclusion and no signals. It
 fails closed on missing or inconsistent records. This is a continuity check
 for a generation. It does not establish a performance result.
 Review incident-specific replay tests before launching a candidate and apply
-the separate 30/60/90-session performance gates before any strategy promotion.
+the forward-test protocol before any strategy promotion; the 30/60/90-session
+readouts are diagnostic milestones.
 
 Run the checker while the runtime is idle: it requires the existing canonical
 runtime lock and refuses a busy lock without creating or changing one. SQLite
@@ -178,10 +195,13 @@ and have no tracked modifications. Evidence must match the generation epoch,
 cohort, and exact strategy/horizon policies. If runtime configuration overrides
 `autoresearch.paper_ledger.policy_id`, pass that same value with `--policy-id`.
 
-Docker works too:
-```bash
-docker compose run --rm tradingagents
-```
+The supported command-line entrypoint is `python scripts/run_generations.py`;
+`python main.py` forwards to the same CLI. Deployment units are in `deploy/`.
+There is no repository-managed Docker Compose stack.
+
+Default trading dates use New York calendar time. Weekend/holiday dates are not
+silently replayed; use an explicit `--date YYYY-MM-DD` for an intended catch-up,
+subject to the same exact-session and historical-input validity checks.
 
 ## Origin
 

@@ -75,7 +75,6 @@ class WeatherAgStrategy:
         return {
             "lookback_days": (10, 60),
             "hold_days": hp["hold_days_range"],
-            "min_return": (-0.05, 0.05),
             "heat_stress_threshold": (2, 15),
             "precip_deficit_threshold": (-50, -10),
             "drought_min_score": (0.3, 2.0),
@@ -91,7 +90,6 @@ class WeatherAgStrategy:
         return {
             "lookback_days": 21,
             "hold_days": hp["hold_days_default"],
-            "min_return": 0.0,
             "heat_stress_threshold": 2,
             "precip_deficit_threshold": -10,
             "drought_min_score": 0.3,
@@ -125,16 +123,25 @@ class WeatherAgStrategy:
         noaa_data = data.get("noaa", {})
         drought_data = data.get("drought_monitor", {})
         usda_data = data.get("usda", {})
+        if isinstance(usda_data, dict):
+            usda_data = dict(usda_data)
+            usda_data["crop_progress"] = {
+                crop: [row for row in weeks if isinstance(row, dict) and str(row.get("week_ending", ""))[:10] <= date]
+                for crop, weeks in usda_data.get("crop_progress", {}).items() if isinstance(weeks, list)
+            }
+        complete_environment = all(isinstance(source, dict) and source and "error" not in source for source in (noaa_data, drought_data, usda_data))
+        complete_environment = complete_environment and bool(usda_data.get("crop_progress")) and bool(drought_data.get("states"))
+        complete_environment = complete_environment and all(source.get("coverage", {}).get("complete", True) is not False for source in (noaa_data, drought_data, usda_data))
 
         # --- Gate check: is anything interesting happening? ---
         gate_triggered = False
         gate_reasons = []
 
         # Drought gate
-        drought_score = 0.0
+        drought_score = None
         if isinstance(drought_data, dict):
-            drought_score = drought_data.get("composite_score", 0.0)
-        if drought_score >= drought_min:
+            drought_score = drought_data.get("composite_score")
+        if drought_score is not None and "error" not in drought_data and drought_score >= drought_min:
             gate_triggered = True
             gate_reasons.append(f"drought={drought_score:.1f}")
 
@@ -146,16 +153,16 @@ class WeatherAgStrategy:
 
         # NOAA weather gate (growing season only)
         if is_growing_season and noaa_data and "error" not in noaa_data:
-            heat_days = noaa_data.get("heat_stress_days", 0)
-            precip_deficit = noaa_data.get("precip_deficit_pct", 0)
-            frost_events = noaa_data.get("frost_events", 0)
-            if heat_days >= heat_threshold:
+            heat_days = noaa_data.get("heat_stress_days")
+            precip_deficit = noaa_data.get("precip_deficit_pct")
+            frost_events = noaa_data.get("frost_events")
+            if heat_days is not None and heat_days >= heat_threshold:
                 gate_triggered = True
                 gate_reasons.append(f"heat={heat_days}d")
-            if precip_deficit < precip_threshold:
+            if precip_deficit is not None and precip_deficit < precip_threshold:
                 gate_triggered = True
                 gate_reasons.append(f"precip={precip_deficit:.0f}%")
-            if frost_events > 0:
+            if frost_events is not None and frost_events > 0:
                 gate_triggered = True
                 gate_reasons.append(f"frost={frost_events}")
 
@@ -177,9 +184,6 @@ class WeatherAgStrategy:
                 else str(observation)
             )
             ag_returns.append((name, ticker, trailing_return, window_end))
-            if trailing_return > 0.02:
-                gate_triggered = True
-                gate_reasons.append(f"momentum_{ticker}={trailing_return:.1%}")
 
         if not gate_triggered or not ag_returns:
             return []
@@ -204,7 +208,7 @@ class WeatherAgStrategy:
         }
 
         candidates = []
-        for name, ticker, ret, window_end in ag_returns[:3]:
+        for name, ticker, ret, window_end in ag_returns:
             source_ids = [f"YFINANCE:{ticker}:{window_end}"]
             source_dates = [window_end]
             for key in ("observation_date", "start_date", "end_date"):
@@ -232,11 +236,15 @@ class WeatherAgStrategy:
                     date=date,
                     direction="long",
                     score=0.5,  # LLM will adjust
+                    journal_only=not complete_environment,
                     metadata={
+                        **({"non_actionable_reason": "incomplete_environmental_inputs"} if not complete_environment else {}),
                         "commodity": name,
                         "trailing_return": round(ret, 4),
                         "needs_llm_analysis": True,
                         "analysis_type": "ag_weather",
+                        "hold_days": params.get("hold_days", 25),
+                        **({"available_at": max(str(source["available_at"]) for source in (noaa_data, drought_data, usda_data) if source.get("available_at"))} if any(source.get("available_at") for source in (noaa_data, drought_data, usda_data)) else {}),
                         "source_observation_ids": sorted(set(source_ids)),
                         "window_end": event_window_end,
                         **ag_context,
@@ -244,7 +252,10 @@ class WeatherAgStrategy:
                 )
             )
 
-        return candidates
+        from .admission import admit_candidates
+        return admit_candidates(self.name, candidates, budget=3,
+            rank_key=lambda candidate: (-candidate.metadata["trailing_return"], candidate.ticker),
+            policy="trailing_return_desc_ticker_source_identity_v1")
 
     def check_exit(
         self,
@@ -254,6 +265,7 @@ class WeatherAgStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period."""
         hold_days = params.get("hold_days", 25)
@@ -288,7 +300,6 @@ Current parameters: {current}
 Parameter ranges:
 - lookback_days: 10-60 (momentum window)
 - hold_days: 20-45 (holding period, target ~25-30 days)
-- min_return: -0.05 to 0.05 (minimum momentum for fallback)
 - heat_stress_threshold: 2-15 (min heat days to trigger)
 - precip_deficit_threshold: -50 to -10 (% below normal precipitation)
 - drought_min_score: 0.3-2.0 (min composite drought score to trigger)
@@ -337,6 +348,7 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
         max_decline = 0.0
         for weeks in crop_progress.values():
+            weeks = [row for row in weeks if isinstance(row, dict) and row.get("survey_active") is not False]
             latest, observations = validated_condition_observations(weeks)
             if latest is None:
                 continue

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+import math
+import pandas as pd
 
 from .base import Candidate
 
@@ -90,7 +92,6 @@ class CommodityMacroStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "cot_extreme_pct": (75, 95),
-            "cot_lookback_weeks": (26, 104),
             "hold_days": hp["hold_days_range"],
             "macro_veto_enabled": (True, False),
             "catalyst_boost": (0.0, 0.3),
@@ -108,7 +109,6 @@ class CommodityMacroStrategy:
             eligible = hp.get("commodity_instruments_override", list(COMMODITY_ETFS))
         return {
             "cot_extreme_pct": 85,
-            "cot_lookback_weeks": 52,
             "hold_days": hp["hold_days_default"],
             "macro_veto_enabled": True,
             "catalyst_boost": 0.15,
@@ -129,18 +129,25 @@ class CommodityMacroStrategy:
         macro_veto = params.get("macro_veto_enabled", True)
         catalyst_boost_val = params.get("catalyst_boost", 0.15)
         fred_data = data.get("fred", {})
+        # Bound observations even when the accepted bundle spans later sessions.
+        fred_data = {key: {str(when): value for when, value in values.items() if pd.Timestamp(when).date().isoformat() <= date}
+                     for key, values in fred_data.items() if key in {"FEDFUNDS", "CPIAUCSL", "VIXCLS"} and hasattr(values, "items")}
         candidates = []
 
         for commodity, cot in cot_data.items():
             if commodity not in _COMMODITY_TO_ETF or not isinstance(cot, dict):
                 continue
 
-            percentile = cot.get("percentile", 0.5)
+            percentile = cot.get("percentile")
+            if isinstance(percentile, bool) or not isinstance(percentile, (float, int)) or not math.isfinite(percentile) or not 0 <= percentile <= 1:
+                continue
             direction = cot.get("direction_signal", "neutral")
             report_id = cot.get("report_id")
             window_end = cot.get("window_end")
 
-            if direction == "neutral" or not report_id or not window_end:
+            if direction not in {"long", "short"} or not report_id or not window_end:
+                continue
+            if macro_veto and not self._macro_inputs_available(commodity, direction, fred_data):
                 continue
 
             if not (
@@ -182,6 +189,10 @@ class CommodityMacroStrategy:
                         "cot_net_position": cot.get("net_position", 0),
                         "catalyst_found": catalyst_found,
                         "needs_llm_analysis": True,
+                        "deterministic_evidence_complete": True,
+                        "cot_evidence": cot,
+                        "macro_evidence": {k: {str(when): float(value) for when, value in v.items()} if hasattr(v, "items") else v for k, v in fred_data.items() if k in {"FEDFUNDS", "CPIAUCSL", "VIXCLS"}},
+                        **({"available_at": cot["available_at"]} if cot.get("available_at") else {}),
                         "analysis_type": "commodity_macro",
                         "report_id": report_id,
                         "window_end": window_end,
@@ -192,20 +203,20 @@ class CommodityMacroStrategy:
         return candidates
 
     def check_exit(
-        self, ticker, entry_price, current_price, holding_days, params, data
+        self, ticker, entry_price, current_price, holding_days, params, data, direction="long"
     ):
         hold_days = params.get("hold_days", 90)
         if holding_days >= hold_days:
             return True, "hold_period"
 
         cot_data = data.get("cftc", {})
-        if cot_data:
+        if cot_data and "error" not in cot_data:
             for commodity, etf in _COMMODITY_TO_ETF.items():
                 if etf == ticker or _LONG_SUBSTITUTIONS.get(etf) == ticker:
                     cot = cot_data.get(commodity, {})
                     if isinstance(cot, dict):
-                        pctl = cot.get("percentile", 0.5)
-                        if 0.30 <= pctl <= 0.70:
+                        pctl = cot.get("percentile")
+                        if cot.get("report_id") and cot.get("window_end") and isinstance(pctl, (int, float)) and not isinstance(pctl, bool) and math.isfinite(pctl) and 0.30 <= pctl <= 0.70:
                             return True, "cot_normalized"
 
         return False, ""
@@ -231,7 +242,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - cot_extreme_pct: 75-95 (percentile threshold for extreme positioning)
-- cot_lookback_weeks: 26-104 (lookback for percentile calculation)
 - hold_days: horizon-dependent (holding period)
 - macro_veto_enabled: True/False (whether macro confirmation is required)
 - catalyst_boost: 0.0-0.3 (score boost when catalyst present)
@@ -242,51 +252,66 @@ Recent results:
 Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
     @staticmethod
-    def _macro_vetoes(commodity, direction, fred_data):
-        if not fred_data:
-            return False
+    def _real_rate_points(fred_data):
+        """Policy rate less CPI year-over-year percent inflation, date aligned.
 
-        fed_funds = _latest_value(fred_data.get("FEDFUNDS", {}))
-        cpi_values = fred_data.get("CPIAUCSL", {})
-        vix = _latest_value(fred_data.get("VIXCLS", {}))
+        CPIAUCSL is an index. Compare three-month change in ex-post real
+        policy rate using matched CPI/FEDFUNDS dates, never index points.
+        """
+        cpi = _observations(fred_data.get("CPIAUCSL"))
+        fed = _observations(fred_data.get("FEDFUNDS"))
+        points = []
+        for when, level in cpi:
+            year_before = when - pd.DateOffset(years=1)
+            previous = [(d, v) for d, v in cpi if d <= year_before]
+            rate = [(d, v) for d, v in fed if d <= when]
+            if (previous and rate and level > 0 and previous[-1][1] > 0
+                    and previous[-1][0].to_period("M") == when.to_period("M") - 12
+                    and rate[-1][0].to_period("M") == when.to_period("M")):
+                inflation = 100 * (level / previous[-1][1] - 1)
+                points.append((when, rate[-1][1] - inflation))
+        return points
 
-        cpi_sorted = sorted(cpi_values.items()) if isinstance(cpi_values, dict) else []
-        if len(cpi_sorted) >= 2:
-            cpi_latest = cpi_sorted[-1][1]
-            cpi_3m_ago = cpi_sorted[0][1]
-            cpi_momentum = cpi_latest - cpi_3m_ago
-        else:
-            cpi_latest = _latest_value(cpi_values)
-            cpi_momentum = 0.0
+    @classmethod
+    def _macro_inputs_available(cls, commodity, direction, fred_data):
+        if direction == "short":
+            return _latest_value(fred_data.get("VIXCLS")) is not None
+        cpi = _observations(fred_data.get("CPIAUCSL"))
+        if commodity in {"gold", "silver"}:
+            points = cls._real_rate_points(fred_data)
+            return bool(points and any(d.to_period("M") == points[-1][0].to_period("M") - 3 for d, _ in points))
+        if commodity in {"crude_oil", "nat_gas"}:
+            return bool(cpi and any(d.to_period("M") == cpi[-1][0].to_period("M") - 3 for d, _ in cpi))
+        return True
 
-        real_rate_now = (fed_funds or 0) - (cpi_latest or 0)
-
-        if commodity in ("gold", "silver") and direction == "long":
-            if len(cpi_sorted) >= 2:
-                real_rate_3m = (fed_funds or 0) - cpi_3m_ago
-                real_rate_delta = real_rate_now - real_rate_3m
-                if real_rate_delta >= 0.5:
-                    return True
-
-        if commodity in ("crude_oil", "nat_gas") and direction == "long":
-            if cpi_momentum < 0:
-                return True
-
-        if direction == "short" and vix is not None and vix < 15:
-            return True
-
+    @classmethod
+    def _macro_vetoes(cls, commodity, direction, fred_data):
+        if direction == "short":
+            vix = _latest_value(fred_data.get("VIXCLS"))
+            return vix is not None and vix < 15
+        if commodity in {"gold", "silver"}:
+            points = cls._real_rate_points(fred_data)
+            if points:
+                prior = [v for d, v in points if d.to_period("M") == points[-1][0].to_period("M") - 3]
+                return bool(prior and points[-1][1] - prior[-1] >= .5)
+        if commodity in {"crude_oil", "nat_gas"}:
+            cpi = _observations(fred_data.get("CPIAUCSL"))
+            if cpi:
+                prior = [v for d, v in cpi if d.to_period("M") == cpi[-1][0].to_period("M") - 3]
+                return bool(prior and cpi[-1][1] < prior[-1])
         return False
 
     @staticmethod
     def _scan_catalysts(commodity, data):
-        relevant_keywords = [
-            k for k in _CATALYST_KEYWORDS if k in commodity or commodity in k
-        ]
-        relevant_keywords.extend(["mining", "energy", "opec", "tariff", "sanctions"])
+        relevant_keywords = {
+            "gold": ("gold",), "silver": ("silver",), "copper": ("copper",),
+            "crude_oil": ("crude", "oil", "opec", "refinery"),
+            "nat_gas": ("natural gas", "lng", "gas pipeline"),
+        }.get(commodity, (commodity,))
 
         regs = data.get("regulations", {})
         if isinstance(regs, dict):
-            results = regs.get("results", [])
+            results = regs.get("proposed_rules", regs.get("results", []))
             if isinstance(results, list):
                 for reg in results:
                     title = str(reg.get("title", "")).lower()
@@ -295,7 +320,7 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
 
         finnhub = data.get("finnhub", {})
         if isinstance(finnhub, dict):
-            news = finnhub.get("news", [])
+            news = [*finnhub.get("news", []), *finnhub.get("disruption_news", []), *finnhub.get("pqc_news", [])]
             if isinstance(news, list):
                 for item in news:
                     headline = str(item.get("headline", "")).lower()
@@ -305,18 +330,21 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
         return False
 
 
+def _observations(values):
+    if values is None:
+        return []
+    items = values.items() if hasattr(values, "items") else []
+    result = []
+    for when, value in items:
+        try:
+            observed, number = pd.Timestamp(when), float(value)
+            if not pd.isna(observed) and math.isfinite(number):
+                result.append((observed, number))
+        except (ValueError, TypeError):
+            continue
+    return sorted(result)
+
+
 def _latest_value(series_data):
-    # NB: avoid bare truthiness here — a non-empty pandas Series raises
-    # "truth value is ambiguous". Guard None explicitly; empty dict is handled
-    # in the dict branch and an empty Series falls through to the IndexError.
-    if series_data is None:
-        return None
-    if isinstance(series_data, dict):
-        if not series_data:
-            return None
-        sorted_items = sorted(series_data.items())
-        return sorted_items[-1][1]
-    try:
-        return float(series_data.iloc[-1])
-    except (IndexError, TypeError):
-        return None
+    observations = _observations(series_data)
+    return observations[-1][1] if observations else None

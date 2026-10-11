@@ -13,7 +13,8 @@ import pandas as pd
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
-from .request_policy import provider_call
+from .request_policy import provider_request, provider_timeout
+from tradingagents.strategies.runtime_deadline import bounded_transport
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ SERIES_MAP = {
 
 
 class FREDSource:
-    """Data source backed by the FRED API via fredapi."""
+    """Data source backed by the public FRED observations REST API."""
 
     name: str = "fred"
     requires_api_key: bool = True
@@ -43,6 +44,7 @@ class FREDSource:
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("FRED_API_KEY", "")
         self._cache: dict[str, Any] = {}
+        self._base_url = "https://api.stlouisfed.org/fred/series/observations"
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "series")
@@ -64,26 +66,61 @@ class FREDSource:
     def is_available(self) -> bool:
         if not self._api_key:
             return False
+        return True
+
+    @staticmethod
+    def _transport_get(url, **options):
+        """Requests inactivity timeout plus a reaped hard wall-clock worker."""
+        import requests
+        timeout = options["timeout"]
         try:
-            from fredapi import Fred  # noqa: F401
-            return True
-        except ImportError:
-            logger.warning("fredapi not installed — run: pip install fredapi")
-            return False
+            result = bounded_transport({"kind": "http_get", "url": url,
+                                        "params": options.get("params", {}), "timeout": timeout}, timeout)
+        except TimeoutError:
+            raise SourceFetchError("FRED transport deadline exhausted", reason_code="timeout") from None
+        if result.get("error"):
+            raise SourceFetchError("FRED transport failed", reason_code=result["error"])
+        response = requests.Response()
+        response.status_code = result["status_code"]
+        response.headers.update(result["headers"])
+        response._content = result["body"].encode()
+        return response
+
+    def _get_series(self, series_id, **params):
+        response = provider_request("fred", "get", self._base_url, operation=series_id,
+                                    transport=self._transport_get,
+                                    params={"api_key": self._api_key, "series_id": series_id,
+                                            "file_type": "json", **params},
+                                    timeout=provider_timeout("fred"))
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("observations"), list):
+            raise SourceFetchError("FRED observations invalid", reason_code="invalid_response")
+        dates, values = [], []
+        for observation in payload["observations"]:
+            if not isinstance(observation, dict) or not source_date(observation.get("date")):
+                raise SourceFetchError("FRED observation invalid", reason_code="invalid_response")
+            dates.append(pd.Timestamp(observation["date"]))
+            value = observation.get("value")
+            # FRED's documented missing-observation marker is a period.
+            try:
+                values.append(float("nan") if value == "." else float(value))
+            except (ValueError, TypeError):
+                raise SourceFetchError("FRED observation value invalid", reason_code="invalid_response") from None
+        return pd.Series(values, index=pd.DatetimeIndex(dates), dtype=float)
 
     def fetch_series(
-        self, series_id: str, start: str, end: str
+        self, series_id: str, start: str, end: str, *, as_of: str | None = None
     ) -> pd.Series:
         """Fetch a single FRED series."""
-        cache_key = f"series|{series_id}|{start}|{end}"
+        as_of = as_of or end
+        if not source_date(as_of) or not source_date(start) or not source_date(end) or start > end:
+            raise SourceFetchError("FRED date range invalid", reason_code="invalid_response")
+        cache_key = f"series|{series_id}|{start}|{end}|{as_of}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        from fredapi import Fred
-
-        fred = Fred(api_key=self._api_key)
         try:
-            data = provider_call("fred", series_id, lambda: fred.get_series(series_id, observation_start=start, observation_end=end))
+            data = self._get_series(series_id, observation_start=start, observation_end=end, realtime_start=as_of, realtime_end=as_of)
             if not isinstance(data, pd.Series):
                 raise SourceFetchError("FRED series response invalid", reason_code="invalid_response")
             if not data.empty:
@@ -91,6 +128,7 @@ class FREDSource:
                 if not usable.any() or (data.notna() & ~usable).any() or not usable.iloc[-1]:
                     raise SourceFetchError("FRED series observations invalid", reason_code="invalid_response",
                                            partial_data={series_id: data.loc[usable]})
+            data.attrs.update({"observation_start": start, "observation_end": end, "vintage_date": as_of})
             self._cache[cache_key] = data
             return data
         except Exception as exc:
@@ -105,7 +143,7 @@ class FREDSource:
             raise safe_error from None
 
     def fetch_multi_series(
-        self, series_ids: list[str], start: str, end: str
+        self, series_ids: list[str], start: str, end: str, *, as_of: str | None = None
     ) -> dict[str, pd.Series]:
         """Fetch multiple FRED series."""
         results: dict[str, pd.Series] = {}
@@ -113,7 +151,7 @@ class FREDSource:
         http_statuses: dict[str, int] = {}
         for sid in series_ids:
             try:
-                results[sid] = self.fetch_series(sid, start, end)
+                results[sid] = self.fetch_series(sid, start, end, as_of=as_of)
             except SourceFetchError as exc:
                 if isinstance(exc.partial_data.get(sid), pd.Series):
                     results[sid] = exc.partial_data[sid]
@@ -128,21 +166,24 @@ class FREDSource:
             )
         return results
 
-    def fetch_credit_spreads(self, start: str, end: str) -> dict[str, pd.Series]:
+    def fetch_credit_spreads(self, start: str, end: str, *, as_of: str | None = None) -> dict[str, pd.Series]:
         """Fetch HY and IG credit spread data."""
         return self.fetch_multi_series(
-            [SERIES_MAP["hy_spread"], SERIES_MAP["ig_spread"]], start, end
+            [SERIES_MAP["hy_spread"], SERIES_MAP["ig_spread"]], start, end, as_of=as_of
         )
 
-    def fetch_economic_indicators(self, start: str, end: str) -> dict[str, pd.Series]:
+    def fetch_economic_indicators(self, start: str, end: str, *, as_of: str | None = None) -> dict[str, pd.Series]:
         """Fetch core economic indicators (unemployment, CPI, payrolls, claims)."""
         ids = [
             SERIES_MAP["unemployment"],
             SERIES_MAP["cpi"],
             SERIES_MAP["payrolls"],
             SERIES_MAP["initial_claims"],
+            SERIES_MAP["fed_funds"],
+            SERIES_MAP["vix"],
+            SERIES_MAP["yield_curve"],
         ]
-        return self.fetch_multi_series(ids, start, end)
+        return self.fetch_multi_series(ids, start, end, as_of=as_of)
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -151,7 +192,7 @@ class FREDSource:
         series_id = params.get("series_id", "")
         start = params.get("start", "")
         end = params.get("end", "")
-        data = self.fetch_series(series_id, start, end)
+        data = self.fetch_series(series_id, start, end, as_of=params.get("as_of"))
         return {"data": data.to_dict() if not data.empty else {}}
 
     def _dispatch_multi_series(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +200,7 @@ class FREDSource:
         start = params.get("start", "")
         end = params.get("end", "")
         try:
-            results = self.fetch_multi_series(series_ids, start, end)
+            results = self.fetch_multi_series(series_ids, start, end, as_of=params.get("as_of"))
         except SourceFetchError as exc:
             return {
                 "data": {k: v.to_dict() for k, v in exc.partial_data.items()},

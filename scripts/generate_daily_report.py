@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard.data_loaders import load_generation_metrics
 
@@ -16,7 +17,7 @@ STRESS_TEST_LABEL = "$5k/$10k/$50k concentration stress tests"
 SHARPE_LABEL = "Annualized daily net Sharpe"
 INFORMATION_RATIO_LABEL = "Annualized matched-benchmark information ratio"
 ACCURACY_LABEL = "Directional accuracy (5 XNYS sessions)"
-INSUFFICIENT_HISTORY = "Insufficient history (<30 valid sessions)"
+INSUFFICIENT_HISTORY = RATIO_REQUIREMENTS
 
 
 def _pct(value: object) -> str:
@@ -35,7 +36,7 @@ def _book_table(books: dict[str, object]) -> list[str]:
     for name, value in sorted(books.items()):
         book = value if isinstance(value, dict) else {}
         lines.append(
-            f"| {name} | {_pct(book.get('total_return'))} | {_metric(book.get('annualized_daily_net_sharpe'))} | {_metric(book.get('annualized_matched_information_ratio'))} | {_pct(book.get('directional_accuracy_5d'))} | {book.get('valid_sessions', 'N/A')} |"
+            f"| {name} | {_pct(book.get('total_return'))} | {ratio_display(book, 'annualized_daily_net_sharpe')} | {ratio_display(book, 'annualized_matched_information_ratio')} | {_pct(book.get('directional_accuracy_5d'))} | {book.get('valid_sessions', 'N/A')} |"
         )
     return (
         lines

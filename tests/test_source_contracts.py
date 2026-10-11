@@ -18,12 +18,13 @@ SECRET='fixture-secret-token'
 
 
 def response(payload,status=200):
-    return SimpleNamespace(status_code=status, headers={}, json=lambda:payload, text='')
+    return SimpleNamespace(status_code=status, headers={}, json=lambda:payload, text='', iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda:None)
 
 
 @pytest.fixture(autouse=True)
 def no_real_waits(monkeypatch):
     monkeypatch.setattr('time.sleep',lambda _:None)
+    monkeypatch.setattr('tradingagents.strategies.data_sources.noaa_source.current_session_date',lambda:'2026-10-06')
 
 
 def test_edgar_search_failure_and_invalid_success_are_explicit(monkeypatch):
@@ -37,7 +38,7 @@ def test_edgar_search_failure_and_invalid_success_are_explicit(monkeypatch):
 
 def test_edgar_search_uses_forms_filter_and_keyword_query(monkeypatch):
     captured=[]
-    monkeypatch.setattr(requests,'get',lambda *a,**kw:captured.append(kw) or response({'hits':{'hits':[]}}))
+    monkeypatch.setattr(requests,'get',lambda *a,**kw:captured.append(kw) or response({'hits':{'hits':[],'total':{'value':0,'relation':'eq'}}}))
     with provider_budget('edgar',100,clock=lambda:0,sleep=lambda _:None,limits=()):
         assert EDGARSource().search_filings('10-K',keyword='post-quantum')==[]
     assert captured[0]['params']['forms']=='10-K'
@@ -119,7 +120,7 @@ def test_other_required_operation_errors_are_explicit(provider,monkeypatch):
     elif provider=='regulations':
         source=RegulationsSource(api_key=SECRET);call=lambda:source.search_documents()
     elif provider=='fred':
-        monkeypatch.setattr('fredapi.Fred.get_series',fail)
+        monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series',fail)
         source=FREDSource(api_key=SECRET);call=lambda:source.fetch_series('UNRATE','2026-10-01','2026-10-06')
     elif provider=='courtlistener':
         source=CourtListenerSource(token=SECRET);call=lambda:source.search_dockets('test')
@@ -193,7 +194,7 @@ def test_event_monitor_preserves_valid_filing_before_bad_form(monkeypatch):
     source=EDGARSource();registry=DataSourceRegistry();registry.register(source)
     valid={'_source':{'form':'10-K','file_date':'2026-10-01','display_names':['Company (ABC)'],'adsh':'2026-001','ciks':['0001']}}
     def request(*a,**kw):
-        return response({'hits':{'hits':[valid]}}) if kw['params']['forms']=='10-K' else response({},500)
+        return response({'hits':{'hits':[valid],'total':{'value':1,'relation':'eq'}}}) if kw['params']['forms']=='10-K' else response({},500)
     monkeypatch.setattr(requests,'get',request)
     monitor=EventMonitor(registry);monitor.as_of='2026-10-06'
     with provider_budget('edgar',100,clock=lambda:0,sleep=lambda _:None,limits=(),max_attempts=1):
@@ -277,8 +278,8 @@ def test_cftc_missing_required_commodity_preserves_existing_positioning(monkeypa
     from tradingagents.strategies.data_sources.cftc_source import CFTCSource, COMMODITY_CODES, COL_MARKET, COL_DATE, COL_MM_LONG, COL_MM_SHORT
     source=CFTCSource()
     frame=pd.DataFrame({COL_MARKET:[COMMODITY_CODES['gold']]*4,COL_DATE:['2026-09-01','2026-09-08','2026-09-15','2026-09-22'],COL_MM_LONG:[10,20,30,40],COL_MM_SHORT:[1,2,3,4]})
-    monkeypatch.setattr(source,'_fetch_raw_report',lambda *a:frame)
-    result=source.fetch({'method':'cot_positioning','commodities':['gold','silver']})
+    monkeypatch.setattr(source,'_fetch_raw_report',lambda *a,**kw:frame)
+    result=source.fetch({'method':'cot_positioning','commodities':['gold','silver'],'lookback_weeks':4})
     assert result.get('error')
     assert result['gold']['net_position']==36
 

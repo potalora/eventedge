@@ -1,0 +1,6 @@
+# Captured SEC responses retain their verified native bytes, including spaces.
+tests/fixtures/edgar-ownership-index-*.html -text whitespace=-blank-at-eol
+
+# Raw SEC framing fixtures retain native CR/CRLF bytes and source whitespace.
+tests/fixtures/filing_evidence/*.nc -text -diff
+tests/fixtures/filing_evidence/native_13g_direct.txt -text -diff

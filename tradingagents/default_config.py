@@ -93,6 +93,7 @@ DEFAULT_CONFIG = {
     },
     # Autoresearch configuration
     "autoresearch": {
+        "disabled_strategies": {"state_economics": "unsupported_state_event_proxy"},
         "max_generations": 15,
         "strategies_per_generation": 4,
         "tickers_per_strategy": 3,
@@ -120,9 +121,11 @@ DEFAULT_CONFIG = {
         "state_dir": "data/state",
         "total_capital": 5000,
         "proposals_per_strategy": 3,
-        # Main event analysis and portfolio committee use OpenAI Responses.
+        # Structured evidence uses Luna; unstructured thesis work uses Astra.
         "autoresearch_model": "gpt-6-luna",
         "llm_effort": "high",
+        "thesis_model": "gpt-6-astra",
+        "thesis_effort": "high",
         # Sampling controls apply only to legacy non-reasoning Claude calls.
         "llm_temperature": 0.0,
         # Tickers to exclude from trading (compliance, conflict of interest)
@@ -184,6 +187,8 @@ DEFAULT_CONFIG = {
             "exploration_budget_pct": 0.15,
             "max_vintage_age_days": 540,
             "portfolio_committee_enabled": True,
+            "portfolio_committee_model": "gpt-6-astra",
+            "portfolio_committee_effort": "high",
             "max_sector_concentration_pct": 0.30,
             "max_single_position_pct": 0.10,
         },
@@ -211,8 +216,8 @@ DEFAULT_CONFIG = {
             "schema_version": 1,
             "calendar": "XNYS",
             "pricing_version": "raw-alpaca-sip-v1",
-            "execution_clock_version": "next-xnys-open-v1",
-            "cost_model_version": "equity-10bps-v1",
+            "execution_clock_version": "causal-xnys-open-stops-v2",
+            "cost_model_version": "equity-10bps-act365-v2",
             "slippage_bps": "10",
             "commission_per_fill": "0",
             "other_fee_per_fill": "0",
@@ -220,7 +225,7 @@ DEFAULT_CONFIG = {
             "margin_financing_rate": "0",
             "idle_cash_yield_rate": "0",
             "existing_short_missing_borrow_rate": "0.30",
-            "benchmark_symbols": ["SPY", "BIL"],
+            "benchmark_symbols": ["SPY", "BIL", "VTI", "VT"],
             "bar_max_age_hours": 24,
         },
         # gen_002 risk-discipline knobs. Defaults reproduce gen_001 behavior;

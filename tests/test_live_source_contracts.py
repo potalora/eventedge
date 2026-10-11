@@ -178,25 +178,55 @@ def test_congress_malformed_asset_type_is_invalid_response(monkeypatch):
     assert set(exc.value.failed_operations.values()) == {"invalid_response"}
 
 
-def test_noaa_direct_summary_uses_one_deadline_for_all_states(monkeypatch):
-    clock = [0.0]
-    calls = []
+def test_noaa_direct_summary_uses_one_deadline_for_catalog_and_all_batches(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import tradingagents.strategies.data_sources.noaa_source as noaa
+    from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
+
+    clock, calls = [0.0], []
     monkeypatch.setattr("time.monotonic", lambda: clock[0])
     monkeypatch.setattr("tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS", {})
-    monkeypatch.setattr("tradingagents.strategies.data_sources.noaa_source.AG_STATES",
-                        {"IA": "FIPS:19", "IL": "FIPS:17", "KS": "FIPS:20"})
-    def get(*args, **kwargs):
-        calls.append(kwargs["params"]["locationid"])
-        clock[0] += 35
-        return response({"results": [observation(len(calls))],
-                         "metadata": {"resultset": {"count": 1}}})
-    source = NOAASource(token="offline")
-    source._session = SimpleNamespace(get=get)
+    monkeypatch.setattr(noaa, "AG_STATES", {"IA": "FIPS:19", "IL": "FIPS:17", "KS": "FIPS:20"})
+    # Keep the real worker-thread budget handoff, but serialize mock elapsed time.
+    monkeypatch.setattr(noaa, "ThreadPoolExecutor", lambda max_workers: ThreadPoolExecutor(max_workers=1))
+    stations = [(f"USW{i:08d}", ("IA", "IL", "KS", "KS")[i // 100]) for i in range(400)]
+
+    def get(url, **kwargs):
+        calls.append((url, clock[0], current_provider_deadline("noaa"), kwargs))
+        if url == f"{noaa.CATALOG_URL}/ghcnd-stations.txt":
+            clock[0] += 15
+            text = "\n".join(f"{station:11} {42:8.4f} {-93:9.4f} {100:6.1f} {state} TEST"
+                             for station, state in stations)
+            return SimpleNamespace(status_code=200, text=text)
+        if url == f"{noaa.CATALOG_URL}/ghcnd-inventory.txt":
+            clock[0] += 15
+            text = "\n".join(f"{station:11} {42:8.4f} {-93:9.4f} TMAX 2000 2026"
+                             for station, _ in stations)
+            return SimpleNamespace(status_code=200, text=text)
+        assert url == noaa.BULK_URL
+        batch = kwargs["params"]["stations"].split(",")
+        assert len(batch) == 100
+        clock[0] += 20
+        return response([{"DATE": "2026-10-06", "STATION": station,
+                          "TMAX": "80", "TMIN": "50", "PRCP": "0.12",
+                          "TMAX_ATTRIBUTES": ",,1", "TMIN_ATTRIBUTES": ",,1", "PRCP_ATTRIBUTES": ",,1"}
+                         for station in batch])
+
+    monkeypatch.setattr("requests.get", get)
+    monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **kw: pytest.fail("unexpected network I/O"))
     with pytest.raises(SourceFetchError) as exc:
-        source.fetch_ag_weather_summary("2026-10-06")
-    assert exc.value.failed_operations == {"KS": "timeout"}
-    assert calls == ["FIPS:19", "FIPS:17"]
-    assert exc.value.partial_data["states_reporting"] == 2
+        NOAASource(token="offline").fetch_ag_weather_summary("2026-10-06", lookback_days=1)
+
+    assert [started for _, started, _, _ in calls] == [0, 15, 30, 50, 70]
+    assert {deadline for _, _, deadline, _ in calls} == {90}
+    assert clock[0] == 90  # Fourth station batch cannot start or reset the budget.
+    assert [url for url, _, _, _ in calls[2:]] == [noaa.BULK_URL] * 3
+    assert exc.value.failed_operations == {state: "timeout" for state in noaa.AG_STATES}
+    # Complete state/day/type samples still cannot excuse an unacquired station batch.
+    assert exc.value.partial_data["states_reporting"] == 3
+    assert exc.value.partial_data["coverage"]["missing"] == {}
+    assert exc.value.partial_data["coverage"]["catalog_station_count"] == 400
+    assert exc.value.partial_data["coverage"]["complete"] is False
 
 
 @pytest.mark.parametrize("commodity,crop_class,week", [
@@ -234,3 +264,9 @@ def test_usda_future_corn_weeks_cannot_create_twenty_point_decline(monkeypatch):
         source.fetch_crop_progress("CORN", 2026, "KS")
     assert exc.value.reason_code == "invalid_response"
     assert not source._cache
+
+
+@pytest.fixture(autouse=True)
+def current_noaa_fixture_date(monkeypatch):
+    # These are current acquisitions on the fixture date, not vintage replays.
+    monkeypatch.setattr("tradingagents.strategies.data_sources.noaa_source.current_session_date",lambda:"2026-10-06")

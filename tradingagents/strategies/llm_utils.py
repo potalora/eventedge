@@ -3,8 +3,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from .runtime_deadline import (ModelDeadlineExceeded, ModelTransportError, bounded_transport, model_timeout)
+
 SONNET_5_MODEL = "claude-sonnet-5"
 LUNA_MODEL = "gpt-6-luna"
+RESPONSES_MODELS = frozenset({"gpt-6-luna", "gpt-6-astra", "gpt-6.1-sol"})
+
+
+def uses_responses(model: str) -> bool:
+    return model in RESPONSES_MODELS
+
+
 _VALID_EFFORTS = frozenset({"low", "medium", "high", "max"})
 
 
@@ -41,23 +50,24 @@ def anthropic_response_text(response: Any) -> str:
     return text
 
 
-def call_analysis_model(
+def _call_model_direct(
     client: Any, *, model: str, system: str, prompt: str,
-    max_tokens: int, temperature: float, effort: str,
+    max_tokens: int, temperature: float, effort: str, provenance: dict | None = None,
 ) -> str:
-    """Keep existing Claude calls and route Luna to OpenAI Responses.
+    """Keep Claude calls and route supported GPT models to OpenAI Responses.
 
-    Luna's output budget includes hidden reasoning. Reserve room beyond the
+    GPT output budgets include hidden reasoning. Reserve room beyond the
     short visible JSON budget and reject incomplete output before JSON repair.
     """
-    if model == LUNA_MODEL:
+    if uses_responses(model):
         if effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
-            raise ValueError("Invalid Luna reasoning effort")
+            raise ValueError("Invalid Responses reasoning effort")
         response = client.responses.create(
             model=model, instructions=system, input=prompt,
             reasoning={"effort": effort},
             max_output_tokens=max(16384, max_tokens), store=False,
         )
+        _record_provenance(provenance, response, model, effort)
         if getattr(response, "status", None) != "completed":
             raise RuntimeError("OpenAI analysis response did not complete")
         for item in getattr(response, "output", []):
@@ -73,4 +83,65 @@ def call_analysis_model(
         messages=[{"role": "user", "content": prompt}],
         **anthropic_request_options(model=model, temperature=temperature, effort=effort),
     )
+    _record_provenance(provenance, response, model, effort)
     return anthropic_response_text(response)
+
+
+def _record_provenance(destination, response, model, effort):
+    if destination is None:
+        return
+    # Only public returned fields; a mutable alias or response ID is not a revision.
+    def field(name):
+        value = getattr(response, name, None)
+        return value if isinstance(value, str) and value else None
+    revision = field("model_revision")
+    destination.update(configured_model=model, returned_model=field("model"),
+                       returned_revision=revision, identity_status="pinned" if revision else "unpinned",
+                       response_id=field("id"), reasoning_effort=effort)
+
+
+def call_analysis_model(
+    client: Any, *, model: str, system: str, prompt: str,
+    max_tokens: int, temperature: float, effort: str,
+    provenance: dict | None = None,
+) -> str:
+    """Bound real SDK transport including startup, retries and response reading.
+
+    Injectable clients retain the same call primitive for deterministic tests.
+    Native supported clients run in a disposable process, with SDK retries off.
+    """
+    timeout = model_timeout()
+    request = dict(model=model, system=system, prompt=prompt, max_tokens=max_tokens,
+                   temperature=temperature, effort=effort)
+    if provenance is not None:
+        provenance.clear()
+        provenance.update(configured_model=model, returned_model=None, returned_revision=None,
+                          identity_status="unpinned", response_id=None, reasoning_effort=effort)
+    # Include supported SDK subclasses; injected call primitives are not SDKs.
+    native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
+    module = "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None
+    if module is None:
+        text = _call_model_direct(client, **request, provenance=provenance)
+        model_timeout()
+        return text
+    # These are supported public SDK constructor properties; preserve explicit
+    # endpoint/auth/header configuration without placing it in argv or logs.
+    settings = {"api_key": client.api_key, "base_url": str(client.base_url),
+                "default_headers": {key: value for key, value in client.default_headers.items() if isinstance(value, str)}}
+    if module == "openai":
+        settings.update(organization=client.organization, project=client.project)
+    else:
+        settings["auth_token"] = client.auth_token
+    try:
+        result = bounded_transport({"kind": "model", "provider": module, "client": settings,
+                                    "request": request, "timeout": timeout}, timeout)
+    except TimeoutError:
+        raise ModelDeadlineExceeded("model_deadline_exhausted") from None
+    if result.get("error") == "timeout":
+        raise ModelDeadlineExceeded("model_deadline_exhausted")
+    if result.get("error"):
+        raise ModelTransportError(result["error"], result.get("status_code"))
+    if provenance is not None:
+        provenance.update(result["provenance"])
+    model_timeout()  # A response arriving after the shared deadline is unusable.
+    return result["text"]

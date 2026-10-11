@@ -336,6 +336,7 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
             "governed_bar_recoveries",
             "metric_epochs",
             "outcomes",
+            "outcome_inputs",
             "strategy_health",
         }
     assert journal_mode == "wal"

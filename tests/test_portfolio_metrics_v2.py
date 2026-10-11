@@ -94,7 +94,7 @@ def _observation(
         session=session,
         symbol=symbol,
         close=Decimal(close),
-        return_basis="total_return_adjusted",
+        return_basis="paired_total_return_index_v2",
         source="fixture",
         observed_at=observed_at or UTC_NOON,
         valid=valid,

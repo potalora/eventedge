@@ -1,4 +1,5 @@
 """Consumed records and bounded collection completeness are source contracts."""
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -13,10 +14,12 @@ from tradingagents.strategies.data_sources.request_policy import provider_budget
 def offline_policy(monkeypatch):
     monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
     monkeypatch.setattr('time.sleep', lambda _: None)
+    for provider in ('noaa','drought_monitor','usda'):
+        monkeypatch.setattr(f'tradingagents.strategies.data_sources.{provider}_source.current_session_date',lambda:'2026-10-06')
 
 
 def response(payload, status=200):
-    return SimpleNamespace(status_code=status, headers={}, json=lambda: payload)
+    return SimpleNamespace(status_code=status, headers={}, json=lambda: payload, iter_content=lambda chunk_size: iter([json.dumps(payload).encode()]), close=lambda: None)
 
 
 def trade(symbol='AAPL', transaction='2026-10-01', disclosure='2026-10-02'):
@@ -38,7 +41,7 @@ def test_congress_valid_iso_datetime_is_filtered_by_calendar_day(monkeypatch):
 
 @pytest.mark.parametrize('provider', ['congress', 'noaa', 'drought_monitor', 'usda', 'regulations'])
 @pytest.mark.parametrize('malformed', [True, False])
-def test_consumed_records_reach_engine_as_failure_but_empty_is_valid(provider, malformed, tmp_path, monkeypatch):
+def test_empty_environment_is_unavailable_and_empty_event_sample_is_valid(provider, malformed, tmp_path, monkeypatch):
     from tradingagents.strategies.data_sources.congress_source import CongressSource
     from tradingagents.strategies.data_sources.noaa_source import NOAASource
     from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
@@ -49,7 +52,7 @@ def test_consumed_records_reach_engine_as_failure_but_empty_is_valid(provider, m
     rows = [{}] if malformed else []
     payloads = {'congress': rows, 'noaa': {'results': rows, 'metadata': {'resultset': {'count': len(rows)}}},
                 'drought_monitor': rows, 'usda': {'data': rows},
-                'regulations': {'data': [{'attributes': {}}] if malformed else []}}
+                'regulations': {'data': [{'attributes': {}}] if malformed else [], 'meta':{'totalPages':0,'totalElements':0}}}
     request = lambda *a, **kw: response(payloads[provider])
     monkeypatch.setattr(requests, 'get', request)
     sources = {'congress': CongressSource(fmp_api_key='offline'), 'noaa': NOAASource(token='offline'),
@@ -60,9 +63,10 @@ def test_consumed_records_reach_engine_as_failure_but_empty_is_valid(provider, m
     engine = MultiStrategyEngine({'autoresearch': {'state_dir': str(tmp_path)}}, registry=registry,
                                  strategies=[], use_llm=False)
     data = engine._fetch_all_data('2026-09-01', '2026-10-06')[provider]
-    assert bool(data.get('error')) is malformed
+    unavailable = malformed or provider in {'noaa','drought_monitor','usda'}
+    assert bool(data.get('error')) is unavailable
     from tradingagents.strategies.orchestration.source_inputs import successful_source
-    assert successful_source(data) is (not malformed)
+    assert successful_source(data) is (not unavailable)
     if malformed:
         assert not sources[provider]._cache
 
@@ -143,7 +147,7 @@ def test_other_consumed_required_records_reject_empty_records(provider, monkeypa
     elif provider == 'edgar':
         source = EDGARSource(); call = lambda: source.search_filings('10-K'); budget_provider = provider
     else:
-        monkeypatch.setattr('fredapi.Fred.get_series', lambda *a, **kw: pd.Series([float('nan')], index=['2026-10-01']))
+        monkeypatch.setattr('tradingagents.strategies.data_sources.fred_source.FREDSource._get_series', lambda *a, **kw: pd.Series([float('nan')], index=['2026-10-01']))
         source = FREDSource(api_key='offline'); call = lambda: source.fetch_series('UNRATE', '2026-10-01', '2026-10-06'); budget_provider = provider
     with provider_budget(budget_provider, 100, clock=lambda: 0, sleep=lambda _: None, limits=()):
         with pytest.raises(SourceFetchError):
@@ -221,7 +225,7 @@ def test_cftc_valid_positioning_survives_invalid_report_sibling(monkeypatch):
     source = CFTCSource()
     with provider_budget('cftc', 100, clock=lambda: 0, sleep=lambda _: None, limits=()):
         with pytest.raises(SourceFetchError) as exc:
-            source._dispatch_cot_positioning({'commodities': ['gold']})
+            source._dispatch_cot_positioning({'commodities': ['gold'],'lookback_weeks':4})
     assert exc.value.partial_data['gold']['net_position'] == 40
     assert exc.value.failed_operations == {'cot_report': 'invalid_response'}
     assert not source._cache

@@ -11,12 +11,14 @@ import json
 import math
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, TypeVar
+from zoneinfo import ZoneInfo
 
 from tradingagents.strategies.execution import (
     AccountSnapshot,
@@ -39,12 +41,13 @@ from tradingagents.strategies.execution.price_source import (
     BarValidationError,
     validate_required_bars,
 )
-from tradingagents.strategies.orchestration.trading_calendar import session_close
+from tradingagents.strategies.orchestration.trading_calendar import session_close, session_open
 
 
 SCHEMA_VERSION = 1
 _OPENING_AT = datetime(1970, 1, 1)
 _T = TypeVar("_T")
+_POLICY_CONTEXT_VALIDATION_MAX_BYTES = 128 * 1024
 
 
 class LedgerConflictError(ValueError):
@@ -128,6 +131,10 @@ _DDL: tuple[str, ...] = (
         direction TEXT NOT NULL, event_at TEXT, observed_at TEXT NOT NULL,
         reference_session TEXT NOT NULL, reference_close TEXT NOT NULL,
         decision_at TEXT NOT NULL, evidence_hash TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS committee_decisions (
+        session TEXT NOT NULL, epoch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL, PRIMARY KEY(session, epoch_id, policy_id)
     )""",
     """CREATE TABLE IF NOT EXISTS signal_journal_outbox (
         signal_id TEXT PRIMARY KEY REFERENCES signals(signal_id),
@@ -258,6 +265,18 @@ _DDL: tuple[str, ...] = (
         action_id TEXT PRIMARY KEY, ticker TEXT NOT NULL, session TEXT NOT NULL,
         action_type TEXT NOT NULL, ratio TEXT, cash_per_share TEXT,
         source TEXT NOT NULL, fetched_at TEXT NOT NULL, verified INTEGER NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS dividend_receivables (
+        event_id TEXT PRIMARY KEY REFERENCES dividend_events(dividend_event_id),
+        amount TEXT NOT NULL, payment_date TEXT, settled_session TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS dividend_payment_observations (
+        action_id TEXT PRIMARY KEY REFERENCES corporate_actions(action_id),
+        payment_date TEXT NOT NULL, source TEXT NOT NULL, reference TEXT NOT NULL,
+        observed_at TEXT NOT NULL, accepted_session TEXT NOT NULL, accepted_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS dividend_payment_terms (
+        action_id TEXT PRIMARY KEY REFERENCES corporate_actions(action_id), payment_date TEXT
     )""",
     """CREATE TABLE IF NOT EXISTS lot_action_applications (
         application_id TEXT PRIMARY KEY,
@@ -582,6 +601,9 @@ class PortfolioLedger:
         with self.transaction():
             for statement in _DDL:
                 self._connection.execute(statement)
+            snapshot_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(account_snapshots)")}
+            if "dividend_receivable" not in snapshot_columns:
+                self._connection.execute("ALTER TABLE account_snapshots ADD COLUMN dividend_receivable TEXT NOT NULL DEFAULT '0'")
             columns = {
                 row["name"]
                 for row in self._connection.execute(
@@ -810,8 +832,28 @@ class PortfolioLedger:
         def rows(sql: str, parameters: tuple[object, ...]) -> list[dict[str, object]]:
             return [dict(row) for row in self._connection.execute(sql, parameters)]
 
+        receivables = [dict(row) for row in self._dividend_receivable_rows(session)]
+        payment_state: dict[str, list[dict[str, object]]] = {}
+        for table in ("dividend_payment_terms", "dividend_payment_observations"):
+            # Historical read-only ledgers may predate either additive table.
+            # Keep the same bounded entitlement scope as dividend_receivables,
+            # including this session's settled rows for post-phase verification.
+            exists = self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            payment_state[table] = rows(
+                f"SELECT p.* FROM {table} p WHERE EXISTS ("
+                "SELECT 1 FROM dividend_events e JOIN dividend_receivables r "
+                "ON r.event_id=e.dividend_event_id WHERE e.action_id=p.action_id "
+                "AND (r.settled_session IS NULL OR r.settled_session=?)) "
+                "ORDER BY p.action_id",
+                (session.isoformat(),),
+            ) if receivables and exists is not None else []
+
         return {
             "account": account.__dict__,
+            "dividend_receivables": receivables,
+            **payment_state,
             "execution_policy_binding": (
                 None
                 if execution_policy_binding is None
@@ -833,6 +875,13 @@ class PortfolioLedger:
             ),
             "due_intents": due_intents,
             "open_lots": self.open_exit_positions(),
+            "applied_lot_actions": rows(
+                "SELECT a.action_id AS action_id, a.lot_id AS lot_id FROM lot_action_applications a "
+                "JOIN lots l ON l.lot_id=a.lot_id WHERE l.open_qty>0 "
+                "UNION SELECT d.action_id, d.lot_id FROM dividend_events d "
+                "JOIN lots l ON l.lot_id=d.lot_id WHERE l.open_qty>0 "
+                "ORDER BY action_id, lot_id", (),
+            ),
             "exit_allocations": [dict(row) for row in allocations],
             "session_cash_events": rows(
                 "SELECT * FROM cash_events WHERE cohort_id = ? AND session = ? "
@@ -1405,6 +1454,25 @@ class PortfolioLedger:
             json.loads(row["candidate_json"]),
             json.loads(row["journal_json"]),
         )
+
+    def committee_decision(self, session: date, epoch_id: str, policy_id: str) -> dict | None:
+        if not self._connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='committee_decisions'").fetchone():
+            return None
+        row = self._connection.execute(
+            "SELECT payload_json FROM committee_decisions WHERE session=? AND epoch_id=? AND policy_id=?",
+            (session.isoformat(), epoch_id, policy_id),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def record_committee_decision(self, session: date, epoch_id: str, policy_id: str, payload: dict) -> None:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        with self.transaction():
+            old = self.committee_decision(session, epoch_id, policy_id)
+            if old is not None:
+                if old != json.loads(encoded):
+                    raise LedgerConflictError("committee decision changed after acquisition")
+                return
+            self._connection.execute("INSERT INTO committee_decisions VALUES (?, ?, ?, ?)", (session.isoformat(), epoch_id, policy_id, encoded))
 
     @staticmethod
     def _normalized_string_tuple(
@@ -2808,6 +2876,13 @@ class PortfolioLedger:
         self, row: sqlite3.Row
     ) -> dict[str, object]:
         label = f"{row['cohort_id']}/{row['session']}/{row['binding_kind']}"
+        # Retain only a validation fact for one exact SQL row, never a parsed
+        # context. Every receiver still reads SQL and parses independent objects;
+        # changes from this connection, another writer or rollback cannot hit.
+        raw_row = tuple(row)
+        already_validated = raw_row == getattr(
+            self, "_validated_policy_context_row", None
+        )
         try:
             config = json.loads(row["policy_config_json"])
             context = json.loads(row["context_json"])
@@ -2816,30 +2891,35 @@ class PortfolioLedger:
             raise LedgerConflictError(
                 f"tampered policy session context {label}"
             ) from exc
-        config_json = _canonical_json(config)
-        context_json = _canonical_json(context)
-        payload_json = _canonical_json(payload)
-        expected_payload = {
-            "cohort_id": row["cohort_id"],
-            "session": row["session"],
-            "binding_kind": row["binding_kind"],
-            "epoch_id": row["epoch_id"],
-            "policy_version": row["policy_version"],
-            "policy_config_digest": row["policy_config_digest"],
-            "context_digest": row["context_digest"],
-        }
-        if (
-            config_json != row["policy_config_json"]
-            or context_json != row["context_json"]
-            or payload_json != row["payload_json"]
-            or row["policy_config_digest"]
-            != stable_id("policy_config", config_json)
-            or row["context_digest"] != stable_id("policy_context", context_json)
-            or payload != expected_payload
-            or row["payload_digest"] != stable_id("policy_binding", payload_json)
-        ):
-            raise LedgerConflictError(f"tampered policy session context {label}")
-        return {
+        if already_validated:
+            config_json = row["policy_config_json"]
+            context_json = row["context_json"]
+            payload_json = row["payload_json"]
+        else:
+            config_json = _canonical_json(config)
+            context_json = _canonical_json(context)
+            payload_json = _canonical_json(payload)
+            expected_payload = {
+                "cohort_id": row["cohort_id"],
+                "session": row["session"],
+                "binding_kind": row["binding_kind"],
+                "epoch_id": row["epoch_id"],
+                "policy_version": row["policy_version"],
+                "policy_config_digest": row["policy_config_digest"],
+                "context_digest": row["context_digest"],
+            }
+            if (
+                config_json != row["policy_config_json"]
+                or context_json != row["context_json"]
+                or payload_json != row["payload_json"]
+                or row["policy_config_digest"]
+                != stable_id("policy_config", config_json)
+                or row["context_digest"] != stable_id("policy_context", context_json)
+                or payload != expected_payload
+                or row["payload_digest"] != stable_id("policy_binding", payload_json)
+            ):
+                raise LedgerConflictError(f"tampered policy session context {label}")
+        result = {
             "cohort_id": str(row["cohort_id"]),
             "session": _date(row["session"]),
             "binding_kind": str(row["binding_kind"]),
@@ -2855,6 +2935,14 @@ class PortfolioLedger:
             "payload_digest": str(row["payload_digest"]),
             "bound_at": _datetime(row["bound_at"]),
         }
+        if self is not None and not already_validated:
+            retained_bytes = sys.getsizeof(raw_row) + sum(
+                sys.getsizeof(value) for value in raw_row
+            )
+            self._validated_policy_context_row = (
+                raw_row if retained_bytes <= _POLICY_CONTEXT_VALIDATION_MAX_BYTES else None
+            )
+        return result
 
     @staticmethod
     def _policy_projection_limit(limit: int, *, maximum: int = 256) -> int:
@@ -2959,6 +3047,7 @@ class PortfolioLedger:
         session: date,
         *,
         limit: int = 256,
+        prices: Mapping[str, Decimal] | None = None,
     ) -> tuple[dict[str, object], ...]:
         """Return marked open lots using only persisted raw ledger evidence."""
         session = self._require_exact_date(session, "session")
@@ -2998,7 +3087,13 @@ class PortfolioLedger:
                 raise LedgerConflictError(
                     f"missing intent policy provenance {row['intent_id']}"
                 )
-            if row["mark_close"] is None:
+            if prices is not None:
+                mark = prices.get(str(row["ticker"]))
+                if not isinstance(mark, Decimal):
+                    raise MissingMarkError(f"missing exact opening mark for {row['ticker']}")
+                mark_session = session
+                mark_source = "bound_session_open"
+            elif row["mark_close"] is None:
                 if opened_session != session:
                     raise MissingMarkError(
                         f"missing persisted raw mark for {row['ticker']}/{session}"
@@ -3802,13 +3897,13 @@ class PortfolioLedger:
         return reason
 
     def corporate_action_batch_state_errors(
-        self, session: date, actions: tuple[CorporateAction, ...]
+        self, session: date, actions: tuple[CorporateAction, ...], *, allow_prior: bool = False
     ) -> tuple[str, ...]:
         """Validate a complete action batch against live lot/intent state."""
         errors: list[str] = []
         unique_actions: list[CorporateAction] = []
         seen_actions: dict[str, CorporateAction] = {}
-        for action in sorted(actions, key=lambda item: item.action_id):
+        for action in sorted(actions, key=lambda item: (item.session, item.action_type != "split", item.ticker, item.action_id)):
             existing_action = seen_actions.get(action.action_id)
             if existing_action is not None:
                 if existing_action != action:
@@ -3853,12 +3948,12 @@ class PortfolioLedger:
                 (action.action_id,),
             ).fetchone()
             if existing is not None:
-                if not self._same_corporate_action(existing, action):
+                if not self._same_corporate_action(existing, action, ignore_observation_time=allow_prior and action.session < session):
                     errors.append(
                         f"conflicting corporate action identity {action.action_id}"
                     )
                 continue
-            if action.session != session:
+            if action.session > session or (action.session != session and not allow_prior):
                 errors.append(f"corporate action session mismatch {action.action_id}")
                 continue
             if action.action_type != "split":
@@ -3896,17 +3991,23 @@ class PortfolioLedger:
         session: date,
         actions: tuple[CorporateAction, ...],
         processed_at: datetime,
+        *, allow_prior: bool = False,
     ) -> tuple[str, ...]:
         """Validate structural and state-dependent action invariants without mutation."""
         errors: list[str] = list(
-            self.corporate_action_batch_state_errors(session, actions)
+            self.corporate_action_batch_state_errors(session, actions, allow_prior=allow_prior)
         )
         seen: dict[str, CorporateAction] = {}
+        terms: dict[tuple[date, str, str], str] = {}
         for action in actions:
+            key = (action.session, action.ticker, action.action_type)
+            if action.action_type == "cash_dividend" and key in terms and terms[key] != action.action_id:
+                errors.append(f"ambiguous corporate action terms {action.ticker}/{action.action_type}")
+            terms[key] = action.action_id
             if action.action_id in seen and seen[action.action_id] != action:
                 errors.append(f"conflicting corporate action {action.action_id}")
             seen[action.action_id] = action
-            if action.session != session:
+            if action.session > session or (action.session != session and not allow_prior):
                 errors.append(f"corporate action session mismatch {action.action_id}")
             if not action.source.strip():
                 errors.append(f"missing source corporate action {action.action_id}")
@@ -3919,7 +4020,7 @@ class PortfolioLedger:
                 errors.append(f"naive corporate action {action.action_id}")
             elif action.fetched_at > processed_at:
                 errors.append(f"future corporate action {action.action_id}")
-            elif action.fetched_at < session_close(session):
+            elif action.fetched_at < session_close(action.session):
                 errors.append(f"pre-close corporate action {action.action_id}")
             if action.action_type == "split":
                 if (
@@ -3939,6 +4040,14 @@ class PortfolioLedger:
                     errors.append(f"invalid dividend {action.action_id}")
             else:
                 errors.append(f"unsupported corporate action {action.action_id}")
+            if action.payment_observed_at is not None:
+                observed = action.payment_observed_at
+                if (observed.tzinfo is None or observed.utcoffset() is None or observed > processed_at
+                    or observed.astimezone(ZoneInfo("America/New_York")).date() > session or not action.payment_source or not action.payment_reference
+                    or action.payment_date is None):
+                    errors.append(f"invalid dividend payment observation {action.action_id}")
+            if action.payment_date is not None and (action.action_type != "cash_dividend" or action.payment_date < action.session):
+                errors.append(f"invalid dividend payment date {action.action_id}")
         return tuple(sorted(set(errors)))
 
     def invalidate_session_and_cancel_due(
@@ -3972,7 +4081,14 @@ class PortfolioLedger:
                     f"conflicting invalid session run {self.cohort_id}/{session}"
                 )
             due = self._due_intent_rows(session)
+            context = self.session_execution_context(session)
+            bound_intents = None if context is None else {
+                item["intent"]["intent_id"]
+                for item in json.loads(str(context["economic_inputs_json"]))["starting_state"]["due_intents"]
+            }
             for row in due:
+                if row["price_rule"] == "resting_stop" and (bound_intents is None or row["intent_id"] in bound_intents):
+                    continue
                 self._terminalize_intent(
                     row["intent_id"],
                     "cancelled",
@@ -4284,6 +4400,9 @@ class PortfolioLedger:
         close_marks: dict[str, MarketBar],
         rates: dict[str, Decimal | None],
         valuation_at: datetime,
+        *,
+        carried_calendar: bool = False,
+        validated_at: datetime | None = None,
     ) -> LedgerEvent:
         """Accrue ACT/365 borrow once per short ticker at that session close."""
         self._require_timezone_aware(valuation_at, "valuation_at")
@@ -4291,7 +4410,7 @@ class PortfolioLedger:
             lots = self._open_lots_for_direction("short")
             tickers = sorted({lot["ticker"] for lot in lots})
             marks = self._validate_accrual_marks(
-                session, close_marks, tickers, valuation_at
+                session, close_marks, tickers, validated_at or valuation_at
             )
             events: list[LedgerEvent] = []
             for ticker in tickers:
@@ -4316,9 +4435,34 @@ class PortfolioLedger:
                     ),
                     Decimal("0"),
                 )
-                amount = self._cost_model.borrow_charge(
-                    quantity * marks[ticker].close, annual_rate
-                )
+                notional = quantity * marks[ticker].close
+                days = 1
+                if carried_calendar:
+                    previous = self._connection.execute(
+                        "SELECT session FROM account_snapshots WHERE cohort_id=? AND session<? AND valid=1 ORDER BY session DESC LIMIT 1",
+                        (self.cohort_id, session.isoformat()),
+                    ).fetchone()
+                    if previous is None:
+                        # No preceding accepted close: newly created book has no carried interval.
+                        days = 0
+                    else:
+                        prior_session = _date(previous["session"])
+                        days = (session - prior_session).days
+                        mark = self._connection.execute(
+                            "SELECT close FROM marks WHERE cohort_id=? AND ticker=? AND session=? AND adjusted=0",
+                            (self.cohort_id, ticker, prior_session.isoformat()),
+                        ).fetchone()
+                        if mark is None:
+                            raise MissingMarkError(f"missing carried mark {ticker}/{prior_session}")
+                        carried_quantity = quantity
+                        for split in self._connection.execute(
+                            "SELECT ratio FROM corporate_actions WHERE ticker=? "
+                            "AND action_type='split' AND session>? AND session<=?",
+                            (ticker, prior_session.isoformat(), session.isoformat()),
+                        ):
+                            carried_quantity /= _decimal(split["ratio"])
+                        notional = carried_quantity * _decimal(mark["close"])
+                amount = self._cost_model.borrow_charge(notional * days, annual_rate)
                 accrual_id = stable_id("borrow", self.cohort_id, session, ticker)
                 event = LedgerEvent(
                     accrual_id,
@@ -4399,6 +4543,8 @@ class PortfolioLedger:
         session: date,
         annual_rate: Decimal,
         processed_at: datetime | None = None,
+        *,
+        carried_calendar: bool = False,
     ) -> LedgerEvent:
         """Accrue debit-cash financing once; positive idle cash has a zero yield."""
         if (
@@ -4438,7 +4584,15 @@ class PortfolioLedger:
                     "debit financing ACT/365",
                 )
             debit_balance = max(-self._accounting_summary()["cash"], Decimal("0"))
-            amount = self._cost_model.financing_charge(debit_balance, annual_rate)
+            days = 1
+            if carried_calendar:
+                previous = self._connection.execute(
+                    "SELECT session, cash FROM account_snapshots WHERE cohort_id=? AND session<? AND valid=1 ORDER BY session DESC LIMIT 1",
+                    (self.cohort_id, session.isoformat()),
+                ).fetchone()
+                days = (session - _date(previous["session"])).days if previous else 0
+                debit_balance = max(-_decimal(previous["cash"]), Decimal(0)) if previous else Decimal(0)
+            amount = self._cost_model.financing_charge(debit_balance * days, annual_rate)
             event = LedgerEvent(
                 accrual_id,
                 session,
@@ -4475,6 +4629,7 @@ class PortfolioLedger:
         session: date,
         actions: list[CorporateAction],
         processed_at: datetime | None = None,
+        *, allow_prior: bool = False,
     ) -> list[LedgerEvent]:
         """Apply verified actions once, or durably quarantine uncertain inputs."""
         processed = processed_at or max(
@@ -4492,7 +4647,7 @@ class PortfolioLedger:
         events: list[LedgerEvent] = []
         with self.transaction():
             batch = tuple(actions)
-            errors = self.corporate_action_batch_errors(session, batch, processed)
+            errors = self.corporate_action_batch_errors(session, batch, processed, allow_prior=allow_prior)
             if errors:
                 for action in batch:
                     existing = self._connection.execute(
@@ -4500,7 +4655,7 @@ class PortfolioLedger:
                         (action.action_id,),
                     ).fetchone()
                     if existing is not None and not self._same_corporate_action(
-                        existing, action
+                        existing, action, ignore_observation_time=allow_prior and action.session < session
                     ):
                         self._record_corporate_action_conflict(
                             session, action, processed
@@ -4524,7 +4679,7 @@ class PortfolioLedger:
                 ]
             unique_actions = {
                 action.action_id: action
-                for action in sorted(actions, key=lambda item: item.action_id)
+                for action in sorted(actions, key=lambda item: (item.session, item.action_type != "split", item.ticker, item.action_id))
             }
             for action in unique_actions.values():
                 existing = self._connection.execute(
@@ -4532,7 +4687,7 @@ class PortfolioLedger:
                     (action.action_id,),
                 ).fetchone()
                 if existing is not None:
-                    if not self._same_corporate_action(existing, action):
+                    if not self._same_corporate_action(existing, action, ignore_observation_time=allow_prior and action.session < session):
                         self._record_corporate_action_conflict(
                             session, action, processed
                         )
@@ -4544,12 +4699,19 @@ class PortfolioLedger:
                                 processed,
                             )
                         )
+                    else:
+                        self._accept_dividend_payment_terms(action, session, processed)
                     continue
                 self._connection.execute(
                     "INSERT INTO corporate_actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self._corporate_action_values(action),
                 )
-                if action.session != session:
+                self._connection.execute(
+                    "INSERT INTO dividend_payment_terms VALUES (?, ?)",
+                    (action.action_id, action.payment_date.isoformat() if action.payment_date else None),
+                )
+                self._accept_dividend_payment_terms(action, session, processed)
+                if action.session > session or (action.session != session and not allow_prior):
                     events.append(
                         self._quarantine_action(
                             session,
@@ -4741,8 +4903,8 @@ class PortfolioLedger:
         """Persist one conflict-safe adjusted benchmark observation."""
         if observation.cohort_id != self.cohort_id:
             raise ValueError("benchmark cohort_id does not match ledger")
-        if observation.return_basis != "total_return_adjusted":
-            raise ValueError("benchmark return basis must be total_return_adjusted")
+        if observation.return_basis not in {"total_return_adjusted", "paired_total_return_index_v2"}:
+            raise ValueError("unsupported benchmark return basis")
         if (
             not observation.close.is_finite()
             or observation.close <= 0
@@ -4794,7 +4956,63 @@ class PortfolioLedger:
                 values,
             )
 
-    def account_state(self) -> AccountState:
+    def session_realized_net(self, session: date) -> Decimal:
+        """Net realized P&L known so far; fills already embed adverse slippage."""
+        rows = self._connection.execute(
+            "SELECT c.realized_pnl FROM lot_closures c JOIN fills f ON f.fill_id=c.fill_id WHERE f.session=?",
+            (session.isoformat(),),
+        ).fetchall()
+        pnl = sum((_decimal(r["realized_pnl"]) for r in rows), Decimal(0))
+        for fill in self.read_fills(session, session):
+            pnl -= fill.commission + fill.other_fees
+        rows = self._connection.execute(
+            "SELECT amount FROM cash_events WHERE cohort_id=? AND session=? AND event_type IN ('borrow','financing','dividend')",
+            (self.cohort_id, session.isoformat()),
+        ).fetchall()
+        return pnl + sum((_decimal(r["amount"]) for r in rows), Decimal(0))
+
+    def cooling_tickers(self, session: date, sessions: int) -> set[str]:
+        """Stops cool a ticker for N exchange sessions, including its exit day."""
+        if sessions <= 0:
+            return set()
+        from tradingagents.strategies.orchestration.trading_calendar import previous_session
+        start = session
+        for _ in range(sessions - 1):
+            start = previous_session(start)
+        rows = self._connection.execute(
+            "SELECT DISTINCT f.intent_id FROM fills f JOIN order_intents i ON i.intent_id=f.intent_id "
+            "WHERE f.session>=? AND f.session<=? AND i.price_rule='resting_stop'",
+            (start.isoformat(), session.isoformat()),
+        ).fetchall()
+        return {self._ticker_for_intent(str(r["intent_id"])) for r in rows}
+
+    def opening_equity(self, session: date, prices: Mapping[str, Decimal]) -> Decimal:
+        """Immutable pre-entry opening equity from the bound pre-action state."""
+        context = self.session_execution_context(session)
+        if context is None:
+            return self.account_state().net_equity
+        payload = json.loads(str(context["economic_inputs_json"]))
+        state = payload["starting_state"]
+        equity = Decimal(str(state["account"]["cash"])) + Decimal(str(state["account"].get("dividend_receivable", "0")))
+        actions = sorted(
+            {a["action_id"]: a for a in payload["market"]["corporate_actions"]}.values(),
+            key=lambda action: (action.get("session", session.isoformat()), action["action_type"] != "split", action["action_id"]),
+        )
+        applied = {(row["action_id"], row["lot_id"]) for row in state.get("applied_lot_actions", [])}
+        for lot in state["open_lots"]:
+            quantity = Decimal(str(lot["quantity"]))
+            sign = Decimal(1) if lot["direction"] == "long" else Decimal(-1)
+            for action in actions:
+                if action["ticker"] != lot["ticker"] or (action["action_id"], lot["lot_id"]) in applied:
+                    continue
+                if action["action_type"] == "split":
+                    quantity *= Decimal(str(action["ratio"]))
+                elif action["action_type"] == "cash_dividend":
+                    equity += sign * quantize_cash(quantity * Decimal(str(action["cash_per_share"])))
+            equity += sign * quantity * prices[str(lot["ticker"])]
+        return equity
+
+    def account_state(self, prices: Mapping[str, Decimal] | None = None) -> AccountState:
         """Return bounded cohort state, using a lot's entry until its first mark."""
         open_lots = self._open_lots(include_latest_mark=True)
         summary = self._accounting_summary()
@@ -4807,22 +5025,27 @@ class PortfolioLedger:
                 if lot["mark_close"] is not None
                 else _decimal(lot["entry_price"])
             )
+            if prices is not None:
+                mark = prices.get(str(lot["ticker"]))
+                if not isinstance(mark, Decimal) or not mark.is_finite() or mark <= 0:
+                    raise MissingMarkError(f"missing exact opening mark for {lot['ticker']}")
             value = _decimal(lot["open_qty"]) * mark
             if lot["direction"] == "long":
                 long_value += value
             else:
                 short_liability += value
-                margin_used += _decimal(lot["margin_reserved"])
-        net_equity = summary["cash"] + long_value - short_liability
+                margin_used += max(_decimal(lot["margin_reserved"]), value * self._cost_model.margin_requirement)
+        net_equity = summary["cash"] + long_value - short_liability + self.dividend_receivable()
         return AccountState(
             self.cohort_id,
             summary["cash"],
             long_value,
             short_liability,
             margin_used,
-            summary["cash"] - margin_used,
+            summary["cash"] - margin_used + self.dividend_payable_reserve(),
             net_equity,
             max(summary["high_water_mark"], net_equity),
+            self.dividend_receivable(),
         )
 
     def _validate_fill(self, intent: OrderIntent, fill: Fill) -> None:
@@ -5177,7 +5400,9 @@ class PortfolioLedger:
             self._encode(action.verified),
         )
 
-    def _same_corporate_action(self, row: sqlite3.Row, action: CorporateAction) -> bool:
+    def _same_corporate_action(
+        self, row: sqlite3.Row, action: CorporateAction, *, ignore_observation_time: bool = False
+    ) -> bool:
         columns = (
             "action_id",
             "ticker",
@@ -5189,10 +5414,45 @@ class PortfolioLedger:
             "fetched_at",
             "verified",
         )
-        return all(
-            row[column] == value
+        terms = self._connection.execute("SELECT payment_date FROM dividend_payment_terms WHERE action_id=?", (action.action_id,)).fetchone()
+        payment_date = terms[0] if terms is not None else None
+        incoming = action.payment_date.isoformat() if action.payment_date else None
+        # Missing repeat evidence cannot erase verified terms; only an audited
+        # unknown-to-known observation may add terms. Economics remain immutable.
+        terms_match = payment_date == incoming or incoming is None or (
+            payment_date is None and bool(action.payment_source and action.payment_reference and action.payment_observed_at)
+        )
+        return terms_match and all(
+            (ignore_observation_time and column == "fetched_at") or row[column] == value
             for column, value in zip(columns, self._corporate_action_values(action))
         )
+
+    def _accept_dividend_payment_terms(self, action: CorporateAction, session: date, processed: datetime) -> None:
+        if action.payment_date is None or action.payment_observed_at is None:
+            return
+        self._connection.execute(
+            "INSERT OR IGNORE INTO dividend_payment_observations VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (action.action_id, action.payment_date.isoformat(), action.payment_source,
+             action.payment_reference, action.payment_observed_at.isoformat(), session.isoformat(), processed.isoformat()),
+        )
+        self._connection.execute("UPDATE dividend_payment_terms SET payment_date=? WHERE action_id=? AND payment_date IS NULL",
+            (action.payment_date.isoformat(), action.action_id))
+        self._connection.execute(
+            "UPDATE dividend_receivables SET payment_date=? WHERE payment_date IS NULL AND settled_session IS NULL "
+            "AND event_id IN (SELECT dividend_event_id FROM dividend_events WHERE action_id=?)",
+            (action.payment_date.isoformat(), action.action_id),
+        )
+
+    def pending_dividend_actions(self) -> tuple[CorporateAction, ...]:
+        """Unknown payable terms for retained entitlements, including closed lots."""
+        rows = self._connection.execute(
+            "SELECT DISTINCT a.* FROM corporate_actions a JOIN dividend_events e USING(action_id) "
+            "JOIN dividend_receivables r ON r.event_id=e.dividend_event_id WHERE r.payment_date IS NULL "
+            "AND r.settled_session IS NULL ORDER BY a.action_id"
+        ).fetchall()
+        return tuple(CorporateAction(row["action_id"], row["ticker"], _date(row["session"]),
+            row["action_type"], None, _decimal(row["cash_per_share"]), row["source"],
+            datetime.fromisoformat(row["fetched_at"]), bool(row["verified"])) for row in rows)
 
     def _invalid_split_reason(self, action: CorporateAction) -> str | None:
         if action.ratio is None or not action.ratio.is_finite() or action.ratio <= 0:
@@ -5338,16 +5598,9 @@ class PortfolioLedger:
                     lot["direction"],
                 ),
             )
-            self._insert_named_cash_event(
-                stable_id("cash", self.cohort_id, "dividend", event_id),
-                action.session,
-                "dividend",
-                amount,
-                processed_at,
-                f"dividend {action.action_id} {lot['lot_id']}",
-            )
-            self._update_accounting_summary(
-                cash_delta=amount, dividend_cash_delta=amount
+            self._connection.execute(
+                "INSERT INTO dividend_receivables VALUES (?, ?, ?, NULL)",
+                (event_id, self._encode(amount), action.payment_date.isoformat() if action.payment_date else None),
             )
             events.append(
                 LedgerEvent(
@@ -5360,6 +5613,70 @@ class PortfolioLedger:
                 )
             )
         return events
+
+    def _dividend_receivable_rows(self, settled_session: date | None = None) -> list[sqlite3.Row]:
+        # Read-only historical ledgers predate accruals and must stay readable.
+        exists = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dividend_receivables'"
+        ).fetchone()
+        if exists is None:
+            return []
+        return self._connection.execute(
+            "SELECT * FROM dividend_receivables "
+            "WHERE settled_session IS NULL OR settled_session=? ORDER BY event_id",
+            (settled_session.isoformat() if settled_session else None,),
+        ).fetchall()
+
+    def dividend_receivable(self) -> Decimal:
+        """Signed entitlement: receivable for longs, payable for shorts."""
+        return sum(
+            (_decimal(row["amount"]) for row in self._dividend_receivable_rows()),
+            Decimal(0),
+        )
+
+    def dividend_payable_reserve(self) -> Decimal:
+        return sum(
+            (min(_decimal(row["amount"]), Decimal(0)) for row in self._dividend_receivable_rows()),
+            Decimal(0),
+        )
+
+    def settle_dividends(self, session: date, processed_at: datetime) -> None:
+        """Transfer only verified payable entitlements into cash, once."""
+        with self.transaction():
+            for row in self._connection.execute(
+                "SELECT r.*, o.observed_at FROM dividend_receivables r "
+                "JOIN dividend_events e ON e.dividend_event_id=r.event_id "
+                "LEFT JOIN dividend_payment_observations o ON o.action_id=e.action_id "
+                "WHERE r.settled_session IS NULL AND r.payment_date <= ? ORDER BY r.event_id",
+                (session.isoformat(),),
+            ).fetchall():
+                # After-open knowledge cannot finance this session's open fills.
+                if row["observed_at"] and datetime.fromisoformat(row["observed_at"]) >= session_open(session):
+                    continue
+                amount = _decimal(row["amount"])
+                self._insert_named_cash_event(
+                    stable_id("dividend_payment", self.cohort_id, row["event_id"]),
+                    session, "dividend", amount, processed_at, f"payment of {row['event_id']}",
+                )
+                self._update_accounting_summary(cash_delta=amount, dividend_cash_delta=amount)
+                self._connection.execute("UPDATE dividend_receivables SET settled_session=? WHERE event_id=?", (session.isoformat(), row["event_id"]))
+
+    def inventory_action_requirements(self, session: date) -> dict[date, tuple[str, ...]]:
+        """Missing XNYS action dates for carried lots; never invent missed fills."""
+        from tradingagents.strategies.orchestration.trading_calendar import next_session
+        row = self._connection.execute(
+            "SELECT MAX(session) FROM account_snapshots WHERE cohort_id=? AND valid=1 AND session < ?",
+            (self.cohort_id, session.isoformat()),
+        ).fetchone()
+        boundary = _date(row[0]) if row[0] else None
+        needed: dict[date, set[str]] = {}
+        for lot in self._open_lots():
+            acquired = _date(lot["opened_session"])
+            day = next_session(max(acquired, boundary) if boundary else acquired)
+            while day < session:
+                needed.setdefault(day, set()).add(str(lot["ticker"]))
+                day = next_session(day)
+        return {day: tuple(sorted(tickers)) for day, tickers in sorted(needed.items())}
 
     def _pending_exit_rows_for_ticker(self, ticker: str) -> list[sqlite3.Row]:
         return self._connection.execute(
@@ -5639,7 +5956,7 @@ class PortfolioLedger:
             )
         self._connection.execute(
             """INSERT INTO account_snapshots VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )""",
             self._snapshot_values(snapshot),
         )
@@ -5673,8 +5990,8 @@ class PortfolioLedger:
             else:
                 short_liability += quantity * close
                 unrealized_pnl += (entry - close) * quantity
-                margin_used += _decimal(lot["margin_reserved"])
-        net_equity = summary["cash"] + long_market_value - short_liability
+                margin_used += max(_decimal(lot["margin_reserved"]), quantity * close * self._cost_model.margin_requirement)
+        net_equity = summary["cash"] + long_market_value - short_liability + self.dividend_receivable()
         gross_exposure = long_market_value + short_liability
         net_exposure = long_market_value - short_liability
         slippage_cost = summary["slippage_cost"]
@@ -5687,7 +6004,7 @@ class PortfolioLedger:
             slippage_cost + commission_cost + other_fees + borrow_cost + financing_cost
         )
         gross_equity = net_equity + cumulative_costs
-        assert net_equity == summary["cash"] + long_market_value - short_liability
+        assert net_equity == summary["cash"] + long_market_value - short_liability + self.dividend_receivable()
         assert gross_equity - cumulative_costs == net_equity
         return AccountSnapshot(
             stable_id("snapshot", self.cohort_id, epoch_id, session),
@@ -5701,7 +6018,7 @@ class PortfolioLedger:
             gross_exposure,
             net_exposure,
             margin_used,
-            summary["cash"] - margin_used,
+            summary["cash"] - margin_used + self.dividend_payable_reserve(),
             summary["realized_pnl"],
             unrealized_pnl,
             gross_equity,
@@ -5715,6 +6032,7 @@ class PortfolioLedger:
             max(summary["high_water_mark"], net_equity),
             valid,
             invalid_reason,
+            self.dividend_receivable(),
         )
 
     def _accounting_summary(self) -> dict[str, Decimal]:
@@ -5870,6 +6188,7 @@ class PortfolioLedger:
             "high_water_mark",
             "valid",
             "invalid_reason",
+            "dividend_receivable",
         )
         if any(
             row[column] != value
@@ -5907,6 +6226,7 @@ class PortfolioLedger:
             cls._encode(snapshot.high_water_mark),
             cls._encode(snapshot.valid),
             snapshot.invalid_reason,
+            cls._encode(snapshot.dividend_receivable),
         )
 
     @classmethod
@@ -6037,6 +6357,7 @@ class PortfolioLedger:
             *values,
             bool(row["valid"]),
             row["invalid_reason"],
+            _decimal(row["dividend_receivable"]) if "dividend_receivable" in row.keys() else Decimal(0),
         )
 
     @staticmethod

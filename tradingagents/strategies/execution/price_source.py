@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 import time
+import os
+import json
+
 from types import MappingProxyType
 from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
@@ -23,6 +26,7 @@ from tradingagents.strategies.execution.alpaca_daily_bar import (
     ADJUSTMENT as SIP_ADJUSTMENT,
     FEED as SIP_FEED,
     HISTORICAL_DELAY,
+    MAX_BATCH_SYMBOLS,
     SOURCE as SIP_SOURCE,
     TIMEFRAME as SIP_TIMEFRAME,
     AlpacaBarFailure,
@@ -58,6 +62,8 @@ class AdjustedClose:
     close: Decimal
     source: str
     fetched_at: datetime
+    previous_session: date | None = None
+    previous_close: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.close, Decimal):
@@ -88,6 +94,7 @@ class CandidateBarResolution:
     attempts: tuple[CandidateBarAttempt, ...]
     recovered_tickers: frozenset[str]
     quarantined_tickers: frozenset[str]
+    eligibility_evidence: Mapping[str, dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -262,6 +269,42 @@ def validate_adjusted_closes(
             errors.append(f"stale {symbol}/{session}")
     if errors:
         raise BarValidationError("; ".join(errors))
+
+
+def paired_adjusted_closes(
+    closes: dict[tuple[str, date], AdjustedClose], symbols: tuple[str, ...], session: date
+) -> dict[tuple[str, date], AdjustedClose]:
+    """Bind adjacent observations acquired together in one adjustment vintage."""
+    from dataclasses import replace
+    from tradingagents.strategies.orchestration.trading_calendar import previous_session
+
+    prior = previous_session(session)
+    pairs: dict[tuple[str, date], AdjustedClose] = {}
+    for symbol in symbols:
+        current = closes.get((symbol, session))
+        previous = closes.get((symbol, prior))
+        if current is None or previous is None:
+            raise BarValidationError(f"missing paired benchmark {symbol}/{prior}/{session}")
+        if current.symbol != symbol or current.session != session or previous.symbol != symbol or previous.session != prior:
+            raise BarValidationError(f"mismatched paired benchmark {symbol}/{session}")
+        if current.source != previous.source or current.fetched_at != previous.fetched_at:
+            raise BarValidationError(f"mixed-vintage benchmark {symbol}/{session}")
+        if not previous.close.is_finite() or previous.close <= 0:
+            raise BarValidationError(f"invalid paired benchmark {symbol}/{prior}")
+        pairs[(symbol, session)] = replace(current, previous_session=prior, previous_close=previous.close)
+    return pairs
+
+
+def validate_benchmark_pairs(
+    closes: dict[tuple[str, date], AdjustedClose], symbols: set[str], session: date
+) -> None:
+    from tradingagents.strategies.orchestration.trading_calendar import previous_session
+
+    prior = previous_session(session)
+    for symbol in symbols:
+        current = closes[(symbol, session)]
+        if current.previous_session != prior or not isinstance(current.previous_close, Decimal) or not current.previous_close.is_finite() or current.previous_close <= 0:
+            raise BarValidationError(f"missing_or_invalid_same_vintage_benchmark_pair {symbol}/{session}")
 
 
 class YFinancePriceSource:
@@ -979,7 +1022,80 @@ class YFinancePriceSource:
                         verified=True,
                     )
                 )
-        return actions
+        return self.enrich_dividend_payment_terms(actions)
+
+    @staticmethod
+    def _payment_terms_get(url: str, **options) -> dict:
+        from tradingagents.strategies.runtime_deadline import bounded_transport
+
+        result = bounded_transport({"kind": "http_get", "url": url, **options}, options["timeout"])
+        if result.get("error") or result.get("status_code") != 200:
+            return {}
+        return json.loads(result["body"])
+
+    def enrich_dividend_payment_terms(
+        self, actions: list[CorporateAction] | tuple[CorporateAction, ...]
+    ) -> list[CorporateAction]:
+        """Enrich the date of an exact, unambiguous existing dividend identity.
+
+        Alpaca filters process_date, not ex_date. Include upcoming processing
+        dates, then join on ex_date and amount; actual observation time is kept.
+        The existing action owns the economic amount; this source only adds a
+        date. Missing optional currency is not asserted to be USD. An explicit
+        foreign denomination, ambiguity or unsupported terms remains unknown.
+        """
+        unknown = [a for a in actions if a.action_type == "cash_dividend" and a.payment_date is None]
+        key, secret = os.environ.get("ALPACA_API_KEY", ""), os.environ.get("ALPACA_SECRET_KEY", "")
+        if not unknown or not key or not secret:
+            return list(actions)
+        observed = self._now()
+        params = {"symbols": ",".join(sorted({a.ticker for a in unknown})),
+                  "types": "cash_dividend", "start": (min(a.session for a in unknown) - timedelta(days=366)).isoformat(),
+                  "end": (observed.date() + timedelta(days=366)).isoformat(),
+                  "limit": 1000, "sort": "asc"}
+        rows = []
+        deadline = time.monotonic() + 15.0
+        try:
+            # No retry; incomplete pagination never authorizes cash.
+            for _ in range(3):
+                payload = self._payment_terms_get("https://data.alpaca.markets/v1/corporate-actions",
+                    params=dict(params), headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                    timeout=min(5.0, deadline - time.monotonic()))
+                if not isinstance(payload, dict) or not isinstance(payload.get("corporate_actions"), dict):
+                    return list(actions)
+                page = payload["corporate_actions"].get("cash_dividends", [])
+                if not isinstance(page, list):
+                    return list(actions)
+                rows.extend(page)
+                token = payload.get("next_page_token")
+                if not token:
+                    break
+                params["page_token"] = token
+            else:
+                return list(actions)
+        except (TimeoutError, OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return list(actions)
+        observed = self._now()
+        enriched = []
+        for action in actions:
+            candidates = [r for r in rows if isinstance(r, dict) and r.get("symbol") == action.ticker and r.get("ex_date") == action.session.isoformat()]
+            if action not in unknown or len(candidates) != 1:
+                enriched.append(action)
+                continue
+            row = candidates[0]
+            try:
+                payable = date.fromisoformat(row["payable_date"])
+                if (payable < action.session or Decimal(str(row["rate"])) != action.cash_per_share
+                    or row.get("currency") not in (None, "", "USD") or not row.get("id")
+                    or row.get("due_bill_on_date") or row.get("due_bill_off_date")
+                    or row.get("sub_type")):
+                    raise ValueError("unsupported or mismatched payment terms")
+                enriched.append(replace(action, payment_date=payable,
+                    payment_source="alpaca-corporate-actions-v1", payment_reference=str(row["id"]),
+                    payment_observed_at=observed))
+            except (ValueError, KeyError, TypeError, InvalidOperation):
+                enriched.append(action)
+        return enriched
 
     def get_total_return_closes(
         self,
@@ -1119,16 +1235,20 @@ class AlpacaSIPPriceSource:
         sip_source: AlpacaHistoricalSIPSource | None = None,
         research_source: PriceSource | None = None,
         now: Callable[[], datetime] | None = None,
+        capture_eligibility: bool = False,
     ) -> None:
         self._sip_source = sip_source or AlpacaHistoricalSIPSource()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._research_source = research_source or YFinancePriceSource(now=self._now)
         self._bars: OrderedDict[tuple[str, date], AlpacaDailyBarResult] = OrderedDict()
+        self._capture_eligibility = capture_eligibility
 
     def _fetch(
-        self, ticker: str, session: date, processed_at: datetime, max_age: timedelta
+        self, ticker: str, session: date, processed_at: datetime, max_age: timedelta,
+        *, supplied_result: AlpacaDailyBarResult | None = None,
+        acquired_at: datetime | None = None,
     ) -> tuple[MarketBar | None, AlpacaBarFailure | None, datetime]:
-        fetched_at = self._now()
+        fetched_at = acquired_at if acquired_at is not None else self._now()
         if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
             raise BarValidationError("now must return a timezone-aware datetime")
         if processed_at.tzinfo is None or processed_at.utcoffset() is None:
@@ -1141,10 +1261,13 @@ class AlpacaSIPPriceSource:
             del self._bars[key]
             result = None
         if result is None:
-            try:
-                result = self._sip_source.fetch_daily_bar(ticker, session, now=fetched_at)
-            except Exception:
-                return None, AlpacaBarFailure.TRANSPORT_ERROR, fetched_at
+            if supplied_result is not None:
+                result = supplied_result
+            else:
+                try:
+                    result = self._sip_source.fetch_daily_bar(ticker, session, now=fetched_at)
+                except Exception:
+                    return None, AlpacaBarFailure.TRANSPORT_ERROR, fetched_at
         if not isinstance(result, AlpacaDailyBarResult):
             return None, AlpacaBarFailure.INVALID_RESPONSE, fetched_at
         if result.failure is not None:
@@ -1230,24 +1353,78 @@ class AlpacaSIPPriceSource:
         bars = {}
         attempts = []
         failures = set()
-        for ticker in dict.fromkeys(tickers):
-            bar, failure, fetched_at = self._fetch(ticker, session, processed_at, max_age)
-            attempts.append(
-                CandidateBarAttempt(
-                    ticker, session, 1, SIP_SOURCE, fetched_at,
-                    bar.open if bar else None,
-                    bar.high if bar else None,
-                    bar.low if bar else None,
-                    bar.close if bar else None,
-                    f"{failure.value} {ticker}/{session}" if failure else None,
+        eligibility_evidence = {}
+        symbols = list(dict.fromkeys(tickers))
+        batch_fetch = getattr(self._sip_source, "fetch_daily_bars", None)
+        # Keep scalar public/provider implementations compatible. Native batches
+        # use only the documented exact-symbol endpoint, with no fallback.
+        use_batch = (len(symbols) > 1 or self._capture_eligibility) and callable(batch_fetch)
+        for offset in range(0, len(symbols), MAX_BATCH_SYMBOLS):
+            chunk = symbols[offset:offset + MAX_BATCH_SYMBOLS]
+            batch_results = None
+            acquired_at = None
+            if use_batch:
+                acquired_at = self._now()
+                if acquired_at.tzinfo is None or acquired_at.utcoffset() is None:
+                    raise BarValidationError("now must return a timezone-aware datetime")
+                pending = [ticker for ticker in chunk if (
+                    (cached := self._bars.get((ticker, session))) is None
+                    or cached.bar is None or acquired_at - cached.bar.fetched_at > max_age
+                )]
+                if pending:
+                    try:
+                        batch_results = batch_fetch(pending, session, now=acquired_at,
+                            **({'capture_eligibility': True} if self._capture_eligibility else {}))
+                    except Exception:
+                        batch_results = {ticker: AlpacaDailyBarResult(
+                            None, AlpacaBarFailure.TRANSPORT_ERROR, reason_code="transport_error",
+                        ) for ticker in pending}
+                    if not isinstance(batch_results, dict) or set(batch_results) != set(pending):
+                        batch_results = {ticker: AlpacaDailyBarResult(
+                            None, AlpacaBarFailure.INVALID_RESPONSE, reason_code="invalid_response",
+                        ) for ticker in pending}
+            for ticker in chunk:
+                result = batch_results.get(ticker) if batch_results is not None else None
+                if batch_results is not None and ticker in batch_results and not isinstance(result, AlpacaDailyBarResult):
+                    result = AlpacaDailyBarResult(
+                        None, AlpacaBarFailure.INVALID_RESPONSE, reason_code="invalid_response",
+                    )
+                bar, failure, fetched_at = self._fetch(
+                    ticker, session, processed_at, max_age,
+                    supplied_result=result, acquired_at=acquired_at,
                 )
-            )
-            if bar is not None:
-                bars[(ticker, session)] = bar
-            else:
-                failures.add(ticker)
+                if (self._capture_eligibility and result is not None
+                        and result.eligibility_evidence is not None):
+                    eligibility_evidence[ticker] = result.eligibility_evidence
+                error = f"{failure.value} {ticker}/{session}" if failure else None
+                if failure and result is not None and result.reason_code is not None:
+                    # New fixed diagnostics fit the historical evidence schema.
+                    # Do not remap old strings: immutable replay derives their
+                    # original coarse issue category from that exact prefix.
+                    prefix = failure.value
+                    if result.reason_code == "missing_data":
+                        prefix = "missing"
+                    elif failure in {AlpacaBarFailure.TRANSPORT_ERROR, AlpacaBarFailure.HTTP_ERROR,
+                                     AlpacaBarFailure.MISSING_CREDENTIALS}:
+                        prefix = "provider_error"
+                    elif failure == AlpacaBarFailure.SESSION_NOT_READY:
+                        prefix = "pre-close"
+                    details = f"failure={failure.value};reason={result.reason_code};attempts={result.attempts}"
+                    if result.http_status is not None:
+                        details += f";http_status={result.http_status}"
+                    error = f"{prefix} {ticker}/{session} [{details}]"
+                attempts.append(CandidateBarAttempt(
+                    ticker, session, 1, SIP_SOURCE, fetched_at,
+                    bar.open if bar else None, bar.high if bar else None,
+                    bar.low if bar else None, bar.close if bar else None, error,
+                ))
+                if bar is not None:
+                    bars[(ticker, session)] = bar
+                else:
+                    failures.add(ticker)
         return CandidateBarResolution(
-            bars, tuple(attempts), frozenset(), frozenset(failures)
+            bars, tuple(attempts), frozenset(), frozenset(failures),
+            eligibility_evidence if self._capture_eligibility else None,
         )
 
     def resolve_governed_daily_bars(
@@ -1288,6 +1465,10 @@ class AlpacaSIPPriceSource:
     ) -> list[CorporateAction]:
         return self._research_source.get_corporate_actions(tickers, session)
 
+    def enrich_dividend_payment_terms(self, actions: list[CorporateAction] | tuple[CorporateAction, ...]) -> list[CorporateAction]:
+        enrich = getattr(self._research_source, "enrich_dividend_payment_terms", None)
+        return enrich(actions) if enrich else list(actions)
+
     def get_total_return_closes(
         self,
         symbols: list[str],
@@ -1308,7 +1489,9 @@ def build_price_source(config: Mapping[str, object]) -> PriceSource:
         .get("pricing_version", SIP_PRICING_VERSION)
     )
     if version == SIP_PRICING_VERSION:
-        return AlpacaSIPPriceSource()
+        return AlpacaSIPPriceSource(capture_eligibility=(
+            config.get('autoresearch', {}).get('new_entry_eligibility_policy')
+            == 'reference_session_activity_v1'))
     raise ValueError("unsupported pricing_version")
 
 
@@ -1503,12 +1686,9 @@ def _optional_action_decimal(
     value: object, ticker: str, session: date, field: str
 ) -> Decimal | None:
     if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
+        raise CorporateActionValidationError(f"missing action evidence {ticker}/{session} {field}")
+    if pd.isna(value):
+        raise CorporateActionValidationError(f"missing action evidence {ticker}/{session} {field}")
     try:
         decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

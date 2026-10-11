@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eventedge"
 version = "0.4.0"
-description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 12 strategies, with LLM-powered portfolio committee."
+description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 11 enabled strategies, with LLM-powered portfolio committee."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.86.0",
+    "beautifulsoup4>=4.13.4,<5",
     "openai>=1.66.0",
     "alpaca-py>=0.35.0",
     "exchange-calendars>=4.13.2,<5",
@@ -20,6 +21,7 @@ dependencies = [
     "numpy>=1.26.0",
     "scipy>=1.11",
     "pandas>=2.3.0",
+    "pyarrow>=24.0.0",
     "plotly>=6.0.0",
     "python-dotenv>=1.0.0",
     "requests>=2.32.4",

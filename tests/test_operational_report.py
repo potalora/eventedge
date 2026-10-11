@@ -136,7 +136,7 @@ def test_optional_clef_status_is_reported_without_changing_financial_validity(na
     if kind != 'missing':
         evaluate_shadow(state_dir=state, generation=GENERATION, session=SESSION, epoch_id=EPOCH, generation_commit=COMMIT,
             signals=[{'event_key':'docket-1','ticker':'NVDA','strategy':'litigation','direction':'short',
-                      'metadata':{'docket_id':1,'llm_analysis':{'rationale':'Company faces a patent suit.'}}}],
+                      'metadata':{'docket_id':1,'llm_analysis':{'evidence_claim':'NVDA faces a patent suit.'}}}],
             data={'courtlistener':{'dockets':[{'docket_id':1,'case_name':'Patent holder v NVDA','nature_of_suit':'Patent'}]}},
             config={'enabled':True,'mode':'shadow'}, environ={})
         if kind == 'corrupt':
@@ -174,6 +174,50 @@ def test_multiple_daily_attempts_preserve_preflight_incident_without_tainting_cl
     assert report['sources']['recovered'][0]['provider'] == 'edgar'
     assert len(report['cohorts']) == 16
     assert report['accounting_valid'] is True
+
+
+def test_governed_preflight_success_preserves_separate_screen_failure(native_evidence):
+    repo, state, wire = native_evidence
+    failed = _attempt(repo, None, action='preflight', ordinal=1, return_code=1)
+    passed = _attempt(repo, None, action='preflight', ordinal=2)
+    artifact = json.loads(passed.read_text())
+    artifact.update(preflight_mode='governed', stderr='')
+    artifact['result'] = {'success': True, 'elapsed_s': 1.0,
+                          'preflight_mode': 'governed', 'governed_ok': True,
+                          'state_status': 'uninitialized', 'governed_probe_status': 'ready',
+                          'governed_bar_recoveries': [], 'governed_failure_map': {}}
+    passed.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=3)
+
+    report = _report(repo)
+    assert report['outcome'] == 'clean' and report['evidence_complete']
+    preflights = [row for row in report['attempts'] if row['action'] == 'preflight']
+    assert [(row['preflight_mode'], row['preflight_ok']) for row in preflights] == [
+        ('screen', False), ('governed', True)]
+    assert len(report['preflight_incidents']) == 1
+    assert report['preflight_incidents'][0]['attempt_id'] == failed.name
+    assert report['preflight_incidents'][0]['preflight_mode'] == 'screen'
+    markdown = render_operational_report(report)
+    assert f'{failed.name}: screen (source screening); failed' in markdown
+    assert f'{passed.name}: governed (price readiness); passed' in markdown
+    assert 'a successful governed price check does not establish source recovery' in markdown
+
+
+@pytest.mark.parametrize('mode,result_mode', [
+    (None, None), ('PRIVATE_SECRET', 'PRIVATE_SECRET'),
+    (['screen'], 'screen'), ('screen', 'governed'),
+])
+def test_report_rejects_unbound_or_conflicting_preflight_modes(native_evidence, mode, result_mode):
+    repo, state, wire = native_evidence
+    path = _attempt(repo, None, action='preflight', ordinal=1, return_code=1)
+    artifact = json.loads(path.read_text())
+    artifact['preflight_mode'] = mode
+    artifact['result']['preflight_mode'] = result_mode
+    path.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=2)
+    report = _report(repo)
+    assert any(row['code'] == 'attempt_unreadable' for row in report['diagnostics'])
+    assert 'PRIVATE_SECRET' not in render_operational_report(report)
 
 
 def test_native_source_failures_reach_report_without_process_error_logs(native_evidence):

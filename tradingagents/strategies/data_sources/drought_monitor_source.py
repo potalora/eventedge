@@ -14,6 +14,7 @@ from typing import Any
 
 import requests
 
+from .evidence import current_session_date, require_current_vintage, acquisition_time
 from .request_policy import provider_request
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
@@ -22,6 +23,8 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://usdmdataservices.unl.edu/api/StateStatistics/GetDroughtSeverityStatisticsByAreaPercent"
 
 # Default agricultural states (same as NOAA/USDA sources)
+STATE_FIPS = {"IA":"19", "IL":"17", "KS":"20", "NE":"31", "MN":"27",
+              "IN":"18", "OH":"39", "SD":"46", "ND":"38", "MO":"29"}
 DEFAULT_AG_STATES = ["IA", "IL", "KS", "NE", "MN", "IN", "OH", "SD", "ND", "MO"]
 
 
@@ -59,7 +62,8 @@ class DroughtMonitorSource:
         states: list[str] | None = None,
         start: str | None = None,
         end: str | None = None,
-    ) -> dict[str, dict[str, float]]:
+        *, vintage_as_of: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Fetch drought category percentages for each state.
 
         Args:
@@ -69,23 +73,28 @@ class DroughtMonitorSource:
 
         Returns:
             Dict mapping state abbreviation to drought categories:
-            {state: {"None": pct, "D0": pct, "D1": pct, "D2": pct, "D3": pct, "D4": pct}}
+            {state: {"None": pct, "D0": pct, ..., "D4": pct,
+                     "observation_date": date, "acquired_at": timestamp, "available_at": timestamp}}
         """
-        states = states or DEFAULT_AG_STATES
+        states = list(dict.fromkeys(state.upper() for state in (states or DEFAULT_AG_STATES)))
+        if any(state not in STATE_FIPS for state in states):
+            raise SourceFetchError("Drought Monitor unsupported state", reason_code="invalid_response")
         if end is None:
-            end = datetime.now().strftime("%Y-%m-%d")
+            end = current_session_date()
         if start is None:
             start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+
+        require_current_vintage(end, vintage_as_of, today=current_session_date())
 
         # Convert dates to API format (M/d/yyyy)
         start_fmt = datetime.strptime(start, "%Y-%m-%d").strftime("%-m/%-d/%Y")
         end_fmt = datetime.strptime(end, "%Y-%m-%d").strftime("%-m/%-d/%Y")
 
         params = {
-            "aoi": ",".join(states),
+            "aoi": ",".join(STATE_FIPS[state] for state in states),
             "startdate": start_fmt,
             "enddate": end_fmt,
-            "statisticsType": 1,  # State-level
+            "statisticsType": 2,  # Disjoint categorical areas, not cumulative exceedances
         }
 
         response = provider_request("drought_monitor", "GET", BASE_URL, operation="severity",
@@ -97,17 +106,26 @@ class DroughtMonitorSource:
         except Exception:
             raise SourceFetchError("Drought Monitor response invalid", reason_code="invalid_response") from None
 
-        result: dict[str, dict[str, float]] = {}
+        acquired_at = acquisition_time()
+        result: dict[str, dict[str, Any]] = {}
         latest_dates = {}
         invalid = False
         for record in data:
+            # Live JSON uses camel case; retain explicit legacy-field support.
+            record = {key: record.get(native, record.get(key)) for key, native in {
+                "StateAbbreviation":"stateAbbreviation", "MapDate":"mapDate",
+                "StatisticFormatID":"statisticFormatID", "None":"none",
+                **{f"D{i}":f"d{i}" for i in range(5)},
+            }.items()}
             state = record.get("StateAbbreviation")
             map_date = record.get("MapDate")
             if isinstance(map_date, str) and len(map_date) == 8 and map_date.isdigit():
                 map_date = f"{map_date[:4]}-{map_date[4:6]}-{map_date[6:]}"
             categories = ("None", "D0", "D1", "D2", "D3", "D4")
             if (not source_text(state) or not source_date(map_date)
-                    or not all(source_number(record.get(key), minimum=0, maximum=100) for key in categories)):
+                    or not all(source_number(record.get(key), minimum=0, maximum=100) for key in categories)
+                    or record.get("StatisticFormatID") != 2
+                    or abs(sum(float(record[key]) for key in categories) - 100) > 0.2):
                 invalid = True
                 continue
             if state not in states or not start <= map_date[:10] <= end:
@@ -115,6 +133,12 @@ class DroughtMonitorSource:
             if state not in latest_dates or map_date > latest_dates[state]:
                 latest_dates[state] = map_date
                 result[state] = {key: float(record[key]) for key in categories}
+                result[state].update({"observation_date":map_date[:10], "acquired_at":acquired_at,
+                                      "available_at":acquired_at, "statistics_type":"categorical"})
+        missing = set(states) - result.keys()
+        if missing:
+            raise SourceFetchError("Drought Monitor requested states unavailable", reason_code="invalid_response",
+                                   partial_data={"states":result, "coverage":{"complete":False,"missing_states":sorted(missing)}})
         if invalid:
             raise SourceFetchError("Drought Monitor records invalid", reason_code="invalid_response",
                                    partial_data={"states": result})
@@ -124,6 +148,7 @@ class DroughtMonitorSource:
         self,
         states: list[str] | None = None,
         date: str | None = None,
+        *, vintage_as_of: str | None = None,
     ) -> float:
         """Compute a single 0-4 weighted drought score across ag states.
 
@@ -141,13 +166,14 @@ class DroughtMonitorSource:
         """
         states = states or DEFAULT_AG_STATES
         if date is None:
-            date = datetime.now().strftime("%Y-%m-%d")
+            date = current_session_date()
 
         start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
-        severity = self.fetch_drought_severity(states, start, date)
+        options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+        severity = self.fetch_drought_severity(states, start, date, **options)
 
         if not severity:
-            return 0.0
+            raise SourceFetchError("Drought Monitor observations unavailable", reason_code="invalid_response")
 
         scores = []
         for state_data in severity.values():

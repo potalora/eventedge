@@ -1500,3 +1500,125 @@ class TestRunLogPersistence:
         log = state_dir / "last_run_output.log"
         assert log.exists()
         assert "Regulations.gov fetch: 20 proposed rules" in log.read_text()
+
+
+@pytest.mark.parametrize("action", ["start", "pause", "resume", "retire"])
+def test_lifecycle_refuses_inflight_daily_without_side_effects(manager, monkeypatch, action):
+    """An acknowledged operator change cannot be lost by an in-flight writer."""
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+    info = manager.start_generation("existing")
+    before_worktrees = set(manager._worktrees_dir.iterdir())
+
+    def worker(*args, **kwargs):
+        before = manager._manifest_path.read_bytes()
+        with pytest.raises(RuntimeLockBusy):
+            if action == "start":
+                manager.start_generation("racing")
+            elif action == "retire":
+                manager.retire_generation(info.gen_id)
+            else:
+                getattr(manager, f"{action}_generation")(info.gen_id)
+        assert manager._manifest_path.read_bytes() == before
+        assert set(manager._worktrees_dir.iterdir()) == before_worktrees
+        return {"outcome": "clean", "success": True, "elapsed_s": 0.0}
+
+    monkeypatch.setattr(manager, "_run_cohorts_subprocess", worker)
+    assert manager.run_daily("2026-10-09")[info.gen_id]["success"]
+    manager.pause_generation(info.gen_id)
+    assert manager.get_generation(info.gen_id).status == "paused"
+
+
+@pytest.mark.parametrize("damage", ["truncated", "missing_roster", "wrong_roster", "duplicate_id", "bad_status", "bad_history"])
+def test_invalid_existing_manifest_is_preserved_and_never_run(manager, monkeypatch, damage):
+    manager.start_generation("existing")
+    manifest = json.loads(manager._manifest_path.read_text())
+    if damage == "truncated":
+        raw = b'{"generations": ['
+    else:
+        if damage == "missing_roster":
+            manifest = {}
+        elif damage == "wrong_roster":
+            manifest["generations"] = {}
+        elif damage == "duplicate_id":
+            manifest["generations"] *= 2
+        elif damage == "bad_status":
+            manifest["generations"][0]["status"] = "typo"
+        else:
+            manifest["generations"][0]["run_history"] = "not a list"
+        raw = json.dumps(manifest).encode()
+    manager._manifest_path.write_bytes(raw)
+    worker = MagicMock()
+    monkeypatch.setattr(manager, "_run_cohorts_subprocess", worker)
+    with pytest.raises(ValueError, match="manifest"):
+        manager.run_daily("2026-10-09")
+    assert manager._manifest_path.read_bytes() == raw
+    worker.assert_not_called()
+
+
+def test_corrupt_manifest_daily_cli_fails_without_overwriting(manager, monkeypatch, capsys):
+    from scripts import run_generations
+
+    raw = b'{"generations": ['
+    manager._manifest_path.write_bytes(raw)
+    monkeypatch.setattr(run_generations, "_repo_root", lambda: str(manager._repo_root))
+    monkeypatch.setattr(sys, "argv", ["run_generations.py", "run-daily", "--date", "2026-10-09"])
+    with pytest.raises(SystemExit) as error:
+        run_generations.main()
+    assert error.value.code != 0
+    assert "manifest" in capsys.readouterr().err.lower()
+    assert manager._manifest_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("state_kind", ["missing", "old_schema", "ready", "busy"])
+def test_compare_opens_only_existing_state_under_shared_lock(tmp_path, monkeypatch, capsys, state_kind):
+    from contextlib import contextmanager
+    from copy import deepcopy
+    from decimal import Decimal
+    from types import SimpleNamespace
+    import sqlite3
+    from scripts import run_cohorts
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.strategies.metrics.store import MetricStore
+    from tradingagents.strategies.orchestration import cohort_orchestrator
+    from tradingagents.strategies.orchestration.runtime_lock import runtime_lock, RuntimeLockBusy
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+    state = tmp_path / 'state'
+    config = deepcopy(DEFAULT_CONFIG)
+    config['autoresearch']['state_dir'] = str(state)
+    cohort = next(row for row in cohort_orchestrator.build_default_cohorts(config) if row.name == 'horizon_3m_size_100k')
+    monkeypatch.setattr(cohort_orchestrator, 'build_default_cohorts', lambda _: [cohort])
+    lock_path = tmp_path / 'runtime.lock'
+    lock_modes = []
+
+    @contextmanager
+    def lock_context(*, exclusive):
+        lock_modes.append(exclusive)
+        with runtime_lock(lock_path, exclusive=exclusive) as lock:
+            yield lock
+
+    monkeypatch.setattr(run_cohorts, '_runtime_lock_context', lock_context)
+    if state_kind in {'ready', 'busy'}:
+        ledger = PortfolioLedger(state / cohort.name / 'portfolio.db', cohort.name, Decimal('100000.0'))
+        ledger.close()
+        MetricStore(state / 'metrics_v2.sqlite3')
+    elif state_kind == 'old_schema':
+        state.mkdir()
+        with sqlite3.connect(state / 'metrics_v2.sqlite3') as connection:
+            connection.execute('CREATE TABLE legacy(value TEXT)')
+    before = {p.relative_to(state): p.read_bytes() for p in state.rglob('*') if p.is_file()}
+    args = SimpleNamespace(no_llm=True)
+    if state_kind == 'busy':
+        with runtime_lock(lock_path, exclusive=True):
+            with pytest.raises(SystemExit):
+                run_cohorts._run_compare(args, config, 'gen_001', 'a' * 40)
+    elif state_kind == 'ready':
+        run_cohorts._run_compare(args, config, 'gen_001', 'a' * 40)
+        assert json.loads(capsys.readouterr().out)['epoch'] is None
+    else:
+        with pytest.raises((FileNotFoundError, sqlite3.DatabaseError)):
+            run_cohorts._run_compare(args, config, 'gen_001', 'a' * 40)
+    assert lock_modes == [False]
+    after = {p.relative_to(state): p.read_bytes() for p in state.rglob('*') if p.is_file()}
+    assert after == before

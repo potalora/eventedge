@@ -13,6 +13,14 @@ _ET = ZoneInfo("America/New_York")
 _UTC = ZoneInfo("UTC")
 
 
+def exchange_date(now: datetime | None = None) -> date:
+    """New York calendar date; session validity and catch-up remain explicit."""
+    instant = datetime.now(_UTC) if now is None else now
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ValueError("exchange clock requires an aware timestamp")
+    return instant.astimezone(_ET).date()
+
+
 def _label(session: date) -> pd.Timestamp:
     """Return a UTC-normalized, timezone-naive exchange session label.
 
@@ -60,7 +68,7 @@ def session_close(session: date) -> datetime:
 
 def resolve_trading_date(date_str: str | None = None) -> str:
     """Resolve a date to the current or prior XNYS session in New York time."""
-    local = datetime.now(_ET).date() if date_str is None else date.fromisoformat(date_str)
+    local = exchange_date() if date_str is None else date.fromisoformat(date_str)
     if is_session(local):
         return local.isoformat()
     return _XNYS.date_to_session(_label(local), direction="previous").date().isoformat()

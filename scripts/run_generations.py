@@ -364,7 +364,7 @@ def _print_run_evidence(result: dict) -> None:
         print(f"    Evidence unavailable: {result['evidence_error']}")
 
 
-def main():
+def _main():
     parser = argparse.ArgumentParser(
         description="Manage parallel paper trading generations",
     )
@@ -523,7 +523,8 @@ def main():
     elif args.command == "run-daily":
         from tradingagents.strategies.orchestration.trading_calendar import is_session
 
-        requested = args.date or date.today().isoformat()
+        from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+        requested = args.date or exchange_date().isoformat()
         try:
             trading_session = date.fromisoformat(requested)
         except ValueError:
@@ -556,7 +557,8 @@ def main():
     elif args.command == "preflight":
         from tradingagents.strategies.orchestration.trading_calendar import is_session
 
-        requested = args.date or date.today().isoformat()
+        from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+        requested = args.date or exchange_date().isoformat()
         try:
             trading_session = date.fromisoformat(requested)
         except ValueError:
@@ -681,6 +683,19 @@ def main():
                     default=str,
                 )
             print(f"Wrote {args.json}")
+
+
+def main() -> None:
+    from tradingagents.strategies.orchestration.generation_manager import GenerationManifestError
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy, RuntimeLockInvalid
+
+    try:
+        _main()
+    except GenerationManifestError as error:
+        print(f"Generation manifest error: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+        _exit_runtime_lock_error(error)
 
 
 if __name__ == "__main__":
