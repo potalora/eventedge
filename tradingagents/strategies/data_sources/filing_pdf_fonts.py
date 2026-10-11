@@ -325,7 +325,8 @@ class FontDecoder:
                 if isinstance(value,list):items=list(enumerate(value,start))
                 else:
                     if not integer(value,start) or index>=len(widths):fail('pdf_invalid_font_width')
-                    items=((c,widths[index]) for c in range(start,value+1));index+=1
+                    range_width=widths[index];index+=1
+                    items=((c,range_width) for c in range(start,value+1))
                 for c,width in items:
                     if c in self.widths or not integer(c) or not number(width) or width<0:fail('pdf_invalid_font_width')
                     self.widths[c]=float(width)

@@ -288,6 +288,11 @@ def _properties(value, tag):
         elif tag == '/Artifact' and key == '/Attached':
             if not isinstance(item, list) or not item or any(not isinstance(v, NameObject) or v not in ('/Top','/Bottom','/Left','/Right') for v in item):
                 raise FilingPDFError('pdf_invalid_marked_properties')
+        elif tag == '/Artifact' and key == '/BBox':
+            # Artifact bounds are source metadata, not replacement text or a
+            # clipping instruction. Preserve them in the operator provenance.
+            if not _numbers(item, 4) or item[0] > item[2] or item[1] > item[3]:
+                raise FilingPDFError('pdf_invalid_marked_properties')
         else:
             raise FilingPDFError('pdf_unsupported_marked_properties')
 

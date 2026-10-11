@@ -253,14 +253,25 @@ def _font(font,state):
         if descriptor is None:fail('invalid_font_descriptor')
     elif '/DescendantFonts' in font:fail('invalid_font_descendants')
     if descriptor is not None:
-        allowed_descriptor={'/Type','/FontName','/FontFamily','/FontStretch','/FontWeight','/Flags','/FontBBox','/ItalicAngle','/Ascent','/Descent','/Leading','/CapHeight','/XHeight','/StemV','/StemH','/AvgWidth','/MaxWidth','/MissingWidth','/FontFile','/FontFile2','/FontFile3','/CharSet'}
+        allowed_descriptor={'/Type','/FontName','/FontFamily','/FontStretch','/FontWeight','/Flags','/FontBBox','/ItalicAngle','/Ascent','/Descent','/Leading','/CapHeight','/XHeight','/StemV','/StemH','/AvgWidth','/MaxWidth','/MissingWidth','/FontFile','/FontFile2','/FontFile3','/CharSet','/CIDSet'}
         if not isinstance(descriptor,dict) or not set(descriptor)<=allowed_descriptor:fail('unsupported_font_descriptor')
         if '/FontBBox' in descriptor and not native._numbers(native._object(descriptor['/FontBBox']),4):fail('invalid_font_descriptor')
         if '/Flags' in descriptor and not integer(descriptor['/Flags']):fail('invalid_font_descriptor')
         if '/FontName' in descriptor and not isinstance(descriptor['/FontName'],NameObject):fail('invalid_font_descriptor')
         for key in ('/FontFile','/FontFile2','/FontFile3'):
             if key in descriptor and not hasattr(native._object(descriptor[key]),'_data'):fail('invalid_font_program_stream')
-    return _record(font,state)
+        if '/CIDSet' in descriptor:
+            cidset=native._object(descriptor['/CIDSet'])
+            if font['/Subtype']!='/Type0' or not hasattr(cidset,'_data') or not set(cidset)<={'/Length','/Filter','/DecodeParms'}:fail('invalid_cidset_declaration')
+    receipt=_record(font,state)
+    if descriptor is not None and '/CIDSet' in descriptor:
+        # Each bit declares one CID in the existing 16-bit CID namespace. The
+        # normal resource recorder decodes once under the shared stream cap,
+        # retaining encoded/decoded hashes. This does not validate membership
+        # against the deliberately uninterpreted font program or text codes.
+        recorded=receipt['/DescendantFonts'][0]['/FontDescriptor']['/CIDSet']['stream']
+        if not 0<recorded['decoded_bytes']<=8192:fail('invalid_cidset_declaration')
+    return receipt
 
 def _resources(resources,state,active=()):
     """Every listed rendering resource is inventoried, including unused entries."""
