@@ -25,21 +25,59 @@ def completed_submission(record):
     observe(record)
 
 
-def _acquire_spooled(response, target, *, accession, form_type, filing_date, required_exhibits, material_policy=None):
+def _reconciliation_metadata(user_agent, record):
+    from .filing_inventory_reconciliation import build_reconciliation, MAX_METADATA_BYTES
+    directory=record.identity['source_url'].rsplit('/',1)[0];accession=record.identity['accession'];metadata={}
+    for key,suffix in (('index_headers',accession+'-index-headers.html'),('filing_index',accession+'-index.html'),('directory','index.json')):
+        provider_timeout('edgar');url=directory+'/'+suffix;response=None
+        try:
+            response=provider_request('edgar','GET',url,headers={'User-Agent':user_agent},timeout=15,
+                operation='submission_inventory',stream=True,allow_redirects=False)
+            if response.status_code!=200 or response.url!=url:raise ValueError
+            raw=read_bounded_response(response,provider='edgar',max_bytes=MAX_METADATA_BYTES)
+            provider_timeout('edgar')
+            import hashlib
+            metadata[key]={'body':raw.decode('utf-8'),'source_url':url,'status_code':200,'complete':True,
+                'size':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'observed_at':datetime.now(timezone.utc).isoformat()}
+        except (ValueError,TypeError,UnicodeError):
+            raise SourceFetchError('SEC inventory response invalid',reason_code='invalid_response') from None
+        finally:
+            if response is not None:response.close()
+    provider_timeout('edgar')
+    try:
+        result=build_reconciliation(metadata,original_identity=dict(record.identity),original_sha256=record.sha256,
+            original_size=record.size,observed_at=record.observed_at)
+    except (ValueError,TypeError,KeyError):
+        raise SourceFetchError('SEC inventory corroboration invalid',reason_code='invalid_response') from None
+    provider_timeout('edgar')
+    return result
+
+
+def _acquire_spooled(response, target, *, accession, form_type, filing_date, required_exhibits, material_policy=None, user_agent=''):
     record = spool_response(response, identity=dict(accession=accession, form=form_type,
         filing_date=filing_date, source_url=target))
     try:
         completed_submission(record)
         provider_timeout('edgar')
-        from .filing_parser_dispatch import current_dispatcher, dispatch_evidence
+        from .filing_parser_dispatch import current_dispatcher, dispatch_evidence, SubmissionDocumentCountMismatch
         if current_dispatcher() is None:
             raise SourceFetchError('SEC parser scope is required', reason_code='provider_error')
         arguments = {'material_policy': material_policy} if material_policy is not None else {}
-        result = dispatch_evidence(record, expected_accession=accession, expected_form=form_type,
+        identity=dict(expected_accession=accession, expected_form=form_type,
             expected_date=filing_date, observed_at=record.observed_at,
-            max_submission_bytes=512 * 1024 * 1024, required_exhibits=required_exhibits, **arguments)
+            max_submission_bytes=512 * 1024 * 1024, required_exhibits=required_exhibits)
+        try:
+            result = dispatch_evidence(record, **identity, **arguments)
+        except SubmissionDocumentCountMismatch:
+            if material_policy is not None:raise
+            provider_timeout('edgar')
+            proof=_reconciliation_metadata(user_agent,record)
+            result=dispatch_evidence(record,**identity,inventory_reconciliation=proof)
         provider_timeout('edgar')
         result['source_url'] = target
+        if 'inventory_reconciliation' in result:
+            record.owner.record_reconciliation(record,result)
+            provider_timeout('edgar')
         return result
     finally:
         record.owner.discard(record)
@@ -76,13 +114,13 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
     target = complete_submission_url(url, accession)
     selected_material_policy = None
     if material_policy is not None:
-        from .filing_material_policy import POLICY, approved_identity
+        from .filing_material_policy import SUPPORTED_POLICIES, approved_identity
         from .filing_parser_dispatch import current_dispatcher
-        if (material_policy != POLICY or current_submission_spool() is None
+        if (not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES or current_submission_spool() is None
                 or current_dispatcher() is None):
             raise ValueError('SEC material quarantine requires bounded spool and parser scopes')
         approved = approved_identity(dict(accession=accession, form=form_type,
-            filing_date=filing_date, source_url=target))
+            filing_date=filing_date, source_url=target), policy=material_policy)
         if approved is not None:
             selected_material_policy = material_policy
     if type(max_submission_bytes) is not int or not 1 <= max_submission_bytes <= 64 * 1024 * 1024:
@@ -108,7 +146,7 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
             spooled_response, response = response, None
             return _acquire_spooled(spooled_response, target, accession=accession,
                 form_type=form_type, filing_date=filing_date, required_exhibits=required_exhibits,
-                material_policy=selected_material_policy)
+                material_policy=selected_material_policy,user_agent=user_agent)
         raw = read_bounded_response(response, provider='edgar', max_bytes=max_submission_bytes)
         observed_at = datetime.now(timezone.utc).isoformat()
     finally:

@@ -107,7 +107,7 @@ class CFTCSource:
         start = end - timedelta(weeks=lookback_weeks + 2)
         frames = []
         for year in range(start.year, end.year + 1):
-            frame = provider_call("cftc", "cot_report", lambda year=year: cot.cot_year(year, cot_report_type=cot_type))
+            frame = provider_call("cftc", "cot_report", lambda year=year: cot.cot_year(year, cot_report_type=cot_type, store_txt=False))
             if not isinstance(frame, pd.DataFrame) or not {COL_MARKET, COL_DATE, COL_MM_LONG, COL_MM_SHORT}.issubset(frame.columns):
                 raise SourceFetchError("CFTC report invalid", reason_code="invalid_response")
             frames.append(frame)

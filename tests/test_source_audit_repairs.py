@@ -109,13 +109,16 @@ def test_cftc_rolling_lookback_and_acquisition_availability(monkeypatch):
     import tradingagents.strategies.data_sources.cftc_source as mod
     monkeypatch.setattr(mod, 'current_session_date', lambda: '2026-01-31', raising=False)
     years = []
+    options = []
     def annual(year, **kw):
         years.append(year)
+        options.append(kw)
         dates = pd.date_range('2025-02-04', periods=48, freq='7D') if year == 2025 else pd.date_range('2026-01-06', periods=4, freq='7D')
         return pd.DataFrame({mod.COL_MARKET:[mod.COMMODITY_CODES['gold']]*len(dates),mod.COL_DATE:dates.strftime('%Y-%m-%d'),mod.COL_MM_LONG:[200]*48 if year==2025 else [10,20,30,100],mod.COL_MM_SHORT:[0]*len(dates)})
     monkeypatch.setitem(sys.modules, 'cot_reports', NS(cot_year=annual))
     row = mod.CFTCSource().fetch({'commodities':['gold'],'lookback_weeks':52,'as_of':'2026-01-31'})['gold']
     assert set(years) >= {2025,2026}
+    assert options == [{'cot_report_type':'disaggregated_fut','store_txt':False} for _ in years]
     assert row['percentile'] == round(3/52,4) and row['lookback_observations'] == 52
     assert row['observation_date'] == '2026-01-27'
     assert row['available_at'] == row['acquired_at'] and row['available_at'] > row['observation_date']

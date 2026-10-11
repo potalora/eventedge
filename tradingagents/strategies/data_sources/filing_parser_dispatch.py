@@ -35,6 +35,17 @@ _META_LIMIT = 4 * 1024 * 1024
 _CURRENT = ContextVar('sec_parser_dispatch', default=None)
 
 
+if __name__ != '__main__':
+    # The direct pure worker never imports the provider failure module, whose
+    # HTTP dependencies are forbidden inside the child. This type is parent-only.
+    from .fetch_errors import SourceFetchError
+
+    class SubmissionDocumentCountMismatch(SourceFetchError):
+        """A closed normal submission needs independent inventory reconciliation."""
+        def __init__(self):
+            super().__init__('SEC submission document count mismatch', reason_code='invalid_response')
+
+
 def _json(raw):
     def pairs(items):
         result = {}
@@ -154,10 +165,14 @@ class _Dispatcher:
             from .filing_spool import CompletedSubmission, current_submission_spool
             receipt = isinstance(raw, CompletedSubmission)
             material_policy = arguments.get('material_policy')
+            reconciliation = 'inventory_reconciliation' in arguments
+            if reconciliation and (not receipt or material_policy is not None
+                    or not isinstance(arguments['inventory_reconciliation'], dict)):
+                raise _failure('invalid_response')
             if 'material_policy' in arguments:
-                from .filing_material_policy import POLICY as MATERIAL_POLICY, approved_identity
-                if (not receipt or material_policy != MATERIAL_POLICY
-                        or approved_identity(dict(raw.identity)) is None):
+                from .filing_material_policy import SUPPORTED_POLICIES, approved_identity
+                if (not receipt or not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES
+                        or approved_identity(dict(raw.identity), policy=material_policy) is None):
                     raise _failure('invalid_response')
             if receipt:
                 if raw.owner is not current_submission_spool():
@@ -219,6 +234,11 @@ class _Dispatcher:
             if set(response) == {'job', 'error'} and response['error'] == 'invalid_evidence':
                 ordinary_rejection = True
                 raise _failure('invalid_response')
+            if set(response) == {'job', 'error'} and response['error'] == 'document_count_mismatch':
+                if not receipt or material_policy is not None or reconciliation:
+                    raise ValueError('unexpected count reconciliation response')
+                ordinary_rejection = True
+                raise SubmissionDocumentCountMismatch()
             if set(response) != {'job', 'result'} or not isinstance(response['result'], dict):
                 raise ValueError('parser response schema')
             result = response['result']
@@ -228,9 +248,16 @@ class _Dispatcher:
                 'submission_sha256': digest}
             if any(result.get(key) != value for key, value in identities.items()):
                 raise ValueError('parser evidence identity')
+            if reconciliation != ('inventory_reconciliation' in result):
+                raise ValueError('parser inventory proof presence mismatch')
+            if reconciliation:
+                from .filing_inventory_reconciliation import validate_reconciled_evidence
+                validate_reconciled_evidence(result, original={'identity': dict(raw.identity),
+                    'sha256': raw.sha256, 'size': raw.size, 'observed_at': raw.observed_at},
+                    check=self._check)
             if material_policy is not None:
                 from .filing_material_policy import validate_quarantined_evidence
-                validate_quarantined_evidence(result)
+                validate_quarantined_evidence(result, policy=material_policy)
                 if result['material_quarantine']['submission_size'] != size:
                     raise ValueError('parser original size mismatch')
             self._check()
@@ -373,9 +400,12 @@ def _worker(deadline):
             'expected_date', 'observed_at', 'max_submission_bytes', 'required_exhibits'}
         spooled = isinstance(meta, dict) and meta.get('spooled') is True
         material_mode = spooled and isinstance(meta, dict) and 'material_policy' in meta
+        reconciliation_mode = spooled and isinstance(meta, dict) and 'inventory_reconciliation' in meta
         allowed = required | {'spooled', 'max_document_bytes'} if spooled else required
         if material_mode:
             allowed |= {'material_policy'}
+        elif reconciliation_mode:
+            allowed |= {'inventory_reconciliation'}
         raw_limit = _SPOOL_LIMIT if spooled else _RAW_LIMIT
         if (not isinstance(meta, dict) or set(meta) != allowed or type(meta['job']) is not int
                 or meta['job'] < 1 or type(meta['raw_size']) is not int
@@ -384,7 +414,8 @@ def _worker(deadline):
                 or not 0 < meta['max_submission_bytes'] <= raw_limit
                 or (spooled and (type(meta['max_document_bytes']) is not int
                                  or meta['max_document_bytes'] != _DOCUMENT_LIMIT))
-                or (material_mode and meta.get('material_policy') != material.POLICY)
+                or (material_mode and (not isinstance(meta.get('material_policy'), str) or meta['material_policy'] not in material.SUPPORTED_POLICIES))
+                or (reconciliation_mode and not isinstance(meta.get('inventory_reconciliation'), dict))
                 or not isinstance(meta['required_exhibits'], list)):
             raise ValueError('SEC parser request invalid')
         size, digest = meta.pop('raw_size'), meta.pop('raw_sha256')
@@ -394,7 +425,7 @@ def _worker(deadline):
             meta.pop('spooled')
             document_limit = meta.pop('max_document_bytes')
             if material_mode:
-                meta.pop('material_policy')
+                selected_material_policy = meta.pop('material_policy')
             # No parent pathname crosses IPC. The child owns one anonymous file
             # whose full exact size has already been reserved by the parent.
             # Native launch checks this exact filesystem. Never silently move
@@ -417,8 +448,10 @@ def _worker(deadline):
                     raise ValueError('SEC parser request hash invalid')
                 check()
                 with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                    framing = True
                     try:
                         framed = evidence.frame_submission(mapped, **meta, check=check)
+                        framing = False
                         if material_mode:
                             # Quarantine cannot turn an absent native body into
                             # permission merely because its tags were balanced.
@@ -428,7 +461,7 @@ def _worker(deadline):
                                     raise evidence.EvidenceError('empty_material_document')
                             try:
                                 result = material.quarantine_evidence(framed, submission_size=size,
-                                    required_exhibits=exhibits)
+                                    required_exhibits=exhibits, policy=selected_material_policy)
                             except ValueError:
                                 raise evidence.EvidenceError('invalid_material_quarantine') from None
                         else:
@@ -437,8 +470,10 @@ def _worker(deadline):
                                 required_exhibits=exhibits, max_document_bytes=document_limit, check=check)
                         check()
                         response = {'job': job, 'result': result}
-                    except evidence.EvidenceError:
-                        response = {'job': job, 'error': 'invalid_evidence'}
+                    except evidence.EvidenceError as error:
+                        response = {'job': job, 'error': ('document_count_mismatch'
+                            if framing and not material_mode and not reconciliation_mode
+                            and isinstance(error, evidence.DocumentCountMismatch) else 'invalid_evidence')}
             # The acknowledgement is constructed only after mmap and file exit.
             response['closed'] = True
             check()

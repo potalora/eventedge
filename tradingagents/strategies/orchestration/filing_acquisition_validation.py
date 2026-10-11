@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 import math
 import re
 
@@ -28,6 +30,7 @@ def acquisition_scope(owner):
             'original_deadline': owner.original_deadline,
             'originals': sorted(owner.completed_metadata(),
                                 key=lambda row: (row['identity']['accession'], row['sha256'])),
+            'inventory_reconciliations':owner.reconciliation_manifest(),
             'spool': owner.stats()}
 
 
@@ -51,7 +54,7 @@ def validate_filing_acquisition_policy(data, config):
         material_scope = validate_filing_material_policy(data, config)
         material_complete = isinstance(material_scope, dict) and material_scope['scoped_complete'] is True
         scope = graph['acquisition_scope']
-        if (set(scope) != {'policy', 'max_submission_bytes', 'max_document_bytes', 'physical_limit_bytes', 'original_deadline', 'originals', 'spool'}
+        if (set(scope) != {'policy', 'max_submission_bytes', 'max_document_bytes', 'physical_limit_bytes', 'original_deadline', 'originals', 'spool','inventory_reconciliations'}
                 or scope['policy'] != POLICY):
             raise ValueError('invalid acquisition scope')
         if (type(scope['original_deadline']) not in (int, float) or not math.isfinite(scope['original_deadline'])
@@ -123,6 +126,24 @@ def validate_filing_acquisition_policy(data, config):
         unmatched = set(originals) - set(graph['corpus'])
         if unmatched and (not failed or graph['coverage']['complete'] is not False or not unmatched <= failed_accessions):
             raise ValueError('completed original has no evidence or recorded parse failure')
+        from tradingagents.strategies.data_sources.filing_inventory_reconciliation import validate_reconciled_evidence
+        reconciliations=scope['inventory_reconciliations']
+        if not isinstance(reconciliations,dict) or not set(reconciliations)<=set(originals):
+            raise ValueError('invalid reconciliation manifest')
+        for accession,entry in reconciliations.items():
+            original=originals[accession]
+            if (not isinstance(entry,dict) or set(entry)!={'submission_sha256','submission_size','proof_sha256','proof','framing'}
+                    or entry['submission_sha256']!=original['sha256'] or type(entry['submission_size']) is not int
+                    or entry['submission_size']!=original['size'] or not isinstance(entry['framing'],dict)
+                    or set(entry['framing'])!={'header_sha256','roles','document_inventory'}):
+                raise ValueError('invalid reconciliation attestation')
+            digest=hashlib.sha256(json.dumps(entry['proof'],sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii')).hexdigest()
+            if entry['proof_sha256']!=digest:raise ValueError('reconciliation digest mismatch')
+            minimal={**original['identity'],'observed_at':original['observed_at'],'submission_sha256':original['sha256'],
+                **entry['framing'],'inventory_reconciliation':entry['proof']}
+            validate_reconciled_evidence(minimal,original={k:original[k] for k in ('identity','sha256','size','observed_at')})
+            if accession not in graph['corpus'] and (not failed or graph['coverage']['complete'] is not False or accession not in failed_accessions):
+                raise ValueError('reconciled acquisition has no corpus or failure')
         for accession, evidence in graph['corpus'].items():
             original = originals[accession]
             identity = original['identity']
@@ -139,7 +160,16 @@ def validate_filing_acquisition_policy(data, config):
                     or ('material_quarantine' in evidence and
                         evidence['material_quarantine']['submission_size'] != original['size'])):
                 raise ValueError('selected evidence differs from original')
+            if ('inventory_reconciliation' in evidence)!=(accession in reconciliations):
+                raise ValueError('missing or unsolicited reconciliation')
+            if accession in reconciliations:
+                entry=reconciliations[accession]
+                if (evidence['inventory_reconciliation']!=entry['proof']
+                        or any(evidence[key]!=entry['framing'][key] for key in ('header_sha256','roles','document_inventory'))):
+                    raise ValueError('corpus differs from acquisition reconciliation')
+                validate_reconciled_evidence(evidence,original={k:original[k] for k in ('identity','sha256','size','observed_at')})
         return {'policy': POLICY, 'completed_originals': len(originals),
+                'reconciled_originals':len(reconciliations),
                 'oversized_originals': sum(row['size'] > 64 * 1024**2 for row in originals.values()),
                 'completed_original_bytes': sum(row['size'] for row in originals.values()),
                 'spool_closed': stats['closed'], 'peak_spool_bytes': stats['peak_total_bytes']}

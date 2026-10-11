@@ -148,8 +148,8 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY, attribution_binding, build_scope
     if attribution_policy not in (None, ATTRIBUTION_POLICY):
         raise ValueError('invalid_filing_attribution')
-    from .filing_material_policy import POLICY as MATERIAL_POLICY, validate_quarantined_evidence
-    if material_policy not in (None, MATERIAL_POLICY):
+    from .filing_material_policy import SUPPORTED_POLICIES, validate_quarantined_evidence
+    if material_policy is not None and (not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES):
         raise ValueError('invalid_filing_material_policy')
     if current_provider_deadline('edgar') is None:
         raise ValueError('An inherited EDGAR deadline is required')
@@ -229,7 +229,10 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                 if 'material_quarantine' in value:
                     if not material_policy:
                         raise ValueError('Undeclared filing material quarantine')
-                    validate_quarantined_evidence(value)
+                    validate_quarantined_evidence(value, policy=material_policy)
+                if 'inventory_reconciliation' in value:
+                    from .filing_inventory_reconciliation import validate_reconciled_evidence
+                    validate_reconciled_evidence(value,check=lambda:provider_timeout('edgar'))
             provider_timeout('edgar')
             try:
                 size = len(json.dumps(value, sort_keys=True, separators=(',', ':'),

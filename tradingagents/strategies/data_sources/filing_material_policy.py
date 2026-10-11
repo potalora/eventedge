@@ -1,4 +1,4 @@
-"""Exact, opt-in framing-only evidence for three unassessed SEC originals.
+"""Exact, opt-in framing-only evidence under separately bound material policies.
 
 Pure standard-library module: worker children load it directly without importing
 providers. This permission establishes neither selected-evidence completeness nor
@@ -13,6 +13,8 @@ import json
 import re
 
 POLICY = 'retained_three_material_gaps_v1'
+TEN_POLICY = 'retained_ten_material_gaps_v1'
+SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY})
 _VERSION = 'sec-filing-evidence-v1'
 _MAX_ORIGINAL = 512 * 1024 * 1024
 _METADATA = ('version', 'format', 'accession', 'form', 'filing_date', 'observed_at',
@@ -30,6 +32,29 @@ _ROWS = (
     ('0000818479-26-000278', '8-K', '2026-10-09', '0000818479',
      'DENTSPLY SIRONA Inc.', '20261009161618', 505, '818479',
      ((1, 'xray-20261008.htm'),), 'unverified_visual_redline_semantics'),
+)
+_ADDITIONAL_ROWS = (
+    ('0001308179-26-000423', 'DEF 14A', '2026-10-06', '0002023554',
+     'Sandisk Corp', '20261006161534', 162, '2023554',
+     ((1, 'sndk-20261005.htm'), (2, 'sndk_courtesy-pdf.pdf')), 'unverified_proxy_pdf_image_material'),
+    ('0001308179-26-000420', 'DEF 14A', '2026-10-06', '0001633978',
+     'Lumentum Holdings Inc.', '20261006160546', 54, '1633978',
+     ((1, 'lite2026-def14a.htm'), (2, 'lite_courtesy-pdf.pdf')), 'unverified_proxy_pdf_image_material'),
+    ('0001140361-26-037937', 'DEF 14A', '2026-09-29', '0001383312',
+     'BROADRIDGE FINANCIAL SOLUTIONS, INC.', '20260929090033', 118, '1383312',
+     ((1, 'ny20075597x1_def14a.htm'), (2, 'ny20075597x1_def14a.pdf')), 'unverified_proxy_pdf_image_material'),
+    ('0001116132-26-000024', 'DEF 14A', '2026-09-25', '0001116132',
+     'TAPESTRY, INC.', '20260925160153', 81, '1116132',
+     ((1, 'tpr-20260924.htm'), (2, 'tpr2026_courtesy-pdf.pdf')), 'unverified_proxy_pdf_image_material'),
+    ('0001482541-26-000056', '8-K', '2026-10-02', '0001482541',
+     'BNB Standard Corp', '20261002160527', 58, '1482541',
+     ((1, 'bnc-20260929.htm'),), 'unassessed_image_only_selected_exhibits'),
+    ('0001628280-26-063740', '8-K', '2026-09-28', '0001736730',
+     'Camp4 Therapeutics Corp', '20260928164756', 69, '1736730',
+     ((1, 'camp-20260928.htm'),), 'unassessed_image_only_selected_exhibits'),
+    ('0001193125-26-402928', '8-K', '2026-09-25', '0002128626',
+     'Vylor Inc.', '20260925164217', 33, '2128626',
+     ((1, 'ck0002128626-20260924.htm'),), 'selected_exhibit_above_document_limit'),
 )
 
 
@@ -50,32 +75,35 @@ def configured(config: dict) -> bool:
     value = config.get('filing_material_policy')
     if value is None:
         return False
-    if (value != POLICY or config.get('filing_evidence_policy') != 'complete_submission_v1'
+    if (not isinstance(value, str) or value not in SUPPORTED_POLICIES or config.get('filing_evidence_policy') != 'complete_submission_v1'
             or config.get('filing_acquisition_policy') != 'bounded_original_submission_v1'
             or config.get('filing_parser_policy') != 'two_processes_v1'):
         raise ValueError('SEC material quarantine requires complete bounded two-process evidence')
     return True
 
 
-def policy_manifest() -> dict:
+def policy_manifest(policy=POLICY) -> dict:
+    if not isinstance(policy, str) or policy not in SUPPORTED_POLICIES:
+        _invalid()
     identities = []
-    for accession, form, date, cik, name, accepted, count, url_cik, primaries, gap in _ROWS:
+    rows = _ROWS if policy == POLICY else _ROWS + _ADDITIONAL_ROWS
+    for accession, form, date, cik, name, accepted, count, url_cik, primaries, gap in rows:
         identities.append(dict(accession=accession, form=form, filing_date=date,
             source_url=f'https://www.sec.gov/Archives/edgar/data/{url_cik}/{accession.replace("-", "")}/{accession}.txt',
             issuer_cik=cik, issuer_name=name, accepted_at=accepted, document_count=count,
             primary_candidates=[dict(sequence=sequence, type=form, filename=filename)
                                 for sequence, filename in primaries], gap_codes=[gap] + (['ambiguous_primary_document'] if form == 'DEF 14A' else [])))
-    return {'policy': POLICY, 'identities': identities}
+    return {'policy': policy, 'identities': identities}
 
 
-def policy_manifest_sha256() -> str:
-    return _digest(policy_manifest())
+def policy_manifest_sha256(policy=POLICY) -> str:
+    return _digest(policy_manifest(policy))
 
 
-def approved_identity(identity: dict) -> dict | None:
+def approved_identity(identity: dict, *, policy=POLICY) -> dict | None:
     if not isinstance(identity, dict):
         _invalid()
-    for row in policy_manifest()['identities']:
+    for row in policy_manifest(policy)['identities']:
         if identity.get('accession') == row['accession']:
             if any(identity.get(key) != row[key] for key in ('form', 'filing_date', 'source_url')):
                 _invalid()
@@ -151,16 +179,16 @@ def _required(documents, required_exhibits):
     return list(required_exhibits)
 
 
-def quarantine_evidence(framed: dict, *, submission_size: int, required_exhibits=()) -> dict:
+def quarantine_evidence(framed: dict, *, submission_size: int, required_exhibits=(), policy=POLICY) -> dict:
     # A successful native frame has no source URL: derive only this policy's
     # exact canonical URL, then bind the observed receipt independently upstream.
     if not isinstance(framed, dict):
         _invalid()
-    candidates = [r for r in policy_manifest()['identities'] if r['accession'] == framed.get('accession')]
+    candidates = [r for r in policy_manifest(policy)['identities'] if r['accession'] == framed.get('accession')]
     if len(candidates) != 1:
         _invalid()
     row = candidates[0]
-    approved_identity(dict(framed, source_url=framed.get('source_url', row['source_url'])))
+    approved_identity(dict(framed, source_url=framed.get('source_url', row['source_url'])), policy=policy)
     documents = framed.get('documents')
     if not isinstance(documents, list):
         _invalid()
@@ -173,17 +201,17 @@ def quarantine_evidence(framed: dict, *, submission_size: int, required_exhibits
         structural_scope='complete_original_inventory_unselected', analysis_adequacy='insufficient',
         dependency_assessment='not_assessed', units=[], dependencies=[],
         issues=[{'code': code} for code in row['gap_codes']], document_inventory=deepcopy(documents),
-        material_quarantine=dict(policy=POLICY, policy_manifest_sha256=policy_manifest_sha256(),
+        material_quarantine=dict(policy=policy, policy_manifest_sha256=policy_manifest_sha256(policy),
             submission_size=submission_size, document_count=len(documents),
             primary_candidates=deepcopy(primaries), gap_codes=list(row['gap_codes']),
             required_exhibits=required, document_inventory_sha256=_digest(documents)))
     return result
 
 
-def validate_quarantined_evidence(evidence: dict) -> dict:
+def validate_quarantined_evidence(evidence: dict, *, policy=POLICY) -> dict:
     if not isinstance(evidence, dict):
         _invalid()
-    row = approved_identity(evidence)
+    row = approved_identity(evidence, policy=policy)
     if row is None or not isinstance(evidence.get('material_quarantine'), dict):
         _invalid()
     declaration = evidence['material_quarantine']
@@ -195,7 +223,7 @@ def validate_quarantined_evidence(evidence: dict) -> dict:
         primary_candidates=[i for i, d in enumerate(documents)
                             if isinstance(d, dict) and d.get('type') == row['form']])
     expected = quarantine_evidence(framed, submission_size=declaration.get('submission_size'),
-        required_exhibits=declaration.get('required_exhibits'))
+        required_exhibits=declaration.get('required_exhibits'), policy=policy)
     if evidence != expected or _digest(evidence) != _digest(expected):
         _invalid()
     return row

@@ -1,7 +1,7 @@
 """Retain exact material gaps while proving the remaining analysis population.
 
 Strict source completeness never changes. This separately bound permission
-removes three explicit framing-only envelopes from downstream analysis.
+removes explicitly permitted framing-only envelopes from downstream analysis.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import hashlib
 import json
 
 from tradingagents.strategies.data_sources.filing_material_policy import (
-    POLICY, configured, policy_manifest, policy_manifest_sha256, validate_quarantined_evidence,
+    POLICY, SUPPORTED_POLICIES, configured, policy_manifest, policy_manifest_sha256, validate_quarantined_evidence,
 )
 
 COLLECTIONS = ('filings', 'activist_13d', 'passive_13g', 'pqc_filings')
@@ -48,14 +48,17 @@ def build_material_scope(graph, collections):
             _fail()
         coverage, corpus = graph['coverage'], graph['corpus']
         quarantines, hashes = {}, {}
-        approved_accessions = {item['accession'] for item in policy_manifest()['identities']}
+        selected_policy = coverage.get('material_policy', POLICY)
+        if not isinstance(selected_policy, str) or selected_policy not in SUPPORTED_POLICIES:
+            _fail()
+        approved_accessions = {item['accession'] for item in policy_manifest(selected_policy)['identities']}
         for accession, value in corpus.items():
             if (value.get('accession') != accession
                     or (accession in approved_accessions and 'material_quarantine' not in value)):
                 _fail()
             hashes[accession] = _digest(value)
             if 'material_quarantine' in value:
-                approved = validate_quarantined_evidence(value)
+                approved = validate_quarantined_evidence(value, policy=selected_policy)
                 declaration = value['material_quarantine']
                 quarantines[accession] = {key: approved[key] for key in
                     ('accession', 'form', 'filing_date', 'issuer_cik', 'document_count', 'gap_codes')}
@@ -160,8 +163,8 @@ def build_material_scope(graph, collections):
         # Strict false may include resource failures even when all accepted rows are complete.
         if coverage['complete'] and (strict_failed or not global_complete):
             _fail()
-        scope = {'policy': POLICY, 'policy_manifest_sha256': policy_manifest_sha256(),
-            'approved_accessions': sorted(item['accession'] for item in policy_manifest()['identities']),
+        scope = {'policy': selected_policy, 'policy_manifest_sha256': policy_manifest_sha256(selected_policy),
+            'approved_accessions': sorted(approved_accessions),
             'total_rows': len(entries), 'required_rows': required_rows,
             'quarantined_rows': sum(item['quarantined_rows'] for item in by_collection.values()),
             'quarantined_accessions': sorted(quarantines),
@@ -194,7 +197,7 @@ def validate_filing_material_policy(data, config):
         error = isinstance(edgar.get('error'), str) and bool(edgar['error'].strip())
         if graph is None and error:
             return None
-        if not isinstance(graph, dict) or declared != POLICY:
+        if not isinstance(graph, dict) or declared != config['filing_material_policy']:
             _fail()
         expected = build_material_scope(graph, {key: edgar.get(key, []) for key in COLLECTIONS})
         if _digest(graph.get('material_scope')) != _digest(expected) or (not expected['scoped_complete'] and not error):

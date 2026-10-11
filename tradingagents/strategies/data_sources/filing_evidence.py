@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+import importlib.util
 import mmap
 import re
 from urllib.parse import unquote, urlsplit
+from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from bs4 import BeautifulSoup
@@ -26,6 +28,10 @@ _OWNERSHIP_NAMESPACES = {'13D': 'http://www.sec.gov/edgar/schedule13D',
 
 class EvidenceError(ValueError):
     """Fixed safe diagnostic code; never includes source contents."""
+
+
+class DocumentCountMismatch(EvidenceError):
+    """A syntactically numeric declared count differs from native starts."""
 
 
 def _sha(data: bytes) -> str:
@@ -212,7 +218,7 @@ def _validate_acceptance(acceptance):
 
 def frame_submission(raw_buffer, *, expected_accession, expected_form,
                      expected_date, observed_at, max_submission_bytes,
-                     max_documents=2000, check=None):
+                     max_documents=2000, check=None, inventory_reconciliation=None):
     """Validate and hash original native ranges without materializing bodies.
 
     Each document's metadata is bounded to 1 MiB on this additive buffer path.
@@ -222,7 +228,8 @@ def frame_submission(raw_buffer, *, expected_accession, expected_form,
     return _frame_submission(raw_buffer, expected_accession=expected_accession,
         expected_form=expected_form, expected_date=expected_date,
         observed_at=observed_at, max_submission_bytes=max_submission_bytes,
-        max_documents=max_documents, check=check, metadata_limit=1024 * 1024)
+        max_documents=max_documents, check=check, metadata_limit=1024 * 1024,
+        inventory_reconciliation=inventory_reconciliation)
 
 
 def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
@@ -247,7 +254,7 @@ def parse_submission(raw: bytes, *, expected_accession: str, expected_form: str,
 
 def _frame_submission(raw, *, expected_accession, expected_form, expected_date,
                       observed_at, max_submission_bytes, max_documents,
-                      metadata_limit, check=None, validate_acceptance=True):
+                      metadata_limit, check=None, validate_acceptance=True, inventory_reconciliation=None):
     _check(check)
     if not _buffer_valid(raw) or len(raw) > max_submission_bytes:
         raise EvidenceError('submission_byte_limit')
@@ -298,8 +305,12 @@ def _frame_submission(raw, *, expected_accession, expected_form, expected_date,
     if filing_date != expected_date:
         raise EvidenceError('filing_date_mismatch')
     count = _one(values, 'PUBLIC-DOCUMENT-COUNT')
-    if not re.fullmatch(r'[0-9]+', count) or int(count) != len(starts):
+    if not re.fullmatch(r'[0-9]+', count):
         raise EvidenceError('document_count_mismatch')
+    if int(count) != len(starts) and inventory_reconciliation is None:
+        raise DocumentCountMismatch('document_count_mismatch')
+    if int(count) == len(starts) and inventory_reconciliation is not None:
+        raise EvidenceError('unexpected_inventory_reconciliation')
     roles = _direct_roles(header) if source_format == 'sec_complete_submission' else _nc_roles(header)
     issuer_role = 'SUBJECT-COMPANY' if exact_form.startswith('SCHEDULE 13') else 'FILER'
     issuers = [dict(r) for r in roles if r['role'] == issuer_role]
@@ -337,12 +348,28 @@ def _frame_submission(raw, *, expected_accession, expected_form, expected_date,
         acceptance = _one(values, 'ACCEPTANCE-DATETIME', optional=True)
         _validate_acceptance(acceptance)
     _check(check)
-    return {'version': VERSION, 'format': source_format, 'accession': accession, 'form': exact_form,
+    framed = {'version': VERSION, 'format': source_format, 'accession': accession, 'form': exact_form,
             'filing_date': filing_date, 'observed_at': observed_at, 'accepted_at': acceptance,
             'submission_sha256': _range_sha(raw, 0, len(raw), check=check), 'header_sha256': _sha(header),
             'roles': roles, 'issuer_candidates': issuers, 'documents': documents,
             'primary_candidates': [i for i, doc in enumerate(documents) if _form(doc['type']) == exact_form],
             **({'_acceptance_values': values.get('ACCEPTANCE-DATETIME', [])} if not validate_acceptance else {})}
+    if inventory_reconciliation is not None:
+        try:
+            spec=importlib.util.spec_from_file_location('_sec_pure_inventory',Path(__file__).with_name('filing_inventory_reconciliation.py'))
+            inventory=importlib.util.module_from_spec(spec);spec.loader.exec_module(inventory)
+            if not isinstance(inventory_reconciliation,dict) or set(inventory_reconciliation)!={'version','original','metadata'}:
+                raise ValueError
+            proof=dict(inventory_reconciliation,native_header_sha256=framed['header_sha256'],
+                declared_document_count=int(count),actual_document_count=len(documents))
+            inventory.validate_reconciliation(proof,identity={'accession':accession,'form':exact_form,
+                'filing_date':filing_date,'source_url':proof['original']['identity']['source_url']},
+                submission_sha256=framed['submission_sha256'],submission_size=len(raw),document_inventory=documents,
+                declared_document_count=int(count),header_sha256=framed['header_sha256'],roles=roles,observed_at=observed_at,check=check)
+            framed['inventory_reconciliation']=proof
+        except (ValueError,KeyError,TypeError,AttributeError):
+            raise EvidenceError('invalid_inventory_reconciliation') from None
+    return framed
 
 
 def select_primary(framed, raw_buffer, *, check=None):
@@ -572,7 +599,8 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
             'structural_status': 'insufficient' if issues else 'complete',
             'structural_scope': 'primary_and_selected_dependencies', 'analysis_adequacy': 'not_assessed',
             'dependency_assessment': 'not_assessed', 'units': units, 'issues': issues,
-            'dependencies': dependencies, 'document_inventory': [_inventory(d) for d in documents]}
+            'dependencies': dependencies, 'document_inventory': [_inventory(d) for d in documents],
+            **({'inventory_reconciliation': parsed['inventory_reconciliation']} if 'inventory_reconciliation' in parsed else {})}
 
 
 

@@ -122,7 +122,8 @@ def _inventory(item):
 
 
 def _validate_evidence(evidence, *, allow_joint_issuers=False):
-    if type(evidence) is not dict or set(evidence) not in (_EVIDENCE_KEYS, _EVIDENCE_KEYS | {'source_url'}):
+    if (type(evidence) is not dict or
+            set(evidence) - {'source_url', 'inventory_reconciliation'} != _EVIDENCE_KEYS):
         fail('input')
     if evidence['version'] != 'sec-filing-evidence-v1' or evidence['format'] not in ('nc_submission', 'sec_complete_submission'):
         fail('input')
@@ -142,6 +143,12 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False):
         if (parsed.scheme != 'https' or parsed.netloc != 'www.sec.gov' or parsed.query or parsed.fragment
                 or not re.fullmatch(pattern, parsed.path) or url != parsed.geturl()):
             fail('source_url')
+    if 'inventory_reconciliation' in evidence:
+        from .filing_inventory_reconciliation import validate_reconciled_evidence
+        try:
+            validate_reconciled_evidence(evidence)
+        except (ValueError, TypeError, KeyError):
+            fail('inventory_reconciliation')
     if type(evidence['form']) is not str or evidence['form'] not in _ALL_FORMS:
         fail('input')
     try:
@@ -350,7 +357,11 @@ def prepare_request(analysis_type, current_evidence, *, prior_evidence=None,
             rendered_units.append({'unit_id': uid, **unit})
             inventory.append({'unit_id': uid, 'accession': item['accession'], 'filename': unit['filename'],
                               'sha256': unit['text_sha256'], 'selection': unit['selection'], 'relation': relation})
-        rendered.append({**item, 'units': rendered_units, 'relation': relation})
+        # Inventory corroboration is acquisition provenance, not filing content.
+        # Full corpus digests above still bind its retained raw evidence.
+        rendered.append({**{key: value for key, value in item.items()
+                            if key != 'inventory_reconciliation'},
+                         'units': rendered_units, 'relation': relation})
     news = [] if news_evidence is None else news_evidence
     _list(news, MAX_UNITS)
     if news and not pqc:

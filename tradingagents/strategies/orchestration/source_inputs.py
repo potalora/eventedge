@@ -74,15 +74,19 @@ def _transform(value: Any, *, decoding: bool, depth: int = 0, budget: list[int] 
     budget[0] -= 1
     if depth > MAX_DEPTH or budget[0] < 0:
         raise SourceInputError('source document exceeds structural bounds')
-    def walk(item: Any) -> Any:
-        return _transform(item, decoding=decoding, depth=depth + 1, budget=budget)
-    if decoding:
-        if value is None or type(value) in (str, bool, int):
-            return value
-        if type(value) is float:
+    # Built-in leaves dominate full filing corpora; keep their accounting above
+    # this fast path while avoiding the pandas/NumPy dispatch for each leaf.
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if decoding:
             if not math.isfinite(value):
                 raise SourceInputError('noncanonical JSON number')
             return value
+        return value if math.isfinite(value) else {'$type': 'float', 'value': str(value)}
+    def walk(item: Any) -> Any:
+        return _transform(item, decoding=decoding, depth=depth + 1, budget=budget)
+    if decoding:
         if isinstance(value, list):
             return [walk(item) for item in value]
         if not isinstance(value, dict) or '$type' not in value:
@@ -185,10 +189,6 @@ def _transform(value: Any, *, decoding: bool, depth: int = 0, budget: list[int] 
         return [walk(item) for item in value]
     if isinstance(value, np.generic):
         return walk(value.item())
-    if type(value) is float:
-        return value if math.isfinite(value) else {'$type': 'float', 'value': str(value)}
-    if value is None or type(value) in (str, int, bool):
-        return value
     raise SourceInputError('unsupported source value type')
 
 

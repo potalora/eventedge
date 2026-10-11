@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import json
 import errno
 import math
 import os
@@ -65,6 +67,7 @@ class SpoolScope:
         self._lock = threading.RLock()
         self._closed, self._closing = False, False
         self._entries, self._records, self._retained, self._children = {}, {}, {}, {}
+        self._reconciliations = {}
         self._counts = {key: 0 for key in ('retained_bytes', 'parent_bytes', 'child_bytes',
             'transient_bytes', 'total_bytes', 'completed_objects', 'failed_objects', 'active_child_copies', 'active_parent_writers', 'active_parent_readers', 'cleanup_failures')}
         self._peaks = {key: 0 for key in ('retained_bytes', 'parent_bytes', 'child_bytes',
@@ -102,6 +105,28 @@ class SpoolScope:
             return [{'identity': dict(record.identity), 'observed_at': record.observed_at,
                      'size': record.size, 'sha256': record.sha256, 'complete': True}
                     for record in self._records]
+
+    def record_reconciliation(self, record, evidence):
+        """Attest a returned parse before hydration can reject its projection."""
+        from .filing_inventory_reconciliation import validate_reconciled_evidence
+        with self._lock:
+            self.validate_completed(record)
+            original={'identity':dict(record.identity),'sha256':record.sha256,
+                'size':record.size,'observed_at':record.observed_at}
+            validate_reconciled_evidence(evidence,original=original,check=self.check)
+            proof=evidence['inventory_reconciliation']
+            encoded=json.dumps(proof,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii')
+            entry={'submission_sha256':record.sha256,'submission_size':record.size,
+                'proof_sha256':hashlib.sha256(encoded).hexdigest(),'proof':deepcopy(proof),
+                'framing':{key:deepcopy(evidence[key]) for key in ('header_sha256','roles','document_inventory')}}
+            accession=record.identity['accession']
+            if accession in self._reconciliations:raise _failure()
+            self._reconciliations[accession]=entry
+
+    def reconciliation_manifest(self):
+        """Closed immutable-result metadata, without paths or narrative text."""
+        with self._lock:
+            return deepcopy(dict(sorted(self._reconciliations.items())))
 
     def _reserve(self, size):
         self.check()
