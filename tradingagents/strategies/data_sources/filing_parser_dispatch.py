@@ -166,8 +166,8 @@ class _Dispatcher:
             receipt = isinstance(raw, CompletedSubmission)
             material_policy = arguments.get('material_policy')
             reconciliation = 'inventory_reconciliation' in arguments
-            from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY
-            supported_mode = material_policy == SUPPORTED_DOCUMENT_POLICY
+            from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES
+            supported_mode = material_policy in SUPPORTED_DOCUMENT_POLICIES
             quarantine_mode = material_policy is not None and not supported_mode
             if reconciliation and (not receipt or (material_policy is not None and not supported_mode)
                     or not isinstance(arguments['inventory_reconciliation'], dict)):
@@ -271,6 +271,8 @@ class _Dispatcher:
                     raise ValueError('parser original size mismatch')
             elif supported_mode:
                 from .filing_supported_policy import _checked_local_proof
+                if result.get('supported_document_policy') != material_policy:
+                    raise ValueError('parser supported policy mismatch')
                 proof = result.pop('supported_source_proof')
                 _checked_local_proof(proof, result, metadata['original'])
                 required = list(arguments['required_exhibits'])
@@ -423,7 +425,7 @@ def _worker(deadline):
         spooled = isinstance(meta, dict) and meta.get('spooled') is True
         material_mode = spooled and isinstance(meta, dict) and 'material_policy' in meta
         reconciliation_mode = spooled and isinstance(meta, dict) and 'inventory_reconciliation' in meta
-        supported_mode = material_mode and meta['material_policy'] == material.SUPPORTED_DOCUMENT_POLICY
+        supported_mode = material_mode and meta['material_policy'] in material.SUPPORTED_DOCUMENT_POLICIES
         allowed = required | {'spooled', 'max_document_bytes'} if spooled else required
         if material_mode:
             allowed |= {'material_policy'}

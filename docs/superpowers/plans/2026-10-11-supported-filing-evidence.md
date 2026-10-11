@@ -8,6 +8,16 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-11-supported-filing-evidence.md` records the approved goal. User autonomy authorizes implementation, review, topic pushes and justified isolated retries without intermediate approval questions.
 
+## Current checkpoint and explicitly approved follow-up
+
+The government-copy checkpoint `ff8c0ff` passed 6,167 local non-live tests (four live exclusions, one existing warning, 227.19 seconds), with independent review of the acquisition, original-failure retention, preformatted tables and subscript evidence. Its [exact-commit CI run](https://github.com/potalora/eventedge/actions/runs/38172116897) passed. All three retained notices also passed a bounded native-host accessibility/parser diagnostic, which does not establish the complete Regulations workflow or native acceptance. Lossless original storage and native PDF v2 are already implemented in the earlier `ef98d16` checkpoint; its exact-head CI passed. Descriptions of their absence in the historical Task 5 checkpoint below do not describe current code.
+
+The user also approved an explicitly limited structural-only visual receipt on October 11. Implement `verified_supported_documents_v2` while preserving v1: independently verify the complete PDF structure, every page, resource and image invocation, record encoded JPEG framing and all raw text/rendering declarations, and state that JPEG entropy/pixel validity, Unicode/glyph meaning and visibility remain unverified. The receipt can support only deferral, with no model admission or order authority. It must never be an exception-based fallback from failed native extraction. The revised validity boundary is recorded in the spec. Missing acquisition, malformed structural data, unknown capabilities and exceeded budgets remain failures.
+
+Implementation ownership: one bounded parser worker owns the new pure structural adapter and adversarial tests; another owns prospective policy routing, evidence, assessment refusal and independent raw/replay reconstruction; a separate worker owns exact private helper/config/oracle/launch binding. Root integrates and documents their outcomes, arranges independent review, runs the full suite and exact-commit CI, and freezes only after all gates pass. Existing deadlines, resources and four-wheel dependency roster are unchanged.
+
+The structural-v2 implementation passed 6,269 local non-live tests (four live exclusions, one existing warning, 225.10 seconds). Independent parser/application review passed 148 focused cases, and the private launch/replay suite passed 269 with one Linux-only skip. Required HTML exhibits in a further retained-source diagnostic still fail the current table/styling capability checks; those are unresolved failures, not accepted deferrals. Exact-commit CI, complete filing fitness, disk capacity, a fresh freeze and all native gates remain required before operational acceptance.
+
 ## Global constraints
 
 - Existing worktree `.worktrees/governed-sip-release`, branch `codex/audit-reliability-fixes`, base `8f69cc90ab854f5290d10eb43360d1b624a1084b`. Root owns Git operations.

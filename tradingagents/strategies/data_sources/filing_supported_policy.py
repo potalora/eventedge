@@ -17,13 +17,17 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 
 from .filing_evidence import (frame_submission, select_primary, build_evidence_from_buffer,
-    _buffer_valid, _range_sha, EvidenceError)
-from .filing_pdf import extract_pdf_evidence, FilingPDFError, VERSION as PDF_VERSION
+    _buffer_valid, _range_sha, EvidenceError, extract_supported_pdf_evidence)
+from .filing_pdf import FilingPDFError, VERSION as PDF_VERSION
 from .filing_ownership_lineage import validate_ownership_lineage, POLICY as LINEAGE_VERSION
 from .filing_publisher_facts import publisher_facts, VERSION as PUBLISHER_VERSION
 
 POLICY = 'verified_supported_documents_v1'
 VERSION = 'supported-document-disposition-v1'
+POLICY_V2 = 'verified_supported_documents_v2'
+VERSION_V2 = 'supported-document-disposition-v2'
+POLICIES = frozenset({POLICY, POLICY_V2})
+VISUAL_VERSION = 'sec-pdf-structural-visual-v1'
 MAX_SUBMISSION_BYTES = 512 * 1024**2
 MAX_DOCUMENT_BYTES = 16 * 1024**2
 MAX_TOTAL_TEXT_BYTES = 32 * 1024**2
@@ -47,6 +51,56 @@ def _digest(value):
 def _require(condition, code):
     if not condition:
         raise SupportedDispositionError(code)
+
+
+def _selected_policy(evidence):
+    selected = evidence.get('supported_document_policy', POLICY)
+    _require(isinstance(selected, str) and selected in POLICIES, 'invalid_supported_document_policy')
+    return selected
+
+
+def _version(selected):
+    return VERSION_V2 if selected == POLICY_V2 else VERSION
+
+
+def _verifiers(selected):
+    return {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION, 'publisher_facts': PUBLISHER_VERSION,
+        **({'structural_visual_pdf': VISUAL_VERSION} if selected == POLICY_V2 else {})}
+
+
+def _bounds(selected):
+    return {'max_submission_bytes': MAX_SUBMISSION_BYTES, 'max_document_bytes': MAX_DOCUMENT_BYTES,
+        'max_total_text_bytes': MAX_TOTAL_TEXT_BYTES, 'pdf': PDF_LIMITS,
+        **({'structural_visual_pdf': {key: value for key, value in PDF_LIMITS.items()
+            if key != 'max_text_chars'}} if selected == POLICY_V2 else {})}
+
+
+def validate_structural_visual_unit(receipt, unit):
+    """Validate IPC schema and exact unit binding; raw audit establishes provenance."""
+    from .filing_pdf_visual import validate_pdf_visual_receipt
+    validate_pdf_visual_receipt(receipt)
+    _require(receipt['input_bytes'] <= MAX_DOCUMENT_BYTES
+        and receipt['decoded_bytes'] <= MAX_DOCUMENT_BYTES
+        and receipt['decoded_stream_bytes'] <= MAX_TOTAL_TEXT_BYTES
+        and receipt['inventory_bytes'] <= MAX_TOTAL_TEXT_BYTES
+        and receipt['page_count'] <= PDF_LIMITS['max_pages'], 'structural_visual_policy_limit')
+    _require(receipt['visual_presence'] is True
+        and receipt['input_sha256'] == unit['body_sha256']
+        and receipt['input_bytes'] == unit['body_end'] - unit['body_start']
+        and unit['representation'] == 'structural_visual_pdf'
+        and unit['text'] == '' and unit['text_sha256'] == hashlib.sha256(b'').hexdigest()
+        and type(unit['text_start']) is int and unit['text_start'] == 0
+        and type(unit['text_end']) is int and unit['text_end'] == 0,
+        'invalid_structural_visual_unit')
+
+
+def _structural_visual_reason(name, unit, receipt):
+    return {'code': 'unsupported_selected_visual_content', 'filename': name,
+        'body_sha256': unit['body_sha256'], 'pages': receipt['pages'],
+        'proof_kind': 'structural_visual_pdf', 'native_text_complete': False,
+        'encoded_image_validity': 'unverified', 'native_unicode': 'unverified',
+        'text_visibility': 'unverified', 'order_authority': False,
+        'visual_meaning': 'unresolved', 'materiality': 'not_inferred_selected_content_obligation'}
 
 
 def _text_capabilities(body, *, ownership=False, check=None):
@@ -131,6 +185,7 @@ def _source(evidence, original, raw, required_exhibits, check):
 
 def _local_source_outcome(current, *, original, raw_submission, required_exhibits=(), check=None):
     """Recompute a local source result; lineage/operational duties are separate."""
+    selected_policy = _selected_policy(current)
     reasons, failures, documents = [], [], []
     dependencies = {'publisher_facts': [], 'pdf': {}}
     pdf_receipts = current.get('pdf_evidence', {})
@@ -191,28 +246,33 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
                     total += len(unit['text'].encode('utf-8'))
                 else:
                     try:
-                        actual = extract_pdf_evidence(raw_submission[doc['body_start']:doc['body_end']], **PDF_LIMITS, check=check)
+                        actual, text, representation = extract_supported_pdf_evidence(
+                            raw_submission[doc['body_start']:doc['body_end']], policy=selected_policy,
+                            max_document_bytes=MAX_DOCUMENT_BYTES, max_total_text_bytes=MAX_TOTAL_TEXT_BYTES, check=check)
                         _require(pdf_receipts[name] == actual, 'pdf_receipt_mismatch')
-                        _require(unit.get('representation') == 'native_pdf_text'
-                            and unit['text'] == actual['text'] and unit['text_sha256'] == actual['text_sha256']
-                            and unit['text_start'] == 0 and unit['text_end'] == len(actual['text'])
+                        _require(unit.get('representation') == representation
+                            and unit['text'] == text and unit['text_sha256'] == hashlib.sha256(text.encode()).hexdigest()
+                            and unit['text_start'] == 0 and unit['text_end'] == len(text)
                             and unit['selection'] == ('primary' if parsed['documents'][parsed['primary_index']]['filename'] == name else 'dependency'), 'pdf_unit_mismatch')
                         dependencies['pdf'][name] = actual
-                        total += len(actual['text'].encode('utf-8'))
-                        if actual['support_limitations']:
-                            fail('pdf_capability_limit', filename=name, limitations=actual['support_limitations'])
-                        if not actual['supported_text_layout']:
-                            pages = [{'page_number': p['page_number'], 'findings': sorted(set(p['findings']) & _VISUAL),
-                                      'text_sha256': p['text_sha256'], 'streams': p['streams']}
-                                     for p in actual['pages'] if set(p['findings']) & _VISUAL]
-                            if pages:
-                                reasons.append({'code': 'unsupported_selected_visual_content', 'filename': name,
-                                    'body_sha256': doc['body_sha256'], 'pages': pages,
-                                    'visual_meaning': 'unresolved', 'materiality': 'not_inferred_selected_content_obligation'})
-                            else:
-                                fail('unproven_pdf_representation', filename=name)
+                        total += len(text.encode('utf-8'))
+                        if representation == 'structural_visual_pdf':
+                            reasons.append(_structural_visual_reason(name, unit, actual))
+                        else:
+                            if actual['support_limitations']:
+                                fail('pdf_capability_limit', filename=name, limitations=actual['support_limitations'])
+                            if not actual['supported_text_layout']:
+                                pages = [{'page_number': p['page_number'], 'findings': sorted(set(p['findings']) & _VISUAL),
+                                          'text_sha256': p['text_sha256'], 'streams': p['streams']}
+                                         for p in actual['pages'] if set(p['findings']) & _VISUAL]
+                                if pages:
+                                    reasons.append({'code': 'unsupported_selected_visual_content', 'filename': name,
+                                        'body_sha256': doc['body_sha256'], 'pages': pages,
+                                        'visual_meaning': 'unresolved', 'materiality': 'not_inferred_selected_content_obligation'})
+                                else:
+                                    fail('unproven_pdf_representation', filename=name)
                     except (KeyError, TypeError, ValueError) as error:
-                        code = str(error) if isinstance(error, (SupportedDispositionError, FilingPDFError)) else 'invalid_pdf_receipt'
+                        code = str(error) if isinstance(error, (SupportedDispositionError, FilingPDFError, EvidenceError)) else 'invalid_pdf_receipt'
                         fail(code, filename=name)
                 documents.append({'filename': name, 'body_sha256': doc['body_sha256'],
                     'selection': unit['selection'], 'text_sha256': unit['text_sha256']})
@@ -232,9 +292,7 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
         fail(code)
     return {'reasons': reasons, 'residual_failures': failures,
         'selected_documents': documents, 'proof_dependencies': dependencies,
-        'verifiers': {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION, 'publisher_facts': PUBLISHER_VERSION},
-        'bounds': {'max_submission_bytes': MAX_SUBMISSION_BYTES, 'max_document_bytes': MAX_DOCUMENT_BYTES,
-                   'max_total_text_bytes': MAX_TOTAL_TEXT_BYTES, 'pdf': PDF_LIMITS}}
+        'verifiers': _verifiers(selected_policy), 'bounds': _bounds(selected_policy)}
 
 
 def _pdf_binding(receipt):
@@ -255,7 +313,8 @@ def build_local_source_proof(current, *, original, raw_submission, required_exhi
     result = _local_source_outcome(current, original=original, raw_submission=raw_submission,
         required_exhibits=required_exhibits, check=check)
     failures = result['residual_failures']
-    value = {'policy': POLICY, 'version': VERSION, 'kind': 'bounded_parser_source_proof',
+    selected_policy = _selected_policy(current)
+    value = {'policy': selected_policy, 'version': _version(selected_policy), 'kind': 'bounded_parser_source_proof',
         'accession': acc, 'evidence_sha256': _digest(current), 'original': original,
         'required_exhibits': list(required_exhibits), 'selected_documents': result['selected_documents'],
         'reasons': result['reasons'], 'residual_failures': failures,
@@ -271,16 +330,16 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
         'required_exhibits', 'selected_documents', 'reasons', 'residual_failures',
         'pdf', 'publisher_facts', 'verifiers', 'bounds', 'source_proof_sha256'}
     _require(type(proof) is dict and set(proof) == keys, 'invalid_local_source_proof')
-    _require(proof['policy'] == POLICY and proof['version'] == VERSION
+    selected_policy = _selected_policy(evidence)
+    _require(proof['policy'] == selected_policy and proof['version'] == _version(selected_policy)
         and proof['kind'] == 'bounded_parser_source_proof'
         and proof['accession'] == evidence['accession']
         and proof['original'] == original
         and proof['evidence_sha256'] == _digest(evidence)
         and proof['source_proof_sha256'] == _digest({k: v for k, v in proof.items() if k != 'source_proof_sha256'}),
         'local_source_proof_binding_mismatch')
-    _require(proof['verifiers'] == {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION, 'publisher_facts': PUBLISHER_VERSION}
-        and proof['bounds'] == {'max_submission_bytes': MAX_SUBMISSION_BYTES, 'max_document_bytes': MAX_DOCUMENT_BYTES,
-            'max_total_text_bytes': MAX_TOTAL_TEXT_BYTES, 'pdf': PDF_LIMITS}, 'local_source_proof_version_mismatch')
+    _require(proof['verifiers'] == _verifiers(selected_policy)
+        and proof['bounds'] == _bounds(selected_policy), 'local_source_proof_version_mismatch')
     _require(original['complete'] is True and original['sha256'] == evidence['submission_sha256']
         and all(original['identity'][k] == evidence[k] for k in ('accession', 'form', 'filing_date', 'source_url'))
         and original['observed_at'] == evidence['observed_at'], 'local_acquisition_binding_mismatch')
@@ -304,11 +363,16 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
              'selection': u['selection'], 'text_sha256': u['text_sha256']}
             for u in sorted(evidence['units'], key=lambda u: u['filename'])], 'local_selected_inventory_mismatch')
         _require(set(proof['pdf']) == {u['filename'] for u in evidence['units']
-            if u['representation'] == 'native_pdf_text'}, 'local_pdf_inventory_mismatch')
+            if u['representation'] in {'native_pdf_text', 'structural_visual_pdf'}}, 'local_pdf_inventory_mismatch')
     expected_reasons = []
     units = {u['filename']: u for u in evidence['units']}
     for name in proof['pdf']:
         pdf = evidence['pdf_evidence'][name]
+        if units[name]['representation'] == 'structural_visual_pdf':
+            _require(selected_policy == POLICY_V2, 'invalid_structural_visual_policy')
+            validate_structural_visual_unit(pdf, units[name])
+            expected_reasons.append(_structural_visual_reason(name, units[name], pdf))
+            continue
         _require(pdf['version'] == PDF_VERSION and pdf['native_text_complete'] is True
             and pdf['input_sha256'] == units[name]['body_sha256']
             and pdf['text'] == units[name]['text'] and pdf['text_sha256'] == units[name]['text_sha256']
@@ -348,6 +412,7 @@ def evaluate_supported_disposition(current, *, source_proofs, originals, ownersh
     Caller-owned occurrence completeness and all operational/model gates remain
     separate. A source admission never certifies model assessment success.
     """
+    selected_policy = _selected_policy(current)
     failures, reasons, proofs, dependencies = [], [], {}, {'ownership': None}
     acc = current.get('accession') if isinstance(current, dict) else None
     def fail(code, **context):
@@ -357,6 +422,7 @@ def evaluate_supported_disposition(current, *, source_proofs, originals, ownersh
     def add_source(evidence):
         source_acc = evidence['accession']
         try:
+            _require(_selected_policy(evidence) == selected_policy, 'source_policy_mismatch')
             proof = _checked_local_proof(source_proofs[source_acc], evidence, originals[source_acc],
                 (ownership or {}).get('primary_bodies', {}).get(source_acc), check=check)
             proofs[source_acc] = proof
@@ -400,7 +466,7 @@ def evaluate_supported_disposition(current, *, source_proofs, originals, ownersh
             fail('unsolicited_ownership_bundle')
     except (KeyError, TypeError, AttributeError, ValueError) as error:
         fail(str(error) if isinstance(error, SupportedDispositionError) else 'invalid_supported_disposition_input')
-    value = {'policy': POLICY, 'version': VERSION, 'accession': acc,
+    value = {'policy': selected_policy, 'version': _version(selected_policy), 'accession': acc,
         'occurrences': list(occurrences) if isinstance(occurrences, (list, tuple)) else [],
         'status': 'failed' if failures else ('deferred' if reasons else 'admitted'),
         'reasons': reasons, 'residual_failures': failures, 'source_proofs': {key: {

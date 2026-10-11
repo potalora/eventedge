@@ -69,8 +69,8 @@ def _acquire_spooled(response, target, *, accession, form_type, filing_date, req
         try:
             result = dispatch_evidence(record, **identity, **arguments)
         except SubmissionDocumentCountMismatch:
-            from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY, approved_identity
-            if material_policy is not None and (material_policy != SUPPORTED_DOCUMENT_POLICY
+            from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, approved_identity
+            if material_policy is not None and (material_policy not in SUPPORTED_DOCUMENT_POLICIES
                     or approved_identity(dict(record.identity), policy=material_policy) is not None):
                 raise
             provider_timeout('edgar')
@@ -117,14 +117,14 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
     target = complete_submission_url(url, accession)
     selected_material_policy = None
     if material_policy is not None:
-        from .filing_material_policy import SUPPORTED_POLICIES, SUPPORTED_DOCUMENT_POLICY, approved_identity
+        from .filing_material_policy import SUPPORTED_POLICIES, SUPPORTED_DOCUMENT_POLICIES, approved_identity
         from .filing_parser_dispatch import current_dispatcher
         if (not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES or current_submission_spool() is None
                 or current_dispatcher() is None):
             raise ValueError('SEC material quarantine requires bounded spool and parser scopes')
         approved = approved_identity(dict(accession=accession, form=form_type,
             filing_date=filing_date, source_url=target), policy=material_policy)
-        if approved is not None or material_policy == SUPPORTED_DOCUMENT_POLICY:
+        if approved is not None or material_policy in SUPPORTED_DOCUMENT_POLICIES:
             selected_material_policy = material_policy
     if type(max_submission_bytes) is not int or not 1 <= max_submission_bytes <= 64 * 1024 * 1024:
         raise ValueError('Invalid SEC submission byte limit')

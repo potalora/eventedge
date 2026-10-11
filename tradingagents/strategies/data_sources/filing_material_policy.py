@@ -15,7 +15,9 @@ import re
 POLICY = 'retained_three_material_gaps_v1'
 TEN_POLICY = 'retained_ten_material_gaps_v1'
 SUPPORTED_DOCUMENT_POLICY = 'verified_supported_documents_v1'
-SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY, SUPPORTED_DOCUMENT_POLICY})
+SUPPORTED_DOCUMENT_POLICY_V2 = 'verified_supported_documents_v2'
+SUPPORTED_DOCUMENT_POLICIES = frozenset({SUPPORTED_DOCUMENT_POLICY, SUPPORTED_DOCUMENT_POLICY_V2})
+SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY}) | SUPPORTED_DOCUMENT_POLICIES
 _VERSION = 'sec-filing-evidence-v1'
 _MAX_ORIGINAL = 512 * 1024 * 1024
 _METADATA = ('version', 'format', 'accession', 'form', 'filing_date', 'observed_at',
@@ -95,9 +97,9 @@ def policy_manifest(policy=POLICY) -> dict:
             primary_candidates=[dict(sequence=sequence, type=form, filename=filename)
                                 for sequence, filename in primaries], gap_codes=[gap] + (['ambiguous_primary_document'] if form == 'DEF 14A' else [])))
     result = {'policy': policy, 'identities': identities}
-    if policy == SUPPORTED_DOCUMENT_POLICY:
+    if policy in SUPPORTED_DOCUMENT_POLICIES:
         result['supported_scope'] = {
-            'version': 'supported-document-disposition-v1',
+            'version': 'supported-document-disposition-v2' if policy == SUPPORTED_DOCUMENT_POLICY_V2 else 'supported-document-disposition-v1',
             'broadens': TEN_POLICY,
             'retains_exact_quarantines': True,
             'categories': ['unsupported_selected_visual_content', 'ambiguous_ownership_lineage',
@@ -105,6 +107,12 @@ def policy_manifest(policy=POLICY) -> dict:
             'source_authority': 'bounded_parser_attestation_requires_raw_capture_audit',
             'retrieval_parser_model_and_budget_failures_remain_failures': True,
             'original_full_analysis_acceptance': False}
+    if policy == SUPPORTED_DOCUMENT_POLICY_V2:
+        result['supported_scope']['structural_visual_pdf'] = {
+            'version': 'sec-pdf-structural-visual-v1',
+            'native_text_complete': False, 'encoded_image_validity': 'unverified',
+            'native_unicode': 'unverified', 'text_visibility': 'unverified',
+            'visual_meaning': 'unresolved', 'order_authority': False}
     return result
 
 

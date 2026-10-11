@@ -500,6 +500,30 @@ def _inventory(document):
     return {k: v for k, v in document.items() if k != 'body'}
 
 
+def extract_supported_pdf_evidence(body, *, policy, max_document_bytes, max_total_text_bytes, check=None):
+    """Select the prospective proof before extraction; errors never select a fallback."""
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2
+    from .filing_pdf import extract_pdf_evidence, FilingPDFError
+    if not isinstance(policy, str) or policy not in SUPPORTED_DOCUMENT_POLICIES:
+        raise EvidenceError('invalid_supported_document_policy')
+    try:
+        if policy == SUPPORTED_DOCUMENT_POLICY_V2:
+            from .filing_pdf_visual import extract_pdf_visual_evidence, FilingPDFVisualError
+            try:
+                receipt = extract_pdf_visual_evidence(body, max_pdf_bytes=max_document_bytes,
+                    max_pages=2000, max_stream_bytes=max_total_text_bytes, check=check)
+            except FilingPDFVisualError as error:
+                raise EvidenceError(str(error)) from None
+            if receipt['visual_presence'] is True:
+                return receipt, '', 'structural_visual_pdf'
+        receipt = extract_pdf_evidence(body, max_pdf_bytes=max_document_bytes,
+            max_text_chars=max_total_text_bytes, max_pages=2000,
+            max_stream_bytes=max_total_text_bytes, check=check)
+        return receipt, receipt['text'], 'native_pdf_text'
+    except FilingPDFError as error:
+        raise EvidenceError(str(error)) from None
+
+
 def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 * 1024 * 1024,
                    max_total_text_bytes=32 * 1024 * 1024, body_reader=None, check=None, supported_document_policy=None) -> dict:
     """Build whole selected-document evidence, not a semantic completeness verdict.
@@ -510,7 +534,9 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
     filenames or exact exhibit types. No missing exhibit numbers are guessed.
     """
     _check(check)
-    if supported_document_policy not in (None, 'verified_supported_documents_v1'):
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES
+    if supported_document_policy is not None and (not isinstance(supported_document_policy, str)
+            or supported_document_policy not in SUPPORTED_DOCUMENT_POLICIES):
         raise EvidenceError('invalid_supported_document_policy')
     documents = parsed['documents']
     read_body = body_reader or (lambda document: document['body'])
@@ -591,18 +617,13 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
                 text = _visible_text(document['body'], soup=primary_soup if index == primary_index else None, check=check)
                 representation = 'full_visible_text'
             elif suffix.endswith('.pdf') and supported_document_policy:
-                from .filing_pdf import extract_pdf_evidence, FilingPDFError
-                try:
-                    receipt = extract_pdf_evidence(document['body'], max_pdf_bytes=max_document_bytes,
-                        max_text_chars=max_total_text_bytes, max_pages=2000,
-                        max_stream_bytes=max_total_text_bytes, check=check)
-                except FilingPDFError as error:
-                    raise EvidenceError(str(error)) from None
+                receipt, text, representation = extract_supported_pdf_evidence(document['body'],
+                    policy=supported_document_policy, max_document_bytes=max_document_bytes,
+                    max_total_text_bytes=max_total_text_bytes, check=check)
                 pdf_evidence[document['filename']] = receipt
-                text, representation = receipt['text'], 'native_pdf_text'
             else:
                 raise EvidenceError('unsupported_document_format')
-            if not text and representation != 'native_pdf_text':
+            if not text and representation not in {'native_pdf_text', 'structural_visual_pdf'}:
                 raise EvidenceError('empty_selected_document')
             _check(check)
             size = len(text.encode('utf-8'))

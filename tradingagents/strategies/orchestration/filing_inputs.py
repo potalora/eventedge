@@ -113,7 +113,8 @@ def filing_analysis_inputs(candidate, shared_data, universe):
         all_corpora = current + ([prior] if prior else [])
         ownership_bundles = {}
         for item in current:
-            if (item.get('supported_document_policy') == 'verified_supported_documents_v1'
+            from tradingagents.strategies.data_sources.filing_material_policy import SUPPORTED_DOCUMENT_POLICIES
+            if (item.get('supported_document_policy') in SUPPORTED_DOCUMENT_POLICIES
                     and item['form'].startswith('SCHEDULE 13')):
                 from .filing_supported_scope import ownership_bundle
                 from tradingagents.strategies.data_sources.filing_ownership_lineage import validate_ownership_lineage

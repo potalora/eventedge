@@ -1,0 +1,30 @@
+# Structural visual PDF deferral
+
+`verified_supported_documents_v2` is a separately opted-in filing material policy. Pedro explicitly approved its limited proof boundary on October 11, 2026. V1 and earlier closed-run verdicts remain unchanged.
+
+The structural adapter verifies the complete acquired PDF, its page tree, content framing, referenced rendering resources and image invocations. It retains original, decoded-document and encoded-stream hashes, page geometry, operators, raw text operands and resource declarations. Its finite JPEG checks cover marker, segment and scan framing and their agreement with the PDF image dictionary. They do **not** establish valid JPEG entropy or pixels. The adapter does not decode images or perform OCR.
+
+The reviewed subset uses finite page and catalog key policies. Accepted page Group and UserUnit declarations are retained; unsupported transitions and output-profile dependencies fail. Resource type discriminators must be PDF names, and page box arrays are checked before library coercion. Positive image/page intersection uses the transformed image polygon, not only its bounding box. Accepted catalog metadata streams retain encoded and decoded hashes; tagging declarations retain reference identities without expanding semantic backlinks. Metadata and tagging semantics remain explicitly **unverified**, as do native Unicode, glyph interpretation and visibility.
+
+A positive structural receipt states `native_text_complete=false`, `encoded_image_validity="unverified"`, `native_unicode="unverified"`, `text_visibility="unverified"`, `visual_meaning="unresolved"` and `order_authority=false`. It can support only a recorded visual deferral. Structural PDF units contain no extracted text and are rejected by normal model-request preparation. A PDF without positive visual evidence still requires the existing native-text extractor and its quality checks.
+
+V2 is selected before parsing. It is not a fallback that catches native-parser errors and relabels them. Missing originals, incomplete acquisitions, invalid PDF or content framing, unresolved resource references, unsupported structural capabilities and exhausted budgets remain failures. Another selected document's failure or an unresolved ownership obligation takes precedence over a visual reason. Existing exact quarantines retain their original requirements.
+
+The same 16 MiB selected-PDF, 2,000-page and 32 MiB actual decoded-stream and provenance bounds apply inside the existing parser child and inherited deadline. Losslessly decoded Flate/JPEG-codestream bytes count toward the stream bound. Hypothetical raster size is reported separately and explicitly remains unverified; no pixel allocation or decoder work is hidden behind compressed-byte accounting. The four pinned dependencies and native source/model/per-call budgets are unchanged.
+
+Source proofs bind the configured policy, receipt version, original identity and hashes, complete selected-document inventory, verifier versions and fixed limits. The independent raw audit reconstructs receipts from every retained required original. Immutable replay checks the same policy and raw evidence without source/model requests. A resealed caller-supplied receipt is not independent proof.
+
+Acquisition completeness, supported analysis coverage, deferred records and operational acceptance remain separate report fields. Any positive scoped result leaves original full-analysis coverage false when these material deferrals remain. The entire sixteen-book operational proof, strict capture, zero-call replay, unchanged production and empty owned workers are still required; a passing parser diagnostic cannot substitute for them.
+
+Independent local review on October 11, 2026 finished with **148 passing tests**, including 13 parser adversarial cases and nine application-boundary reviewer cases. It reproduced and verified repairs for ignored page/catalog rendering declarations, malformed resource discriminators, false bounding-box intersection and silent page-box string coercion. Shared resource DAG amplification and cycles fail within the existing inventory policy. The reviewed parser SHA256 is `63cd6e574d96a03e7ee905b85472720ded6330e995db2cb28808a0628f9a2a8f`. Exact reviewed file hashes, commands and resolved findings are in the private `data/forward-readiness/structural-v2-independent-review/review.json` report.
+
+The separate bounded retained-source diagnostic at that parser hash checked two unchanged originals:
+
+| Accession | Pages | Structural visual presence | Actual decoded stream bytes | Inventory bytes |
+| --- | ---: | --- | ---: | ---: |
+| `0001104659-26-112476` | 18 | Positive; eligible for structural deferral subject to all application gates | 3,968,788 | 328,988 |
+| `0001193125-26-409166` | 7 | Negative; must continue through native-text extraction and its checks | 1,590,948 | 3,147,380 |
+
+The source/body/PDF/receipt hashes and process limits are recorded in private `data/forward-readiness/bounded-visual-proof-design/retained-source-validation.json`. That diagnostic reports zero network requests, model calls, JPEG entropy validations and pixel decodes. These parser diagnostics and local review establish neither sixteen-book operational acceptance nor completed immutable replay, native-run timing, supported analysis, order authority or deployment. Historical failure verdicts remain unchanged. No deployment is authorized by this policy.
+
+The complete local non-live suite passed 6,269 tests, with four live exclusions and one existing dependency warning, in 225.10 seconds. The private launch/replay suite passed 269 tests with one Linux-only skip. Selected HTML table/styling failures found in a broader retained-source diagnostic remain unresolved by this PDF change. Exact-commit CI and the complete native acceptance gates must be recorded separately.

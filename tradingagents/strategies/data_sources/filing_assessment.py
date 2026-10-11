@@ -126,7 +126,9 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
             set(evidence) - {'source_url', 'inventory_reconciliation', 'supported_document_policy',
                 'pdf_evidence', 'ownership_primary_body', 'ownership_facts'} != _EVIDENCE_KEYS):
         fail('input')
-    supported = evidence.get('supported_document_policy') == 'verified_supported_documents_v1'
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2
+    selected_policy = evidence.get('supported_document_policy')
+    supported = isinstance(selected_policy, str) and selected_policy in SUPPORTED_DOCUMENT_POLICIES
     extended = {'supported_document_policy', 'pdf_evidence', 'ownership_primary_body', 'ownership_facts'} & set(evidence)
     if extended and (not supported or not isinstance(evidence.get('pdf_evidence'), dict)):
         fail('supported_document_policy')
@@ -210,14 +212,14 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
         if inventory != documents.get(item['filename']) or item['filename'] in selected:
             fail('input')
         selected.add(item['filename'])
-        if not (allow_unsupported_documents and supported and item['representation'] == 'native_pdf_text'
+        if not (allow_unsupported_documents and supported and item['representation'] in {'native_pdf_text', 'structural_visual_pdf'}
                 and item['text'] == ''):
             _string(item['text'], MAX_PROMPT_BYTES)
         _hash(item['text_sha256'])
         if (_sha(item['text']) != item['text_sha256'] or type(item['text_start']) is not int or
                 item['text_start'] != 0 or type(item['text_end']) is not int or item['text_end'] != len(item['text'])):
             fail('source_hash')
-        if item['representation'] not in (('full_visible_text', 'ownership_form_data', 'native_pdf_text')
+        if item['representation'] not in (('full_visible_text', 'ownership_form_data', 'native_pdf_text', 'structural_visual_pdf')
                 if supported else ('full_visible_text', 'ownership_form_data')) or item['selection'] not in ('primary', 'dependency'):
             fail('input')
         if item['selection'] == 'primary':
@@ -243,12 +245,18 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
                 fail('structural_evidence')
     if supported:
         from .filing_pdf import VERSION as PDF_VERSION
-        pdf_units = {item['filename']: item for item in evidence['units'] if item['representation'] == 'native_pdf_text'}
+        pdf_units = {item['filename']: item for item in evidence['units'] if item['representation'] in {'native_pdf_text', 'structural_visual_pdf'}}
         if set(evidence['pdf_evidence']) != set(pdf_units):
             fail('pdf_inventory')
         for name, unit in pdf_units.items():
             receipt = evidence['pdf_evidence'][name]
             try:
+                if unit['representation'] == 'structural_visual_pdf':
+                    if not allow_unsupported_documents or evidence['supported_document_policy'] != SUPPORTED_DOCUMENT_POLICY_V2:
+                        fail('pdf_inventory')
+                    from .filing_supported_policy import validate_structural_visual_unit
+                    validate_structural_visual_unit(receipt, unit)
+                    continue
                 if (receipt['version'] != PDF_VERSION or type(receipt['schema_version']) is not int
                         or receipt['schema_version'] != 2
                         or receipt['native_text_complete'] is not True
@@ -269,7 +277,7 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
                         or (not allow_unsupported_documents and (receipt['support_limitations']
                             or receipt['supported_text_layout'] is not True))):
                     fail('pdf_inventory')
-            except (KeyError, TypeError):
+            except (KeyError, TypeError, ValueError):
                 fail('pdf_inventory')
         ownership = evidence['form'].startswith('SCHEDULE 13')
         if ownership:
@@ -320,8 +328,9 @@ def prepare_request(analysis_type, current_evidence, *, prior_evidence=None,
         fail('comparator')
     lineage, lineage_bindings = [], {}
     ownership_bundles = {} if ownership_bundles is None else ownership_bundles
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES
     required_ownership = {item['accession'] for item in current
-        if item.get('supported_document_policy') == 'verified_supported_documents_v1'
+        if item.get('supported_document_policy') in SUPPORTED_DOCUMENT_POLICIES
         and item['form'].startswith('SCHEDULE 13')}
     if type(ownership_bundles) is not dict or set(ownership_bundles) != required_ownership:
         fail('ownership_lineage')

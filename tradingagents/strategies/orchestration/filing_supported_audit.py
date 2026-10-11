@@ -44,9 +44,10 @@ def validate_supported_raw_capture(data, config, raw_paths, *, check):
             return remaining
         bounded_check()
         from tradingagents.strategies.data_sources.filing_supported_policy import (
-            POLICY as SOURCE_POLICY, build_local_source_proof,
+            POLICIES as SOURCE_POLICIES, build_local_source_proof,
         )
-        _require(config.get('filing_material_policy')==SOURCE_POLICY, 'unsupported_raw_audit_policy')
+        source_policy = config.get('filing_material_policy')
+        _require(source_policy in SOURCE_POLICIES, 'unsupported_raw_audit_policy')
         from .filing_acquisition_validation import validate_filing_acquisition_policy
         from .filing_material_validation import validate_filing_material_policy, COLLECTIONS
         acquisition=validate_filing_acquisition_policy(data,config)
@@ -82,7 +83,7 @@ def validate_supported_raw_capture(data, config, raw_paths, *, check):
                             expected_date=identity['filing_date'],observed_at=original['observed_at'],
                             max_submission_bytes=512*1024**2,check=bounded_check,
                             inventory_reconciliation=evidence.get('inventory_reconciliation'))
-                        expected=quarantine_evidence(framed,submission_size=len(raw),policy=SOURCE_POLICY,
+                        expected=quarantine_evidence(framed,submission_size=len(raw),policy=source_policy,
                             required_exhibits=evidence['material_quarantine']['required_exhibits'])
                         _require(expected==evidence, 'raw_quarantine_evidence_mismatch')
                         quarantine_count+=1

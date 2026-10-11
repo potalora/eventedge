@@ -197,7 +197,8 @@ def validate_filing_acquisition_policy(data, config):
                 prior = row.get('prior_comparison', {})
                 if row.get('prior_status') == 'prior_evidence_unavailable':
                     failed_accessions.add(prior.get('accession'))
-        prospective = config.get('filing_material_policy') == 'verified_supported_documents_v1'
+        from tradingagents.strategies.data_sources.filing_material_policy import SUPPORTED_DOCUMENT_POLICIES
+        prospective = config.get('filing_material_policy') in SUPPORTED_DOCUMENT_POLICIES
         failed_accessions.update(_ownership_dependency_failures(graph, collections,
             prospective=prospective, failed=failed))
         _supported_original_bindings(graph, originals, prospective=prospective)

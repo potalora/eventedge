@@ -53,8 +53,8 @@ def build_material_scope(graph, collections):
         selected_policy = coverage.get('material_policy', POLICY)
         if not isinstance(selected_policy, str) or selected_policy not in SUPPORTED_POLICIES:
             _fail()
-        from tradingagents.strategies.data_sources.filing_supported_policy import POLICY as SUPPORTED_DOCUMENT_POLICY
-        prospective = selected_policy == SUPPORTED_DOCUMENT_POLICY
+        from tradingagents.strategies.data_sources.filing_supported_policy import POLICIES as SUPPORTED_DOCUMENT_POLICIES
+        prospective = selected_policy in SUPPORTED_DOCUMENT_POLICIES
         dispositions = {}
         if prospective:
             from .filing_supported_scope import build_supported_dispositions
@@ -65,6 +65,8 @@ def build_material_scope(graph, collections):
         for accession, value in corpus.items():
             if (value.get('accession') != accession
                     or (accession in approved_accessions and 'material_quarantine' not in value)):
+                _fail()
+            if prospective and 'material_quarantine' not in value and value.get('supported_document_policy') != selected_policy:
                 _fail()
             hashes[accession] = _digest(value)
             if 'material_quarantine' in value:

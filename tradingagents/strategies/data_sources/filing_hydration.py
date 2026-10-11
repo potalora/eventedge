@@ -148,7 +148,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY, attribution_binding, build_scope
     if attribution_policy not in (None, ATTRIBUTION_POLICY):
         raise ValueError('invalid_filing_attribution')
-    from .filing_material_policy import (SUPPORTED_POLICIES, SUPPORTED_DOCUMENT_POLICY,
+    from .filing_material_policy import (SUPPORTED_POLICIES, SUPPORTED_DOCUMENT_POLICIES,
         validate_quarantined_evidence)
     if material_policy is not None and (not isinstance(material_policy, str) or material_policy not in SUPPORTED_POLICIES):
         raise ValueError('invalid_filing_material_policy')
@@ -166,7 +166,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     discovery_complete = all(value.get('complete') is True for value in discovery_coverage.values())
     symbols = EquityUniverse.company_symbols(company_map) if company_map is not None else {}
     refs, specs, failures, corpus, histories, archives = {}, {}, {}, {}, {}, {}
-    prospective = material_policy == SUPPORTED_DOCUMENT_POLICY
+    prospective = material_policy in SUPPORTED_DOCUMENT_POLICIES
     supported_proofs, supported_originals, ownership_facts, ownership_lineages = {}, {}, {}, {}
     accepted_bytes, accepted_objects, rejected_bytes, rejected_objects = 0, 0, 0, 0
     resource_exhausted = False
@@ -566,6 +566,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
         result['coverage']['attribution_policy'] = attribution_policy
         result['attribution_scope'] = build_scope(result, copied, equity_universe, company_map)
     if prospective:
+        result['coverage']['material_policy'] = material_policy
         from tradingagents.strategies.orchestration.filing_supported_scope import build_supported_dispositions
         result.update(supported_source_proofs=dict(sorted(supported_proofs.items())),
             supported_originals=dict(sorted(supported_originals.items())),
