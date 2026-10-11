@@ -11,9 +11,11 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import json
+import time
 from threading import Lock
+from pathlib import Path
 
-from .runtime_deadline import model_timeout
+from .runtime_deadline import current_model_deadline, model_timeout
 
 
 @dataclass(repr=False)
@@ -68,6 +70,24 @@ def end_candidate_response(token):
 
 
 def _client_namespace(memo: _Memo, client) -> int | None:
+    from .chatgpt_plan_client import ChatGPTPlanClient
+    if isinstance(client, ChatGPTPlanClient):
+        from .plan_auth import PlanAuthError, read_profile_identity
+        try:
+            deadline = current_model_deadline()
+            identity = read_profile_identity(Path(client.auth_path) if client.auth_path else None,
+                deadline=min(time.monotonic() + 2, deadline if deadline is not None else float("inf")))
+        except (PlanAuthError, OSError, ValueError):
+            return None
+        if identity != client.profile_identity:
+            return None
+        settings = ("chatgpt_plan", client.auth_path, client.profile_identity)
+    else:
+        return _native_client_namespace(memo, client)
+    return _settings_namespace(memo, settings)
+
+
+def _native_client_namespace(memo: _Memo, client) -> int | None:
     native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
     provider = "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None
     if provider is None:
@@ -78,6 +98,10 @@ def _client_namespace(memo: _Memo, client) -> int | None:
                 client.project if provider == "openai" else None)
     if any(value is not None and not isinstance(value, str) for value in settings[1:3] + settings[4:]):
         return None
+    return _settings_namespace(memo, settings)
+
+
+def _settings_namespace(memo: _Memo, settings: tuple) -> int:
     with memo.lock:
         for index, accepted in enumerate(memo.client_settings):
             if accepted == settings:
@@ -99,7 +123,8 @@ def reused_candidate_response(client, *, model: str, system: str, prompt: str,
             return None
         from .llm_utils import uses_responses
         # Keep requested and effective limits, even when Responses raises the cap.
-        effective_limit = max(16384, max_tokens) if uses_responses(model) else max_tokens
+        from .chatgpt_plan_client import ChatGPTPlanClient
+        effective_limit = None if isinstance(client, ChatGPTPlanClient) else max(16384, max_tokens) if uses_responses(model) else max_tokens
         key = ("validated-candidate-response-v1", namespace, request.context,
                model, role, effort, max_tokens, effective_limit, temperature, system, prompt)
         hash(key)  # Unsupported mutable request values cannot authorize reuse.

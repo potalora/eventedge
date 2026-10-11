@@ -20,6 +20,6 @@ jobs:
       - name: Install application and test runner
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest
+          python -m pip install -e '.[chatgpt-plan]' pytest
       - name: Run non-live suite
         run: python -m pytest -q -m 'not live' tests

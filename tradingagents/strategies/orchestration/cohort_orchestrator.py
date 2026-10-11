@@ -271,6 +271,11 @@ class CohortOrchestrator:
         )
         models["thesis_model"] = ar_config.get("thesis_model", ar_config.get("autoresearch_model"))
         models["thesis_effort"] = ar_config.get("thesis_effort", models["llm_effort"])
+        billing_mode = ar_config.get("llm_billing_mode", "api")
+        if billing_mode not in {"api", "chatgpt_plan"}:
+            raise ValueError("invalid llm billing mode")
+        if billing_mode == "chatgpt_plan":
+            models["llm_billing_mode"] = billing_mode
         for key, value in models.items():
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"model {key} must be non-empty text")

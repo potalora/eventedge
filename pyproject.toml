@@ -31,6 +31,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+chatgpt-plan = [
+    "Authlib>=1.8.0,<2",
+    "joserfc>=1.7.5,<2",
+]
 openbb = [
     "openbb-core",
     "openbb-equity",

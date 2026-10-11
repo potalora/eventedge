@@ -118,20 +118,29 @@ def call_analysis_model(
         provenance.update(configured_model=model, returned_model=None, returned_revision=None,
                           identity_status="unpinned", response_id=None, reasoning_effort=effort)
     # Include supported SDK subclasses; injected call primitives are not SDKs.
+    from .chatgpt_plan_client import ChatGPTPlanClient
     native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
-    module = "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None
+    module = ("chatgpt_plan" if isinstance(client, ChatGPTPlanClient) else
+              "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None)
     if module is None:
         text = _call_model_direct(client, **request, provenance=provenance)
         model_timeout()
         return text
     # These are supported public SDK constructor properties; preserve explicit
     # endpoint/auth/header configuration without placing it in argv or logs.
-    settings = {"api_key": client.api_key, "base_url": str(client.base_url),
-                "default_headers": {key: value for key, value in client.default_headers.items() if isinstance(value, str)}}
-    if module == "openai":
-        settings.update(organization=client.organization, project=client.project)
+    if module == "chatgpt_plan":
+        if not uses_responses(model):
+            raise ValueError("chatgpt_plan_model_unsupported")
+        settings = {"auth_path": client.auth_path, "profile_identity": client.profile_identity}
+        if provenance is not None:
+            provenance.update(billing_mode="chatgpt_plan", effective_output_limit=None)
     else:
-        settings["auth_token"] = client.auth_token
+        settings = {"api_key": client.api_key, "base_url": str(client.base_url),
+                    "default_headers": {key: value for key, value in client.default_headers.items() if isinstance(value, str)}}
+        if module == "openai":
+            settings.update(organization=client.organization, project=client.project)
+        else:
+            settings["auth_token"] = client.auth_token
     try:
         result = bounded_transport({"kind": "model", "provider": module, "client": settings,
                                     "request": request, "timeout": timeout}, timeout)

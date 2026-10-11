@@ -11,7 +11,11 @@ import sys
 # text, bodies, IDs, URLs or headers. Unknown values provide no retry authority.
 _ERROR_CODES = frozenset({"rate_limit_exceeded", "slow_down", "insufficient_quota",
     "credit_balance_exhausted", "organization_spend_limit_exceeded",
-    "project_spend_limit_exceeded", "organization_usage_limit_exceeded"})
+    "project_spend_limit_exceeded", "organization_usage_limit_exceeded",
+    "subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable",
+    "auth_denied", "profile_changed", "model_unavailable", "provider_error",
+    "stream_interrupted", "stream_incomplete", "stream_invalid", "response_refused",
+    "response_empty", "response_too_large", "invalid_request"})
 _ERROR_TYPES = frozenset({"rate_limit_error", "insufficient_quota", "requests", "tokens"})
 _COUNTER_BOUND = 10**12
 _SECONDS_BOUND = 7 * 24 * 60 * 60
@@ -82,6 +86,60 @@ def extract_error_metadata(exc):
         return {}
 
 
+def _execute_plan(payload):
+    """Refresh and infer inside the same killable call; no API fallback exists."""
+    import os
+    import time
+    from pathlib import Path
+    from tradingagents.strategies.chatgpt_plan_transport import (
+        ChatGPTPlanTransportError, stream_plan_response,
+    )
+    deadline = time.monotonic() + payload["timeout"]
+    try:
+        from tradingagents.strategies.plan_auth import get_plan_credentials
+        settings = payload["client"]
+        credentials = get_plan_credentials(
+            auth_path=Path(settings["auth_path"]) if settings["auth_path"] else None,
+            deadline=deadline,
+        )
+        if credentials.profile_identity != settings["profile_identity"]:
+            return {"error": "provider_error", "status_code": None,
+                    "error_metadata": {"error_code": "profile_changed"}}
+    except Exception as exc:
+        return {"error": "timeout" if isinstance(exc, TimeoutError) else "provider_error",
+                "status_code": None, "error_metadata": {"error_code": "auth_denied"}}
+    try:
+        # This disposable process must not inherit a paid tenant, endpoint,
+        # SDK logging setting, or any other OpenAI credential configuration.
+        for name in tuple(os.environ):
+            if name.startswith("OPENAI_"):
+                os.environ.pop(name, None)
+        from openai import OpenAI, DefaultHttpxClient
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        with OpenAI(api_key=credentials.access_token, base_url="https://api.openai.com/v1",
+                    max_retries=0, timeout=remaining,
+                    http_client=DefaultHttpxClient(timeout=remaining, follow_redirects=False,
+                                                  trust_env=False)) as client:
+            provenance = {}
+            request = payload["request"]
+            text = stream_plan_response(client, model=request["model"], system=request["system"],
+                                        prompt=request["prompt"], effort=request["effort"],
+                                        provenance=provenance)
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            provenance.update(billing_mode="chatgpt_plan", effective_output_limit=None)
+            return {"text": text, "provenance": provenance}
+    except (TimeoutError, ChatGPTPlanTransportError) as exc:
+        code = getattr(exc, "code", None)
+        return {"error": "timeout" if isinstance(exc, TimeoutError) or code == "transport_timeout" else "provider_error",
+                "status_code": None, "error_metadata": validate_error_metadata({"error_code": code})}
+    except Exception:
+        return {"error": "provider_error", "status_code": None,
+                "error_metadata": {"error_code": "provider_error"}}
+
+
 def execute(payload):
     if payload["kind"] == "http_get":
         import requests
@@ -94,6 +152,8 @@ def execute(payload):
         except requests.RequestException:
             return {"error": "transport_error"}
     if payload["kind"] == "model":
+        if payload["provider"] == "chatgpt_plan":
+            return _execute_plan(payload)
         from tradingagents.strategies.llm_utils import _call_model_direct
         if payload["provider"] == "openai":
             from openai import OpenAI

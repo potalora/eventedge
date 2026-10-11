@@ -29,6 +29,7 @@ ALLOWED_MODEL_KEYS = frozenset(
         "portfolio_committee_effort",
         "thesis_model",
         "thesis_effort",
+        "llm_billing_mode",
     }
 )
 
@@ -274,18 +275,21 @@ def build_epoch_context(
     # Earlier frozen generations did not bind these settings explicitly.
     legacy_model_keys = ALLOWED_MODEL_KEYS - {
         "llm_effort", "portfolio_committee_model", "portfolio_committee_effort",
-        "thesis_model", "thesis_effort",
+        "thesis_model", "thesis_effort", "llm_billing_mode",
     }
     missing_model_keys = legacy_model_keys - actual_model_keys
     if missing_model_keys:
         raise ValueError(
             f"model key set is missing {sorted(missing_model_keys)[0]!r}"
         )
+    if "llm_billing_mode" in models and models["llm_billing_mode"] not in {"api", "chatgpt_plan"}:
+        raise ValueError("invalid llm billing mode")
     model_document = {
         _required_text("model key", key): (
             _required_text(f"model {key}", value) if value is not None else None
         )
         for key, value in sorted(models.items())
+        if key != "llm_billing_mode" or value == "chatgpt_plan"
     }
     strategy_document = tuple(
         _required_text("strategy", strategy) for strategy in strategies

@@ -912,6 +912,11 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
     def _get_client(self):
         """Lazy-init the selected provider."""
         if self._client is None:
+            from tradingagents.strategies.chatgpt_plan_client import configured_plan_client
+            plan_client = configured_plan_client(self.config, self._model_name)
+            if plan_client is not None:
+                self._client = plan_client
+                return self._client
             try:
                 from tradingagents.strategies.llm_utils import uses_responses
                 if uses_responses(self._model_name):
@@ -936,6 +941,7 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
     def _call_llm(self, *, system: str, prompt: str, max_tokens: int = 1024):
         """SDK retries are off; rate-limit backoff consumes one shared deadline."""
         from tradingagents.strategies.llm_utils import call_analysis_model
+        from tradingagents.strategies.chatgpt_plan_client import require_configured_billing
         from tradingagents.strategies.runtime_deadline import (
             DEFAULT_MODEL_BUDGET_S, ModelDeadlineExceeded, current_model_deadline,
             model_backoff, model_budget, model_timeout,
@@ -950,6 +956,7 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
             raise RuntimeError("No LLM client")
         for attempt in range(5):
             try:
+                require_configured_billing(client, self.config, self._model_name)
                 return call_analysis_model(
                     client, model=self._model_name, max_tokens=max_tokens,
                     system=system, prompt=prompt, temperature=self._temperature,

@@ -157,6 +157,9 @@ class LLMAnalyzer:
         def fork_client(client):
             if client is None:
                 return None
+            from tradingagents.strategies.chatgpt_plan_client import ChatGPTPlanClient
+            if isinstance(client, ChatGPTPlanClient):
+                return client
             native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
             if native_bases & {"openai", "anthropic"}:
                 return client
@@ -195,6 +198,11 @@ class LLMAnalyzer:
     def _get_client(self):
         """Lazy-init the selected provider; credentials stay in its environment."""
         if self._client is None:
+            from tradingagents.strategies.chatgpt_plan_client import configured_plan_client
+            plan_client = configured_plan_client(self.config, self._model_name)
+            if plan_client is not None:
+                self._client = plan_client
+                return self._client
             try:
                 from tradingagents.strategies.llm_utils import uses_responses
                 if uses_responses(self._model_name):
@@ -235,6 +243,7 @@ class LLMAnalyzer:
         """Make a single LLM call. Returns response text or empty string."""
         from tradingagents.strategies.candidate_response_reuse import reused_candidate_response, retain_candidate_response
         from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
+        from tradingagents.strategies.chatgpt_plan_client import configured_plan_client, require_configured_billing
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
         model = self._model_name if role == "bounded" else self._thesis_model
         effort = self._effort if role == "bounded" else self._thesis_effort
@@ -244,7 +253,11 @@ class LLMAnalyzer:
                                      "response_id": None, "reasoning_effort": effort, "role": role}
         try:
             model_timeout()
-            if uses_responses(model) != uses_responses(self._model_name):
+            plan_client = configured_plan_client(self.config, model)
+            mixed_provider = uses_responses(model) != uses_responses(self._model_name)
+            if plan_client is not None and mixed_provider:
+                client = self._provider_clients.setdefault("chatgpt_plan", plan_client)
+            elif mixed_provider:
                 # Mixed-provider configurations do not mutate the shared role model.
                 provider = "openai" if uses_responses(model) else "anthropic"
                 if provider not in self._provider_clients:
@@ -260,6 +273,7 @@ class LLMAnalyzer:
             if client is None:
                 self.last_call_failure = "model_unavailable"
                 return ""
+            require_configured_billing(client, self.config, model)
             reused = reused_candidate_response(client, model=model, system=system, prompt=user,
                                                 max_tokens=max_tokens, temperature=self._temperature,
                                                 effort=effort, role=role)

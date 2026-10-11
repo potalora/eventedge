@@ -1,0 +1,180 @@
+# EventEdge ChatGPT plan authorization
+
+This optional backend uses EventEdge's own Sign in with ChatGPT registration.
+It does not read Codex or Pi credentials and has no API-key fallback. It does
+not use code from the noncommercial SIWC devkit.
+
+The authorization module is `tradingagents.strategies.plan_auth`. Authlib 1.8.0
+provides the OAuth client, PKCE, token exchange and OIDC claim checks. Its
+maintained joserfc dependency verifies JWT signatures. Authlib uses the BSD
+3-Clause license. Installation of EventEdge's optional authentication dependency
+belongs to the application's dependency workflow; login does not install tools.
+
+For a development checkout, install the optional dependencies with
+`python -m pip install -e '.[chatgpt-plan]'`. The non-live CI job installs that
+extra to exercise the authorization tests.
+
+## Operator consent
+
+No live sign-in or inference request was made during implementation. Tests use
+synthetic signed tokens, synthetic OAuth HTTP responses and loopback callbacks.
+Account entitlement and the selected models remain unverified until the user
+completes consent and an explicitly authorized validation occurs.
+
+The name `chatgpt_plan` describes this authorization route; it does not promise
+zero spending. Eligible SIWC requests can use a ChatGPT plan or available
+credits. Before any model preflight, inspect EventEdge in ChatGPT Settings →
+Usage and verify that credit spending is disabled or its limit is zero. Retain
+that UI evidence for the user's subscription-only requirement. No inference is
+authorized before that check. The adapter does not invent a request parameter
+that forces plan-only billing. No API-key fallback is a separate guarantee.
+
+Run login as the same Unix user that will execute EventEdge. Pedro's local
+Codex login does not establish a grant for the Hermes service user. Every host
+uses its own stable identifier and its own registration. Do not copy credential
+files between users or hosts.
+
+After review and authorization, the local command is:
+
+```sh
+python -m tradingagents.strategies.plan_auth login
+```
+
+The explicit headless flow can display a temporary authorization URL:
+
+```sh
+python -m tradingagents.strategies.plan_auth login --no-browser --port 1456
+```
+
+The listener binds only to `127.0.0.1`. A remote user's browser needs a separately
+approved loopback forwarding arrangement to the selected port. Do not expose
+the callback publicly. The URL has one-time state, nonce and a PKCE challenge;
+it has no retained ID token or email hint. Do not retain the URL in run logs.
+The command requires user consent in the browser and does not send inference.
+
+Local status has no network or refresh:
+
+```sh
+python -m tradingagents.strategies.plan_auth status
+```
+
+The default credential file is `~/.config/eventedge/plan-auth.json` for the
+executing user. `--auth-path` selects another private, local path outside Git.
+The parent directory must belong to that user and have mode 0700. Credential
+and lock files have mode 0600. Symlinks, hard-linked files, nonregular files and
+paths within a Git checkout are rejected. No external secret-store daemon is
+required; access and refresh tokens remain plaintext in this protected file.
+Use disk encryption and the host's existing account isolation as applicable.
+Never commit, print, upload or copy that file into proof artifacts.
+
+## Application interface
+
+Select the route explicitly in the prospective generation's configuration:
+
+```python
+config["autoresearch"]["llm_billing_mode"] = "chatgpt_plan"
+```
+
+The application default remains `api`. The optional
+`autoresearch.chatgpt_plan_auth_path` selects a private file for the executing
+user. Both the configured file selection and its opaque profile identity must
+match the client before a call or cached response can be used. Switching the
+configuration cannot silently keep an older account client. Credentials and
+file paths do not enter the metric epoch's model identity.
+
+The route preserves configured model names, reasoning effort, system guidance
+and complete user input. OpenAI's plan endpoint requires streaming, array input
+and `store: false`; it does not support `max_output_tokens` or sampling controls.
+The plan route therefore omits the former native output-token cap and records
+`effective_output_limit: null` in provenance. This is a prospective behavior
+change requiring a new generation, not an in-place equivalent of an old run.
+Its billing mode changes the metric behavior identity and isolates response
+reuse from API-mode entries. Existing API-mode metric identities are preserved.
+
+The disposable worker ignores ambient OpenAI API credentials, tenant IDs and
+endpoint overrides, uses only the selected OAuth grant at the fixed public
+endpoint, and disables redirects and SDK retries. Subscription-limit failures
+are terminal for the call. No failure switches to another provider or account.
+The response is accepted only after consistent completion and full HTTP EOF;
+refusals, incomplete or contradictory events, trailing errors, excessive
+responses and missing completion all fail. Existing source and shared model
+budgets, including the 120-second call cap, still apply.
+
+`get_plan_credentials(*, auth_path=None, deadline=<absolute monotonic time>)`
+returns `PlanCredentials` with `access_token`, `client_id`, `subject`,
+`profile_identity` and `expires_at`. Its representation is redacted. The bearer
+is for private in-process use by the selected plan transport, not provenance,
+argv, environment variables, model output or public diagnostics.
+
+`read_profile_identity(auth_path=None, *, deadline=None)` returns only an opaque
+UUID for memo isolation. It does not refresh or make a network request. Pass the
+parent's current absolute deadline when one exists. A successful login creates
+a new UUID. A token refresh preserves it. The transport worker must compare it
+with its expected identity before inference. The UUID does not expose the
+account subject or client ID.
+
+`status(auth_path=None, deadline=None)` returns local status, a plan-usage flag
+and the opaque UUID when present. Local status is not an online entitlement
+check. Default local reads use a short two-second deadline. Status and identity reads
+use a noncreating, nonblocking file snapshot. They never wait for a refresh
+lock. Atomic replacement yields a complete old or new record; the worker checks
+the expected profile UUID before inference.
+
+The application must resolve credentials inside its disposable transport
+worker. Its complete elapsed allowance includes authentication, refresh, SDK
+startup, streaming and response parsing. Expired auth deadlines raise
+`PlanAuthDeadlineExceeded`, both `PlanAuthError` and `TimeoutError`, so the
+existing transport deadline contract applies. Invalid arguments and other auth
+failures expose fixed local codes only. Socket inactivity timeouts do not bound
+DNS, filesystem stalls or all operating-system work; retain the parent worker's
+elapsed deadline and kill/reap behavior. No auth failure permits API-key fallback.
+
+## Grant and storage lifecycle
+
+First login persists a stable host UUID before opening the browser. Authlib
+constructs authorization with fresh state, nonce and S256 PKCE. The first request
+uses `dynamic_agent_client` and the actual name EventEdge. The callback must have
+the exact loopback Host, path, state and a valid issued client ID. The module
+saves that issued ID before exchanging the code. Failed exchange preserves the
+registration for another sign-in; it does not produce usable credentials.
+
+The module verifies the ID token's signature, issuer, audience, expiration,
+issued-at time and nonce. A returning login must match the registered subject
+and client. The token response must grant the requested scopes, including
+`chatgpt.tokens.use.direct`. Identity-only login cannot enable inference.
+
+Exclusive file locking serializes login and refresh for one profile. Writes use
+private temporary files, atomic replacement and file/directory fsync. Refresh
+uses the issued client, the latest refresh token and the fixed API resource;
+it omits a new scope request. The module replaces the token set and expiry
+together. A new refresh ID token is optional: when supplied, it must pass full
+signature/issuer/audience/time validation and match the original subject. When
+absent, the TLS-protected, issued-client-bound refresh preserves the previously
+verified identity and retained ID token.
+
+The module checkpoints rotated credentials before it performs key-service I/O.
+If verification cannot finish, those pending credentials cannot power inference.
+A later attempt can verify the saved rotation without reusing a consumed refresh
+token. Local credential ownership is a trust boundary; this module does not
+protect against malicious code that already runs as the same Unix user.
+
+## Verification scope
+
+Focused tests exercise actual Authlib PKCE/exchange/refresh and joserfc signature
+validation with synthetic credentials. They cover wrong identities, forged and
+unsigned tokens, missing consent, returning registration, callback rejection,
+private storage, deadline failures, concurrent refresh and interrupted key
+validation. Local status and profile identity tests prohibit network use.
+
+These tests do not establish account eligibility, available model names, plan
+capacity, successful native proof or production deployment. Existing frozen
+native bundles do not gain a new transport by this application change.
+
+## Primary references
+
+- [OpenAI registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)
+- [OpenAI accounts and sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
+- [OpenAI identity validation](https://developers.openai.com/siwc/website)
+- [Authlib OAuth HTTP clients](https://docs.authlib.org/en/stable/oauth2/client/http/index.html)
+- [Authlib OIDC claims](https://docs.authlib.org/en/stable/oauth2/specs/oidc.html)
+- [Authlib 1.8.0 license](https://github.com/authlib/authlib/blob/v1.8.0/LICENSE)

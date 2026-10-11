@@ -123,6 +123,8 @@ DEFAULT_CONFIG = {
         "proposals_per_strategy": 3,
         # Structured evidence uses Luna; unstructured thesis work uses Astra.
         "autoresearch_model": "gpt-6-luna",
+        "llm_billing_mode": "api",
+        "chatgpt_plan_auth_path": None,
         "llm_effort": "high",
         "thesis_model": "gpt-6-astra",
         "thesis_effort": "high",
