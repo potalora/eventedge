@@ -79,12 +79,17 @@ def test_complete_ordered_inventory_and_exact_text_provenance():
     json.dumps(result, allow_nan=False)
 
 
-def test_sec_uu_wrapper_preserves_encoded_and_decoded_hashes():
+@pytest.mark.parametrize('line_ending', [b'\n', b'\r\n', b'\r'], ids=['lf', 'crlf', 'cr'])
+def test_sec_uu_wrapper_preserves_encoded_and_decoded_hashes(line_ending):
     body = pdf_bytes()
-    uu = b'begin 644 filing.pdf\n' + b''.join(binascii.b2a_uu(body[i:i+45]) for i in range(0, len(body), 45)) + b'`\nend\n'
-    wrapped = b'<PDF>\n' + uu + b'</PDF>\n'
+    rows = [binascii.b2a_uu(body[i:i+45]).removesuffix(b'\n')
+            for i in range(0, len(body), 45)]
+    uu = line_ending.join([b'begin 644 filing.pdf', *rows, b'`', b'end', b''])
+    wrapped = line_ending + b'<PDF>' + line_ending + uu + b'</PDF>' + line_ending
     result = extract(wrapped)
     assert result['encoding'] == 'sec_pdf_uu'
+    assert result['decoded_bytes'] == len(body)
+    assert result['input_bytes'] == len(wrapped)
     assert result['decoded_sha256'] == hashlib.sha256(body).hexdigest()
     assert result['input_sha256'] == hashlib.sha256(wrapped).hexdigest()
 

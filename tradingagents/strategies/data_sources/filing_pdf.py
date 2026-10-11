@@ -70,7 +70,7 @@ def _decode(body, limit, check):
         raise FilingPDFError('pdf_byte_limit')
     payload, encoding = body, 'pdf'
     if body.lstrip().startswith(b'<PDF>'):
-        match = re.fullmatch(rb'[ \t\r\n]*<PDF>\r?\n(.*?)</PDF>[ \t\r\n]*', body, re.S)
+        match = re.fullmatch(rb'[ \t\r\n]*<PDF>(?:\r\n|\r|\n)(.*?)</PDF>[ \t\r\n]*', body, re.S)
         if match is None:
             raise FilingPDFError('pdf_wrapper_invalid')
         payload, encoding = match[1], 'sec_pdf'
