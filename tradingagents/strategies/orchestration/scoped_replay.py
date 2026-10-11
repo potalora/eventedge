@@ -52,12 +52,16 @@ record; it does not invalidate unrelated, already completed execution.
     from .filing_acquisition_validation import configured as acquisition_configured, validate_filing_acquisition_policy
     validate_filing_acquisition_policy(data, config)
     acquisition_enabled = acquisition_configured(config)
+    from .filing_material_validation import validate_filing_material_policy, validate_filing_material_health
+    from tradingagents.strategies.data_sources.filing_material_policy import configured as material_configured
+    material_scope = validate_filing_material_policy(data, config)
+    material_enabled = material_configured(config)
     from .congress_policy import audit_scope, configured
     congress_scope = audit_scope(data, config, session, now=now, replay=True)
     congress_enabled = configured(config)
     validate_portfolio_targets(data, owner, session)
     errors, _, _ = source_scope_evidence(data, config, session, now=now)
-    if not errors and not congress_enabled and not filing_attribution_enabled and not acquisition_enabled:
+    if not errors and not congress_enabled and not filing_attribution_enabled and not acquisition_enabled and not material_enabled:
         return
     policy_ids = {owner._policy_id_for_horizon(row['config'].horizon) for row in owner.cohorts}
     records = owner._metric_store.read_strategy_health(epoch, session=date.fromisoformat(session), limit=1000)
@@ -69,7 +73,7 @@ record; it does not invalidate unrelated, already completed execution.
         by_identity[key] = record
     if congress_enabled:
         _validate_congress_health(by_identity, policy_ids, congress_scope)
-    if filing_attribution_enabled or acquisition_enabled:
+    if filing_attribution_enabled or acquisition_enabled or material_enabled:
         disabled = {**getattr(owner, '_disabled_strategies', {}), **config.get('disabled_strategies', {})}
         strategy_sources = {strategy.name: strategy.data_sources for strategy in owner.cohorts[0]['engine'].paper_trade_strategies
                           if 'edgar' in strategy.data_sources and strategy.name not in disabled
@@ -77,6 +81,7 @@ record; it does not invalidate unrelated, already completed execution.
         validate_filing_attribution_health(records, policy_ids, set(strategy_sources), filing_attribution_scope,
             expected_error_sha256=filing_source_error_sha256(data.get('edgar')),
             strategy_sources=strategy_sources)
+        validate_filing_material_health(records, policy_ids, set(strategy_sources), material_scope)
     if not errors:
         return
     policies = {'courtlistener': ('courtlistener_scope_policy', COURT_POLICY),

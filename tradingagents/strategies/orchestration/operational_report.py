@@ -507,8 +507,13 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose) 
                           'filing_comparison_policy': graph.get('coverage', {}).get('comparator_policy'),
                           'filing_attribution_policy': graph.get('coverage', {}).get('attribution_policy'),
                           'filing_parser_policy': graph.get('coverage', {}).get('parser_policy'),
-                          'filing_acquisition_policy': graph.get('coverage', {}).get('acquisition_policy')}
+                          'filing_acquisition_policy': graph.get('coverage', {}).get('acquisition_policy'),
+                          'filing_material_policy': graph.get('coverage', {}).get('material_policy')}
                          if isinstance(graph, dict) else {})
+        from .filing_material_validation import validate_filing_material_policy
+        material_scope = validate_filing_material_policy(envelope['payload'], filing_config)
+        if material_scope is not None:
+            result['filing_material_scope'] = material_scope
         from .filing_acquisition_validation import validate_filing_acquisition_policy
         acquisition_scope = validate_filing_acquisition_policy(envelope['payload'], filing_config)
         if acquisition_scope is not None:
@@ -670,6 +675,19 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         except (ValueError, TypeError, KeyError):
             diagnose('filing_attribution_scope_conflict')
         try:
+            expected_material = report['sources'].get('filing_material_scope')
+            if expected_material is not None:
+                from .filing_material_validation import validate_filing_material_health
+                strategies = {strategy.name for strategy in get_paper_trade_strategies()
+                              if 'edgar' in strategy.data_sources and strategy.name not in disabled
+                              and not getattr(strategy, 'retirement_reason', None)}
+                validate_filing_material_health(health, {row['policy_id'] for row in health},
+                                               strategies, expected_material)
+            elif any('filing_material_scope' in row['evidence'] for row in health):
+                raise ValueError('unbound filing material health')
+        except (ValueError, TypeError, KeyError):
+            diagnose('filing_material_scope_conflict')
+        try:
             scope_limits = source_scope_limits_from_health(health)
             expected_congress_scope = report['sources'].get('congress_audit_scope')
             if scope_limits.get('congress') != expected_congress_scope:
@@ -780,6 +798,22 @@ def render_operational_report(report: dict) -> str:
             f"{scope['outside_rows']} outside the declared universe, {scope['unresolved_rows']} unresolved, "
             f"from {scope['total_rows']} retained discovery rows. "
             'Unresolved rows remain non-actionable. These counts establish neither full attribution nor model completion.'])
+    if report['sources'].get('filing_acquisition_scope'):
+        scope = report['sources']['filing_acquisition_scope']
+        lines.extend(['', f"Original filing acquisition: {scope['completed_originals']} completed originals; "
+            f"spool closed: {str(scope['spool_closed']).lower()}."])
+    if report['sources'].get('filing_material_scope'):
+        scope = report['sources']['filing_material_scope']
+        lines.extend(['', f"Strict filing evidence complete: {str(scope['strict_complete']).lower()} "
+            f"({scope['strict_failed_rows']} failed rows); scoped analysis complete: {str(scope['scoped_complete']).lower()} "
+            f"({scope['scoped_failed_rows']} failed rows). "
+            f"{scope['quarantined_rows']} quarantined rows across {len(scope['quarantined_accessions'])} approved filings "
+            'remain non-actionable material gaps. Scoped completeness excludes these analyses and does not establish model completion.'])
+        if scope['quarantines']:
+            lines.append('')
+        for quarantine in scope['quarantines']:
+            gaps = ', '.join(quarantine['gap_codes'])
+            lines.append(f"- {quarantine['accession']}: {gaps}.")
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:

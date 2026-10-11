@@ -25,7 +25,7 @@ def completed_submission(record):
     observe(record)
 
 
-def _acquire_spooled(response, target, *, accession, form_type, filing_date, required_exhibits):
+def _acquire_spooled(response, target, *, accession, form_type, filing_date, required_exhibits, material_policy=None):
     record = spool_response(response, identity=dict(accession=accession, form=form_type,
         filing_date=filing_date, source_url=target))
     try:
@@ -34,9 +34,10 @@ def _acquire_spooled(response, target, *, accession, form_type, filing_date, req
         from .filing_parser_dispatch import current_dispatcher, dispatch_evidence
         if current_dispatcher() is None:
             raise SourceFetchError('SEC parser scope is required', reason_code='provider_error')
+        arguments = {'material_policy': material_policy} if material_policy is not None else {}
         result = dispatch_evidence(record, expected_accession=accession, expected_form=form_type,
             expected_date=filing_date, observed_at=record.observed_at,
-            max_submission_bytes=512 * 1024 * 1024, required_exhibits=required_exhibits)
+            max_submission_bytes=512 * 1024 * 1024, required_exhibits=required_exhibits, **arguments)
         provider_timeout('edgar')
         result['source_url'] = target
         return result
@@ -66,13 +67,24 @@ def complete_submission_url(url: str, accession: str) -> str:
 def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
                                 form_type: str, filing_date: str,
                                 required_exhibits=(),
-                                max_submission_bytes=64 * 1024 * 1024) -> dict:
+                                max_submission_bytes=64 * 1024 * 1024, material_policy=None) -> dict:
     """Fetch once, validate full framing, and reject any late parse/acceptance.
 
     Retries use the inherited provider policy. The native supervisor supplies
     hard process closure; socket and parser deadlines are cooperative here.
     """
     target = complete_submission_url(url, accession)
+    selected_material_policy = None
+    if material_policy is not None:
+        from .filing_material_policy import POLICY, approved_identity
+        from .filing_parser_dispatch import current_dispatcher
+        if (material_policy != POLICY or current_submission_spool() is None
+                or current_dispatcher() is None):
+            raise ValueError('SEC material quarantine requires bounded spool and parser scopes')
+        approved = approved_identity(dict(accession=accession, form=form_type,
+            filing_date=filing_date, source_url=target))
+        if approved is not None:
+            selected_material_policy = material_policy
     if type(max_submission_bytes) is not int or not 1 <= max_submission_bytes <= 64 * 1024 * 1024:
         raise ValueError('Invalid SEC submission byte limit')
     if current_provider_deadline('edgar') is None:
@@ -82,7 +94,7 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
             return acquire_complete_submission(
                 user_agent, url, accession=accession, form_type=form_type,
                 filing_date=filing_date, required_exhibits=required_exhibits,
-                max_submission_bytes=max_submission_bytes)
+                max_submission_bytes=max_submission_bytes, material_policy=material_policy)
     provider_timeout('edgar')
     response = provider_request(
         'edgar', 'GET', target, headers={'User-Agent': user_agent}, timeout=30,
@@ -95,7 +107,8 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
             # spool_response owns response closure, including all read failures.
             spooled_response, response = response, None
             return _acquire_spooled(spooled_response, target, accession=accession,
-                form_type=form_type, filing_date=filing_date, required_exhibits=required_exhibits)
+                form_type=form_type, filing_date=filing_date, required_exhibits=required_exhibits,
+                material_policy=selected_material_policy)
         raw = read_bounded_response(response, provider='edgar', max_bytes=max_submission_bytes)
         observed_at = datetime.now(timezone.utc).isoformat()
     finally:

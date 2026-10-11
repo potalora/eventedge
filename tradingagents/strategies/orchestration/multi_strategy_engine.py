@@ -315,6 +315,8 @@ class MultiStrategyEngine:
         filing_attribution_configured(self.ar_config)
         from .filing_acquisition_validation import configured as filing_acquisition_configured
         filing_acquisition_configured(self.ar_config)
+        from tradingagents.strategies.data_sources.filing_material_policy import configured as filing_material_configured
+        filing_material_configured(self.ar_config)
 
         # Load strategies (paper-trade only)
         self.paper_trade_strategies = strategies or get_paper_trade_strategies()
@@ -439,6 +441,18 @@ class MultiStrategyEngine:
             validate_filing_acquisition_policy(data, self.ar_config)
         except ValueError:
             scope_errors['edgar'] = 'invalid_filing_acquisition_policy'
+            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        from .filing_material_validation import validate_filing_material_policy, signal_edgar as material_signal_edgar
+        from tradingagents.strategies.data_sources.filing_material_policy import configured as filing_material_configured
+        filing_material_scope = None
+        try:
+            filing_material_scope = validate_filing_material_policy(data, self.ar_config)
+            if filing_material_configured(self.ar_config) and 'edgar' not in scope_errors:
+                signal_data = dict(signal_data, edgar=(material_signal_edgar(data['edgar'],
+                    filing_material_scope, projected_edgar=signal_data.get('edgar'))
+                    if filing_material_scope is not None else {}))
+        except ValueError:
+            scope_errors['edgar'] = 'invalid_filing_material_policy'
             signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
         regime_model = self._build_regime_model(signal_data)
         regime_model.setdefault("timestamp", datetime.now().isoformat())
@@ -576,6 +590,9 @@ class MultiStrategyEngine:
                 if filing_attribution_scope is not None:
                     from copy import deepcopy
                     health_record.evidence['filing_attribution_scope'] = deepcopy(filing_attribution_scope)
+                if filing_material_scope is not None:
+                    from copy import deepcopy
+                    health_record.evidence['filing_material_scope'] = deepcopy(filing_material_scope)
             health.append(health_record)
             for c in candidates:
                 if c.metadata.get("equity_universe_excluded"):
@@ -2301,6 +2318,8 @@ class MultiStrategyEngine:
             monitor_options['parser_policy'] = parser_policy
         if attribution_policy is not None:
             monitor_options['attribution_policy'] = attribution_policy
+        if self.ar_config.get('filing_material_policy') is not None:
+            monitor_options['material_policy'] = self.ar_config['filing_material_policy']
         if self.ar_config.get('filing_acquisition_policy') is not None:
             monitor_options.update(acquisition_policy=self.ar_config['filing_acquisition_policy'],
                                    spool_root=self.ar_config.get('filing_spool_dir'))
@@ -2353,7 +2372,15 @@ class MultiStrategyEngine:
                     company_map=company_map)
                 result.update(graph['collections'])
                 result['filing_evidence'] = {key: value for key, value in graph.items() if key != 'collections'}
-                if graph.get('coverage', {}).get('complete') is not True:
+                complete = graph.get('coverage', {}).get('complete') is True
+                if self.ar_config.get('filing_material_policy') is not None:
+                    from .filing_material_validation import validate_filing_material_policy
+                    # A temporary failure label permits validating incomplete graphs;
+                    # it is never persisted or used to erase other operation errors.
+                    material = validate_filing_material_policy(
+                        {'edgar': dict(result, error='full filing evidence incomplete')}, self.ar_config)
+                    complete = material is not None and material['scoped_complete'] is True
+                if not complete:
                     failures.append('full filing evidence incomplete')
             except Exception as exc:
                 error = source_fetch_error('Full filing evidence acquisition incomplete', exc)

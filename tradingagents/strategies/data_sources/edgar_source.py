@@ -481,13 +481,13 @@ class EDGARSource:
 
     def get_complete_submission(self, url: str, *, accession: str, form_type: str,
                                 filing_date: str, required_exhibits=(),
-                                max_submission_bytes=64 * 1024 * 1024) -> dict:
+                                max_submission_bytes=64 * 1024 * 1024, material_policy=None) -> dict:
         """Acquire full selected filing evidence under the existing source deadline."""
         from .filing_acquisition import acquire_complete_submission
         return acquire_complete_submission(
             self._user_agent, url, accession=accession, form_type=form_type,
             filing_date=filing_date, required_exhibits=required_exhibits,
-            max_submission_bytes=max_submission_bytes)
+            max_submission_bytes=max_submission_bytes, material_policy=material_policy)
 
     def get_primary_document_url(self, url: str, form_type: str | None = None) -> str:
         """Resolve the matching main filing document, independently of identity URL."""

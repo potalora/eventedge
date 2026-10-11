@@ -111,6 +111,8 @@ def filing_analysis_inputs(candidate, shared_data, universe):
             if item['accession'] not in corpus or corpus[item['accession']] != item:
                 _fail()
         all_corpora = current + ([prior] if prior else [])
+        if any('material_quarantine' in item for item in all_corpora):
+            _fail('material_quarantine')
         issuer_map = {item['accession']: _issuer(item) for item in all_corpora}
         issuer_binding = {'status': 'verified', 'issuers': issuer_map,
                           'corpus_sha256': {item['accession']: evidence_digest(item) for item in all_corpora}}

@@ -135,7 +135,7 @@ def _issuer_binding(evidence, universe, company_symbols):
 def hydrate_filings(source, collections: dict, *, equity_universe=None,
                     company_map=None, max_workers=16,
                     max_evidence_bytes=512 * 1024 * 1024, comparator_policy=None,
-                    attribution_policy=None) -> dict:
+                    attribution_policy=None, material_policy=None) -> dict:
     """Hydrate all categories once under the caller's unchanged absolute budget.
 
     Output rows contain corpus references, never duplicated full narratives.
@@ -148,6 +148,9 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY, attribution_binding, build_scope
     if attribution_policy not in (None, ATTRIBUTION_POLICY):
         raise ValueError('invalid_filing_attribution')
+    from .filing_material_policy import POLICY as MATERIAL_POLICY, validate_quarantined_evidence
+    if material_policy not in (None, MATERIAL_POLICY):
+        raise ValueError('invalid_filing_material_policy')
     if current_provider_deadline('edgar') is None:
         raise ValueError('An inherited EDGAR deadline is required')
     if type(max_workers) is not int or not 1 <= max_workers <= 16:
@@ -210,7 +213,8 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
         spec = specs[acc]
         return (('body', acc), partial(source.get_complete_submission, spec['url'],
             accession=acc, form_type=spec['form'], filing_date=spec['date'],
-            required_exhibits=tuple(sorted(spec['required_exhibits']))))
+            required_exhibits=tuple(sorted(spec['required_exhibits'])),
+            **({'material_policy': material_policy} if material_policy else {})))
 
     def accept(results, failed):
         nonlocal accepted_bytes, accepted_objects, rejected_bytes, rejected_objects, resource_exhausted
@@ -222,6 +226,10 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                         or value.get('structural_status') not in ('complete', 'insufficient')):
                     failures[key] = _failure('mismatched_submission_evidence')
                     continue
+                if 'material_quarantine' in value:
+                    if not material_policy:
+                        raise ValueError('Undeclared filing material quarantine')
+                    validate_quarantined_evidence(value)
             provider_timeout('edgar')
             try:
                 size = len(json.dumps(value, sort_keys=True, separators=(',', ':'),
@@ -258,13 +266,15 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     tasks = [(('history', cik), partial(source.get_company_submission_history, cik)) for cik in initial_ciks]
     tasks += [body_task(key) for key in annual]
     _run_tasks(tasks, max_workers, accept)
-    actual_ciks = {cik for key in annual if key in corpus for cik in _role_ciks(corpus[key], 'FILER')}
+    # A validated disabled current filing creates no comparator obligation.
+    comparison_annual = [key for key in annual if not corpus.get(key, {}).get('material_quarantine')]
+    actual_ciks = {cik for key in comparison_annual if key in corpus for cik in _role_ciks(corpus[key], 'FILER')}
     tasks = [(('history', cik), partial(source.get_company_submission_history, cik))
              for cik in sorted(actual_ciks - set(histories))]
     _run_tasks(tasks, max_workers, accept)
 
     archive_tasks = {}
-    for key in annual:
+    for key in comparison_annual:
         if key not in corpus:
             continue
         spec = specs[key]
@@ -291,7 +301,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     expanded_history = set()
     if comparator_policy == CURRENT_ONLY_POLICY:
         additional = {}
-        for key in annual:
+        for key in comparison_annual:
             current = corpus.get(key)
             if current is None or current['structural_status'] != 'complete':
                 continue
@@ -311,7 +321,7 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
         _run_tasks([additional[key] for key in sorted(additional)], max_workers, accept)
 
     comparisons, selected_proofs = {}, {}
-    for key in annual:
+    for key in comparison_annual:
         if key not in corpus:
             comparisons[key] = {'status': 'current_evidence_unavailable'}
             continue
@@ -431,6 +441,11 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                     binding = attribution_binding(value, equity_universe, symbols)
                     attribution_permission = True
                 row['issuer_binding'] = binding
+                if 'material_quarantine' in value:
+                    row['filing_material_disposition'] = 'quarantined'
+                    row['material_gap_codes'] = list(value['material_quarantine']['gap_codes'])
+                    if row.get('requires_prior'):
+                        row['prior_status'] = 'not_assessed_material_quarantine'
                 failed = failed or (binding['status'] != 'verified' and not attribution_permission)
                 if filing_form_family(value['form']) in _OWNERSHIP:
                     row['subject_attribution_verified'] = binding['execution_status'] == 'verified'
@@ -490,4 +505,10 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
     if attribution_policy:
         result['coverage']['attribution_policy'] = attribution_policy
         result['attribution_scope'] = build_scope(result, copied, equity_universe, company_map)
+    if material_policy:
+        from tradingagents.strategies.orchestration.filing_material_validation import build_material_scope
+        result['coverage']['material_policy'] = material_policy
+        result['material_scope'] = build_material_scope(result, copied)
+        for key in ('scoped_complete', 'scoped_failed_rows', 'quarantined_rows'):
+            result['coverage'][key] = result['material_scope'][key]
     return result

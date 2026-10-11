@@ -25,7 +25,8 @@ class EventMonitor:
                  comparator_policy: str | None = None,
                  parser_policy: str | None = None,
                  attribution_policy: str | None = None,
-                 acquisition_policy: str | None = None, spool_root=None) -> None:
+                 acquisition_policy: str | None = None, spool_root=None,
+                 material_policy: str | None = None) -> None:
         """
         Args:
             registry: DataSourceRegistry instance.
@@ -50,6 +51,11 @@ class EventMonitor:
             'filing_evidence_policy': filing_policy, 'filing_parser_policy': parser_policy})
         if acquisition_enabled and (spool_root is None or not Path(spool_root).is_absolute()):
             raise ValueError('An absolute private filing spool directory is required')
+        from tradingagents.strategies.data_sources.filing_material_policy import configured as material_configured
+        material_configured({'filing_material_policy': material_policy,
+            'filing_evidence_policy': filing_policy, 'filing_acquisition_policy': acquisition_policy,
+            'filing_parser_policy': parser_policy})
+        self.material_policy = material_policy
         self.acquisition_policy = acquisition_policy
         self.spool_root = Path(spool_root) if acquisition_enabled else None
         self.registry = registry
@@ -88,17 +94,25 @@ class EventMonitor:
                     result = hydrate_filings(source, collections, equity_universe=self.equity_universe,
                                              company_map=company_map, max_workers=max_workers,
                                              comparator_policy=self.comparator_policy,
-                                             attribution_policy=self.attribution_policy)
-        except SourceFetchError:
+                                             attribution_policy=self.attribution_policy,
+                                             material_policy=self.material_policy)
+        except SourceFetchError as error:
             # Preserve completed evidence when deadline-bound workers have not
             # closed yet. The graph remains failed and cannot claim cleanup.
             if result is None or owner is None:
                 raise
             result['coverage']['complete'] = False
+            result['coverage']['scope_failure'] = {'code': 'filing_scope_closure_failure',
+                                                   'reason_code': error.reason_code}
         if owner is not None:
             result['coverage'].update(acquisition_policy=self.acquisition_policy,
                                       parser_policy=self.parser_policy)
             result['acquisition_scope'] = acquisition_scope(owner)
+        if self.material_policy:
+            from tradingagents.strategies.orchestration.filing_material_validation import build_material_scope
+            result['material_scope'] = build_material_scope(result, result['collections'])
+            for key in ('scoped_complete', 'scoped_failed_rows', 'quarantined_rows'):
+                result['coverage'][key] = result['material_scope'][key]
         return result
 
     def poll_edgar_filings(

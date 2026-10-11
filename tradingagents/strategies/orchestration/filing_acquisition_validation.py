@@ -47,13 +47,16 @@ def validate_filing_acquisition_policy(data, config):
         if (not isinstance(graph, dict) or declared != POLICY or graph.get('policy') != 'complete_submission_v1'
                 or graph['coverage'].get('parser_policy') != 'two_processes_v1'):
             raise ValueError('missing acquisition graph')
+        from .filing_material_validation import validate_filing_material_policy
+        material_scope = validate_filing_material_policy(data, config)
+        material_complete = isinstance(material_scope, dict) and material_scope['scoped_complete'] is True
         scope = graph['acquisition_scope']
         if (set(scope) != {'policy', 'max_submission_bytes', 'max_document_bytes', 'physical_limit_bytes', 'original_deadline', 'originals', 'spool'}
                 or scope['policy'] != POLICY):
             raise ValueError('invalid acquisition scope')
         if (type(scope['original_deadline']) not in (int, float) or not math.isfinite(scope['original_deadline'])
                 or type(graph['coverage'].get('complete')) is not bool
-                or (graph['coverage']['complete'] is False and not failed)):
+                or (graph['coverage']['complete'] is False and not failed and not material_complete)):
             raise ValueError('unfinished acquisition lacks original failure')
         for key, value in (('max_submission_bytes', MAX_SUBMISSION_BYTES),
                            ('max_document_bytes', MAX_DOCUMENT_BYTES), ('physical_limit_bytes', PHYSICAL_LIMIT_BYTES)):
@@ -132,7 +135,9 @@ def validate_filing_acquisition_policy(data, config):
                     or evidence['filing_date'] != identity['filing_date']
                     or evidence['observed_at'] != original['observed_at']
                     or evidence['submission_sha256'] != original['sha256']
-                    or evidence['source_url'] != identity['source_url']):
+                    or evidence['source_url'] != identity['source_url']
+                    or ('material_quarantine' in evidence and
+                        evidence['material_quarantine']['submission_size'] != original['size'])):
                 raise ValueError('selected evidence differs from original')
         return {'policy': POLICY, 'completed_originals': len(originals),
                 'oversized_originals': sum(row['size'] > 64 * 1024**2 for row in originals.values()),
