@@ -16,10 +16,10 @@ extra to exercise the authorization tests.
 
 ## Operator consent
 
-No live sign-in or inference request was made during implementation. Tests use
-synthetic signed tokens, synthetic OAuth HTTP responses and loopback callbacks.
-Account entitlement and the selected models remain unverified until the user
-completes consent and an explicitly authorized validation occurs.
+Automated tests use synthetic signed tokens, synthetic OAuth HTTP responses and
+loopback callbacks. Live account consent and model validation are separate
+operator steps. A successful connection check does not establish workload
+capacity or native end-to-end readiness.
 
 The name `chatgpt_plan` describes this authorization route; it does not promise
 zero spending. Eligible SIWC requests can use a ChatGPT plan or available
@@ -99,6 +99,14 @@ The response is accepted only after consistent completion and full HTTP EOF;
 refusals, incomplete or contradictory events, trailing errors, excessive
 responses and missing completion all fail. Existing source and shared model
 budgets, including the 120-second call cap, still apply.
+
+The plan endpoint can send complete message events and then an explicit empty
+`response.completed.output` list. Only that terminal shape permits reconstruction
+from finalized items. Every message must have a consistent item identity,
+complete ordered content slots, matching deltas and final text, and closed
+item/part lifecycles. Closed reasoning items never become returned text. Missing
+or null terminal output does not receive this treatment. Full HTTP EOF and all
+terminal error checks still apply.
 
 `get_plan_credentials(*, auth_path=None, deadline=<absolute monotonic time>)`
 returns `PlanCredentials` with `access_token`, `client_id`, `subject`,

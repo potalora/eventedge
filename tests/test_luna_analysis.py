@@ -84,9 +84,43 @@ def test_defaults_separate_bounded_luna_from_frontier_thesis_and_committee():
     assert DEFAULT_CONFIG["autoresearch"]["autoresearch_model"] == "gpt-6-luna"
     assert DEFAULT_CONFIG["autoresearch"]["llm_effort"] == "high"
     assert LLMAnalyzer(DEFAULT_CONFIG)._model_name == "gpt-6-luna"
-    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gpt-6-astra"
+    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gpt-6.1-sol"
     assert DEFAULT_CONFIG["autoresearch"]["thesis_effort"] == "high"
-    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6-astra"
+    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6.1-sol"
+    assert PortfolioCommittee(DEFAULT_CONFIG)._effort == "high"
+
+
+@pytest.mark.parametrize("role,expected_model", [("bounded", "gpt-6-luna"), ("thesis", "gpt-6.1-sol"), ("committee", "gpt-6.1-sol")])
+def test_next_candidate_role_requests_retain_configured_and_returned_model_provenance(role, expected_model):
+    obj = PortfolioCommittee(DEFAULT_CONFIG) if role == "committee" else LLMAnalyzer(DEFAULT_CONFIG)
+    client = MagicMock()
+    def create(**request):
+        return SimpleNamespace(status="completed", output_text="{}", output=[], model=request["model"],
+                               id="resp-role-fixture", model_revision="revision-role-fixture")
+    client.responses.create.side_effect = create
+    obj._client = client
+    actual = (obj._call_llm(system="system", prompt="event") if role == "committee"
+              else obj._call_llm("system", "event", role=role))
+    assert actual == "{}"
+    assert client.responses.create.call_args.kwargs["model"] == expected_model
+    assert client.responses.create.call_args.kwargs["reasoning"] == {"effort": "high"}
+    assert obj.last_call_provenance["configured_model"] == expected_model
+    assert obj.last_call_provenance["returned_model"] == expected_model
+    assert obj.last_call_provenance["returned_revision"] == "revision-role-fixture"
+    assert obj.last_call_provenance["response_id"] == "resp-role-fixture"
+
+
+def test_explicit_role_overrides_and_omitted_role_fallbacks_remain_supported():
+    config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"]["thesis_model"] = "gpt-6-astra"
+    config["autoresearch"]["thesis_effort"] = "medium"
+    config["autoresearch"]["paper_trade"]["portfolio_committee_model"] = "gpt-6-astra"
+    config["autoresearch"]["paper_trade"]["portfolio_committee_effort"] = "medium"
+    assert (LLMAnalyzer(config)._thesis_model, LLMAnalyzer(config)._thesis_effort) == ("gpt-6-astra", "medium")
+    assert (PortfolioCommittee(config)._model_name, PortfolioCommittee(config)._effort) == ("gpt-6-astra", "medium")
+    legacy = {"autoresearch": {"autoresearch_model": "gpt-6-luna", "llm_effort": "low"}}
+    assert (LLMAnalyzer(legacy)._thesis_model, LLMAnalyzer(legacy)._thesis_effort) == ("gpt-6-luna", "low")
+    assert (PortfolioCommittee(legacy)._model_name, PortfolioCommittee(legacy)._effort) == ("gpt-6-luna", "low")
 
 
 @pytest.mark.parametrize("factory", [LLMAnalyzer, PortfolioCommittee])

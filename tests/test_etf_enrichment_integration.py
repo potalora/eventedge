@@ -96,7 +96,7 @@ def test_new_model_resolved_company_still_requires_sec_identity(
                 field: [model_ticker] if field == "affected_tickers" else model_ticker,
             }
         ),
-        expected_model="gpt-6-astra",
+        expected_model="gpt-6.1-sol",
     )
     candidate = Candidate(
         ticker="",

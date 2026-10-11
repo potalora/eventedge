@@ -148,6 +148,39 @@ def _slot(event):
     return output, content
 
 
+def _sparse_terminal(response, items_added, items_done, item_ids, slot_phases,
+                     deltas, done, parts_done, parts_added, lifecycle_valid):
+    """Recover only explicit empty output from fully closed, indexed items.
+
+    This is not a delta fallback: finalized items remain authoritative and the
+    ordinary terminal validator independently checks their complete contents.
+    """
+    if type(response) is not dict or response.get("output") != []:
+        return response
+    if not lifecycle_valid or not items_done or set(items_done) != set(range(len(items_done))) or set(items_added) != set(items_done) or set(item_ids) != set(items_done):
+        _fail("stream_invalid")
+    output = [items_done[index] for index in range(len(items_done))]
+    identities, slots = set(), set()
+    for index, item in enumerate(output):
+        initial = items_added[index]
+        identity = item.get("id")
+        if type(identity) is not str or not identity or identity in identities or initial.get("id") != identity or item_ids[index] != identity or initial.get("type") != item.get("type"):
+            _fail("stream_invalid")
+        identities.add(identity)
+        if item.get("type") == "reasoning":
+            # Existing reasoning-item semantics are unchanged; their contents
+            # are checked by the ordinary validator and never become text.
+            if initial.get("status") not in {None, "in_progress", "completed"}:
+                _fail("stream_invalid")
+            continue
+        if item.get("type") != "message" or initial.get("role") != "assistant" or initial.get("status") not in {"in_progress", "completed"} or initial.get("content") != [] or type(item.get("content")) is not list:
+            _fail("stream_invalid")
+        slots.update((index, content) for content in range(len(item["content"])))
+    if any(set(values) != slots for values in (slot_phases, deltas, done, parts_done, parts_added)) or any(phase != "part_done" for phase in slot_phases.values()):
+        _fail("stream_invalid")
+    return {**response, "output": output}
+
+
 def _terminal_text(response, deltas, done, items_done, parts_done, parts_added, item_ids):
     if type(response) is not dict or response.get("status") != "completed" or response.get("error") is not None or response.get("incomplete_details") is not None:
         _fail("stream_invalid")
@@ -212,6 +245,8 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
     text = None
     deltas, done = {}, {}
     items_done, parts_done, parts_added, item_ids = {}, {}, {}, {}
+    items_added, slot_phases, content_started = {}, {}, set()
+    sparse_lifecycle_valid = True
     response_id = None
     total_bytes = 0
     try:
@@ -237,6 +272,8 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                 if completed is not None or sentinel:
                     _fail("stream_invalid")
                 response = event.get("response")
+                if kind in {"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"}:
+                    sparse_lifecycle_valid &= type(event.get("item_id")) is str and bool(event["item_id"])
                 if "item_id" in event:
                     index, item_id = event.get("output_index"), event["item_id"]
                     if type(index) is not int or not 0 <= index < MAX_STREAM_EVENTS or type(item_id) is not str or not item_id or (index in item_ids and item_ids[index] != item_id):
@@ -251,7 +288,9 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                             _fail("stream_invalid")
                         response_id = current_id
                 if kind == "response.completed":
-                    text = _terminal_text(response, deltas, done, items_done, parts_done, parts_added, item_ids)
+                    terminal = _sparse_terminal(response, items_added, items_done, item_ids, slot_phases,
+                        deltas, done, parts_done, parts_added, sparse_lifecycle_valid)
+                    text = _terminal_text(terminal, deltas, done, items_done, parts_done, parts_added, item_ids)
                     completed = response
                 elif kind == "response.failed":
                     _fail(_error_code(response.get("error") if type(response) is dict else None))
@@ -263,11 +302,17 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                     _fail("response_refused")
                 elif kind == "response.output_text.delta":
                     slot = _slot(event)
+                    sparse_lifecycle_valid &= slot[0] in items_added and slot[0] not in items_done and slot_phases.get(slot) in {"added", "delta"}
+                    content_started.add(slot[0])
+                    slot_phases[slot] = "delta"
                     if slot in done or type(event.get("delta")) is not str:
                         _fail("stream_invalid")
                     deltas.setdefault(slot, []).append(event["delta"])
                 elif kind == "response.output_text.done":
                     slot = _slot(event)
+                    sparse_lifecycle_valid &= slot[0] in items_added and slot[0] not in items_done and slot_phases.get(slot) == "delta"
+                    content_started.add(slot[0])
+                    slot_phases[slot] = "text_done"
                     if slot in done or type(event.get("text")) is not str or (slot in deltas and "".join(deltas[slot]) != event["text"]):
                         _fail("stream_invalid")
                     done[slot] = event["text"]
@@ -285,9 +330,13 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                             _fail("stream_invalid")
                         item_ids[index] = item_id
                     if kind == "response.output_item.done":
+                        sparse_lifecycle_valid &= index in items_added
                         if index in items_done:
                             _fail("stream_invalid")
                         items_done[index] = item
+                    else:
+                        sparse_lifecycle_valid &= index not in items_added and index not in items_done and index not in content_started
+                        items_added.setdefault(index, item)
                 elif kind in {"response.content_part.added", "response.content_part.done"}:
                     part = event.get("part")
                     if type(part) is dict and part.get("type") == "refusal":
@@ -295,18 +344,28 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                     if type(part) is not dict or part.get("type") != "output_text":
                         _fail("stream_invalid")
                     slot = _slot(event)
+                    sparse_lifecycle_valid &= slot[0] in items_added and slot[0] not in items_done
+                    content_started.add(slot[0])
                     if kind == "response.content_part.added":
+                        sparse_lifecycle_valid &= slot not in slot_phases
+                        slot_phases[slot] = "added"
                         if slot in parts_added or type(part.get("text")) is not str:
                             _fail("stream_invalid")
                         parts_added[slot] = part["text"]
                     if kind == "response.content_part.done":
+                        sparse_lifecycle_valid &= slot_phases.get(slot) == "text_done"
+                        slot_phases[slot] = "part_done"
                         if slot in parts_done:
                             _fail("stream_invalid")
                         parts_done[slot] = part
                 elif kind not in _PASSIVE_EVENTS:
                     _fail("stream_invalid")
-                elif type(response) is dict and response.get("status") not in {"queued", "in_progress"}:
-                    _fail("stream_invalid")
+                else:
+                    if kind.startswith("response.reasoning"):
+                        index = event.get("output_index")
+                        sparse_lifecycle_valid &= type(index) is int and index in items_added and index not in items_done and items_added[index].get("type") == "reasoning" and event.get("item_id") == items_added[index].get("id")
+                    if type(response) is dict and response.get("status") not in {"queued", "in_progress"}:
+                        _fail("stream_invalid")
     except ChatGPTPlanTransportError:
         raise
     except Exception as exc:

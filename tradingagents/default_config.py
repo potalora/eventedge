@@ -121,12 +121,12 @@ DEFAULT_CONFIG = {
         "state_dir": "data/state",
         "total_capital": 5000,
         "proposals_per_strategy": 3,
-        # Structured evidence uses Luna; unstructured thesis work uses Astra.
+        # Structured evidence uses Luna; unstructured thesis work uses Sol.
         "autoresearch_model": "gpt-6-luna",
         "llm_billing_mode": "api",
         "chatgpt_plan_auth_path": None,
         "llm_effort": "high",
-        "thesis_model": "gpt-6-astra",
+        "thesis_model": "gpt-6.1-sol",
         "thesis_effort": "high",
         # Sampling controls apply only to legacy non-reasoning Claude calls.
         "llm_temperature": 0.0,
@@ -189,7 +189,7 @@ DEFAULT_CONFIG = {
             "exploration_budget_pct": 0.15,
             "max_vintage_age_days": 540,
             "portfolio_committee_enabled": True,
-            "portfolio_committee_model": "gpt-6-astra",
+            "portfolio_committee_model": "gpt-6.1-sol",
             "portfolio_committee_effort": "high",
             "max_sector_concentration_pct": 0.30,
             "max_single_position_pct": 0.10,

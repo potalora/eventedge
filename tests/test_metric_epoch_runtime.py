@@ -66,6 +66,18 @@ def test_analysis_effort_and_committee_override_are_semantic_identity(key):
     assert before.behavior_hash != after.behavior_hash
 
 
+def test_next_candidate_sol_roles_rotate_identity_from_prior_astra_roles():
+    ar = DEFAULT_CONFIG["autoresearch"]
+    models = _models(autoresearch_model=ar["autoresearch_model"], llm_effort=ar["llm_effort"],
+        thesis_model=ar["thesis_model"], thesis_effort=ar["thesis_effort"],
+        portfolio_committee_model=ar["paper_trade"]["portfolio_committee_model"],
+        portfolio_committee_effort=ar["paper_trade"]["portfolio_committee_effort"])
+    prior = {**models, "thesis_model": "gpt-6-astra", "portfolio_committee_model": "gpt-6-astra"}
+    assert models["autoresearch_model"] == prior["autoresearch_model"] == "gpt-6-luna"
+    assert models["thesis_model"] == models["portfolio_committee_model"] == "gpt-6.1-sol"
+    assert _context(models=models).behavior_hash != _context(models=prior).behavior_hash
+
+
 def _execution_policy(**changes: object) -> dict[str, object]:
     policy: dict[str, object] = {
         "policy_document_version": POLICY_DOCUMENT_VERSION,
