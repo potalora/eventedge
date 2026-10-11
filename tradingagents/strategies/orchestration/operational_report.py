@@ -505,8 +505,14 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose) 
         graph = envelope['payload'].get('edgar', {}).get('filing_evidence')
         filing_config = ({'filing_evidence_policy': graph.get('policy'),
                           'filing_comparison_policy': graph.get('coverage', {}).get('comparator_policy'),
-                          'filing_attribution_policy': graph.get('coverage', {}).get('attribution_policy')}
+                          'filing_attribution_policy': graph.get('coverage', {}).get('attribution_policy'),
+                          'filing_parser_policy': graph.get('coverage', {}).get('parser_policy'),
+                          'filing_acquisition_policy': graph.get('coverage', {}).get('acquisition_policy')}
                          if isinstance(graph, dict) else {})
+        from .filing_acquisition_validation import validate_filing_acquisition_policy
+        acquisition_scope = validate_filing_acquisition_policy(envelope['payload'], filing_config)
+        if acquisition_scope is not None:
+            result['filing_acquisition_scope'] = acquisition_scope
         filing_scope = validate_filing_comparison_policy(envelope['payload'], filing_config)
         if filing_scope is not None:
             result['filing_comparison_scope'] = filing_scope

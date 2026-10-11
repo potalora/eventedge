@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import mmap
 import os
 from pathlib import Path
 import select
@@ -20,11 +21,14 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 POLICY = 'two_processes_v1'
 _RAW_LIMIT = 64 * 1024 * 1024
+_SPOOL_LIMIT = 512 * 1024 * 1024
+_DOCUMENT_LIMIT = 16 * 1024 * 1024
 _RESULT_LIMIT = 512 * 1024 * 1024
 # Accommodates all 2000 document filenames even with JSON Unicode escaping.
 _META_LIMIT = 4 * 1024 * 1024
@@ -116,6 +120,7 @@ class _Dispatcher:
         self._closed = False
         self._failed = None
         self._sequence = 0
+        self._child_leases = {}
         deadline = time.monotonic() + _remaining()
         try:
             for _ in range(2):
@@ -144,8 +149,24 @@ class _Dispatcher:
 
     def parse(self, raw, arguments):
         child = None
+        started, ordinary_rejection = False, False
         try:
-            if not isinstance(raw, bytes) or not 0 < len(raw) <= _RAW_LIMIT:
+            from .filing_spool import CompletedSubmission, current_submission_spool
+            receipt = isinstance(raw, CompletedSubmission)
+            if receipt:
+                if raw.owner is not current_submission_spool():
+                    raise _failure('invalid_response')
+                raw.owner.validate_completed(raw)
+                from .filing_evidence import _form
+                if (raw.identity['accession'] != arguments['expected_accession']
+                        or _form(raw.identity['form']) != _form(arguments['expected_form'])
+                        or raw.identity['filing_date'] != arguments['expected_date']
+                        or raw.observed_at != arguments['observed_at']):
+                    raise _failure('invalid_response')
+                size, digest = raw.size, raw.sha256
+            elif isinstance(raw, bytes) and 0 < len(raw) <= _RAW_LIMIT:
+                size, digest = len(raw), hashlib.sha256(raw).hexdigest()
+            else:
                 raise _failure('invalid_response')
             with self._condition:
                 while not self._available:
@@ -155,18 +176,42 @@ class _Dispatcher:
                 child = self._available.pop(0)
                 self._sequence += 1
                 job = self._sequence
-            digest = hashlib.sha256(raw).hexdigest()
-            metadata = dict(arguments, job=job, raw_size=len(raw), raw_sha256=digest)
+                if receipt:
+                    self._child_leases[child] = raw.owner.reserve_child_copy(raw)
+            metadata = dict(arguments, job=job, raw_size=size, raw_sha256=digest)
+            if receipt:
+                metadata['spooled'] = True
+                metadata['max_document_bytes'] = _DOCUMENT_LIMIT
+            started = True
             _frame(child.stdin.fileno(), metadata, check=self._check, limit=_META_LIMIT,
                    io_lock=self._io_locks[child])
-            _transfer(child.stdin.fileno(), raw, write=True, check=self._check, io_lock=self._io_locks[child])
+            if receipt:
+                with raw.owner.open_completed(raw) as source:
+                    remaining = size
+                    while remaining:
+                        self._check()
+                        chunk = source.read(min(65536, remaining))
+                        if not chunk:
+                            raise ValueError('incomplete parser source')
+                        _transfer(child.stdin.fileno(), chunk, write=True, check=self._check,
+                                  io_lock=self._io_locks[child])
+                        remaining -= len(chunk)
+                    if source.read(1):
+                        raise ValueError('parser source size changed')
+            else:
+                _transfer(child.stdin.fileno(), raw, write=True, check=self._check, io_lock=self._io_locks[child])
             response = _read_frame(child.stdout.fileno(), check=self._check, limit=_RESULT_LIMIT,
                                    io_lock=self._io_locks[child])
             self._check()
             if (not isinstance(response, dict) or type(response.get('job')) is not int
                     or response.get('job') != job):
                 raise ValueError('parser response identity')
+            if receipt:
+                if response.pop('closed', None) is not True:
+                    raise ValueError('parser copy closure missing')
+                self._release_child(child)
             if set(response) == {'job', 'error'} and response['error'] == 'invalid_evidence':
+                ordinary_rejection = True
                 raise _failure('invalid_response')
             if set(response) != {'job', 'result'} or not isinstance(response['result'], dict):
                 raise ValueError('parser response schema')
@@ -181,7 +226,8 @@ class _Dispatcher:
             return result
         except BaseException as exc:
             from .fetch_errors import SourceFetchError
-            if isinstance(exc, SourceFetchError) and exc.reason_code == 'invalid_response':
+            if (isinstance(exc, SourceFetchError) and exc.reason_code == 'invalid_response'
+                    and (not started or ordinary_rejection)):
                 raise  # A rejected filing does not poison otherwise healthy children.
             reason = self._failed or (exc.reason_code if isinstance(exc, SourceFetchError) else 'provider_error')
             self.close(failed=reason)
@@ -194,6 +240,12 @@ class _Dispatcher:
                     if not self._closed:
                         self._available.append(child)
                     self._condition.notify_all()
+
+    def _release_child(self, child):
+        with self._condition:
+            lease = self._child_leases.pop(child, None)
+            if lease is not None:
+                lease.record.owner.release_child_copy(lease)
 
     def close(self, *, failed=None):
         with self._condition:
@@ -225,6 +277,8 @@ class _Dispatcher:
                     for pipe in (child.stdin, child.stdout):
                         if pipe is not None:
                             pipe.close()
+                if child.poll() is not None:
+                    self._release_child(child)
         finally:
             self._cleanup_done.set()
         if unreaped:
@@ -303,26 +357,71 @@ def _worker(deadline):
         meta = _read_frame(0, check=check, limit=_META_LIMIT)
         required = {'job', 'raw_size', 'raw_sha256', 'expected_accession', 'expected_form',
             'expected_date', 'observed_at', 'max_submission_bytes', 'required_exhibits'}
-        if (not isinstance(meta, dict) or set(meta) != required or type(meta['job']) is not int
+        spooled = isinstance(meta, dict) and meta.get('spooled') is True
+        allowed = required | {'spooled', 'max_document_bytes'} if spooled else required
+        raw_limit = _SPOOL_LIMIT if spooled else _RAW_LIMIT
+        if (not isinstance(meta, dict) or set(meta) != allowed or type(meta['job']) is not int
                 or meta['job'] < 1 or type(meta['raw_size']) is not int
-                or not 0 < meta['raw_size'] <= _RAW_LIMIT
+                or not 0 < meta['raw_size'] <= raw_limit
                 or type(meta['max_submission_bytes']) is not int
-                or not 0 < meta['max_submission_bytes'] <= _RAW_LIMIT
+                or not 0 < meta['max_submission_bytes'] <= raw_limit
+                or (spooled and (type(meta['max_document_bytes']) is not int
+                                 or meta['max_document_bytes'] != _DOCUMENT_LIMIT))
                 or not isinstance(meta['required_exhibits'], list)):
             raise ValueError('SEC parser request invalid')
-        raw = _transfer(0, meta.pop('raw_size'), check=check)
-        if hashlib.sha256(raw).hexdigest() != meta.pop('raw_sha256'):
-            raise ValueError('SEC parser request hash invalid')
+        size, digest = meta.pop('raw_size'), meta.pop('raw_sha256')
         job = meta.pop('job')
         exhibits = meta.pop('required_exhibits')
-        try:
-            parsed = evidence.parse_submission(raw, **meta)
+        if spooled:
+            meta.pop('spooled')
+            document_limit = meta.pop('max_document_bytes')
+            # No parent pathname crosses IPC. The child owns one anonymous file
+            # whose full exact size has already been reserved by the parent.
+            # Native launch checks this exact filesystem. Never silently move
+            # child storage to tempfile's /var/tmp or cwd fallback candidates.
+            with tempfile.TemporaryFile(mode='w+b', buffering=0, dir='/tmp') as source:
+                remaining, actual = size, hashlib.sha256()
+                while remaining:
+                    chunk = _transfer(0, min(65536, remaining), check=check)
+                    offset = 0
+                    while offset < len(chunk):
+                        check()
+                        written = source.write(chunk[offset:])
+                        if not written:
+                            raise ValueError('incomplete parser temporary write')
+                        offset += written
+                    actual.update(chunk)
+                    remaining -= len(chunk)
+                    check()
+                if actual.hexdigest() != digest or source.tell() != size:
+                    raise ValueError('SEC parser request hash invalid')
+                check()
+                with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                    try:
+                        framed = evidence.frame_submission(mapped, **meta, check=check)
+                        selected = evidence.select_primary(framed, mapped, check=check)
+                        result = evidence.build_evidence_from_buffer(selected, mapped,
+                            required_exhibits=exhibits, max_document_bytes=document_limit, check=check)
+                        check()
+                        response = {'job': job, 'result': result}
+                    except evidence.EvidenceError:
+                        response = {'job': job, 'error': 'invalid_evidence'}
+            # The acknowledgement is constructed only after mmap and file exit.
+            response['closed'] = True
             check()
-            result = evidence.build_evidence(parsed, required_exhibits=exhibits)
+        else:
+            raw = _transfer(0, size, check=check)
+            if hashlib.sha256(raw).hexdigest() != digest:
+                raise ValueError('SEC parser request hash invalid')
+            try:
+                parsed = evidence.parse_submission(raw, **meta)
+                check()
+                result = evidence.build_evidence(parsed, required_exhibits=exhibits)
+                check()
+                response = {'job': job, 'result': result}
+            except evidence.EvidenceError:
+                response = {'job': job, 'error': 'invalid_evidence'}
             check()
-            response = {'job': job, 'result': result}
-        except evidence.EvidenceError:
-            response = {'job': job, 'error': 'invalid_evidence'}
         check()
         _frame(1, response, check=check, limit=_RESULT_LIMIT)
 

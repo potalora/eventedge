@@ -222,7 +222,7 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
             'key': os.environ.get('ALPACA_API_KEY', '').strip(),
             'secret': os.environ.get('ALPACA_SECRET_KEY', '').strip(),
         }
-    omitted = {'state_dir', 'source_cache_dir', 'source_cache_ttl_s'}
+    omitted = {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
     if exclude_horizon:
         omitted.add('horizon')
     effective = dict(config)

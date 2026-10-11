@@ -24,7 +24,8 @@ class EventMonitor:
     def __init__(self, registry: Any, *, filing_policy: str | None = None,
                  comparator_policy: str | None = None,
                  parser_policy: str | None = None,
-                 attribution_policy: str | None = None) -> None:
+                 attribution_policy: str | None = None,
+                 acquisition_policy: str | None = None, spool_root=None) -> None:
         """
         Args:
             registry: DataSourceRegistry instance.
@@ -43,6 +44,14 @@ class EventMonitor:
             from tradingagents.strategies.data_sources.filing_attribution_policy import POLICY
             if attribution_policy != POLICY or filing_policy != 'complete_submission_v1':
                 raise ValueError('Invalid filing attribution policy')
+        from pathlib import Path
+        from tradingagents.strategies.orchestration.filing_acquisition_validation import configured
+        acquisition_enabled = configured({'filing_acquisition_policy': acquisition_policy,
+            'filing_evidence_policy': filing_policy, 'filing_parser_policy': parser_policy})
+        if acquisition_enabled and (spool_root is None or not Path(spool_root).is_absolute()):
+            raise ValueError('An absolute private filing spool directory is required')
+        self.acquisition_policy = acquisition_policy
+        self.spool_root = Path(spool_root) if acquisition_enabled else None
         self.registry = registry
         self.filing_policy = filing_policy
         self.comparator_policy = comparator_policy
@@ -67,11 +76,30 @@ class EventMonitor:
         from tradingagents.strategies.data_sources.filing_hydration import hydrate_filings
         from contextlib import nullcontext
         from tradingagents.strategies.data_sources.filing_parser_dispatch import parser_scope
-        with parser_scope() if self.parser_policy is not None else nullcontext():
-            return hydrate_filings(source, collections, equity_universe=self.equity_universe,
-                                   company_map=company_map, max_workers=max_workers,
-                                   comparator_policy=self.comparator_policy,
-                                   attribution_policy=self.attribution_policy)
+        from tradingagents.strategies.data_sources.filing_spool import submission_spool_scope
+        from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
+        from tradingagents.strategies.orchestration.filing_acquisition_validation import acquisition_scope
+        result, owner = None, None
+        spool = (submission_spool_scope(self.spool_root, original_deadline=current_provider_deadline('edgar'))
+                 if self.acquisition_policy is not None else nullcontext())
+        try:
+            with spool as owner:
+                with parser_scope() if self.parser_policy is not None else nullcontext():
+                    result = hydrate_filings(source, collections, equity_universe=self.equity_universe,
+                                             company_map=company_map, max_workers=max_workers,
+                                             comparator_policy=self.comparator_policy,
+                                             attribution_policy=self.attribution_policy)
+        except SourceFetchError:
+            # Preserve completed evidence when deadline-bound workers have not
+            # closed yet. The graph remains failed and cannot claim cleanup.
+            if result is None or owner is None:
+                raise
+            result['coverage']['complete'] = False
+        if owner is not None:
+            result['coverage'].update(acquisition_policy=self.acquisition_policy,
+                                      parser_policy=self.parser_policy)
+            result['acquisition_scope'] = acquisition_scope(owner)
+        return result
 
     def poll_edgar_filings(
         self,

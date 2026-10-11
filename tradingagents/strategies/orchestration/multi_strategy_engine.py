@@ -313,6 +313,8 @@ class MultiStrategyEngine:
         configured(self.ar_config)
         from tradingagents.strategies.data_sources.filing_attribution_policy import configured as filing_attribution_configured
         filing_attribution_configured(self.ar_config)
+        from .filing_acquisition_validation import configured as filing_acquisition_configured
+        filing_acquisition_configured(self.ar_config)
 
         # Load strategies (paper-trade only)
         self.paper_trade_strategies = strategies or get_paper_trade_strategies()
@@ -431,6 +433,12 @@ class MultiStrategyEngine:
                     if filing_attribution_scope is not None else {}))
         except ValueError:
             scope_errors['edgar'] = 'invalid_filing_attribution_policy'
+            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        from .filing_acquisition_validation import validate_filing_acquisition_policy
+        try:
+            validate_filing_acquisition_policy(data, self.ar_config)
+        except ValueError:
+            scope_errors['edgar'] = 'invalid_filing_acquisition_policy'
             signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
         regime_model = self._build_regime_model(signal_data)
         regime_model.setdefault("timestamp", datetime.now().isoformat())
@@ -2293,6 +2301,9 @@ class MultiStrategyEngine:
             monitor_options['parser_policy'] = parser_policy
         if attribution_policy is not None:
             monitor_options['attribution_policy'] = attribution_policy
+        if self.ar_config.get('filing_acquisition_policy') is not None:
+            monitor_options.update(acquisition_policy=self.ar_config['filing_acquisition_policy'],
+                                   spool_root=self.ar_config.get('filing_spool_dir'))
         monitor = EventMonitor(self.registry, **monitor_options)
         monitor.as_of = trading_date
         result, failures = {}, []

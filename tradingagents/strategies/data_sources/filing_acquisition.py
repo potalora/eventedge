@@ -12,10 +12,36 @@ from urllib.parse import urlsplit
 
 from .fetch_errors import SourceFetchError
 from .filing_evidence import EvidenceError, build_evidence, parse_submission
+from .filing_spool import current_submission_spool, spool_response
 from .request_policy import (
     current_provider_deadline, provider_budget, provider_request, provider_timeout,
     read_bounded_response,
 )
+
+
+def completed_submission(record):
+    """Observe a closed original before any framing, selection, or parsing."""
+    from .filing_spool import completed_submission as observe
+    observe(record)
+
+
+def _acquire_spooled(response, target, *, accession, form_type, filing_date, required_exhibits):
+    record = spool_response(response, identity=dict(accession=accession, form=form_type,
+        filing_date=filing_date, source_url=target))
+    try:
+        completed_submission(record)
+        provider_timeout('edgar')
+        from .filing_parser_dispatch import current_dispatcher, dispatch_evidence
+        if current_dispatcher() is None:
+            raise SourceFetchError('SEC parser scope is required', reason_code='provider_error')
+        result = dispatch_evidence(record, expected_accession=accession, expected_form=form_type,
+            expected_date=filing_date, observed_at=record.observed_at,
+            max_submission_bytes=512 * 1024 * 1024, required_exhibits=required_exhibits)
+        provider_timeout('edgar')
+        result['source_url'] = target
+        return result
+    finally:
+        record.owner.discard(record)
 
 
 def complete_submission_url(url: str, accession: str) -> str:
@@ -50,7 +76,9 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
     if type(max_submission_bytes) is not int or not 1 <= max_submission_bytes <= 64 * 1024 * 1024:
         raise ValueError('Invalid SEC submission byte limit')
     if current_provider_deadline('edgar') is None:
-        with provider_budget('edgar', time.monotonic() + 60):
+        owner = current_submission_spool()
+        deadline = owner.original_deadline if owner is not None else time.monotonic() + 60
+        with provider_budget('edgar', deadline):
             return acquire_complete_submission(
                 user_agent, url, accession=accession, form_type=form_type,
                 filing_date=filing_date, required_exhibits=required_exhibits,
@@ -63,10 +91,16 @@ def acquire_complete_submission(user_agent: str, url: str, *, accession: str,
         provider_timeout('edgar')
         if response.status_code != 200 or response.url != target:
             raise SourceFetchError('Unexpected SEC submission response', reason_code='invalid_response')
+        if current_submission_spool() is not None:
+            # spool_response owns response closure, including all read failures.
+            spooled_response, response = response, None
+            return _acquire_spooled(spooled_response, target, accession=accession,
+                form_type=form_type, filing_date=filing_date, required_exhibits=required_exhibits)
         raw = read_bounded_response(response, provider='edgar', max_bytes=max_submission_bytes)
         observed_at = datetime.now(timezone.utc).isoformat()
     finally:
-        response.close()
+        if response is not None:
+            response.close()
     provider_timeout('edgar')
     try:
         from .filing_parser_dispatch import current_dispatcher, dispatch_evidence
