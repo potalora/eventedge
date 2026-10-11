@@ -100,6 +100,51 @@ def history_comparison(current, histories, archives, *, require_full_history=Tru
     return result, proof
 
 
+def validate_source_comparison(graph, binding, current, prior):
+    """Validate a retained source comparison without granting model permission.
+
+    Joint source issuers remain unresolved execution targets. Every actual
+    FILER must nevertheless prove the same exact nearest prior from genuine
+    retained history; attribution never exempts a prior or history check.
+    """
+    from .filing_assessment import _validate_evidence
+    from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY
+    from .filing_hydration import PRIOR_POLICY
+    try:
+        if (graph['policy'] != 'complete_submission_v1'
+                or graph['coverage']['attribution_policy'] != ATTRIBUTION_POLICY
+                or current['form'] not in ('10-K', '10-Q')):
+            raise ValueError('source attribution not enabled')
+        current_ciks = sorted(_validate_evidence(current, allow_joint_issuers=True))
+        prior_ciks = sorted(_validate_evidence(prior, allow_joint_issuers=True))
+        if current_ciks != prior_ciks:
+            raise ValueError('prior issuer roles differ')
+        comparison, proof = history_comparison(current, graph['history_corpus'],
+            graph['archive_corpus'], require_full_history=False)
+        if comparison['status'] != 'selected' or comparison['issuer_ciks'] != current_ciks:
+            raise ValueError('unproven joint prior')
+        candidate = comparison['candidate']
+        # All FILERs already selected identical full metadata. Legacy history
+        # may have an empty/path primaryDocument; complete bodies bind by
+        # accession, exact form and date, as in ordinary source selection.
+        if any(candidate[key] != expected for key, expected in (
+                ('accession_number', prior['accession']), ('form', prior['form']),
+                ('filing_date', prior['filing_date']))):
+            raise ValueError('selected prior metadata differs')
+        expected = {'policy': PRIOR_POLICY, 'current_accession': current['accession'],
+            'prior_accession': prior['accession'], 'form_type': current['form'],
+            'current_filing_date': current['filing_date'], 'prior_filing_date': prior['filing_date'],
+            'issuer_ciks': current_ciks, 'history_refs': sorted(proof['recent']),
+            'archive_refs': sorted(proof['archives']),
+            'history_snapshot_sha256': hashlib.sha256(json.dumps(proof, sort_keys=True,
+                separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode()).hexdigest()}
+        if binding != expected:
+            raise ValueError('source comparison binding differs')
+    except (KeyError, TypeError, AttributeError, ValueError) as error:
+        raise ValueError('invalid_filing_comparator') from error
+    return comparison
+
+
 def current_only_binding(current, comparison, proof):
     if comparison['status'] not in NO_UNIQUE_PRIOR:
         raise ValueError('invalid_filing_comparator')

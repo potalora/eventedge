@@ -41,7 +41,9 @@ def build_material_scope(graph, collections):
     from tradingagents.strategies.data_sources.edgar_source import normalize_filing_form, filing_form_family
     from tradingagents.strategies.data_sources.filing_acquisition import complete_submission_url
     from tradingagents.strategies.data_sources.filing_assessment import _validate_evidence
-    from tradingagents.strategies.data_sources.filing_comparison_policy import validate_current_only_binding
+    from tradingagents.strategies.data_sources.filing_comparison_policy import (
+        validate_current_only_binding, validate_source_comparison,
+    )
     try:
         if (graph.get('policy') != 'complete_submission_v1' or not isinstance(collections, dict)
                 or set(collections) - set(COLLECTIONS) or not isinstance(graph.get('corpus'), dict)):
@@ -126,9 +128,12 @@ def build_material_scope(graph, collections):
                         if row.get('filing_assessment_scope') == 'current_only':
                             validate_current_only_binding(graph, row['comparison_binding'], value)
                         elif row.get('prior_status') == 'available' and prior_ref in corpus and prior_ref not in quarantines:
-                            from .filing_inputs import _comparison
-                            _validate_evidence(corpus[prior_ref])
-                            _comparison(graph, row['comparison_binding'], value, corpus[prior_ref])
+                            if attribution:
+                                validate_source_comparison(graph, row['comparison_binding'], value, corpus[prior_ref])
+                            else:
+                                from .filing_inputs import _comparison
+                                _validate_evidence(corpus[prior_ref])
+                                _comparison(graph, row['comparison_binding'], value, corpus[prior_ref])
                         else:
                             failed = True
                     # Quarantined prior evidence never becomes an exception for another current filing.
