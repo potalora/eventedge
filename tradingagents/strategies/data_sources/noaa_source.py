@@ -27,7 +27,7 @@ MAX_STATE_OBSERVATIONS = 100_000
 MAX_OBSERVATION_LAG_DAYS = 7
 BULK_URL = "https://www.ncei.noaa.gov/access/services/data/v1"
 CATALOG_URL = "https://www.ncei.noaa.gov/pub/data/ghcn/daily"
-REGIONAL_BUDGET_SECONDS = 90
+REGIONAL_BUDGET_SECONDS = 180
 MAX_REGIONAL_STATIONS = 12_000
 
 # Key US agricultural states (Corn Belt + Plains)

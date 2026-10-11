@@ -372,10 +372,10 @@ def test_native_form4_complete_window_scope_survives_freeze_and_health(monkeypat
     assert scope['issuers']['AAPL']['matching_filings']==41
 
 
-@pytest.mark.parametrize('outer,expected', [(None,190),(400,190),(150,150)])
+@pytest.mark.parametrize('outer,expected', [(None,280),(400,280),(150,150)])
 @pytest.mark.parametrize('entry', ['summary', 'bulk'])
 def test_noaa_native_regional_budget_caps_outer_deadline(outer, expected, entry, monkeypatch):
-    """A pipeline's larger budget cannot expand NOAA's declared 90 seconds."""
+    """A pipeline's larger budget cannot expand NOAA's declared 180 seconds."""
     import contextlib
     import tradingagents.strategies.data_sources.noaa_source as mod
     from tradingagents.strategies.data_sources.request_policy import provider_budget, current_provider_deadline

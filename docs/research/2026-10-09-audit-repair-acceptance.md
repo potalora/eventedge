@@ -43,7 +43,7 @@ Audit IDs are qualified by component because the source and strategy audits each
 | B8: unsupported wheat geography | Declared crop/class/state comparison scope and season; full current active coverage; explicit inactive classes | `test_environmental_contract_repairs.py`, USDA and source reliability pipeline tests |
 | B9: opinion identity | Cluster, docket and nested opinion identities remain distinct | Provider meaning contracts |
 | B10: misleading diagnostic populations | Immutable analysis/journal eligibility carried to outcomes; provisional, validated, selected and executed populations with explicit missingness | `test_population_diagnostics.py`, cross-epoch retained-obligation reporting |
-| NOAA/USDM availability | Complete catalog/inventory bulk NOAA acquisition inside 90 seconds, measurement-quality quarantine, native state FIPS/camel-case drought response | Environmental contracts, source audit and native source reliability pipeline |
+| NOAA/USDM availability | Complete catalog/inventory bulk NOAA acquisition inside 180 seconds or any shorter parent deadline, measurement-quality quarantine, native state FIPS/camel-case drought response | Environmental contracts, source audit and native source reliability pipeline |
 | Outcome-only global failures | Independent immutable per-ticker/session outcome acquisition; only entry/maturity prices plus continuous actions; healthy books/outcomes survive unrelated diagnostic gaps | `test_outcome_availability.py`, 30-day replay/critical-gap cases |
 | Research interpretation | Cost stress, realized contribution concentration, lagged exposure attribution, dependence-aware uncertainty and explicit empirical-evidence limits | `test_research_diagnostics.py` |
 

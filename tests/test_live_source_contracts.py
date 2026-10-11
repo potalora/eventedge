@@ -194,19 +194,19 @@ def test_noaa_direct_summary_uses_one_deadline_for_catalog_and_all_batches(monke
     def get(url, **kwargs):
         calls.append((url, clock[0], current_provider_deadline("noaa"), kwargs))
         if url == f"{noaa.CATALOG_URL}/ghcnd-stations.txt":
-            clock[0] += 15
+            clock[0] += 30
             text = "\n".join(f"{station:11} {42:8.4f} {-93:9.4f} {100:6.1f} {state} TEST"
                              for station, state in stations)
             return SimpleNamespace(status_code=200, text=text)
         if url == f"{noaa.CATALOG_URL}/ghcnd-inventory.txt":
-            clock[0] += 15
+            clock[0] += 30
             text = "\n".join(f"{station:11} {42:8.4f} {-93:9.4f} TMAX 2000 2026"
                              for station, _ in stations)
             return SimpleNamespace(status_code=200, text=text)
         assert url == noaa.BULK_URL
         batch = kwargs["params"]["stations"].split(",")
         assert len(batch) == 100
-        clock[0] += 20
+        clock[0] += 40
         return response([{"DATE": "2026-10-06", "STATION": station,
                           "TMAX": "80", "TMIN": "50", "PRCP": "0.12",
                           "TMAX_ATTRIBUTES": ",,1", "TMIN_ATTRIBUTES": ",,1", "PRCP_ATTRIBUTES": ",,1"}
@@ -217,9 +217,9 @@ def test_noaa_direct_summary_uses_one_deadline_for_catalog_and_all_batches(monke
     with pytest.raises(SourceFetchError) as exc:
         NOAASource(token="offline").fetch_ag_weather_summary("2026-10-06", lookback_days=1)
 
-    assert [started for _, started, _, _ in calls] == [0, 15, 30, 50, 70]
-    assert {deadline for _, _, deadline, _ in calls} == {90}
-    assert clock[0] == 90  # Fourth station batch cannot start or reset the budget.
+    assert [started for _, started, _, _ in calls] == [0, 30, 60, 100, 140]
+    assert {deadline for _, _, deadline, _ in calls} == {180}
+    assert clock[0] == 180  # Fourth station batch cannot start or reset the budget.
     assert [url for url, _, _, _ in calls[2:]] == [noaa.BULK_URL] * 3
     assert exc.value.failed_operations == {state: "timeout" for state in noaa.AG_STATES}
     # Complete state/day/type samples still cannot excuse an unacquired station batch.
