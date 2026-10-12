@@ -271,6 +271,11 @@ class TransportFixture:
 @pytest.fixture
 def pipeline(monkeypatch, tmp_path):
     fixture = TransportFixture()
+    # This historical baseline excludes optional OpenBB enrichment. Pin that
+    # boundary explicitly: an installed SDK otherwise performs unconfigured
+    # FINRA/factor calls and introduces real cache paths and clock metadata.
+    # Dedicated enrichment tests replace this with their own SDK responses.
+    monkeypatch.setitem(sys.modules, "openbb", None)
     # CLI dotenv loading in another test must not authorize shadow acquisition.
     # Dedicated shadow tests explicitly supply their own credentials afterward.
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
