@@ -233,3 +233,81 @@ def test_legacy_calls_have_no_new_request_authority(transport):
     assert len(calls) == 2
     assert analyzer.last_research_request is None and committee.last_research_request is None
     assert 'model_request' not in committee.last_decision_status
+
+
+def _committee_output_contract_case(transport, profile):
+    from tradingagents.strategies.orchestration.cohort_orchestrator import SIZE_PROFILES
+    client, calls, outcomes = transport
+    committee = PortfolioCommittee(config(profile != 'legacy'),
+        size_profile=None if profile == 'legacy' else SIZE_PROFILES[profile])
+    committee._client = client
+    signals = [dict(ticker='CFR', direction='long', score=2.5,
+        strategy='filing_analysis', metadata={})]
+    signals += [dict(ticker='SHT', direction='short', score=2.5,
+        strategy=strategy, metadata={}) for strategy in ('litigation', 'supply_chain')]
+    return committee, calls, outcomes, signals
+
+
+def _assert_transmitted_committee_output_contract(committee, calls, profile):
+    assert len(calls) == 1
+    request = calls[0]
+    sentence = 'The direction field must be exactly lowercase "long" or "short".'
+    assert request['system'].count(sentence) == 1
+    assert request['system'].index(sentence) > request['system'].index(
+        'rationale, contributing_strategies, regime_alignment.')
+    assert ('"ticker": "SHT"' in request['prompt']) is (profile != '5k')
+    if profile == '5k':
+        assert 'LONG ONLY' in request['system']
+    if profile == 'legacy':
+        assert committee.last_research_request is None
+        assert 'model_request' not in committee.last_decision_status
+    else:
+        receipt = committee.last_decision_status['model_request']
+        args = {key: request[key] for key in ('model', 'effort', 'max_tokens', 'temperature', 'system', 'prompt')}
+        api().validate_request_receipt(receipt, role='committee', **args)
+        assert receipt['system_sha256'] == hashlib.sha256(request['system'].encode()).hexdigest()
+        assert receipt['request_sha256'] == hashlib.sha256(json.dumps(
+            dict(role='committee', **args), sort_keys=True, separators=(',', ':'),
+            ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+
+
+@pytest.mark.parametrize('profile', ['legacy', '5k', '100k'])
+def test_transmitted_committee_contract_keeps_lowercase_long_and_exact_request(transport, profile):
+    committee, calls, outcomes, signals = _committee_output_contract_case(transport, profile)
+    outcomes.append(json.dumps([dict(ticker='CFR', direction='long', position_size_pct=0.05,
+        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['filing_analysis'])]))
+    recommendations = committee.synthesize(signals)
+    assert [(row.ticker, row.direction) for row in recommendations] == [('CFR', 'long')]
+    assert committee.last_decision_status['status'] == 'selected'
+    _assert_transmitted_committee_output_contract(committee, calls, profile)
+
+
+@pytest.mark.parametrize('profile', ['legacy', '100k'])
+def test_transmitted_committee_contract_keeps_convergent_lowercase_short(transport, profile):
+    committee, calls, outcomes, signals = _committee_output_contract_case(transport, profile)
+    outcomes.append(json.dumps([dict(ticker='SHT', direction='short', position_size_pct=0.05,
+        confidence=0.8, rationale='Two retained catalysts', contributing_strategies=['litigation', 'supply_chain'])]))
+    recommendations = committee.synthesize(signals)
+    assert [(row.ticker, row.direction) for row in recommendations] == [('SHT', 'short')]
+    assert committee.last_decision_status['status'] == 'selected'
+    _assert_transmitted_committee_output_contract(committee, calls, profile)
+
+
+@pytest.mark.parametrize('profile', ['legacy', '5k', '100k'])
+@pytest.mark.parametrize('uppercase', ['LONG', 'SHORT'])
+def test_uppercase_committee_row_rejects_whole_response_without_fallback(transport, monkeypatch, profile, uppercase):
+    committee, calls, outcomes, signals = _committee_output_contract_case(transport, profile)
+    def forbidden_fallback(*args, **kwargs):
+        raise AssertionError('invalid model response must never use rule fallback')
+    monkeypatch.setattr(committee, '_rule_based_synthesize', forbidden_fallback)
+    valid = dict(ticker='CFR', direction='long', position_size_pct=0.05,
+        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['filing_analysis'])
+    invalid = dict(ticker='CFR' if uppercase == 'LONG' else 'SHT', direction=uppercase,
+        position_size_pct=0.05, confidence=0.8, rationale='Retained source catalyst',
+        contributing_strategies=['filing_analysis'] if uppercase == 'LONG' else ['litigation', 'supply_chain'])
+    outcomes.append(json.dumps([valid, invalid]))
+    assert committee.synthesize(signals) == []
+    status = committee.last_decision_status
+    assert status['status'] == 'failed' and status['reason'] == 'invalid_model_response'
+    assert status['selected_count'] == 0 and status['degraded'] is True
+    _assert_transmitted_committee_output_contract(committee, calls, profile)

@@ -674,6 +674,7 @@ class PortfolioCommittee:
                 "For single-strategy LONG signals, only recommend if the event is clearly material (score >= 2.0 or strong catalyst). "
                 "Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, "
                 "rationale, contributing_strategies, regime_alignment. "
+                'The direction field must be exactly lowercase "long" or "short". '
                 f"Keep position_size_pct between 0.01 and {self._max_position:.2f}. Keep rationale under 80 chars."
             )
             system_prompt = "\n".join(system_parts)

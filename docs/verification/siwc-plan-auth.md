@@ -1,5 +1,11 @@
 # EventEdge ChatGPT plan authorization
 
+## Prospective committee response clarification: October 12
+
+The closed R6 HTTP200 committee response is valid JSON with uppercase directions; an exact offline parser invocation reproduces the correct schema rejection. The prompt omitted the existing lowercase `long`/`short` contract. An independently reviewed one-sentence prompt clarification leaves response validation, all model/risk settings and historical evidence unchanged. Its focused selection passed 130 tests and four additional independent cases checked the remaining size profiles. The source record documents the exact evidence and limits; it does not infer that prompt wording caused the model response or that the clarification guarantees compliance.
+
+The `c57e3c1` reconciliation checkpoint passed 7,320 local SDK-present tests and eighteen installed filing/helper integration cases. A fresh runtime freeze, final verification and native/replay acceptance remain required after the prompt repair. The c57 R7 contract was only an unapproved preparation checkpoint; no campaign launched from it. See the [direction-contract verification record](2026-10-06-source-reliability.md#prospective-committee-direction-contract-october-12).
+
 ## Closed Mac r6 campaign: October 12
 
 The `a54517d` application passed its SDK-present local suite and both [CI jobs](https://github.com/potalora/eventedge/actions/runs/38231241476). R6 independently retained and verified all 36 main-workload model attempts: twenty candidate responses and one committee response received HTTP200; fifteen committee requests received HTTP503 with no SDK-observed inference fragment. The positive committee response failed native response validation. The retained negative classifications are `provider_error` and `stream_interrupted`; an exact upstream cause or transient condition is not established. Similar-sized committee prompts include both positive and negative transport outcomes, so prompt size alone does not prove the cause.
