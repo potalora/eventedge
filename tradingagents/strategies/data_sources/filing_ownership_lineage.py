@@ -79,7 +79,7 @@ def _one(root, path, *, optional=False):
 
 
 def _policy(evidence):
-    return POLICY_V2 if evidence.get('supported_document_policy') == 'verified_supported_documents_v3' else POLICY
+    return POLICY_V2 if evidence.get('supported_document_policy') in {'verified_supported_documents_v3', 'verified_supported_documents_v4'} else POLICY
 
 
 def _selected_unit(evidence, filename):

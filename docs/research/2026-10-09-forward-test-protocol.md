@@ -2,6 +2,8 @@
 
 This protocol is fixed before the next generation starts. Its purpose is to learn whether EventEdge produces economically meaningful excess returns under reproducible information and execution rules. The repair itself is not evidence of alpha. Deployment and its starting date remain unapproved.
 
+The latest approved document-policy candidate is `verified_supported_documents_v4`: it preserves the v3 structural HTML/PDF and ownership contracts and adds only the source-bound whole-filing quarantine for SoundThinking accession `0001772351-26-000012`. Complete acquisition and raw audit are still required. Retain its original parser failures and strict coverage gap; exclude the whole filing, every occurrence and dependent analysis from model inputs and orders. The policy binds two independently reviewed complete-original variants and cannot classify an unknown failure as low signal. Earlier policy/results remain historical. See the [approved scope](../superpowers/specs/2026-10-11-supported-filing-evidence.md) and [verification record](../verification/2026-10-06-source-reliability.md). Broader research fault containment and the next-generation Luna extraction pilot remain separately documented future work.
+
 ## Decision and scope
 
 The primary portfolio is `horizon_3m_size_100k`. The three other $100k horizons are dependent sensitivity scenarios; the twelve smaller books test concentration and minimum-ticket effects. Do not average their AUM or count them as independent replications. Do not select the best book after seeing results.

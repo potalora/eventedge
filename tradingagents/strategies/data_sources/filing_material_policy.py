@@ -17,7 +17,8 @@ TEN_POLICY = 'retained_ten_material_gaps_v1'
 SUPPORTED_DOCUMENT_POLICY = 'verified_supported_documents_v1'
 SUPPORTED_DOCUMENT_POLICY_V2 = 'verified_supported_documents_v2'
 SUPPORTED_DOCUMENT_POLICY_V3 = 'verified_supported_documents_v3'
-SUPPORTED_DOCUMENT_POLICIES = frozenset({SUPPORTED_DOCUMENT_POLICY, SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3})
+SUPPORTED_DOCUMENT_POLICY_V4 = 'verified_supported_documents_v4'
+SUPPORTED_DOCUMENT_POLICIES = frozenset({SUPPORTED_DOCUMENT_POLICY, SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4})
 SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY}) | SUPPORTED_DOCUMENT_POLICIES
 _VERSION = 'sec-filing-evidence-v1'
 _MAX_ORIGINAL = 512 * 1024 * 1024
@@ -62,6 +63,33 @@ _ADDITIONAL_ROWS = (
 )
 
 
+# Reviewed complete-original registry. Runtime failures never add entries or
+# infer low signal. Each new source variant requires complete retained bytes,
+# exact framing and a recorded content review; historical policies exclude it.
+KNOWN_LOW_SIGNAL_ROWS = ({
+    'accession': '0001772351-26-000012', 'form': 'SCHEDULE 13D/A',
+    'filing_date': '2026-09-30',
+    'source_url': 'https://www.sec.gov/Archives/edgar/data/1772351/000177235126000012/0001772351-26-000012.txt',
+    'issuer_cik': '0001351636', 'issuer_name': 'SOUNDTHINKING, INC.',
+    'document_count': 2,
+    'primary_candidates': [{'sequence': 1, 'type': 'SCHEDULE 13D/A', 'filename': 'primary_doc.xml'}],
+    'roles': [{'role': 'SUBJECT-COMPANY', 'cik': '0001351636', 'name': 'SOUNDTHINKING, INC.'},
+              {'role': 'FILED-BY', 'cik': '0001772351', 'name': 'Veradace Capital Management LLC'}],
+    'original_variants': [{
+        'submission_sha256': 'e63e7fcbff22a7fabf602b33759c4ab17d9f722eee00abc8e882757e9301ad16',
+        'submission_size': 324850, 'format': 'nc_submission', 'accepted_at': None}, {
+        'submission_sha256': '67c6b52a7deed7de595e0c4d3968de867d094229af4f8dcceb2f9c3ba4162aae',
+        'submission_size': 325036, 'format': 'sec_complete_submission', 'accepted_at': '20260930205927'}],
+    'disposition': 'whole_filing_excluded',
+    'verification_basis': 'reviewed_complete_original_and_administrative_content',
+    'content_review': ('ex994.pdf is a one-page administrative Joint Filing Agreement. '
+        'The approved whole-filing exclusion also removes the primary XML and its '
+        'unassessed merger terms; no ownership-change analysis is certified.'),
+    'gap_codes': ['known_low_signal_whole_filing_exclusion', 'pdf_invalid_embedded_font',
+                  'invalid_native_ownership_facts'],
+},)
+
+
 def _digest(value):
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
@@ -97,10 +125,13 @@ def policy_manifest(policy=POLICY) -> dict:
             issuer_cik=cik, issuer_name=name, accepted_at=accepted, document_count=count,
             primary_candidates=[dict(sequence=sequence, type=form, filename=filename)
                                 for sequence, filename in primaries], gap_codes=[gap] + (['ambiguous_primary_document'] if form == 'DEF 14A' else [])))
+    if policy == SUPPORTED_DOCUMENT_POLICY_V4:
+        identities.extend(deepcopy(KNOWN_LOW_SIGNAL_ROWS))
     result = {'policy': policy, 'identities': identities}
     if policy in SUPPORTED_DOCUMENT_POLICIES:
         result['supported_scope'] = {
-            'version': ('supported-document-disposition-v3' if policy == SUPPORTED_DOCUMENT_POLICY_V3 else
+            'version': ('supported-document-disposition-v4' if policy == SUPPORTED_DOCUMENT_POLICY_V4 else
+                'supported-document-disposition-v3' if policy == SUPPORTED_DOCUMENT_POLICY_V3 else
                 'supported-document-disposition-v2' if policy == SUPPORTED_DOCUMENT_POLICY_V2 else 'supported-document-disposition-v1'),
             'broadens': TEN_POLICY,
             'retains_exact_quarantines': True,
@@ -109,13 +140,13 @@ def policy_manifest(policy=POLICY) -> dict:
             'source_authority': 'bounded_parser_attestation_requires_raw_capture_audit',
             'retrieval_parser_model_and_budget_failures_remain_failures': True,
             'original_full_analysis_acceptance': False}
-    if policy in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3}:
+    if policy in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4}:
         result['supported_scope']['structural_visual_pdf'] = {
-            'version': 'sec-pdf-structural-visual-v2' if policy == SUPPORTED_DOCUMENT_POLICY_V3 else 'sec-pdf-structural-visual-v1',
+            'version': 'sec-pdf-structural-visual-v2' if policy in {SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4} else 'sec-pdf-structural-visual-v1',
             'native_text_complete': False, 'encoded_image_validity': 'unverified',
             'native_unicode': 'unverified', 'text_visibility': 'unverified',
             'visual_meaning': 'unresolved', 'order_authority': False}
-    if policy == SUPPORTED_DOCUMENT_POLICY_V3:
+    if policy in {SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4}:
         result['supported_scope']['structural_html'] = {
             'version': 'sec-html-structural-v2', 'max_html_bytes': 24 * 1024**2,
             'max_resource_bytes': 16 * 1024**2, 'max_inventory_bytes': 32 * 1024**2,
@@ -125,6 +156,13 @@ def policy_manifest(policy=POLICY) -> dict:
             'source_text_use': 'incorporation_locator_only_not_analysis', 'order_authority': False}
         result['supported_scope']['ownership_verifier'] = 'complete_ownership_lineage_v2'
         result['supported_scope']['native_pdf_verifier'] = 'sec-native-pdf-evidence-v3'
+    if policy == SUPPORTED_DOCUMENT_POLICY_V4:
+        result['known_low_signal_registry'] = {
+            'version': 'reviewed-known-low-signal-originals-v1',
+            'runtime_self_classification': False, 'unknown_parser_failures_remain_failures': True,
+            'whole_filing_and_dependent_analysis_excluded': True,
+            'complete_original_acquisition_and_raw_audit_required': True,
+            'original_full_analysis_coverage': False, 'order_authority': False}
     return result
 
 
@@ -172,7 +210,7 @@ def _validate_frame(framed, size, row, documents):
     if (type(size) is not int or not 0 < size <= _MAX_ORIGINAL
             or framed.get('version') != _VERSION
             or framed.get('format') not in {'nc_submission', 'sec_complete_submission'}
-            or framed.get('accepted_at') != row['accepted_at']
+            or ('original_variants' not in row and framed.get('accepted_at') != row['accepted_at'])
             or not _hash(framed.get('submission_sha256')) or not _hash(framed.get('header_sha256'))
             or len(documents) != row['document_count']):
         _invalid()
@@ -183,16 +221,25 @@ def _validate_frame(framed, size, row, documents):
     except (TypeError, ValueError, KeyError):
         _invalid()
     _validate_inventory(documents, size)
-    roles = framed.get('roles')
-    if not isinstance(roles, list) or len(roles) != 1:
+    variants = row.get('original_variants')
+    if variants is not None and not any(
+            framed['submission_sha256'] == variant['submission_sha256']
+            and size == variant['submission_size'] and framed['format'] == variant['format']
+            and framed.get('accepted_at') == variant['accepted_at'] for variant in variants):
         _invalid()
-    role = roles[0]
-    if (not isinstance(role, dict) or set(role) != _ROLE_KEYS
-            or role.get('role') != 'FILER' or role.get('cik') != row['issuer_cik']
-            or role.get('name') != row['issuer_name'] or not _hash(role.get('sha256'))
-            or type(role.get('start')) is not int or type(role.get('end')) is not int
-            or not 0 <= role['start'] < role['end'] < documents[0]['body_start']
-            or framed.get('issuer_candidates') != roles):
+    roles = framed.get('roles')
+    expected_roles = row.get('roles', [{'role': 'FILER', 'cik': row['issuer_cik'], 'name': row['issuer_name']}])
+    if not isinstance(roles, list) or len(roles) != len(expected_roles):
+        _invalid()
+    for role, expected_role in zip(roles, expected_roles):
+        if (not isinstance(role, dict) or set(role) != _ROLE_KEYS
+                or any(role.get(key) != expected_role[key] for key in ('role', 'cik', 'name'))
+                or not _hash(role.get('sha256'))
+                or type(role.get('start')) is not int or type(role.get('end')) is not int
+                or not 0 <= role['start'] < role['end'] < documents[0]['body_start']):
+            _invalid()
+    issuer_role = 'SUBJECT-COMPANY' if variants is not None and row['form'].startswith('SCHEDULE 13') else 'FILER'
+    if framed.get('issuer_candidates') != [role for role in roles if role['role'] == issuer_role]:
         _invalid()
     primaries = [document for document in documents if document['type'] == row['form']]
     if [dict(sequence=d['sequence'], type=d['type'], filename=d['filename']) for d in primaries] != row['primary_candidates']:

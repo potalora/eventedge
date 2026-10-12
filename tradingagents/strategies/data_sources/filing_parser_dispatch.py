@@ -269,6 +269,12 @@ class _Dispatcher:
                 validate_quarantined_evidence(result, policy=material_policy)
                 if result['material_quarantine']['submission_size'] != size:
                     raise ValueError('parser original size mismatch')
+                required = list(arguments['required_exhibits'])
+                if '__all_native_exhibits__' in required:
+                    required = sorted(set(name for name in required if name != '__all_native_exhibits__')
+                        | {doc['filename'] for doc in result['document_inventory'] if doc['type'].upper().startswith('EX-')})
+                if result['material_quarantine']['required_exhibits'] != required:
+                    raise ValueError('parser quarantine required evidence selection mismatch')
             elif supported_mode:
                 from .filing_supported_policy import _checked_local_proof
                 if result.get('supported_document_policy') != material_policy:
@@ -484,6 +490,9 @@ def _worker(deadline):
                     try:
                         framed = evidence.frame_submission(mapped, **meta, check=check)
                         framing = False
+                        if supported_mode and '__all_native_exhibits__' in exhibits:
+                            exhibits = sorted(set(name for name in exhibits if name != '__all_native_exhibits__')
+                                | {doc['filename'] for doc in framed['documents'] if doc['type'].upper().startswith('EX-')})
                         if quarantine_mode:
                             # Quarantine cannot turn an absent native body into
                             # permission merely because its tags were balanced.
@@ -497,9 +506,6 @@ def _worker(deadline):
                             except ValueError:
                                 raise evidence.EvidenceError('invalid_material_quarantine') from None
                         else:
-                            if supported_mode and '__all_native_exhibits__' in exhibits:
-                                exhibits = sorted(set(name for name in exhibits if name != '__all_native_exhibits__')
-                                    | {doc['filename'] for doc in framed['documents'] if doc['type'].upper().startswith('EX-')})
                             selected = evidence.select_primary(framed, mapped, check=check)
                             result = evidence.build_evidence_from_buffer(selected, mapped,
                                 required_exhibits=exhibits, max_document_bytes=document_limit, check=check,

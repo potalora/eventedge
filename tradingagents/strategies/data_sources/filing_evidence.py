@@ -502,12 +502,12 @@ def _inventory(document):
 
 def extract_supported_pdf_evidence(body, *, policy, max_document_bytes, max_total_text_bytes, check=None):
     """Select the prospective proof before extraction; errors never select a fallback."""
-    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4
     from .filing_pdf import extract_pdf_evidence, FilingPDFError
     if not isinstance(policy, str) or policy not in SUPPORTED_DOCUMENT_POLICIES:
         raise EvidenceError('invalid_supported_document_policy')
     try:
-        if policy in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3}:
+        if policy in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4}:
             from .filing_pdf_visual import extract_pdf_visual_evidence, FilingPDFVisualError
             try:
                 receipt = extract_pdf_visual_evidence(body, max_pdf_bytes=max_document_bytes,
@@ -525,8 +525,8 @@ def extract_supported_pdf_evidence(body, *, policy, max_document_bytes, max_tota
 
 
 def _selected_document_limit(document, max_document_bytes, supported_document_policy):
-    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY_V3
-    if supported_document_policy == SUPPORTED_DOCUMENT_POLICY_V3 and document['filename'].lower().endswith(('.htm', '.html')):
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4
+    if supported_document_policy in {SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4} and document['filename'].lower().endswith(('.htm', '.html')):
         from .filing_html_structural import MAX_HTML_BYTES
         return MAX_HTML_BYTES
     return max_document_bytes
@@ -621,7 +621,7 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
                 representation = 'ownership_form_data'
                 if supported_document_policy:
                     ownership_primary_body = document['body']
-            elif suffix.endswith(('.htm', '.html')) and supported_document_policy == 'verified_supported_documents_v3':
+            elif suffix.endswith(('.htm', '.html')) and supported_document_policy in {'verified_supported_documents_v3', 'verified_supported_documents_v4'}:
                 from .filing_html_structural import extract_html_structural_evidence, structural_html_source_text, FilingHTMLStructuralError
                 try:
                     receipt = extract_html_structural_evidence(document['body'], documents=documents,
@@ -665,7 +665,7 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
     if supported_document_policy:
         result['supported_document_policy'] = supported_document_policy
         result['pdf_evidence'] = pdf_evidence
-        if supported_document_policy == 'verified_supported_documents_v3':
+        if supported_document_policy in {'verified_supported_documents_v3', 'verified_supported_documents_v4'}:
             result['html_evidence'] = html_evidence
         if ownership_primary_body is not None:
             import base64

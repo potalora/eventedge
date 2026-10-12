@@ -29,7 +29,9 @@ POLICY_V2 = 'verified_supported_documents_v2'
 VERSION_V2 = 'supported-document-disposition-v2'
 POLICY_V3 = 'verified_supported_documents_v3'
 VERSION_V3 = 'supported-document-disposition-v3'
-POLICIES = frozenset({POLICY, POLICY_V2, POLICY_V3})
+POLICY_V4 = 'verified_supported_documents_v4'
+VERSION_V4 = 'supported-document-disposition-v4'
+POLICIES = frozenset({POLICY, POLICY_V2, POLICY_V3, POLICY_V4})
 HTML_VERSION = 'sec-html-structural-v2'
 MAX_HTML_DOCUMENT_BYTES = 24 * 1024**2
 from .filing_pdf_visual import VERSION as VISUAL_VERSION
@@ -65,23 +67,23 @@ def _selected_policy(evidence):
 
 
 def _version(selected):
-    return VERSION_V3 if selected == POLICY_V3 else VERSION_V2 if selected == POLICY_V2 else VERSION
+    return VERSION_V4 if selected == POLICY_V4 else VERSION_V3 if selected == POLICY_V3 else VERSION_V2 if selected == POLICY_V2 else VERSION
 
 
 def _verifiers(selected):
-    return {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION_V2 if selected == POLICY_V3 else LINEAGE_VERSION,
+    return {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION_V2 if selected in {POLICY_V3, POLICY_V4} else LINEAGE_VERSION,
         'publisher_facts': PUBLISHER_VERSION,
-        **({'structural_visual_pdf': VISUAL_VERSION} if selected in {POLICY_V2, POLICY_V3} else {}),
-        **({'structural_html': HTML_VERSION} if selected == POLICY_V3 else {})}
+        **({'structural_visual_pdf': VISUAL_VERSION} if selected in {POLICY_V2, POLICY_V3, POLICY_V4} else {}),
+        **({'structural_html': HTML_VERSION} if selected in {POLICY_V3, POLICY_V4} else {})}
 
 
 def _bounds(selected):
     return {'max_submission_bytes': MAX_SUBMISSION_BYTES, 'max_document_bytes': MAX_DOCUMENT_BYTES,
         'max_total_text_bytes': MAX_TOTAL_TEXT_BYTES, 'pdf': PDF_LIMITS,
         **({'structural_visual_pdf': {key: value for key, value in PDF_LIMITS.items()
-            if key != 'max_text_chars'}} if selected in {POLICY_V2, POLICY_V3} else {}),
+            if key != 'max_text_chars'}} if selected in {POLICY_V2, POLICY_V3, POLICY_V4} else {}),
         **({'structural_html': {'max_html_bytes': MAX_HTML_DOCUMENT_BYTES, 'max_resource_bytes': MAX_DOCUMENT_BYTES,
-            'max_inventory_bytes': MAX_TOTAL_TEXT_BYTES}} if selected == POLICY_V3 else {})}
+            'max_inventory_bytes': MAX_TOTAL_TEXT_BYTES}} if selected in {POLICY_V3, POLICY_V4} else {})}
 
 
 def validate_structural_visual_unit(receipt, unit):
@@ -214,7 +216,7 @@ def _source(evidence, original, raw, required_exhibits, check):
     parsed = select_primary(framed, raw, check=check)
     baseline = build_evidence_from_buffer(parsed, raw, required_exhibits=required_exhibits,
         max_document_bytes=MAX_DOCUMENT_BYTES, max_total_text_bytes=MAX_TOTAL_TEXT_BYTES, check=check,
-        supported_document_policy=POLICY_V3 if _selected_policy(evidence) == POLICY_V3 else None)
+        supported_document_policy=_selected_policy(evidence) if _selected_policy(evidence) in {POLICY_V3, POLICY_V4} else None)
     for key in ('version', 'format', 'accession', 'form', 'filing_date', 'observed_at', 'accepted_at',
                 'submission_sha256', 'header_sha256', 'roles', 'issuer_candidates', 'document_inventory', 'dependencies'):
         _require(evidence[key] == baseline[key], 'source_evidence_mismatch')
@@ -227,7 +229,7 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
     """Recompute a local source result; lineage/operational duties are separate."""
     selected_policy = _selected_policy(current)
     reasons, failures, documents = [], [], []
-    dependencies = {'publisher_facts': [], 'pdf': {}, **({'html': {}} if selected_policy == POLICY_V3 else {})}
+    dependencies = {'publisher_facts': [], 'pdf': {}, **({'html': {}} if selected_policy in {POLICY_V3, POLICY_V4} else {})}
     pdf_receipts = current.get('pdf_evidence', {})
     html_receipts = current.get('html_evidence', {})
     accession = current.get('accession') if isinstance(current, dict) else None
@@ -271,7 +273,7 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
                 fail('selected_inventory_mismatch')
             if set(pdf_receipts) != {name for name in selected if name.lower().endswith('.pdf')}:
                 fail('pdf_receipt_inventory_mismatch')
-            if selected_policy == POLICY_V3 and set(html_receipts) != {name for name in selected if name.lower().endswith(('.htm', '.html'))}:
+            if selected_policy in {POLICY_V3, POLICY_V4} and set(html_receipts) != {name for name in selected if name.lower().endswith(('.htm', '.html'))}:
                 fail('html_receipt_inventory_mismatch')
             total = 0
             for name in sorted(selected):
@@ -281,7 +283,7 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
                 unit, doc = units[name], by_name[name]
                 _require(all(unit[key] == value for key, value in doc.items() if key != 'body'), 'selected_body_identity_mismatch')
                 is_pdf = name.lower().endswith('.pdf')
-                if selected_policy == POLICY_V3 and name.lower().endswith(('.htm', '.html')):
+                if selected_policy in {POLICY_V3, POLICY_V4} and name.lower().endswith(('.htm', '.html')):
                     actual = baseline.get('html_evidence', {}).get(name)
                     _require(actual is not None and html_receipts.get(name) == actual, 'html_receipt_mismatch')
                     validate_structural_html_unit(actual, unit, check=check)
@@ -372,7 +374,7 @@ def build_local_source_proof(current, *, original, raw_submission, required_exhi
         'reasons': result['reasons'], 'residual_failures': failures,
         'pdf': {name: _pdf_binding(receipt) for name, receipt in result['proof_dependencies']['pdf'].items()},
         'publisher_facts': result['proof_dependencies']['publisher_facts'],
-        **({'html': {name: _html_binding(receipt) for name, receipt in result['proof_dependencies']['html'].items()}} if selected_policy == POLICY_V3 else {}),
+        **({'html': {name: _html_binding(receipt) for name, receipt in result['proof_dependencies']['html'].items()}} if selected_policy in {POLICY_V3, POLICY_V4} else {}),
         'verifiers': result['verifiers'], 'bounds': result['bounds']}
     return {**value, 'source_proof_sha256': _digest(value)}
 
@@ -383,7 +385,7 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
         'required_exhibits', 'selected_documents', 'reasons', 'residual_failures',
         'pdf', 'publisher_facts', 'verifiers', 'bounds', 'source_proof_sha256'}
     selected_policy = _selected_policy(evidence)
-    if selected_policy == POLICY_V3:
+    if selected_policy in {POLICY_V3, POLICY_V4}:
         keys.add('html')
     _require(type(proof) is dict and set(proof) == keys, 'invalid_local_source_proof')
     _require(proof['policy'] == selected_policy and proof['version'] == _version(selected_policy)
@@ -421,7 +423,7 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
             if u['representation'] in {'native_pdf_text', 'structural_visual_pdf'}}, 'local_pdf_inventory_mismatch')
     expected_reasons = []
     units = {u['filename']: u for u in evidence['units']}
-    if selected_policy == POLICY_V3:
+    if selected_policy in {POLICY_V3, POLICY_V4}:
         _require(isinstance(proof['html'], dict) and set(proof['html']) == set(evidence.get('html_evidence', {})), 'local_html_inventory_mismatch')
         if not proof['residual_failures']:
             _require(set(proof['html']) == {name for name in units if name.lower().endswith(('.htm', '.html'))}, 'local_html_inventory_mismatch')
@@ -443,7 +445,7 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
     for name in proof['pdf']:
         pdf = evidence['pdf_evidence'][name]
         if units[name]['representation'] == 'structural_visual_pdf':
-            _require(selected_policy in {POLICY_V2, POLICY_V3}, 'invalid_structural_visual_policy')
+            _require(selected_policy in {POLICY_V2, POLICY_V3, POLICY_V4}, 'invalid_structural_visual_policy')
             validate_structural_visual_unit(pdf, units[name])
             expected_reasons.append(_structural_visual_reason(name, units[name], pdf))
             continue

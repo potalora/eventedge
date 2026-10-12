@@ -127,13 +127,13 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
                 'pdf_evidence', 'html_evidence', 'ownership_primary_body', 'ownership_facts'} != _EVIDENCE_KEYS):
         fail('input')
     from .filing_material_policy import (SUPPORTED_DOCUMENT_POLICIES,
-        SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3)
+        SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4)
     selected_policy = evidence.get('supported_document_policy')
     supported = isinstance(selected_policy, str) and selected_policy in SUPPORTED_DOCUMENT_POLICIES
     extended = {'supported_document_policy', 'pdf_evidence', 'html_evidence', 'ownership_primary_body', 'ownership_facts'} & set(evidence)
     if extended and (not supported or not isinstance(evidence.get('pdf_evidence'), dict)):
         fail('supported_document_policy')
-    if selected_policy == SUPPORTED_DOCUMENT_POLICY_V3:
+    if selected_policy in {SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4}:
         if type(evidence.get('html_evidence')) is not dict:
             fail('html_inventory')
     elif 'html_evidence' in evidence:
@@ -229,7 +229,7 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
                 if supported else ('full_visible_text', 'ownership_form_data')) or item['selection'] not in ('primary', 'dependency'):
             fail('input')
         if item['representation'] == 'structural_html' and (
-                selected_policy != SUPPORTED_DOCUMENT_POLICY_V3 or not allow_unsupported_documents):
+                selected_policy not in {SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4} or not allow_unsupported_documents):
             fail('html_inventory')
         if item['selection'] == 'primary':
             primary.append(item)
@@ -253,7 +253,7 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
             if referenced is None or (referenced['type'].upper().startswith('EX-') and item['filename'] not in selected):
                 fail('structural_evidence')
     if supported:
-        if selected_policy == SUPPORTED_DOCUMENT_POLICY_V3:
+        if selected_policy in {SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4}:
             from .filing_supported_policy import validate_structural_html_unit
             html_units = {item['filename']: item for item in evidence['units']
                 if item['filename'].lower().endswith(('.htm', '.html'))}
@@ -276,7 +276,7 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
             receipt = evidence['pdf_evidence'][name]
             try:
                 if unit['representation'] == 'structural_visual_pdf':
-                    if not allow_unsupported_documents or selected_policy not in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3}:
+                    if not allow_unsupported_documents or selected_policy not in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3, SUPPORTED_DOCUMENT_POLICY_V4}:
                         fail('pdf_inventory')
                     from .filing_supported_policy import validate_structural_visual_unit
                     validate_structural_visual_unit(receipt, unit)
