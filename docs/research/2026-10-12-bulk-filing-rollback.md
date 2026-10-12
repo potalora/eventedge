@@ -23,3 +23,9 @@ The final bulk campaign, local R7, failed after 914.24 seconds. Its source deadl
 Verify the exclusion and retained resilience with focused regression/integration checks and the existing CI. Perform at most one fresh isolated local operational check under this reduced profile and unchanged time/resource limits. Record its actual outcome and excluded coverage. A remaining defect becomes a specific follow-up, not another expanding repair loop. Finish the existing PR and full-system guide with these limits; do not claim live operational acceptance or replay unless separately demonstrated.
 
 This remains topic-branch work. No merge, VPS action, production mutation or paid API fallback is authorized by this rollback.
+
+## Focused validation follow-up
+
+After the closeout, Pedro explicitly requested fixing the validation failure and continuing. The first reduced check remains failed. A new price-only diagnostic using the actual governed acquisition, cohort validation and accounting path passed all sixteen books; the earlier direct-price probe had omitted that governance context. Neither diagnostic establishes the cause of the original failure.
+
+The verified reporting defect was missing safe diagnostics at governed-acquisition and per-cohort validation exception boundaries. Those boundaries now log the bounded exception type and code locations before critical-gap handling replaces the result. Exception messages and provider credentials remain excluded. The isolated continuation must retain those diagnostic events instead of globally disabling logging. Continue one fresh reduced-profile run with the existing limits; do not restart bulk filing acquisition or reinterpret previous failures as successes.

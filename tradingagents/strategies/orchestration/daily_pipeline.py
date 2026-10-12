@@ -1411,6 +1411,7 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
             )
             state.processed_at = datetime.now(timezone.utc)
         except GovernedMarketDataError as error:
+            _log_boundary_failure("governed_market_data", session, error)
             state.outcome_price_failures.update(error.failure_map)
             assign_failures(state.results, state.fresh, "critical_market_data_gap")
             return state.critical_gap(
@@ -1484,6 +1485,7 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
                 state.results[name], corporate_errors[name] = failure_result(reason), error
                 preflight_gap = True
             except Exception as error:
+                _log_boundary_failure("market_data_validation", session, error)
                 state.results[name] = failure_result(
                     f"market data validation failed: {error}"
                 )

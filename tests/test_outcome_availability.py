@@ -51,6 +51,53 @@ def test_unexpected_shared_input_failure_logs_safe_origin_and_keeps_gap_closed(t
             cohort["ledger"].close()
 
 
+@pytest.mark.parametrize("phase,method,event,count,error_type", [
+    ("acquisition", "fetch_input_bundle", "governed_market_data_boundary_failed", 1,
+     "GovernedMarketDataError"),
+    ("validation", "validate_execution_input_bundle", "market_data_validation_boundary_failed", 2,
+     "RuntimeError"),
+])
+def test_market_failure_retains_safe_origin_before_gap_replaces_results(
+    tmp_path, caplog, phase, method, event, count, error_type,
+):
+    import json
+    import logging
+    from tradingagents.strategies.orchestration.governed_market_data import GovernedMarketDataError
+    from tradingagents.strategies.orchestration.session_executor import SessionExecutor
+
+    orch, _ = _authoritative_orchestrator(tmp_path, cohorts=2, strategy_modules=[])
+    session = date(2026, 3, 30)
+    secret = "validation-private-api-key"
+
+    def failing_market_boundary(*args, **kwargs):
+        if phase == "acquisition":
+            raise GovernedMarketDataError({})
+        raise RuntimeError(f"https://private.example/?key={secret}")
+
+    caplog.set_level(logging.ERROR)
+    try:
+        with patch.object(SessionExecutor, method, side_effect=failing_market_boundary):
+            results = orch.run_daily(session.isoformat())
+        assert all(row["invalid_reason"] == "critical_market_data_gap" for row in results.values())
+        assert all(row["execution_valid"] is False for row in results.values())
+        assert orch._metric_store.load_epoch(orch._epoch_id).status == "invalid"
+        assert all(not c["ledger"].read_fills(session, session) for c in orch.cohorts)
+        diagnostics = [json.loads(record.getMessage()) for record in caplog.records
+                       if record.getMessage().startswith('{"event": "' + event + '"')]
+        assert len(diagnostics) == count
+        for diagnostic in diagnostics:
+            assert diagnostic["exception_type"] == error_type
+            assert diagnostic["session"] == session.isoformat()
+            assert 1 <= len(diagnostic["code_frames"]) <= 8
+            assert diagnostic["code_frames"][-1]["function"] == "failing_market_boundary"
+            assert all("/" not in frame["file"] and "\\" not in frame["file"]
+                       for frame in diagnostic["code_frames"])
+        assert secret not in caplog.text and "private.example" not in caplog.text
+    finally:
+        for cohort in orch.cohorts:
+            cohort["ledger"].close()
+
+
 @pytest.mark.parametrize("boundary,helper", [
     ("candidate_identity", "_candidate_identity_scope_for_run"),
     ("candidate_reference_replay", "_replay_candidate_reference_issues"),
