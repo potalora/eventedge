@@ -105,21 +105,29 @@ def call_analysis_model(
     max_tokens: int, temperature: float, effort: str,
     provenance: dict | None = None,
     response_observer=None,
+    document_inputs=None,
 ) -> str:
     """Bound real SDK transport including startup, retries and response reading.
 
     Injectable clients retain the same call primitive for deterministic tests.
     Native supported clients run in a disposable process, with SDK retries off.
     """
+    from .chatgpt_plan_client import ChatGPTPlanClient
+    if document_inputs is not None:
+        if not isinstance(client, ChatGPTPlanClient) or model != LUNA_MODEL:
+            raise ValueError("document_inputs_require_luna_plan")
+        from .plan_document_inputs import encode_document_inputs
+        encoded_documents = encode_document_inputs(document_inputs)
     timeout = model_timeout()
     request = dict(model=model, system=system, prompt=prompt, max_tokens=max_tokens,
                    temperature=temperature, effort=effort)
+    if document_inputs is not None:
+        request["document_inputs"] = encoded_documents
     if provenance is not None:
         provenance.clear()
         provenance.update(configured_model=model, returned_model=None, returned_revision=None,
                           identity_status="unpinned", response_id=None, reasoning_effort=effort)
     # Include supported SDK subclasses; injected call primitives are not SDKs.
-    from .chatgpt_plan_client import ChatGPTPlanClient
     native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
     module = ("chatgpt_plan" if isinstance(client, ChatGPTPlanClient) else
               "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None)

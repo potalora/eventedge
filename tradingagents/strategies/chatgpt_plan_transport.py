@@ -230,7 +230,7 @@ def _terminal_text(response, deltas, done, items_done, parts_done, parts_added, 
     return text
 
 
-def stream_plan_response(client, *, model, system, prompt, effort, provenance=None):
+def stream_plan_response(client, *, model, system, prompt, effort, provenance=None, document_inputs=None):
     """Return text only after one consistent completed response and stream EOF.
 
     Exact prompts and effort are sent without truncation. Unsupported plan
@@ -241,6 +241,18 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         provenance.clear()
     if type(model) is not str or not model or type(system) is not str or type(prompt) is not str or type(effort) is not str or effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
         _fail("invalid_request")
+    content = prompt
+    document_metadata = None
+    if document_inputs is not None:
+        if model != "gpt-6-luna":
+            _fail("invalid_request")
+        from .plan_document_inputs import document_input_content, document_input_metadata
+        try:
+            blocks = document_input_content(document_inputs)
+            document_metadata = document_input_metadata(document_inputs)
+        except ValueError:
+            _fail("invalid_request")
+        content = [{"type": "input_text", "text": prompt}, *blocks]
     completed = None
     text = None
     deltas, done = {}, {}
@@ -251,7 +263,7 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
     total_bytes = 0
     try:
         with client.responses.with_streaming_response.create(model=model, instructions=system,
-                input=[{"role": "user", "content": prompt}], reasoning={"effort": effort},
+                input=[{"role": "user", "content": content}], reasoning={"effort": effort},
                 stream=True, store=False) as stream:
             sentinel = False
             for count, event in enumerate(_sse_events(stream), 1):
@@ -392,4 +404,6 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         revision = public("model_revision")
         provenance.update(configured_model=model, returned_model=public("model"), returned_revision=revision,
             identity_status="pinned" if revision else "unpinned", response_id=public("id"), reasoning_effort=effort)
+        if document_metadata is not None:
+            provenance["document_inputs"] = document_metadata
     return text

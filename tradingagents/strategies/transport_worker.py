@@ -95,6 +95,18 @@ def _execute_plan(payload):
         ChatGPTPlanTransportError, stream_plan_response,
     )
     deadline = time.monotonic() + payload["timeout"]
+    document_options = {}
+    request = payload["request"]
+    if "document_inputs" in request:
+        from tradingagents.strategies.plan_document_inputs import document_input_content
+        try:
+            if request.get("model") != "gpt-6-luna":
+                raise ValueError
+            document_input_content(request["document_inputs"])
+        except ValueError:
+            return {"error": "provider_error", "status_code": None,
+                    "error_metadata": {"error_code": "invalid_request"}}
+        document_options["document_inputs"] = request["document_inputs"]
     try:
         from tradingagents.strategies.plan_auth import get_plan_credentials
         settings = payload["client"]
@@ -126,7 +138,7 @@ def _execute_plan(payload):
             request = payload["request"]
             text = stream_plan_response(client, model=request["model"], system=request["system"],
                                         prompt=request["prompt"], effort=request["effort"],
-                                        provenance=provenance)
+                                        provenance=provenance, **document_options)
             if time.monotonic() >= deadline:
                 raise TimeoutError
             provenance.update(billing_mode="chatgpt_plan", effective_output_limit=None)
