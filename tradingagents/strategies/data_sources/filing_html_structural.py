@@ -20,28 +20,30 @@ _VOID = frozenset({'br','hr','meta','img','col'})
 _TABLE = frozenset({'table','thead','tbody','tfoot','tr','td','th','caption','colgroup','col'})
 _INLINE = frozenset('span a b strong i em u s strike del ins sup sub br font small big img kbd'.split())
 _COMMON = frozenset({'id','class','title','style','lang'})
-_ATTRS = {'html': {'lang'}, 'meta': {'http-equiv','content','name','charset'},
+_ATTRS = {'html': {'lang','version'}, 'meta': {'http-equiv','content','name','charset'},
     'a': {'href','name','target','rel'}, 'font': {'size','face','color'},
-    'body': {'bgcolor','text','link','vlink','alink'}, 'p': {'align'}, 'div': {'align'},
+    'body': {'bgcolor','text','link','vlink','alink'}, 'p': {'align'}, 'div': {'align','border','cellpadding','cellspacing'},
     'table': {'width','height','border','cellpadding','cellspacing','align','bgcolor','summary','rules','frame'},
-    'tr': {'align','valign','bgcolor'}, 'td': {'width','height','colspan','rowspan','align','valign','bgcolor','nowrap'},
+    'tr': {'align','valign','bgcolor','height'}, 'td': {'width','height','colspan','rowspan','align','valign','bgcolor','nowrap'},
     'th': {'width','height','colspan','rowspan','align','valign','bgcolor','nowrap','scope'},
     'col': {'width','span','align','valign'}, 'colgroup': {'width','span','align','valign'},
     'img': {'src','alt','width','height','border','align','hspace','vspace'},
     'hr': {'width','size','align','noshade','color'}, 'ol': {'start','type'}, 'ul': {'type'}, 'li': {'value','type'}}
 _NAME = rb'[A-Za-z][A-Za-z0-9_.-]*(?::[A-Za-z][A-Za-z0-9_.-]*)?'
 _ATTR = re.compile(rb'\s+(' + _NAME + rb')(?:\s*=\s*(?:"([^"<>]*)"|\x27([^\x27<>]*)\x27|([^\s"\x27`=<>]+)))?')
-_LENGTH = r'(?:(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:pt|px|pc|in|cm|mm|em|ex|%)?)'
+_NUMBER = r'(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,2})?'
+_LENGTH = r'(?:'+_NUMBER+r'(?:pt|px|pc|in|cm|mm|em|ex|%)?)'
 _COLOR = r'(?:(?:#[0-9a-fA-F]{8}|#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3})|#auto|black|whitesmoke|white|navajowhite|red|green|blue|gray|grey|silver|maroon|navy|purple|teal|aqua|lime|yellow|fuchsia|olive|orange|transparent|currentcolor|windowtext|rgb\(\s*(?:[0-9]{1,3}\s*,\s*){2}[0-9]{1,3}\s*\))'
 _FONT_NAME = r'(?:[A-Za-z][A-Za-z0-9 -]*|"[A-Za-z\x27][A-Za-z0-9 ,\x27-]*"|\x27[A-Za-z"][A-Za-z0-9 ,"-]*\x27)'
 _FONT = _FONT_NAME + r'(?:\s*,\s*' + _FONT_NAME + r')*'
-_CSS_ENUMS = {'text-align':'left right center justify start end', 'vertical-align':'top middle bottom baseline sub super text-top text-bottom',
+_CSS_ENUMS = {'text-align':'left right center justify start end middle', 'vertical-align':'top middle bottom baseline sub super text-top text-bottom',
     'text-transform':'none uppercase lowercase capitalize','font-variant':'normal small-caps','font-style':'normal italic oblique','font-weight':'normal bold bolder lighter 100 200 300 400 500 600 700 800 900',
     'text-decoration':'none underline overline line-through underline solid',
     'display':'none block inline inline-block flex inline-flex table inline-table table-row table-cell table-row-group table-header-group table-footer-group table-column table-column-group table-caption',
     'visibility':'visible hidden collapse','font-kerning':'auto normal none',
     'align-items':'normal stretch center start end flex-start flex-end baseline',
     'justify-content':'normal center start end flex-start flex-end space-between space-around space-evenly',
+    'align-content':'normal stretch center start end flex-start flex-end space-between space-around space-evenly',
     'box-sizing':'border-box content-box','flex-direction':'row row-reverse column column-reverse',
     'position':'static relative absolute fixed sticky','table-layout':'auto fixed',
     'word-break':'normal break-all keep-all break-word', 'border-collapse':'collapse separate',
@@ -51,8 +53,14 @@ _CSS_ENUMS = {'text-align':'left right center justify start end', 'vertical-alig
     'overflow-wrap':'normal break-word anywhere', 'text-align-last':'auto left right center justify start end',
     'text-decoration-line':'none underline overline line-through', 'text-decoration-style':'solid double dotted dashed wavy initial',
     'list-style-position':'inside outside','font-stretch':'normal condensed expanded',
-    'font-size-adjust':'none','break-after':'auto always page avoid',
-    '-sec-extract':'summary exhibit', 'border-image':'none', 'cursor':'auto default pointer text none'}
+    'font-size-adjust':'none','break-after':'auto always page column avoid',
+    '-sec-extract':'summary exhibit', 'border-image':'none', 'cursor':'auto default pointer text none',
+    'text-underline-style':'none single double thick dotted dash dot-dash dot-dot-dash wave',
+    'text-justify-trim':'none punctuation punctuation-and-kana',
+    'mso-bidi-font-weight':'normal bold', 'mso-spacerun':'yes no',
+    'text-justify':'auto none inter-word inter-character inter-ideograph',
+    'mso-yfti-firstrow':'yes no','mso-yfti-lastrow':'yes no',
+    'writing-mode':'horizontal-tb vertical-rl vertical-lr', 'word-wrap':'normal break-word'}
 
 _XHTML = 'http://www.w3.org/1999/xhtml'
 _XML = 'http://www.w3.org/XML/1998/namespace'
@@ -61,7 +69,11 @@ _NAMESPACE_ROLES = {'http://www.xbrl.org/2013/inlineXBRL':'ix',
     'http://www.xbrl.org/2003/linkbase':'link',
     'http://xbrl.org/2006/xbrldi':'xbrldi',
     'http://www.w3.org/1999/xlink':'xlink',
-    'http://www.w3.org/2001/XMLSchema-instance':'xsi', _XML:'xml'}
+    'http://www.w3.org/2001/XMLSchema-instance':'xsi', _XML:'xml',
+    'http://xbrl.sec.gov/ecd/2026':'ecd', 'http://fasb.org/us-gaap/2026':'us-gaap',
+    'http://xbrl.sec.gov/ecd/2025':'ecd2025'}
+_TYPED_LEAVES = frozenset({'ecd:MeasureAxis.domain','us-gaap:QName.domain',
+    'us-gaap:date.domain','ecd2025:RestatementDateAxis.domain'})
 _XML_ATTRS = {
     'ix:header':set(), 'ix:hidden':set(), 'ix:references':{'target'}, 'ix:resources':set(),
     'ix:nonNumeric':{'name','contextRef','format','continuedAt','escape','target'},
@@ -77,8 +89,8 @@ _XML_ATTRS = {
     'xbrli:forever':set(), 'xbrli:unit':set(), 'xbrli:measure':set(),
     'xbrli:divide':set(), 'xbrli:unitNumerator':set(), 'xbrli:unitDenominator':set(),
     'xbrldi:explicitMember':{'dimension'}, 'xbrldi:typedMember':{'dimension'},
-    'link:schemaRef':set()}
-_PRESENTATION_ATTRS = frozenset('face size color bgcolor text link vlink alink align valign width height border cellpadding cellspacing rules frame nowrap noshade hspace vspace start type value'.split())
+    'link:schemaRef':set(), **{leaf:set() for leaf in _TYPED_LEAVES}}
+_PRESENTATION_ATTRS = frozenset('face size color bgcolor text link vlink alink align valign width height border cellpadding cellspacing rules frame nowrap noshade hspace vspace start type value version'.split())
 _PRESENTATION_TAGS = frozenset('b strong i em u sup sub pre blockquote center font small big h1 h2 h3 h4 h5 h6 ul ol li dl dt dd hr kbd'.split())
 
 
@@ -130,16 +142,23 @@ def _css(value):
     if any(any(int(n)>255 for n in re.findall(r'[0-9]+',m.group())) for m in rgb.finditer(value)):
         _fail('unsupported_css_value')
     translate=re.compile(r'translate\(\s*-?'+_LENGTH+r'\s*,\s*-?'+_LENGTH+r'\s*\)',re.I)
-    if len(value) > 16384 or re.search(r'[\\{}()@]|/\*|\*/|[\x00-\x08\x0b\x0c\x0e-\x1f]', translate.sub('TRANSLATE',rgb.sub('RGB',value))):
+    rotate=re.compile(r'rotate\(\s*-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)deg\s*\)',re.I)
+    # Complete, nonrecursive static functions only. Preserve their spelling;
+    # never evaluate arithmetic, clipping, visibility or used CSS values.
+    calc=re.compile(r'calc\(\s*-?'+_LENGTH+r'[ \t\r\n]+[+-][ \t\r\n]+-?'+_LENGTH+r'\s*\)',re.I)
+    coordinate=r'(?:auto|-?'+_LENGTH+r')'
+    rect=re.compile(r'rect\(\s*'+coordinate+r'(?:\s*,\s*'+coordinate+r'){3}\s*\)',re.I)
+    static=rotate.sub('ROTATE',rect.sub('RECT',calc.sub('CALC',translate.sub('TRANSLATE',rgb.sub('RGB',value)))))
+    if len(value) > 16384 or re.search(r'[\\{}()@]|/\*|\*/|[\x00-\x08\x0b\x0c\x0e-\x1f]', static):
         _fail('unsupported_css_syntax')
     result = []
     declarations = value.split(';')
     for index, declaration in enumerate(declarations):
-        if not declaration.strip():
-            if index not in (len(declarations)-1,) and len(declarations)>1:
-                _fail('empty_css_declaration')
+        if not declaration.strip(' \t\r\n'):
+            # Empty declarations are valid separators, not error recovery.
+            # Exact separators still belong to the retained style attribute.
             continue
-        match = re.fullmatch(r'\s*([a-zA-Z-]+)\s*:\s*(.+?)\s*', declaration)
+        match = re.fullmatch(r'\s*([a-zA-Z-]+)\s*:\s*(.+?)\s*', declaration,re.S)
         if match is None:
             _fail('invalid_css_declaration')
         prop, val = match[1].lower(), match[2]
@@ -157,9 +176,14 @@ def _css(value):
         if prop in _CSS_ENUMS and prop != 'text-decoration':
             valid = low in _CSS_ENUMS[prop].split()
         elif prop in {'width','height','min-width','max-width','min-height','max-height','font-size','text-indent','letter-spacing','word-spacing','top','right','bottom','left','tab-size','-webkit-text-size-adjust'}:
-            valid = bool(re.fullmatch(('-?' if prop in {'text-indent','top','right','bottom','left','letter-spacing','word-spacing'} else '') + _LENGTH, low)) or low in {'auto','normal','fit-content','max-content','min-content'} and prop not in {'font-size','text-indent'} or prop=='font-size' and low in {'smaller','larger','xx-small','x-small','small','medium','large','x-large','xx-large'}
+            valid = bool(re.fullmatch(('-?' if prop in {'text-indent','top','right','bottom','left','letter-spacing','word-spacing'} else '') + _LENGTH, low)) or low in {'auto','normal','fit-content','max-content','min-content'} and prop not in {'font-size','text-indent'} or prop=='font-size' and low in {'smaller','larger','xx-small','x-small','small','medium','large','x-large','xx-large'} or calc.fullmatch(low) is not None
+        elif prop=='clip':
+            valid=low=='auto' or rect.fullmatch(low) is not None
         elif prop == 'z-index':
-            valid = low=='auto' or bool(re.fullmatch(r'-?[0-9]{1,6}',low))
+            # Integer stacking order is not a dimensional length. This changes
+            # the earlier scalar grammar explicitly, retaining finite int32
+            # syntax and exact tokens without computing any stacking result.
+            valid = low=='auto' or bool(re.fullmatch(r'[+-]?[0-9]{1,10}',low)) and -2147483648<=int(low)<=2147483647
         elif prop == 'line-height':
             valid = low in {'normal','initial'} or bool(re.fullmatch(_LENGTH, low))
         elif prop in {'widows','orphans'}:
@@ -167,7 +191,18 @@ def _css(value):
         elif prop == '-sec-ix-hidden':
             valid = bool(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.-]{0,255}',val))
         elif prop == 'transform':
-            valid=low=='none' or translate.fullmatch(low) is not None
+            valid=(low=='none' or rotate.fullmatch(low) is not None
+                or re.fullmatch(translate.pattern+r'(?:\s+'+rotate.pattern+r')?',low,re.I) is not None)
+        elif prop=='rotate':
+            valid=rotate.fullmatch('rotate('+low+')') is not None
+        elif prop in {'flex-grow','flex-shrink'}:
+            valid=re.fullmatch(_NUMBER,low) is not None
+        elif prop=='column-count':
+            valid=low=='auto' or bool(re.fullmatch(r'[1-9][0-9]{0,3}',low)) and int(low)<=1000
+        elif prop=='column-gap':
+            valid=low=='normal' or re.fullmatch(_LENGTH,low) is not None
+        elif prop=='mso-yfti-irow':
+            valid=re.fullmatch(r'[0-9]{1,4}',low) is not None
         elif prop == 'opacity':
             valid=bool(re.fullmatch(r'(?:0(?:\.[0-9]+)?|1(?:\.0+)?)',low))
         elif prop == 'border-spacing':
@@ -181,7 +216,7 @@ def _css(value):
             parts = low.split(); valid = 1 <= len(parts) <= (4 if prop in {'margin','padding'} else 1) and all(re.fullmatch('-?' + _LENGTH, p) or p=='auto' and prop.startswith('margin') for p in parts)
         elif prop in {'color','background-color','background','text-decoration-color'}:
             valid = bool(re.fullmatch(_COLOR, low)) or prop=='text-decoration-color' and low=='initial'
-        elif prop in {'border','border-top','border-right','border-bottom','border-left'}:
+        elif prop in {'border','border-top','border-right','border-bottom','border-left','mso-border-alt','mso-border-left-alt','mso-border-top-alt'}:
             valid = 1<=len(parts)<=3 and sum(border_width(p) for p in parts)<=1 and sum(p in border_styles for p in parts)<=1 and sum(bool(re.fullmatch(_COLOR,p)) for p in parts)<=1 and all(border_width(p) or p in border_styles or re.fullmatch(_COLOR,p) for p in parts)
         elif re.fullmatch(r'border(?:-(?:top|right|bottom|left))?-(?:width|style|color)',prop):
             maximum=4 if prop in {'border-width','border-style','border-color'} else 1
@@ -190,7 +225,7 @@ def _css(value):
             valid = 1<=len(parts)<=3 and parts[0] in {'none','underline','overline','line-through'} and all(p in border_styles or re.fullmatch(_COLOR,p) for p in parts[1:])
         elif prop == 'text-decoration-thickness':
             valid=low in {'auto','from-font','initial'} or bool(re.fullmatch(_LENGTH,low))
-        elif prop == 'font-family':
+        elif prop in {'font-family','mso-fareast-font-family'}:
             valid = bool(re.fullmatch(_FONT,val))
         elif prop == 'font':
             valid = bool(re.fullmatch(r'(?:(?:normal|italic|oblique|bold|small-caps|[1-9]00)\s+){0,3}' + _LENGTH + r'(?:/(?:normal|'+_LENGTH+r'))?\s+' + _FONT,val,re.I))
@@ -201,7 +236,12 @@ def _css(value):
         # Bound pathological numeric declarations; this is syntax, not layout.
         # The SEC hidden-fact reference is a bounded identifier, not a numeric
         # declaration. Digits in its opaque ID never assert numeric magnitude.
-        if prop!='-sec-ix-hidden' and any(len(n)>32 or float(n)>1000000 for n in re.findall(r'[0-9]+(?:\.[0-9]+)?',val)):
+        # Hex colors are already checked by the finite property grammar. Their
+        # exact digits can contain E (e.g. #215E99) without being a scientific
+        # number. Exclude only complete accepted-size hex lexemes from this
+        # derived magnitude scan; keep source values and dimensional bounds.
+        numeric_value=re.sub(r'#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![A-Za-z0-9_.-])','',val)
+        if prop not in {'-sec-ix-hidden','z-index'} and any(len(n)>32 or float(n)>1000000 for n in re.findall(_NUMBER,numeric_value)):
             _fail('css_numeric_limit')
         result.append({'property':prop,'value':val,'important':important})
     return result
@@ -225,10 +265,20 @@ def _namespace_attributes(tag, attrs, namespaces):
     for key,value in attrs.items():
         if key=='xmlns' or key.startswith('xmlns:'):
             prefix='' if key=='xmlns' else key[6:]
+            # One exact SEC resources profile declares a default instance URI
+            # and clears it on the prefixed context. Every accepted descendant
+            # is explicitly prefix-bound by the content model; unprefixed
+            # instance/custom children fail. These metadata bindings need no
+            # global mutation and cannot escape the subtree into later HTML.
+            default_profile=(not prefix and tag!='html' and
+                (_role(tag,namespaces)=='ix:resources' and value=='http://www.xbrl.org/2003/instance'
+                 or _role(tag,namespaces)=='xbrli:context' and value==''))
+            if default_profile:continue
             # A schemaRef is a leaf with no descendants. Its exact local XLink
             # declaration can be checked without introducing general XML
             # namespace rebinding or allowing the binding to escape the leaf.
-            if tag!='html' and not (prefix and _role(tag,namespaces)=='link:schemaRef'
+            if tag!='html' and not (prefix and _role(tag,namespaces) in _XML_ATTRS and namespaces.get(prefix)==value
+                    or prefix and _role(tag,namespaces)=='link:schemaRef'
                     and (value=='http://www.w3.org/1999/xlink'
                         or value=='http://www.xbrl.org/2003/linkbase' and namespaces.get(prefix)==value)):
                 _fail('unsupported_namespace_scope')
@@ -243,6 +293,7 @@ def _attributes(tag, attrs, namespaces):
     if tag!='html':namespaces=namespaces.copy()
     _namespace_attributes(tag,attrs,namespaces)
     role=_role(tag,namespaces)
+    if role in _TYPED_LEAVES and attrs:_fail('unsupported_namespace_attribute')
     for key,value in attrs.items():
         if not isinstance(key,str) or not isinstance(value,str) or len(value)>16384:
             _fail('attribute_limit')
@@ -254,15 +305,19 @@ def _attributes(tag, attrs, namespaces):
             ns=_NAMESPACE_ROLES.get(namespaces.get(prefix))
             if not (ns=='xml' and local in {'lang','space'}
                     or ns=='xsi' and local=='nil' and ':' in tag
-                    or ns=='xlink' and role=='link:schemaRef' and local in {'type','href'}):
+                    or ns=='xlink' and role=='link:schemaRef' and local in {'type','href','arcrole'}):
                 _fail('unsupported_namespace_attribute')
             if ns=='xsi' and value not in {'true','false','0','1'}:_fail('invalid_nil')
             if ns=='xlink' and local=='type' and value!='simple':_fail('unsupported_link_type')
+            if ns=='xlink' and local=='arcrole' and value!='http://www.xbrl.org/2003/linkbase':_fail('unsupported_link_arcrole')
             if ns=='xml' and local=='space' and value not in {'preserve','default'}:_fail('invalid_xml_space')
         if key in {'rowspan','colspan','span'} and (not re.fullmatch(r'[1-9][0-9]{0,3}',value) or int(value)>1000):_fail('span_limit')
         if key=='lang' or key.endswith(':lang'):
             if not re.fullmatch(r'[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*',value):_fail('invalid_language')
-        if key in {'width','height','hspace','vspace','border','cellspacing','cellpadding','size'} and role!='font' and not re.fullmatch(r'[0-9]{1,6}(?:\.[0-9]{1,4})?%?',value):_fail('invalid_presentation_number')
+        if key in {'width','height','hspace','vspace','border','cellspacing','cellpadding','size'} and role!='font':
+            suffix=r'(?:%|pt|px)?' if key in {'cellspacing','cellpadding'} else r'%?'
+            if not re.fullmatch(r'[0-9]{1,6}(?:\.[0-9]{1,4})?'+suffix,value):_fail('invalid_presentation_number')
+        if key=='version' and value!='-//XBRL International//DTD XHTML Inline XBRL 1.1//EN':_fail('unsupported_html_version')
         if key=='href' or key.endswith(':href'):
             # Browser URL parsing removes ASCII HT/LF/CR, including characters
             # supplied by references. Check that scheme while preserving the
@@ -308,14 +363,15 @@ def _nest(tag, stack, namespaces=None):
         'xbrli:divide':{'xbrli:unit'},'xbrli:measure':{'xbrli:unit','xbrli:unitNumerator','xbrli:unitDenominator'},
         'xbrli:unitNumerator':{'xbrli:divide'},'xbrli:unitDenominator':{'xbrli:divide'},
         'xbrldi:explicitMember':{'xbrli:segment','xbrli:scenario'},'xbrldi:typedMember':{'xbrli:segment','xbrli:scenario'},
-        'ix:numerator':{'ix:fraction'},'ix:denominator':{'ix:fraction'}}
+        'ix:numerator':{'ix:fraction'},'ix:denominator':{'ix:fraction'},
+        **{leaf:{'xbrldi:typedMember'} for leaf in _TYPED_LEAVES}}
     if tag in xml_parents and parent not in xml_parents[tag]:_fail('invalid_namespace_content_model')
     if parent in set().union(*xml_parents.values()) | {'ix:hidden'}:
         allowed={t for t,parents in xml_parents.items() if parent in parents}
         if parent=='ix:hidden':allowed|={'ix:nonNumeric','ix:nonFraction','ix:fraction'}
         if parent=='ix:resources':allowed|={'ix:relationship'}
         if tag not in allowed:_fail('invalid_namespace_content_model')
-    if parent in {'xbrli:identifier','xbrli:startDate','xbrli:endDate','xbrli:instant','xbrli:measure','xbrldi:explicitMember','link:schemaRef','ix:relationship','xbrli:forever'}:
+    if parent in {'xbrli:identifier','xbrli:startDate','xbrli:endDate','xbrli:instant','xbrli:measure','xbrldi:explicitMember','link:schemaRef','ix:relationship','xbrli:forever'} | _TYPED_LEAVES:
         _fail('invalid_namespace_content_model')
     if tag=='ix:header' and parent not in {'body','div'}:_fail('invalid_namespace_content_model')
     if ':' in tag:
@@ -362,10 +418,37 @@ def _meta(tag, attrs):
         _fail('active_meta')
     if 'charset' in attrs and attrs['charset'].lower() not in {'utf-8','utf8','us-ascii'}:
         _fail('unsupported_charset')
-    if equiv == 'content-type' and not re.fullmatch(r'text/html(?:\s*;\s*charset\s*=\s*(?:utf-8|utf8|us-ascii))?', attrs.get('content', ''), re.I):
+    if equiv == 'content-type' and not re.fullmatch(r'text/html(?:\s*;\s*(?:charset\s*=\s*(?:utf-8|utf8|us-ascii))?)?', attrs.get('content', ''), re.I):
         _fail('unsupported_charset')
     if equiv == 'content-style-type' and attrs.get('content', '').lower() != 'text/css':
         _fail('unsupported_style_type')
+
+
+def _typed_member_inventory(receipt, namespaces, check):
+    """One explicitly known text leaf, never arbitrary typed XML or type proof."""
+    if 'http://xbrl.org/2006/xbrldi' not in namespaces.values():return
+    stack=[];children=None
+    for token in iter_html_structural_tokens(receipt):
+        _pulse(check)
+        kind=token['kind']
+        if token.get('implicit_closes'):stack.pop()
+        if kind in {'start','empty'}:
+            role=_role(token['tag'],namespaces)
+            if role=='xbrldi:typedMember':
+                if kind=='empty' or children is not None:_fail('invalid_typed_member_inventory')
+                children=0
+            elif stack and stack[-1]=='xbrldi:typedMember':
+                if role not in _TYPED_LEAVES:_fail('invalid_typed_member_inventory')
+                children+=1
+            if kind=='start' and token['tag'] not in _VOID:stack.append(role)
+        elif kind=='end':
+            role=_role(token['tag'],namespaces)
+            if role=='xbrldi:typedMember':
+                if children!=1:_fail('invalid_typed_member_inventory')
+                children=None
+            stack.pop()
+        elif kind=='text' and stack and stack[-1]=='xbrldi:typedMember' and not token['whitespace_only']:
+            _fail('invalid_typed_member_inventory')
 
 
 def _transport(document, body_reader, limit, check):
@@ -522,8 +605,6 @@ def extract_html_structural_evidence(body, *, documents=(), body_reader=None,
                         _fail('unsupported_charset')
                     if key=='lang' and not re.fullmatch(r'[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*',value):
                         _fail('invalid_language')
-                    if key in {'width','height','hspace','vspace','border','cellspacing','cellpadding','size'} and tag!='font' and not re.fullmatch(r'[0-9]{1,6}(?:\.[0-9]{1,4})?%?',value):
-                        _fail('invalid_presentation_number')
                     if key=='href' and (len(value)>4096 or re.match(r'\s*(?:javascript|data|vbscript):',value,re.I)):
                         _fail('unsafe_navigation')
                     attrs[key]=value;offset=attr.end()
@@ -571,6 +652,7 @@ def extract_html_structural_evidence(body, *, documents=(), body_reader=None,
         'obligations':sorted(obligations),'visual_presence':bool(obligations),'native_text_complete':False,
         'css_layout':'unverified','css_property_semantics':'unverified','font_availability':'unverified','encoded_image_validity':'unverified',
         'text_visibility':'unverified','visual_meaning':'unresolved','order_authority':False}
+    _typed_member_inventory(receipt,namespaces,check)
     reference_text=structural_html_source_text(body,receipt,check=check)
     receipt.update(source_text_sha256=_sha(reference_text.encode('utf-8')),source_text_chars=len(reference_text),
         source_text_utf8_bytes=len(reference_text.encode('utf-8')),source_text_use='incorporation_locator_only_not_analysis')
@@ -701,6 +783,7 @@ def validate_html_structural_receipt(receipt, *, check=None):
             _role(token['tag'],namespaces)
             require(bool(stack) and stack.pop()==token['tag'])
     require(pos==receipt['input_bytes'] and not stack and receipt['resource_edges']==edges)
+    _typed_member_inventory(receipt,namespaces,check)
     require(not document_state.get('xbrl') or document_state['html'])
     require(receipt['obligations']==sorted(obligations) and receipt['visual_presence'] is bool(obligations))
     require(type(receipt['resources']) is list and [r.get('filename') for r in receipt['resources']]==sorted({e['filename'] for e in edges}))

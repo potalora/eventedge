@@ -113,7 +113,7 @@ def test_retained_finite_css_is_source_bound_and_visual(style):
     'background:url(secret.png)', 'color:rgb(256,0,0)',
     'font:expression(alert(1))',
     '-sec-ix-hidden:x y', 'clear:sideways', 'border-width:99999999px',
-    'transform:translate(secret,0)', 'transform:rotate(45deg)',
+    'transform:translate(secret,0)', 'transform:rotate(45rad)',
     'margin-top:1000001pt', '-sec-ix-hidden:'+('x'*257),
 ])
 def test_finite_css_rejects_unknown_active_invalid_and_unbounded(style):
