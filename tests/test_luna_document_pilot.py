@@ -205,3 +205,14 @@ def test_extraction_replay_preserves_native_deadline_rejection_even_with_readabl
     receipt = replay_capture(tmp_path, hashlib.sha256(body).hexdigest())
     assert receipt['status'] == 'failed'
     assert 'transport_not_accepted' in receipt['reasons']
+    assert receipt['verified_pages'] == []
+    assert receipt['verified_probes'] == 0
+
+
+def test_revised_prompt_policy_preserves_legacy_receipts_and_has_explicit_new_identity():
+    manifest = spec()
+    manifest['policy_version'] = 'luna-page-pilot-v2'
+    receipt = validate(response(), manifest)
+    assert receipt['status'] == 'passed'
+    assert receipt['policy_version'] == 'luna-page-pilot-v2'
+    assert validate(response())['policy_version'] == 'luna-page-pilot-v1'
