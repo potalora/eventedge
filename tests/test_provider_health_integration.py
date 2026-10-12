@@ -510,7 +510,8 @@ def test_fred_actual_http_wrapper_retains_status_and_redacts_body(
             response = _response({})
             response.status_code = 502
             return response
-        return _response({"observations": [{"date": "2026-09-01", "value": "3.0"}]})
+        return _response({"count": 1, "offset": 0, "limit": 100000, "observations": [
+            {"date": "2026-09-01", "value": "3.0", "realtime_start": "2026-10-01", "realtime_end": "2026-10-01"}]})
 
     monkeypatch.setattr(FREDSource, "_transport_get", staticmethod(transport))
     source = FREDSource(api_key="fixture-secret")

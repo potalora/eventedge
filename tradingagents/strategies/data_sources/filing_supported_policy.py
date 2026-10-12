@@ -19,15 +19,20 @@ from urllib.parse import urlsplit
 from .filing_evidence import (frame_submission, select_primary, build_evidence_from_buffer,
     _buffer_valid, _range_sha, EvidenceError, extract_supported_pdf_evidence)
 from .filing_pdf import FilingPDFError, VERSION as PDF_VERSION
-from .filing_ownership_lineage import validate_ownership_lineage, POLICY as LINEAGE_VERSION
+from .filing_ownership_lineage import (validate_ownership_lineage, POLICY as LINEAGE_VERSION,
+    POLICY_V2 as LINEAGE_VERSION_V2)
 from .filing_publisher_facts import publisher_facts, VERSION as PUBLISHER_VERSION
 
 POLICY = 'verified_supported_documents_v1'
 VERSION = 'supported-document-disposition-v1'
 POLICY_V2 = 'verified_supported_documents_v2'
 VERSION_V2 = 'supported-document-disposition-v2'
-POLICIES = frozenset({POLICY, POLICY_V2})
-VISUAL_VERSION = 'sec-pdf-structural-visual-v1'
+POLICY_V3 = 'verified_supported_documents_v3'
+VERSION_V3 = 'supported-document-disposition-v3'
+POLICIES = frozenset({POLICY, POLICY_V2, POLICY_V3})
+HTML_VERSION = 'sec-html-structural-v2'
+MAX_HTML_DOCUMENT_BYTES = 24 * 1024**2
+from .filing_pdf_visual import VERSION as VISUAL_VERSION
 MAX_SUBMISSION_BYTES = 512 * 1024**2
 MAX_DOCUMENT_BYTES = 16 * 1024**2
 MAX_TOTAL_TEXT_BYTES = 32 * 1024**2
@@ -60,19 +65,23 @@ def _selected_policy(evidence):
 
 
 def _version(selected):
-    return VERSION_V2 if selected == POLICY_V2 else VERSION
+    return VERSION_V3 if selected == POLICY_V3 else VERSION_V2 if selected == POLICY_V2 else VERSION
 
 
 def _verifiers(selected):
-    return {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION, 'publisher_facts': PUBLISHER_VERSION,
-        **({'structural_visual_pdf': VISUAL_VERSION} if selected == POLICY_V2 else {})}
+    return {'pdf': PDF_VERSION, 'ownership': LINEAGE_VERSION_V2 if selected == POLICY_V3 else LINEAGE_VERSION,
+        'publisher_facts': PUBLISHER_VERSION,
+        **({'structural_visual_pdf': VISUAL_VERSION} if selected in {POLICY_V2, POLICY_V3} else {}),
+        **({'structural_html': HTML_VERSION} if selected == POLICY_V3 else {})}
 
 
 def _bounds(selected):
     return {'max_submission_bytes': MAX_SUBMISSION_BYTES, 'max_document_bytes': MAX_DOCUMENT_BYTES,
         'max_total_text_bytes': MAX_TOTAL_TEXT_BYTES, 'pdf': PDF_LIMITS,
         **({'structural_visual_pdf': {key: value for key, value in PDF_LIMITS.items()
-            if key != 'max_text_chars'}} if selected == POLICY_V2 else {})}
+            if key != 'max_text_chars'}} if selected in {POLICY_V2, POLICY_V3} else {}),
+        **({'structural_html': {'max_html_bytes': MAX_HTML_DOCUMENT_BYTES, 'max_resource_bytes': MAX_DOCUMENT_BYTES,
+            'max_inventory_bytes': MAX_TOTAL_TEXT_BYTES}} if selected == POLICY_V3 else {})}
 
 
 def validate_structural_visual_unit(receipt, unit):
@@ -101,6 +110,36 @@ def _structural_visual_reason(name, unit, receipt):
         'encoded_image_validity': 'unverified', 'native_unicode': 'unverified',
         'text_visibility': 'unverified', 'order_authority': False,
         'visual_meaning': 'unresolved', 'materiality': 'not_inferred_selected_content_obligation'}
+
+
+def validate_structural_html_unit(receipt, unit, *, check=None):
+    from .filing_html_structural import validate_html_structural_receipt
+    validate_html_structural_receipt(receipt, check=check)
+    _require(receipt['input_sha256'] == unit['body_sha256']
+        and receipt['input_bytes'] == unit['body_end'] - unit['body_start'], 'invalid_structural_html_unit')
+    _require(unit['text_sha256'] == receipt['source_text_sha256'] == hashlib.sha256(unit['text'].encode('utf-8')).hexdigest()
+        and len(unit['text']) == receipt['source_text_chars']
+        and len(unit['text'].encode('utf-8')) == receipt['source_text_utf8_bytes']
+        and type(unit['text_start']) is int and unit['text_start'] == 0
+        and type(unit['text_end']) is int and unit['text_end'] == len(unit['text']), 'invalid_structural_html_projection')
+    if receipt['visual_presence']:
+        _require(unit['representation'] == 'structural_html', 'invalid_structural_html_unit')
+    else:
+        _require(unit['representation'] == 'full_visible_text', 'invalid_structural_html_unit')
+
+
+def _structural_html_reason(name, unit, receipt):
+    return {'code': 'unsupported_selected_visual_content', 'filename': name,
+        'body_sha256': unit['body_sha256'], 'proof_kind': 'structural_html',
+        'obligations': receipt['obligations'], 'native_text_complete': False,
+        'css_layout': 'unverified', 'css_property_semantics': 'unverified', 'font_availability': 'unverified',
+        'encoded_image_validity': 'unverified', 'text_visibility': 'unverified',
+        'order_authority': False, 'visual_meaning': 'unresolved',
+        'materiality': 'not_inferred_selected_content_obligation'}
+
+
+def _html_binding(receipt):
+    return {key: receipt[key] for key in ('version', 'input_sha256', 'input_bytes')} | {'receipt_sha256': _digest(receipt)}
 
 
 def _text_capabilities(body, *, ownership=False, check=None):
@@ -174,7 +213,8 @@ def _source(evidence, original, raw, required_exhibits, check):
         inventory_reconciliation=evidence.get('inventory_reconciliation'))
     parsed = select_primary(framed, raw, check=check)
     baseline = build_evidence_from_buffer(parsed, raw, required_exhibits=required_exhibits,
-        max_document_bytes=MAX_DOCUMENT_BYTES, max_total_text_bytes=MAX_TOTAL_TEXT_BYTES, check=check)
+        max_document_bytes=MAX_DOCUMENT_BYTES, max_total_text_bytes=MAX_TOTAL_TEXT_BYTES, check=check,
+        supported_document_policy=POLICY_V3 if _selected_policy(evidence) == POLICY_V3 else None)
     for key in ('version', 'format', 'accession', 'form', 'filing_date', 'observed_at', 'accepted_at',
                 'submission_sha256', 'header_sha256', 'roles', 'issuer_candidates', 'document_inventory', 'dependencies'):
         _require(evidence[key] == baseline[key], 'source_evidence_mismatch')
@@ -187,8 +227,9 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
     """Recompute a local source result; lineage/operational duties are separate."""
     selected_policy = _selected_policy(current)
     reasons, failures, documents = [], [], []
-    dependencies = {'publisher_facts': [], 'pdf': {}}
+    dependencies = {'publisher_facts': [], 'pdf': {}, **({'html': {}} if selected_policy == POLICY_V3 else {})}
     pdf_receipts = current.get('pdf_evidence', {})
+    html_receipts = current.get('html_evidence', {})
     accession = current.get('accession') if isinstance(current, dict) else None
     def fail(code, **context):
         item = {'code': code, **context}
@@ -230,6 +271,8 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
                 fail('selected_inventory_mismatch')
             if set(pdf_receipts) != {name for name in selected if name.lower().endswith('.pdf')}:
                 fail('pdf_receipt_inventory_mismatch')
+            if selected_policy == POLICY_V3 and set(html_receipts) != {name for name in selected if name.lower().endswith(('.htm', '.html'))}:
+                fail('html_receipt_inventory_mismatch')
             total = 0
             for name in sorted(selected):
                 if name not in units:
@@ -238,7 +281,16 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
                 unit, doc = units[name], by_name[name]
                 _require(all(unit[key] == value for key, value in doc.items() if key != 'body'), 'selected_body_identity_mismatch')
                 is_pdf = name.lower().endswith('.pdf')
-                if not is_pdf:
+                if selected_policy == POLICY_V3 and name.lower().endswith(('.htm', '.html')):
+                    actual = baseline.get('html_evidence', {}).get(name)
+                    _require(actual is not None and html_receipts.get(name) == actual, 'html_receipt_mismatch')
+                    validate_structural_html_unit(actual, unit, check=check)
+                    _require(unit == baseline_units[name], 'selected_html_unit_mismatch')
+                    dependencies['html'][name] = actual
+                    total += actual['inventory_bytes'] + len(unit['text'].encode('utf-8'))
+                    if actual['visual_presence']:
+                        reasons.append(_structural_html_reason(name, unit, actual))
+                elif not is_pdf:
                     for code in _text_capabilities(raw_submission[doc['body_start']:doc['body_end']],
                             ownership=unit.get('representation') == 'ownership_form_data', check=check):
                         fail(code, filename=name)
@@ -320,6 +372,7 @@ def build_local_source_proof(current, *, original, raw_submission, required_exhi
         'reasons': result['reasons'], 'residual_failures': failures,
         'pdf': {name: _pdf_binding(receipt) for name, receipt in result['proof_dependencies']['pdf'].items()},
         'publisher_facts': result['proof_dependencies']['publisher_facts'],
+        **({'html': {name: _html_binding(receipt) for name, receipt in result['proof_dependencies']['html'].items()}} if selected_policy == POLICY_V3 else {}),
         'verifiers': result['verifiers'], 'bounds': result['bounds']}
     return {**value, 'source_proof_sha256': _digest(value)}
 
@@ -329,8 +382,10 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
     keys = {'policy', 'version', 'kind', 'accession', 'evidence_sha256', 'original',
         'required_exhibits', 'selected_documents', 'reasons', 'residual_failures',
         'pdf', 'publisher_facts', 'verifiers', 'bounds', 'source_proof_sha256'}
-    _require(type(proof) is dict and set(proof) == keys, 'invalid_local_source_proof')
     selected_policy = _selected_policy(evidence)
+    if selected_policy == POLICY_V3:
+        keys.add('html')
+    _require(type(proof) is dict and set(proof) == keys, 'invalid_local_source_proof')
     _require(proof['policy'] == selected_policy and proof['version'] == _version(selected_policy)
         and proof['kind'] == 'bounded_parser_source_proof'
         and proof['accession'] == evidence['accession']
@@ -366,10 +421,29 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
             if u['representation'] in {'native_pdf_text', 'structural_visual_pdf'}}, 'local_pdf_inventory_mismatch')
     expected_reasons = []
     units = {u['filename']: u for u in evidence['units']}
+    if selected_policy == POLICY_V3:
+        _require(isinstance(proof['html'], dict) and set(proof['html']) == set(evidence.get('html_evidence', {})), 'local_html_inventory_mismatch')
+        if not proof['residual_failures']:
+            _require(set(proof['html']) == {name for name in units if name.lower().endswith(('.htm', '.html'))}, 'local_html_inventory_mismatch')
+        for name, binding in proof['html'].items():
+            html_receipt = evidence['html_evidence'][name]
+            _require(_html_binding(html_receipt) == binding, 'local_html_binding_mismatch')
+            # Failed/incomplete selected bodies remain failures; never give a
+            # receipt without its exact complete selected unit a visual reason.
+            if name not in units:
+                _require(bool(proof['residual_failures']), 'local_html_missing_unit')
+                continue
+            validate_structural_html_unit(html_receipt, units[name], check=check)
+            inventory = [d for d in evidence['document_inventory'] if d['filename'] in {r['filename'] for r in html_receipt['resources']}]
+            _require(sorted(inventory, key=lambda d:d['filename']) == [
+                {k:r[k] for k in ('type','sequence','filename','body_start','body_end','body_sha256')}
+                for r in html_receipt['resources']], 'local_html_resource_binding_mismatch')
+            if html_receipt['visual_presence']:
+                expected_reasons.append(_structural_html_reason(name, units[name], html_receipt))
     for name in proof['pdf']:
         pdf = evidence['pdf_evidence'][name]
         if units[name]['representation'] == 'structural_visual_pdf':
-            _require(selected_policy == POLICY_V2, 'invalid_structural_visual_policy')
+            _require(selected_policy in {POLICY_V2, POLICY_V3}, 'invalid_structural_visual_policy')
             validate_structural_visual_unit(pdf, units[name])
             expected_reasons.append(_structural_visual_reason(name, units[name], pdf))
             continue
@@ -398,6 +472,7 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
         raise SupportedDispositionError('missing_raw_publisher_facts_body')
     if proof['publisher_facts']:
         expected_reasons.append({'code': 'unresolved_publisher_facts', 'facts': proof['publisher_facts']})
+    expected_reasons.sort(key=lambda r: (r.get('filename', '\uffff'), r['code']))
     _require(proof['reasons'] == expected_reasons, 'local_source_reasons_mismatch')
     return proof
 

@@ -275,6 +275,10 @@ def hold_incomplete_model_sample(signals, health, *, incomplete=False):
         signal["journal_only"] = True
         signal.setdefault("metadata", {}).update(analysis_status="failed",
             analysis_failure_reason="model_deadline_exhausted", non_actionable_reason="model_sample_incomplete")
+    for record in health:
+        for event in record.evidence.get('state_economic_events', []):
+            event.update(journal_only=True, analysis_status='failed',
+                analysis_failure_reason='model_deadline_exhausted', non_actionable_reason='model_sample_incomplete')
     health = [replace(record, status="data_failure", evidence={**record.evidence,
         "provider_errors": {**record.evidence.get("provider_errors", {}), "analysis": "model_deadline_exhausted"},
         "model_coverage": {"complete": False, "reason": "model_deadline_exhausted"},
@@ -319,7 +323,8 @@ class MultiStrategyEngine:
         filing_material_configured(self.ar_config)
 
         # Load strategies (paper-trade only)
-        self.paper_trade_strategies = strategies or get_paper_trade_strategies()
+        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
+        self.paper_trade_strategies = configure_strategies(strategies or get_paper_trade_strategies(), self.ar_config)
 
         # Data source registry
         self.registry = registry or build_default_registry(self.ar_config)
@@ -480,6 +485,23 @@ class MultiStrategyEngine:
                     company_map=data.get("edgar", {}).get("company_tickers"))
             except (ValueError, TypeError, AttributeError):
                 universe_failure = True
+        from tradingagents.strategies.data_sources.state_economics_policy import configured as state_configured
+        state_enabled = state_configured(self.ar_config)
+        state_failure = None
+        state_coverage = None
+        state_scope = None
+        if state_enabled:
+            signal_data = dict(signal_data, _state_economics_universe=universe)
+            try:
+                from .state_inputs import state_policy_scope
+                state_scope = state_policy_scope(data, self.ar_config, trading_date, universe=universe)
+                state_coverage = state_scope['source_coverage']
+                if state_scope['exposure_registry_error']:
+                    state_failure = state_scope['exposure_registry_error']
+                elif not state_coverage['complete']:
+                    state_failure = 'incomplete_state_unemployment_coverage'
+            except (ValueError, TypeError, KeyError):
+                state_failure = 'invalid_state_unemployment_evidence'
         all_signals: list[dict] = []
         health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
@@ -503,7 +525,7 @@ class MultiStrategyEngine:
                 from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
                 with candidate_universe(universe):
                     candidates = (admit_candidates(strategy.name, [], budget=None)
-                        if any(source in scope_errors for source in strategy.data_sources)
+                        if any(source in scope_errors for source in strategy.data_sources) or (strategy.name == 'state_economics' and state_failure == 'invalid_state_unemployment_evidence')
                         else strategy.screen(signal_data, trading_date, params))
                     if not hasattr(candidates, "admission_manifest"):
                         candidates = admit_candidates(strategy.name, candidates, budget=None)
@@ -522,6 +544,8 @@ class MultiStrategyEngine:
             universe_assessments = []
             if universe is not None:
                 for candidate in candidates:
+                    if (candidate.metadata.get('state_economics_policy') == 'state_unemployment_v1' and not candidate.ticker):
+                        continue
                     if (candidate.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1'
                             and candidate.metadata.get('analysis_status') == 'validated'
                             and candidate.metadata.get('document_assessment') == 'assessed_no_directional_thesis'
@@ -543,11 +567,15 @@ class MultiStrategyEngine:
             provider_errors = _provider_errors(data, strategy.data_sources)
             provider_errors.update({source: reason for source, reason in scope_errors.items()
                                     if source in strategy.data_sources})
+            if strategy.name == 'state_economics' and state_enabled and state_failure:
+                provider_errors['fred_state_unemployment'] = state_failure
             if universe_failure:
                 provider_errors = dict(provider_errors, equity_universe="universe_evidence_unavailable")
             non_actionable = sorted({c.metadata["non_actionable_reason"] for c in candidates if c.metadata.get("non_actionable_reason")})
             if any(c.metadata.get('non_actionable_reason') and not
-                   accepted_attribution_limitation(c, strategy.name, scope_proofs) for c in candidates):
+                   (accepted_attribution_limitation(c, strategy.name, scope_proofs) or
+                    (c.metadata.get('state_economics_policy') == 'state_unemployment_v1' and
+                     c.metadata.get('non_actionable_reason') == 'no_verified_state_exposure')) for c in candidates):
                 provider_errors = dict(provider_errors, analysis="required_evidence_unavailable")
             if error is None and any(str(c.metadata.get("analysis_failure_reason", "")).startswith("unsupported_required_analysis:") for c in candidates):
                 error = ValueError("unsupported_required_analysis")
@@ -556,6 +584,11 @@ class MultiStrategyEngine:
                 policy_id=policy_id, strategy=strategy.name,
                 data_sources=tuple(strategy.data_sources), candidates=candidates,
                 provider_errors=provider_errors, exception=error, admission_manifest=admission_manifest)
+            if strategy.name == 'state_economics' and state_enabled:
+                health_record.evidence['state_source_scope'] = state_scope
+                health_record.evidence['state_source_coverage'] = state_coverage
+                health_record.evidence['state_economic_events'] = [dict(c.metadata, ticker=c.ticker,
+                    journal_only=c.journal_only, direction=c.direction, score=c.score) for c in candidates]
             if universe is not None:
                 health_record.evidence["universe_assessments"] = universe_assessments
                 health_record.evidence["universe_policy"] = universe.evidence["policy"]
@@ -810,6 +843,15 @@ class MultiStrategyEngine:
         from tradingagents.strategies.orchestration.decision_clock import resolve_cutoff, policy, PROSPECTIVE, require_live_staging
         decision_context = data.get('_decision_context')
         cutoff = resolve_cutoff(self.config, session, decision_context)
+        if self.ar_config.get('state_economics_policy') and any(
+                row.get('strategy') == 'state_economics' and not row.get('journal_only')
+                and row.get('direction') in {'long', 'short'} for row in shared_signals):
+            from .state_inputs import state_policy_scope
+            state_scope = state_policy_scope(data, self.ar_config, trading_date)
+            if (not state_scope['source_coverage']['complete'] or state_scope['exposure_registry_error']
+                    or any(row.get('metadata', {}).get('state_registry_sha256') != state_scope['exposure_registry_sha256']
+                        for row in shared_signals if row.get('strategy') == 'state_economics' and not row.get('journal_only'))):
+                raise ValueError('invalid_state_exposure_at_staging_cutoff')
         eligible_session = next_session(session)
         expected_staging_state_digest = self.ledger.verify_session_phase_chain(
             session, PHASES
@@ -2001,7 +2043,8 @@ class MultiStrategyEngine:
             else:
                 api_fetches["courtlistener"] = (self._fetch_courtlistener_data, (end_date,))
         if "fred" in needed_sources and "fred" in available:
-            api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
+            api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date, vintage)
+                if self.ar_config.get('state_economics_policy') else (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
             api_fetches["congress"] = (self._fetch_congress_data,
                 (end_date, acquisition_deadline) if self.ar_config.get('congress_disclosure_policy') else (end_date,))
@@ -2030,6 +2073,8 @@ class MultiStrategyEngine:
                 from tradingagents.strategies.data_sources.courtlistener_scope import digest
                 source_fingerprint += ':court-scope:' + digest(data['_courtlistener_targets']['scope'])
             if decision_policy == PROSPECTIVE and name in {'noaa', 'usda', 'drought_monitor', 'cftc'}:
+                source_fingerprint += ':current-vintage:' + vintage
+            if name == 'fred' and self.ar_config.get('state_economics_policy'):
                 source_fingerprint += ':current-vintage:' + vintage
             if name == "edgar" and universe_policy:
                 snapshot = data["equity_universe"].get("snapshot", {})
@@ -2384,6 +2429,11 @@ class MultiStrategyEngine:
             company_map = source.company_ticker_map()
             monitor.equity_universe = EquityUniverse(universe_data.get("snapshot"), company_map=company_map)
             result["company_tickers"] = company_map
+            if self.ar_config.get('state_economics_policy'):
+                from datetime import timezone
+                from tradingagents.strategies.data_sources.state_economics_policy import digest
+                result['company_tickers_available_at'] = datetime.now(timezone.utc).isoformat()
+                result['company_tickers_sha256'] = digest(company_map)
         text_options = {'fetch_text': False} if filing_policy else {}
         operations = {
             "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14, **text_options),
@@ -2486,7 +2536,7 @@ class MultiStrategyEngine:
         )
         return result
 
-    def _fetch_fred_data(self, start_date: str, end_date: str) -> dict[str, Any]:
+    def _fetch_fred_data(self, start_date: str, end_date: str, state_vintage: str | None = None) -> dict[str, Any]:
         """Fetch FRED credit spreads and economic indicators."""
         from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
@@ -2525,7 +2575,16 @@ class MultiStrategyEngine:
         if failures:
             result["error"] = "; ".join(failures)
 
-        # Plain metadata survives the immutable bundle codec (Series.attrs does not).
+        if self.ar_config.get('state_economics_policy'):
+            from copy import deepcopy
+            from tradingagents.strategies.data_sources.state_economics_policy import acquire_states
+            result['state_unemployment'] = acquire_states(source, start_date, state_vintage or end_date)
+            result['state_exposure_registry'] = deepcopy(self.ar_config['state_exposure_manifest'])
+            result['state_policy_settings'] = {'policy': self.ar_config['state_economics_policy'],
+                'release_lookback_days': self.ar_config.get('state_release_lookback_days', 7)}
+            result['coverage'] = {'state_unemployment': result['state_unemployment']['coverage']}
+
+        # Both Series.attrs and this convenience metadata survive the bundle codec.
         result["vintage"] = {"as_of": end_date, "realtime_start": end_date, "realtime_end": end_date}
         # Map friendly names for strategies that use them
         from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
@@ -2534,6 +2593,24 @@ class MultiStrategyEngine:
             if series_id in result:
                 result[friendly_name] = result[series_id]
 
+        if self.ar_config.get('state_economics_policy'):
+            from .source_inputs import SourceInputStore, SourceInputError
+            try:
+                SourceInputStore.encode(result)
+            except SourceInputError:
+                # State acceptance cannot discard independently valid macro inputs.
+                from tradingagents.strategies.data_sources.state_economics_policy import STATES
+                state = result['state_unemployment']
+                state['states'] = {}
+                state['coverage'] = {'expected_states': 51, 'accepted_states': 0,
+                    'failed_states': {code: 'invalid_response' for code in STATES}, 'complete': False}
+                result['coverage'] = {'state_unemployment': state['coverage']}
+                result['state_evidence_error'] = 'state_source_codec_limit'
+                try:
+                    SourceInputStore.encode(result)
+                except SourceInputError:
+                    result.pop('state_exposure_registry', None)
+                    SourceInputStore.encode(result)
         logger.info("FRED fetch: %d series loaded", len(result))
         return result
 
@@ -2906,6 +2983,12 @@ class MultiStrategyEngine:
                     if isinstance(provenance, dict) and provenance:
                         c.metadata['model_provenance'] = dict(provenance)
                     raise ValueError('missing_required_regulation_analysis')
+            elif analysis_type == 'state_economics':
+                from tradingagents.strategies.data_sources.state_economics_policy import validate_assessment
+                event, exposure = c.metadata['state_event'], c.metadata['state_exposure']
+                llm_result = analyzer.analyze_state_economics(ticker=c.ticker, state_event=event,
+                    state_exposure=exposure, regime_context=regime_context)
+                llm_result = validate_assessment(llm_result, ticker=c.ticker, event=event, exposure=exposure)
             elif analysis_type == "earnings_call":
                 llm_result = analyzer.analyze_earnings_call(
                     c.metadata.get(

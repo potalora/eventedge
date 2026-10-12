@@ -28,6 +28,8 @@ PROVIDER_LIMITS = {
     "edgar": ((1, 0.1),),
     "noaa": ((5, 1), (10000, 86400)),
     "finnhub": ((60, 60),),
+    # Official FRED API errors policy: 120 requests per minute.
+    "fred": ((120, 60),),
     "regulations": ((1, 0.5),),
     "usaspending": ((1, 0.5),),
 }

@@ -64,7 +64,12 @@ record; it does not invalidate unrelated, already completed execution.
     congress_enabled = configured(config)
     validate_portfolio_targets(data, owner, session)
     errors, _, _ = source_scope_evidence(data, config, session, now=now)
-    if not errors and not congress_enabled and not filing_attribution_enabled and not acquisition_enabled and not material_enabled and not regulation_enabled:
+    from tradingagents.strategies.data_sources.state_economics_policy import configured as state_configured
+    state_enabled = state_configured(config)
+    if not state_enabled:
+        from .state_inputs import state_policy_scope
+        state_policy_scope(data, config, session)
+    if not errors and not congress_enabled and not filing_attribution_enabled and not acquisition_enabled and not material_enabled and not regulation_enabled and not state_enabled:
         return
     policy_ids = {owner._policy_id_for_horizon(row['config'].horizon) for row in owner.cohorts}
     records = owner._metric_store.read_strategy_health(epoch, session=date.fromisoformat(session), limit=1000)
@@ -74,6 +79,9 @@ record; it does not invalidate unrelated, already completed execution.
         if record.epoch_id != epoch or record.session.isoformat() != session or key in by_identity:
             raise ValueError('completed replay source health identity invalid')
         by_identity[key] = record
+    if state_enabled:
+        from .state_inputs import validate_state_health
+        validate_state_health(data, config, session, records, policy_ids)
     if congress_enabled:
         _validate_congress_health(by_identity, policy_ids, congress_scope)
     if filing_attribution_enabled or acquisition_enabled or material_enabled:

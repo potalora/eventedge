@@ -94,6 +94,9 @@ DEFAULT_CONFIG = {
     # Autoresearch configuration
     "autoresearch": {
         "disabled_strategies": {"state_economics": "unsupported_state_event_proxy"},
+        "state_economics_policy": None,
+        "state_exposure_manifest": None,
+        "state_release_lookback_days": 7,
         "max_generations": 15,
         "strategies_per_generation": 4,
         "tickers_per_strategy": 3,

@@ -543,7 +543,16 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
         source_error_digest = filing_source_error_sha256(envelope['payload'].get('edgar'))
         if source_error_digest is not None:
             result['filing_source_error_sha256'] = source_error_digest
-        required={source for strategy in get_paper_trade_strategies() for source in strategy.data_sources if source!='openbb'}
+        from .state_inputs import declared_state_config, state_policy_scope
+        state_config = declared_state_config(envelope['payload'])
+        if state_config:
+            state_scope = state_policy_scope(envelope['payload'], state_config, session)
+            result['state_source_scope'] = state_scope
+            if retained_sources is not None:
+                retained_sources.update({key: envelope['payload'][key] for key in ('fred','edgar','equity_universe') if key in envelope['payload']})
+                retained_sources['_state_config'] = state_config
+        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
+        required={source for strategy in configure_strategies(get_paper_trade_strategies(), state_config) for source in strategy.data_sources if source!='openbb'}
         for source in sorted(required-set(envelope['payload'])):
             diagnose('accepted_source_missing',source)
             result['observations'][source]='missing'
@@ -662,6 +671,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         retained_sources = {}
         report['sources'] = _sources(state,generation,session,commit,diagnose, retained_sources=retained_sources)
         disabled = report['sources'].get('declared_exclusions', {})
+        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
+        report_strategies = configure_strategies(get_paper_trade_strategies(), retained_sources.get('_state_config', {}))
         epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
         report['epoch_id'] = epoch
         report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
@@ -680,7 +691,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             source_error_digest = report['sources'].get('filing_source_error_sha256')
             if expected_attribution is not None or source_error_digest is not None:
                 from .filing_attribution_validation import validate_filing_attribution_health
-                strategy_sources = {strategy.name: strategy.data_sources for strategy in get_paper_trade_strategies()
+                strategy_sources = {strategy.name: strategy.data_sources for strategy in report_strategies
                                   if 'edgar' in strategy.data_sources and strategy.name not in disabled
                                   and not getattr(strategy, 'retirement_reason', None)}
                 validate_filing_attribution_health(health, {row['policy_id'] for row in health},
@@ -694,7 +705,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             expected_material = report['sources'].get('filing_material_scope')
             if expected_material is not None:
                 from .filing_material_validation import validate_filing_material_health
-                strategies = {strategy.name for strategy in get_paper_trade_strategies()
+                strategies = {strategy.name for strategy in report_strategies
                               if 'edgar' in strategy.data_sources and strategy.name not in disabled
                               and not getattr(strategy, 'retirement_reason', None)}
                 validate_filing_material_health(health, {row['policy_id'] for row in health},
@@ -707,7 +718,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             expected_regulation = report['sources'].get('regulation_source_coverage')
             if expected_regulation is not None:
                 from .regulation_validation import validate_regulation_health
-                strategy_sources = {strategy.name: strategy.data_sources for strategy in get_paper_trade_strategies()
+                strategy_sources = {strategy.name: strategy.data_sources for strategy in report_strategies
                     if 'regulations' in strategy.data_sources and strategy.name not in disabled
                     and not getattr(strategy, 'retirement_reason', None)}
                 report['sources']['regulation_analysis_coverage'] = validate_regulation_health(
@@ -719,6 +730,15 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 raise ValueError('unbound regulation health')
         except (ValueError, TypeError, KeyError):
             diagnose('regulation_evidence_conflict')
+        try:
+            if report['sources'].get('state_source_scope') is not None:
+                from .state_inputs import validate_state_health
+                validate_state_health(retained_sources, retained_sources['_state_config'], session, health,
+                    {row['policy_id'] for row in health})
+            elif any('state_source_scope' in row['evidence'] for row in health):
+                raise ValueError('unbound_state_health')
+        except (ValueError, TypeError, KeyError):
+            diagnose('state_economics_evidence_conflict')
         retained_sources.clear()
         try:
             scope_limits = source_scope_limits_from_health(health)
@@ -746,14 +766,14 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['input_coverage_valid'] = epoch is not None and not report['source_health_failures']
         report['volatility'] = _volatility(state,generation,session,commit,report['sources'],report['candidate_input_issues'],report['cohorts'],diagnose)
         failed_sources = {item['provider'] for item in report['sources']['unresolved']}
-        required_failures = {source for strategy in get_paper_trade_strategies()
+        required_failures = {source for strategy in report_strategies
             if strategy.name not in report['disabled_strategies']
             for source in strategy.data_sources if source!='openbb'} & failed_sources
         if required_failures:
             report['input_coverage_valid'] = False
         for item in report['sources']['unresolved']:
             source=item['provider']
-            for strategy in get_paper_trade_strategies():
+            for strategy in report_strategies:
                 if source=='openbb' or source not in strategy.data_sources or strategy.name in report['disabled_strategies']:
                     continue
                 for horizon in ('30d','3m','6m','1y'):

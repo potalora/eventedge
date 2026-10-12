@@ -11,7 +11,7 @@ import math
 import re
 import struct
 
-VERSION = 'sec-pdf-declared-font-v2'
+VERSION = 'sec-pdf-declared-font-v3'
 _STANDARD = {f'/{x}' for x in ('Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique',
     'Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic', 'Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique')}
 
@@ -275,7 +275,7 @@ def cmap_mapping(data, code_bytes, check=lambda:None):
 
 class FontDecoder:
     def __init__(self, font, consume_stream, check):
-        self.check=check;self.widths={};self.ttf=None;self.cidmap=None;self.mapping=None;self.code_bytes=1
+        self.check=check;self.widths={};self.ttf=None;self.cidmap=None;self.cidset=None;self.mapping=None;self.code_bytes=1
         self.standard=False;self.receipt={'version':VERSION,'mapping_trust':'source_declared_unicode','hint_programs_executed':False}
         from pypdf.generic import NameObject, TextStringObject
         subtype=font.get('/Subtype');encoding=obj(font.get('/Encoding'))
@@ -338,18 +338,36 @@ class FontDecoder:
         if not isinstance(descriptor,dict) or '/FontFile2' not in descriptor or any(k in descriptor for k in ('/FontFile','/FontFile3')):fail('pdf_unverified_embedded_font')
         if not set(descriptor)<={'/Type','/FontName','/FontFamily','/FontStretch','/FontWeight','/Flags','/FontBBox',
                 '/ItalicAngle','/Ascent','/Descent','/Leading','/CapHeight','/XHeight','/StemV','/StemH','/AvgWidth',
-                '/MaxWidth','/MissingWidth','/FontFile2'}:fail('pdf_unsupported_font_descriptor')
+                '/MaxWidth','/MissingWidth','/FontFile2','/CIDSet'}:fail('pdf_unsupported_font_descriptor')
         for key,value in descriptor.items():
-            if key not in ('/Type','/FontName','/FontFamily','/FontStretch','/FontBBox','/FontFile2') and not number(value):fail('pdf_invalid_font_descriptor')
+            if key not in ('/Type','/FontName','/FontFamily','/FontStretch','/FontBBox','/FontFile2','/CIDSet') and not number(value):fail('pdf_invalid_font_descriptor')
+        if '/CIDSet' in descriptor:
+            # ISO 32000-1, Table 122: a CID-indexed MSB-first bitset. Keep
+            # source provenance and verify every consumed code against it;
+            # it cannot replace the independent glyph/Unicode/width checks.
+            cidset=obj(descriptor['/CIDSet'])
+            if (self.code_bytes!=2 or not isinstance(cidset,dict)
+                    or not hasattr(cidset,'_data')
+                    or not set(cidset)<={'/Length','/Filter','/DecodeParms'}):
+                fail('pdf_invalid_cidset')
+            self.cidset=consume_stream(cidset,'font_cid_set')
+            if not isinstance(self.cidset,bytes) or not 1<=len(self.cidset)<=8192:
+                fail('pdf_invalid_cidset')
+            self.receipt['cid_set']={'sha256':sha(self.cidset),'bytes':len(self.cidset),
+                'bit_order':'most_significant_bit_first',
+                'membership_validation':'every_decoded_character',
+                'unused_font_membership':'unverified'}
         if descriptor.get('/Type','/FontDescriptor')!='/FontDescriptor' or not isinstance(descriptor.get('/FontName'),NameObject):fail('pdf_invalid_font_descriptor')
         flags=descriptor.get('/Flags')
-        if not integer(flags,0,2**31-1) or not flags&32 or flags&4:fail('pdf_unsupported_symbolic_font')
+        if (not integer(flags,0,2**31-1) or bool(flags&4)==bool(flags&32)
+                or (self.code_bytes==1 and flags&4)):
+            fail('pdf_unsupported_symbolic_font')
         bbox=obj(descriptor.get('/FontBBox'))
         if not isinstance(bbox,list) or len(bbox)!=4 or not all(number(v) for v in bbox) or bbox[0]>bbox[2] or bbox[1]>bbox[3]:fail('pdf_invalid_font_descriptor')
         data=consume_stream(obj(descriptor['/FontFile2']),'embedded_font')
         self.ttf=TrueType(data,check)
         self.receipt.update(kind='embedded_truetype_declared',font_sha256=sha(data),font_bytes=len(data),tables=self.ttf.inventory,
-                            declared_font_bbox=list(bbox),units_per_em=self.ttf.units,code_bytes=self.code_bytes,
+                            declared_font_bbox=list(bbox),declared_flags=flags,units_per_em=self.ttf.units,code_bytes=self.code_bytes,
                             directory_hints=self.ttf.directory_hints,encoding=str(encoding),
                             declared_mapping_sha256=sha(json.dumps(self.mapping,sort_keys=True).encode()),
                             declared_widths_sha256=sha(json.dumps(self.widths,sort_keys=True).encode()),
@@ -370,6 +388,9 @@ class FontDecoder:
         glyphs=[];text=[]
         for offset in range(0,len(raw),self.code_bytes):
             self.check();code=int.from_bytes(raw[offset:offset+self.code_bytes],'big')
+            if self.cidset is not None and (code//8>=len(self.cidset)
+                    or not self.cidset[code//8] & (128>>(code%8))):
+                fail('pdf_cidset_missing_character')
             value=self.mapping.get(code) if self.mapping is not None else self.encoding[code]
             if value is None:fail('pdf_font_unmapped_character')
             value=unicode_text(value)

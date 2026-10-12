@@ -16,7 +16,8 @@ POLICY = 'retained_three_material_gaps_v1'
 TEN_POLICY = 'retained_ten_material_gaps_v1'
 SUPPORTED_DOCUMENT_POLICY = 'verified_supported_documents_v1'
 SUPPORTED_DOCUMENT_POLICY_V2 = 'verified_supported_documents_v2'
-SUPPORTED_DOCUMENT_POLICIES = frozenset({SUPPORTED_DOCUMENT_POLICY, SUPPORTED_DOCUMENT_POLICY_V2})
+SUPPORTED_DOCUMENT_POLICY_V3 = 'verified_supported_documents_v3'
+SUPPORTED_DOCUMENT_POLICIES = frozenset({SUPPORTED_DOCUMENT_POLICY, SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3})
 SUPPORTED_POLICIES = frozenset({POLICY, TEN_POLICY}) | SUPPORTED_DOCUMENT_POLICIES
 _VERSION = 'sec-filing-evidence-v1'
 _MAX_ORIGINAL = 512 * 1024 * 1024
@@ -99,7 +100,8 @@ def policy_manifest(policy=POLICY) -> dict:
     result = {'policy': policy, 'identities': identities}
     if policy in SUPPORTED_DOCUMENT_POLICIES:
         result['supported_scope'] = {
-            'version': 'supported-document-disposition-v2' if policy == SUPPORTED_DOCUMENT_POLICY_V2 else 'supported-document-disposition-v1',
+            'version': ('supported-document-disposition-v3' if policy == SUPPORTED_DOCUMENT_POLICY_V3 else
+                'supported-document-disposition-v2' if policy == SUPPORTED_DOCUMENT_POLICY_V2 else 'supported-document-disposition-v1'),
             'broadens': TEN_POLICY,
             'retains_exact_quarantines': True,
             'categories': ['unsupported_selected_visual_content', 'ambiguous_ownership_lineage',
@@ -107,12 +109,22 @@ def policy_manifest(policy=POLICY) -> dict:
             'source_authority': 'bounded_parser_attestation_requires_raw_capture_audit',
             'retrieval_parser_model_and_budget_failures_remain_failures': True,
             'original_full_analysis_acceptance': False}
-    if policy == SUPPORTED_DOCUMENT_POLICY_V2:
+    if policy in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3}:
         result['supported_scope']['structural_visual_pdf'] = {
-            'version': 'sec-pdf-structural-visual-v1',
+            'version': 'sec-pdf-structural-visual-v2' if policy == SUPPORTED_DOCUMENT_POLICY_V3 else 'sec-pdf-structural-visual-v1',
             'native_text_complete': False, 'encoded_image_validity': 'unverified',
             'native_unicode': 'unverified', 'text_visibility': 'unverified',
             'visual_meaning': 'unresolved', 'order_authority': False}
+    if policy == SUPPORTED_DOCUMENT_POLICY_V3:
+        result['supported_scope']['structural_html'] = {
+            'version': 'sec-html-structural-v2', 'max_html_bytes': 24 * 1024**2,
+            'max_resource_bytes': 16 * 1024**2, 'max_inventory_bytes': 32 * 1024**2,
+            'native_text_complete': False, 'css_layout': 'unverified', 'css_property_semantics': 'unverified',
+            'font_availability': 'unverified', 'encoded_image_validity': 'unverified',
+            'text_visibility': 'unverified', 'visual_meaning': 'unresolved',
+            'source_text_use': 'incorporation_locator_only_not_analysis', 'order_authority': False}
+        result['supported_scope']['ownership_verifier'] = 'complete_ownership_lineage_v2'
+        result['supported_scope']['native_pdf_verifier'] = 'sec-native-pdf-evidence-v3'
     return result
 
 

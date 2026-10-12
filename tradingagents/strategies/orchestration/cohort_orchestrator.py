@@ -283,7 +283,8 @@ class CohortOrchestrator:
         self.cohorts: list[dict[str, Any]] = []
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
-        strategies = get_paper_trade_strategies()
+        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
+        strategies = configure_strategies(get_paper_trade_strategies(), ar_config)
         strategy_names = tuple(
             getattr(strategy, "name", None) for strategy in strategies
         )

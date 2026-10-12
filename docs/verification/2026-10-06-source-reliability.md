@@ -1,6 +1,18 @@
 # Source reliability verification and release notes
 
-## October 11 supported-document candidate status
+## October 11 current HTML, PDF and FRED follow-up
+
+The candidate now includes the approved `verified_supported_documents_v3` contract: selected HTML alone may use 24 MiB; complete structural HTML receipts retain all markup, declarations and referenced image transport, while CSS layout/property semantics, encoded-image validity and visual meaning remain unverified. Structural HTML and structural PDF evidence can support only a precisely recorded deferral, never model admission or orders. Native PDF verifier v3 checks complete parser/application stream framing and compressed-object grammar; structural PDF verifier v2 inventories all 23 and 32 pages of the retained pair. All acquisition, ownership and technical-failure duties remain independent. Current boundaries are documented in [structural HTML](structural-html.md), [its finite grammar](structural-html-finite-expansion.md), and [structural PDF](structural-visual-pdf.md).
+
+The explicitly requested FRED repair adds opt-in `state_unemployment_v1`; state trading remains disabled by default. The fresh source diagnostic passed all 51 state/DC series and nine national series in 25.46 seconds. A separate fresh SIP asset-master/SEC-map diagnostic validated one source-reviewed CFR common-share operating exposure in Texas. It found no releases in the seven-day window and made no model calls. This proves source acquisition and the reviewed binding, not a directional assessment or a full operational run. See [FRED acquisition, clocks and verification](fred-state-economics.md).
+
+The exact approved server diagnostic cleanup reclaimed 2,604,953,600 bytes after independent backup and live-reference checks. Its retained receipt measured 26,605,260,800 bytes available, above the unchanged 24 GiB floor. Future preparation must recheck capacity. No production checkout, generation, authoritative state, service or timer was changed.
+
+Full candidate tests, exact-commit CI and reviewed preparation are separate from native acceptance. The private v3 launch/replay regression suite passed 260 tests with one Linux-only Mac skip; it remains an unfrozen preparation artifact. No fresh complete sixteen-book run or immutable full-run replay is established. Scoped operational acceptance remains pending and original full-source/full-analysis acceptance remains false. A required `ex994.pdf` has malformed embedded fonts and no qualifying positive visual presence; other retained sources still have explicit capability or acquisition failures. These are failures under the approved boundary, not deferrals. The [implementation plan](../superpowers/plans/2026-10-11-supported-filing-evidence.md) and [PR #50](https://github.com/potalora/eventedge/pull/50) carry the candidate verification checkpoint. Not merged or deployed.
+
+## Historical storage/native-PDF-v2 checkpoint
+
+This section preserves evidence from the earlier storage/native-PDF-v2 candidate. Its statements about then-current capabilities, pending approvals and blockers are historical; the follow-up above and linked verifier documents govern the current candidate.
 
 The final local non-live suite passed **6,043 tests**, with four live tests deselected and one existing websockets dependency warning, in 220.69 seconds. The closed log is `data/forward-readiness/supported-documents-storage-pdf-v2-full-suite.txt`. Its first run passed 6,041 cases and exposed two scope fixtures that depended on the historical ordinary-text-plus-image extraction defect. Both now use an actual unsupported mixed-font layout; the failure-precedence assertions remain and an explicit residual capability assertion was added. Independent fixture review and all 12 scope tests passed. The original failed-run log is preserved.
 

@@ -124,14 +124,20 @@ def _inventory(item):
 def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported_documents=False):
     if (type(evidence) is not dict or
             set(evidence) - {'source_url', 'inventory_reconciliation', 'supported_document_policy',
-                'pdf_evidence', 'ownership_primary_body', 'ownership_facts'} != _EVIDENCE_KEYS):
+                'pdf_evidence', 'html_evidence', 'ownership_primary_body', 'ownership_facts'} != _EVIDENCE_KEYS):
         fail('input')
-    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2
+    from .filing_material_policy import (SUPPORTED_DOCUMENT_POLICIES,
+        SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3)
     selected_policy = evidence.get('supported_document_policy')
     supported = isinstance(selected_policy, str) and selected_policy in SUPPORTED_DOCUMENT_POLICIES
-    extended = {'supported_document_policy', 'pdf_evidence', 'ownership_primary_body', 'ownership_facts'} & set(evidence)
+    extended = {'supported_document_policy', 'pdf_evidence', 'html_evidence', 'ownership_primary_body', 'ownership_facts'} & set(evidence)
     if extended and (not supported or not isinstance(evidence.get('pdf_evidence'), dict)):
         fail('supported_document_policy')
+    if selected_policy == SUPPORTED_DOCUMENT_POLICY_V3:
+        if type(evidence.get('html_evidence')) is not dict:
+            fail('html_inventory')
+    elif 'html_evidence' in evidence:
+        fail('html_inventory')
     if evidence['version'] != 'sec-filing-evidence-v1' or evidence['format'] not in ('nc_submission', 'sec_complete_submission'):
         fail('input')
     if type(evidence['accession']) is not str or not re.fullmatch(r'\d{10}-\d{2}-\d{6}', evidence['accession']):
@@ -212,16 +218,19 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
         if inventory != documents.get(item['filename']) or item['filename'] in selected:
             fail('input')
         selected.add(item['filename'])
-        if not (allow_unsupported_documents and supported and item['representation'] in {'native_pdf_text', 'structural_visual_pdf'}
+        if not (allow_unsupported_documents and supported and item['representation'] in {'native_pdf_text', 'structural_visual_pdf', 'structural_html'}
                 and item['text'] == ''):
             _string(item['text'], MAX_PROMPT_BYTES)
         _hash(item['text_sha256'])
         if (_sha(item['text']) != item['text_sha256'] or type(item['text_start']) is not int or
                 item['text_start'] != 0 or type(item['text_end']) is not int or item['text_end'] != len(item['text'])):
             fail('source_hash')
-        if item['representation'] not in (('full_visible_text', 'ownership_form_data', 'native_pdf_text', 'structural_visual_pdf')
+        if item['representation'] not in (('full_visible_text', 'ownership_form_data', 'native_pdf_text', 'structural_visual_pdf', 'structural_html')
                 if supported else ('full_visible_text', 'ownership_form_data')) or item['selection'] not in ('primary', 'dependency'):
             fail('input')
+        if item['representation'] == 'structural_html' and (
+                selected_policy != SUPPORTED_DOCUMENT_POLICY_V3 or not allow_unsupported_documents):
+            fail('html_inventory')
         if item['selection'] == 'primary':
             primary.append(item)
     if len(primary) != 1 or re.sub(r'^SC (13[DG](?:/A)?)$', r'SCHEDULE \1', primary[0]['type'].upper()) != evidence['form']:
@@ -244,7 +253,22 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
             if referenced is None or (referenced['type'].upper().startswith('EX-') and item['filename'] not in selected):
                 fail('structural_evidence')
     if supported:
-        from .filing_pdf import VERSION as PDF_VERSION
+        if selected_policy == SUPPORTED_DOCUMENT_POLICY_V3:
+            from .filing_supported_policy import validate_structural_html_unit
+            html_units = {item['filename']: item for item in evidence['units']
+                if item['filename'].lower().endswith(('.htm', '.html'))}
+            if set(evidence['html_evidence']) != set(html_units):
+                fail('html_inventory')
+            for name, unit in html_units.items():
+                try:
+                    receipt = evidence['html_evidence'][name]
+                    validate_structural_html_unit(receipt, unit)
+                    for resource in receipt['resources']:
+                        if {key: resource[key] for key in _INVENTORY_KEYS} != documents.get(resource['filename']):
+                            fail('html_inventory')
+                except (KeyError, TypeError, ValueError):
+                    fail('html_inventory')
+        from .filing_pdf import VERSION as PDF_VERSION, validate_pdf_stream_accounting
         pdf_units = {item['filename']: item for item in evidence['units'] if item['representation'] in {'native_pdf_text', 'structural_visual_pdf'}}
         if set(evidence['pdf_evidence']) != set(pdf_units):
             fail('pdf_inventory')
@@ -252,13 +276,14 @@ def _validate_evidence(evidence, *, allow_joint_issuers=False, allow_unsupported
             receipt = evidence['pdf_evidence'][name]
             try:
                 if unit['representation'] == 'structural_visual_pdf':
-                    if not allow_unsupported_documents or evidence['supported_document_policy'] != SUPPORTED_DOCUMENT_POLICY_V2:
+                    if not allow_unsupported_documents or selected_policy not in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3}:
                         fail('pdf_inventory')
                     from .filing_supported_policy import validate_structural_visual_unit
                     validate_structural_visual_unit(receipt, unit)
                     continue
+                validate_pdf_stream_accounting(receipt)
                 if (receipt['version'] != PDF_VERSION or type(receipt['schema_version']) is not int
-                        or receipt['schema_version'] != 2
+                        or receipt['schema_version'] != 3
                         or receipt['native_text_complete'] is not True
                         or receipt['mapping_trust'] != 'source_declared_unicode'
                         or receipt['text_order'] != 'content_invocation_order_with_recorded_baseline_separators'

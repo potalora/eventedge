@@ -17,8 +17,9 @@ import json
 import logging
 import math
 import re
+import zlib
 
-VERSION = 'sec-native-pdf-evidence-v2'
+VERSION = 'sec-native-pdf-evidence-v3'
 _TEXT = {b'Tj', b'TJ', b"'", b'"'}
 _PAINT = {b'S', b's', b'f', b'F', b'f*', b'B', b'B*', b'b', b'b*', b'sh'}
 _PLAIN = {b'BT', b'ET', b'Tf', b'Td', b'TD', b'Tm', b'T*', b'TL', b'Tj'}
@@ -489,7 +490,9 @@ def _raw_text(value):
 
 def _inventory_append(state, target, value):
     size = len(json.dumps(value, sort_keys=True, separators=(',',':'), ensure_ascii=True, allow_nan=False).encode())
-    state['inventory_bytes'] += size
+    budget = state['stream_budget']
+    budget['inventory_bytes'] += size
+    state['inventory_bytes'] = budget['inventory_bytes']
     if state['inventory_bytes'] > state['inventory_limit']:
         raise FilingPDFError('pdf_stream_limit_provenance')
     target.append(value)
@@ -501,7 +504,7 @@ def _validate_stream_dictionary(stream, kind):
     if not hasattr(stream,'get_data') or not isinstance(stream,dict):
         raise FilingPDFError('pdf_invalid_stream_object')
     extra = {
-        'embedded_font':{'/Length1'}, 'font_cmap':set(), 'font_cid_map':set(), 'page':set(),
+        'embedded_font':{'/Length1'}, 'font_cmap':set(), 'font_cid_map':set(), 'font_cid_set':set(), 'page':set(),
         'form':{'/Type','/Subtype','/BBox','/Matrix','/Resources','/FormType'},
     }[kind]
     if not set(stream) <= {'/Length','/Filter','/DecodeParms'} | extra:
@@ -534,6 +537,321 @@ def _validate_stream_dictionary(stream, kind):
                 raise FilingPDFError('pdf_invalid_stream_parameters')
 
 
+def _strict_stream_data(stream, remaining, check, *, identity_parameters=True):
+    """Decode only complete unfiltered/single-Flate streams, within the balance.
+
+    Generic PDF filter recovery may return bytes despite truncated zlib framing
+    or ignore an additional compressed stream. Neither is source-complete
+    evidence. Other codecs/chains remain unsupported until their exact framing
+    and parameters have an independently bounded implementation.
+    """
+    from pypdf.generic import NameObject, NullObject
+    _pulse(check)
+    if (not isinstance(stream,dict) or not hasattr(stream,'_data')
+            or not isinstance(stream._data,bytes)):
+        raise FilingPDFError('pdf_invalid_stream_object')
+    if (remaining() if callable(remaining) else remaining) < 0: raise FilingPDFError('pdf_stream_limit')
+    filters = _object(stream.get('/Filter', []))
+    filters = [filters] if isinstance(filters,NameObject) else filters
+    if (not isinstance(filters,list) or any(not isinstance(value,NameObject) for value in filters)
+            or list(map(str,filters)) not in ([], ['/FlateDecode'], ['/Fl'])):
+        raise FilingPDFError('pdf_unsupported_strict_stream_filter')
+    parameters = _object(stream.get('/DecodeParms'))
+    if parameters is not None and not isinstance(parameters,NullObject):
+        parameters = parameters if isinstance(parameters,list) else [parameters]
+        if len(parameters)!=len(filters): raise FilingPDFError('pdf_invalid_stream_parameters')
+        for parameter in parameters:
+            parameter = _object(parameter)
+            if isinstance(parameter,NullObject): continue
+            if (not identity_parameters or not isinstance(parameter,dict) or hasattr(parameter,'_data')
+                    or not set(parameter)<={'/Predictor','/Colors','/BitsPerComponent','/Columns'}):
+                raise FilingPDFError('pdf_unsupported_stream_parameters')
+            if any(not isinstance(value,int) or isinstance(value,bool) for value in parameter.values()):
+                raise FilingPDFError('pdf_invalid_stream_parameters')
+            if parameter.get('/Predictor',1)!=1:
+                raise FilingPDFError('pdf_unsupported_stream_predictor')
+            if (parameter.get('/Colors',1)<=0 or parameter.get('/Columns',1)<=0
+                    or parameter.get('/BitsPerComponent',8) not in (1,2,4,8,16)):
+                raise FilingPDFError('pdf_invalid_stream_parameters')
+    remaining = remaining() if callable(remaining) else remaining
+    if remaining < 0: raise FilingPDFError('pdf_stream_limit')
+    data = stream._data
+    if filters:
+        decoder = zlib.decompressobj()
+        try: data = decoder.decompress(data,remaining+1)
+        except zlib.error: raise FilingPDFError('pdf_invalid_flate_stream') from None
+        if len(data)>remaining or decoder.unconsumed_tail:
+            raise FilingPDFError('pdf_stream_limit')
+        if not decoder.eof or decoder.unused_data:
+            raise FilingPDFError('pdf_incomplete_or_trailing_flate_stream')
+    if len(data)>remaining: raise FilingPDFError('pdf_stream_limit')
+    _pulse(check)
+    return data
+
+
+def _consume_stream_data(stream, budget, limit, check, *, local_limit=None, identity_parameters=True):
+    def remaining():
+        available = limit-budget['decoded_stream_bytes']
+        return min(available,local_limit) if local_limit is not None else available
+    data = _strict_stream_data(stream,remaining,check,identity_parameters=identity_parameters)
+    budget['decoded_stream_bytes'] += len(data)
+    return data
+
+
+def _object_stream_grammar(data, count, first, reader, check):
+    """Consume every declared compressed object, including otherwise unused ones.
+
+    pypdf resolves individual requested objects and can ignore malformed header
+    suffixes or extra objects after the final declaration. Such recovery cannot
+    establish a complete parser-stream inventory.
+    """
+    from pypdf.generic import read_object, StreamObject
+    whitespace = rb'(?:[\x00\t\n\f\r ]|%[^\r\n]*(?:\r\n?|\n))*'
+    final_whitespace = rb'(?:[\x00\t\n\f\r ]|%[^\r\n]*(?:\r\n?|\n|$))*'
+    header = data[:first]
+    position = 0
+    pairs = []
+    identities = set()
+    for _ in range(count):
+        _pulse(check)
+        pair = []
+        for _ in range(2):
+            position = re.compile(whitespace).match(header, position).end()
+            token = re.compile(rb'\+?[0-9]+(?=[\x00\t\n\f\r %]|$)').match(header, position)
+            if token is None:
+                raise FilingPDFError('pdf_invalid_object_stream_header')
+            pair.append(int(token[0])); position = token.end()
+        number, offset = pair
+        if (number <= 0 or number in identities or offset >= len(data)-first
+                or pairs and offset <= pairs[-1][1]):
+            raise FilingPDFError('pdf_invalid_object_stream_header')
+        identities.add(number); pairs.append((number, offset))
+    if re.fullmatch(whitespace, header[position:]) is None:
+        raise FilingPDFError('pdf_invalid_object_stream_header')
+    prefix_end = first + pairs[0][1] if pairs else len(data)
+    if re.fullmatch(whitespace, data[first:prefix_end]) is None:
+        raise FilingPDFError('pdf_invalid_object_stream_content')
+    for index, (_, offset) in enumerate(pairs):
+        _pulse(check)
+        stop = first+pairs[index+1][1] if index+1<len(pairs) else len(data)
+        chunk = data[first+offset:stop]
+        stream = io.BytesIO(chunk)
+        stream.seek(re.match(whitespace, chunk).end())
+        value = read_object(stream, reader)
+        if isinstance(value, StreamObject) or re.fullmatch(
+                final_whitespace if index+1==len(pairs) else whitespace, chunk[stream.tell():]) is None:
+            raise FilingPDFError('pdf_invalid_object_stream_content')
+
+
+def _strict_pdf_reader(decoded, budget, limit, check):
+    """Reader-local validation before pypdf consumes XRef/ObjStm streams.
+
+    The hook runs when an indirect stream is first cached, which precedes the
+    library's parser-internal get_data calls. Only this reader's decoded cache
+    is populated; original encoded bytes stay intact, with no global patch.
+    """
+    from pypdf import PdfReader
+    from pypdf.generic import NameObject, NullObject, DecodedStreamObject, EncodedStreamObject
+
+    class StrictReader(PdfReader):
+        def __init__(self):
+            self._strict_parser_streams = {}
+            self.parser_stream_receipts = []
+            self._strict_active_parser_streams = set()
+            super().__init__(io.BytesIO(decoded),strict=True)
+
+        def cache_indirect_object(self, generation, idnum, value):
+            if isinstance(value,dict) and value.get('/Type') in ('/XRef','/ObjStm'):
+                key = (generation,idnum)
+                if key in self._strict_active_parser_streams:
+                    raise _Cancelled(FilingPDFError('pdf_parser_stream_cycle'))
+                previous = self._strict_parser_streams.get(key)
+                if previous is not None and previous is not value:
+                    raise _Cancelled(FilingPDFError('pdf_duplicate_parser_stream'))
+                if previous is None:
+                    self._strict_active_parser_streams.add(key)
+                    try:
+                        data,receipt = self._strict_parser_data(value)
+                        receipt.update(index=len(self.parser_stream_receipts),object_number=idnum,generation=generation)
+                        size = len(json.dumps(receipt,sort_keys=True,separators=(',',':')).encode())
+                        budget['inventory_bytes'] = budget.get('inventory_bytes',0)+size
+                        if budget['inventory_bytes']>limit: raise FilingPDFError('pdf_stream_limit_provenance')
+                        self.parser_stream_receipts.append(receipt)
+                        decoded_stream = DecodedStreamObject()
+                        decoded_stream.set_data(data)
+                        if isinstance(value,EncodedStreamObject): value.decoded_self = decoded_stream
+                        elif not isinstance(value,DecodedStreamObject):
+                            raise FilingPDFError('pdf_invalid_parser_stream')
+                        self._strict_parser_streams[key] = value
+                    except FilingPDFError as error:
+                        # pypdf can wrap/recover ValueError while reading XRef;
+                        # preserve the strict rejection through that boundary.
+                        raise _Cancelled(error) from None
+                    finally:
+                        self._strict_active_parser_streams.remove(key)
+            return super().cache_indirect_object(generation,idnum,value)
+
+        def _strict_parser_data(self, value):
+            _pulse(check)
+            kind = value.get('/Type')
+            common = {'/Type','/Length','/Filter','/DecodeParms'}
+            extra = ({'/Size','/W','/Index','/Prev','/Root','/Info','/ID','/Encrypt'}
+                     if kind=='/XRef' else {'/N','/First'})
+            if not isinstance(kind,NameObject) or not set(value)<=common|extra:
+                raise FilingPDFError('pdf_unsupported_parser_stream_dependency')
+            def natural(number):
+                return isinstance(number,int) and not isinstance(number,bool) and number>=0
+            columns = entries = None
+            if kind=='/XRef':
+                size = value.get('/Size');widths = _object(value.get('/W'))
+                indices = _object(value.get('/Index',[0,size]))
+                if (not natural(size) or size==0 or not isinstance(widths,list) or len(widths)!=3
+                        or any(not natural(width) or width>8 for width in widths) or not sum(widths)
+                        or not isinstance(indices,list) or not indices or len(indices)%2
+                        or any(not natural(index) for index in indices)):
+                    raise FilingPDFError('pdf_invalid_xref_stream')
+                end = 0; entries = 0; columns = sum(widths)
+                for offset in range(0,len(indices),2):
+                    start,count = indices[offset:offset+2]
+                    if start<end or start+count>size: raise FilingPDFError('pdf_invalid_xref_stream')
+                    end = start+count; entries += count
+                if entries*columns>limit-budget['decoded_stream_bytes']:
+                    raise FilingPDFError('pdf_stream_limit')
+                if '/Prev' in value and (not natural(value['/Prev']) or not 0<value['/Prev']<len(decoded)):
+                    raise FilingPDFError('pdf_invalid_xref_stream')
+            else:
+                if not natural(value.get('/N')) or not natural(value.get('/First')):
+                    raise FilingPDFError('pdf_invalid_object_stream')
+            parameters = _object(value.get('/DecodeParms'))
+            if isinstance(parameters,list) and len(parameters)==1: parameters = _object(parameters[0])
+            predictor = parameters.get('/Predictor',1) if isinstance(parameters,dict) else 1
+            if kind=='/XRef' and predictor==12:
+                # The retained XRef producer uses PNG Up with one 8-bit channel.
+                # Validate that exact transform, then inflate unchanged encoded
+                # bytes through the common strict framing/budget implementation.
+                if (not isinstance(parameters,dict) or hasattr(parameters,'_data')
+                        or not set(parameters)<={'/Predictor','/Columns','/Colors','/BitsPerComponent'}
+                        or any(not natural(v) for v in parameters.values())
+                        or parameters.get('/Colors',1)!=1 or parameters.get('/BitsPerComponent',8)!=8
+                        or parameters.get('/Columns',1)!=columns):
+                    raise FilingPDFError('pdf_unsupported_xref_predictor')
+                filter_value = _object(value.get('/Filter'))
+                if isinstance(filter_value,list) and len(filter_value)==1: filter_value = filter_value[0]
+                if not isinstance(filter_value,NameObject) or filter_value not in ('/FlateDecode','/Fl'):
+                    raise FilingPDFError('pdf_unsupported_xref_predictor')
+                compressed = EncodedStreamObject(); compressed._data = value._data
+                compressed[NameObject('/Filter')] = filter_value
+                filtered = _consume_stream_data(compressed,budget,limit,check)
+                if len(filtered)!=entries*(columns+1): raise FilingPDFError('pdf_invalid_xref_predictor_rows')
+                data = bytearray(); previous = bytes(columns)
+                for offset in range(0,len(filtered),columns+1):
+                    _pulse(check)
+                    if filtered[offset]!=2: raise FilingPDFError('pdf_invalid_xref_predictor_row')
+                    previous = bytes((a+b)&255 for a,b in zip(filtered[offset+1:offset+columns+1],previous))
+                    data.extend(previous)
+                # Charge inflated bytes, including predictor row bytes; the
+                # reconstructed data is no larger and is not a second decode.
+                data = bytes(data)
+                inflated = filtered
+            else:
+                data = _consume_stream_data(value,budget,limit,check)
+                inflated = data
+            if kind=='/XRef' and len(data)!=entries*columns:
+                raise FilingPDFError('pdf_invalid_xref_stream_length')
+            if kind=='/ObjStm' and (value['/First']>len(data) or value['/N']>value['/First']//3):
+                raise FilingPDFError('pdf_invalid_object_stream')
+            if kind=='/ObjStm':
+                try:
+                    _object_stream_grammar(data,value['/N'],value['/First'],self,check)
+                except FilingPDFError:
+                    raise
+                except Exception:
+                    raise FilingPDFError('pdf_invalid_object_stream_content') from None
+            def parameters_declaration(item):
+                item = _object(item)
+                if item is None or isinstance(item,NullObject): return None
+                if isinstance(item,list): return [parameters_declaration(v) for v in item]
+                if isinstance(item,dict): return {str(k):int(v) for k,v in item.items()}
+                raise FilingPDFError('pdf_invalid_stream_parameters')
+            filters = _object(value.get('/Filter',[]))
+            filters = [filters] if isinstance(filters,NameObject) else filters
+            budget['parser_stream_bytes'] = budget.get('parser_stream_bytes',0)+len(inflated)
+            receipt = dict(kind='xref' if kind=='/XRef' else 'object',
+                encoded_sha256=_sha(value._data),encoded_bytes=len(value._data),
+                inflated_sha256=_sha(inflated),inflated_bytes=len(inflated),
+                decoded_sha256=_sha(data),decoded_bytes=len(data),charged_bytes=len(inflated),
+                filters=list(map(str,filters)),decode_parameters=parameters_declaration(value.get('/DecodeParms')),
+                predictor=int(predictor),columns=int(columns) if columns is not None else None,
+                rows=int(entries) if entries is not None else None,
+                object_count=int(value['/N']) if kind=='/ObjStm' else None,
+                first_object_byte=int(value['/First']) if kind=='/ObjStm' else None)
+            return data,receipt
+
+    return StrictReader()
+
+
+def validate_pdf_stream_accounting(receipt):
+    """Shape/accounting checks only; original bytes must be re-extracted in audit."""
+    def require(condition):
+        if not condition: raise FilingPDFError('pdf_invalid_parser_stream_receipt')
+    def natural(value): return type(value) is int and value>=0
+    def digest(value): return isinstance(value,str) and re.fullmatch(r'[0-9a-f]{64}',value) is not None
+    try:
+        rows = receipt['parser_streams']; application = receipt['application_stream_bytes']
+        require(isinstance(rows,list) and natural(application) and natural(receipt['decoded_stream_bytes']))
+        keys = {'index','object_number','generation','kind','encoded_sha256','encoded_bytes','inflated_sha256',
+                'inflated_bytes','decoded_sha256','decoded_bytes','charged_bytes','filters','decode_parameters',
+                'predictor','columns','rows','object_count','first_object_byte'}
+        charged = 0; identities = set()
+        for index,row in enumerate(rows):
+            require(isinstance(row,dict) and set(row)==keys)
+            require(type(row['index']) is int and row['index']==index)
+            require(natural(row['object_number']) and row['object_number']>0 and natural(row['generation']))
+            identity = (row['generation'],row['object_number'])
+            require(identity not in identities); identities.add(identity)
+            for key in ('encoded_bytes','inflated_bytes','decoded_bytes','charged_bytes'): require(natural(row[key]))
+            for key in ('encoded_sha256','inflated_sha256','decoded_sha256'): require(digest(row[key]))
+            require(row['kind'] in ('xref','object') and row['filters'] in ([],['/FlateDecode'],['/Fl']))
+            require(type(row['predictor']) is int and row['predictor'] in (1,12))
+            params = row['decode_parameters']
+            if isinstance(params,list):
+                require(len(params)==len(row['filters'])); params = params[0] if params else None
+            if params is not None:
+                require(bool(row['filters']) and isinstance(params,dict)
+                        and set(params)<={'/Predictor','/Colors','/BitsPerComponent','/Columns'}
+                        and all(type(v) is int for v in params.values()))
+                require(params.get('/Predictor',1)==row['predictor'] and params.get('/Colors',1)>0
+                        and params.get('/Columns',1)>0 and params.get('/BitsPerComponent',8) in (1,2,4,8,16))
+            else: require(row['predictor']==1)
+            require(row['charged_bytes']==row['inflated_bytes'])
+            if row['predictor']==1:
+                require(row['inflated_bytes']==row['decoded_bytes'] and row['inflated_sha256']==row['decoded_sha256'])
+            else:
+                require(row['kind']=='xref' and bool(row['filters']) and isinstance(params,dict)
+                        and params.get('/Colors',1)==1 and params.get('/BitsPerComponent',8)==8
+                        and params.get('/Columns',1)==row['columns'])
+            if not row['filters']:
+                require(row['encoded_bytes']==row['inflated_bytes'] and row['encoded_sha256']==row['inflated_sha256'])
+            if row['kind']=='xref':
+                require(natural(row['columns']) and 0<row['columns']<=24 and natural(row['rows']))
+                require(row['decoded_bytes']==row['columns']*row['rows'])
+                require(row['object_count'] is None and row['first_object_byte'] is None)
+                if row['predictor']==12: require(row['inflated_bytes']==(row['columns']+1)*row['rows'])
+            else:
+                require(row['predictor']==1 and row['columns'] is None and row['rows'] is None)
+                require(natural(row['object_count']) and natural(row['first_object_byte'])
+                        and row['first_object_byte']<=row['decoded_bytes'] and row['object_count']<=row['first_object_byte']//3)
+            charged += row['charged_bytes']
+        require(receipt['decoded_stream_bytes']==application+charged)
+        if receipt.get('native_text_complete') is True:
+            amounts = [stream['bytes'] for page in receipt['pages'] for stream in page['streams']]
+            require(all(natural(value) for value in amounts) and sum(amounts)==application)
+        return True
+    except FilingPDFError: raise
+    except (KeyError,TypeError,ValueError,OverflowError,RecursionError):
+        raise FilingPDFError('pdf_invalid_parser_stream_receipt') from None
+
+
 def _font_decoder(font, state, check, max_stream_bytes):
     from .filing_pdf_fonts import build_font, FontError
     cache = state['font_cache']
@@ -544,15 +862,15 @@ def _font_decoder(font, state, check, max_stream_bytes):
             declared = stream.get('/Length1')
             if declared is not None and (not isinstance(declared,int) or isinstance(declared,bool) or declared <= 0):
                 raise FilingPDFError('pdf_invalid_font_stream_length')
-            if declared is not None and declared > max_stream_bytes-state['stream_bytes']:
+            if declared is not None and declared > max_stream_bytes-state['stream_budget']['decoded_stream_bytes']:
                 raise FilingPDFError('pdf_stream_limit')
             _pulse(check)
-            data = stream.get_data()
+            data = _consume_stream_data(stream,state['stream_budget'],max_stream_bytes,check,
+                                        local_limit=8192 if kind=='font_cid_set' else None,
+                                        identity_parameters=kind!='font_cid_set')
             if declared is not None and declared != len(data):
                 raise FilingPDFError('pdf_invalid_font_stream_length')
             if not data: raise FilingPDFError('pdf_empty_font_stream')
-            state['stream_bytes'] += len(data)
-            if state['stream_bytes'] > max_stream_bytes: raise FilingPDFError('pdf_stream_limit')
             state['streams'].append({'kind':kind,'sha256':_sha(data),'bytes':len(data)})
             return data
         try: cache[key] = build_font(font, consume_stream=consume, check=lambda:_pulse(check))
@@ -589,7 +907,7 @@ def _show(state, g, strings, operator, stream_hash, index, check):
             parts.append({'adjustment':float(value),'advance':advance})
             continue
         raw=_raw_text(value)
-        try: decoded=g['font'].decode(raw, state['inventory_limit']-state['inventory_bytes'])
+        try: decoded=g['font'].decode(raw, state['inventory_limit']-state['stream_budget']['inventory_bytes'])
         except FontError as error: raise FilingPDFError(str(error)) from None
         text=decoded['text']; decoded_parts.append(text)
         glyph_count+=len(decoded['glyphs'])
@@ -661,18 +979,19 @@ def _content_operations(data, check):
 
 
 def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, active=(), graphics=(1, 1), inherited=None):
-    from pypdf.generic import ContentStream, TextStringObject, ByteStringObject, NameObject
+    from pypdf.generic import TextStringObject, ByteStringObject, NameObject
     _pulse(check)
     resolved = _object(stream)
-    if resolved is not None:
-        references = resolved if isinstance(resolved,list) else [resolved]
-        for reference in references:
-            _validate_stream_dictionary(_object(reference), 'form' if active else 'page')
-    content = ContentStream(stream, reader)
-    data = content.get_data()
-    state['stream_bytes'] += len(data)
-    if state['stream_bytes'] > max_stream_bytes:
-        raise FilingPDFError('pdf_stream_limit')
+    references = resolved if isinstance(resolved,list) else ([] if resolved is None else [resolved])
+    blocks = []
+    for reference in references:
+        source = _object(reference)
+        _validate_stream_dictionary(source,'form' if active else 'page')
+        block = _consume_stream_data(source,state['stream_budget'],max_stream_bytes,check)
+        blocks.append(block)
+    # A content array is the exact concatenation of its source streams. Adding
+    # a newline can repair invalid tokens or alter a split literal string.
+    data = b''.join(blocks)
     digest = _sha(data)
     state['streams'].append({'kind': 'form' if active else 'page', 'sha256': digest, 'bytes': len(data)})
     if not isinstance(resources, dict):
@@ -819,15 +1138,12 @@ def _inspect_stream(stream, resources, reader, state, check, max_stream_bytes, a
                     raise FilingPDFError('pdf_invalid_image')
                 components, bits = _image_components(obj, resources)
                 _pulse(check)
-                image_data = obj.get_data()
+                image_data = _consume_stream_data(obj,state['stream_budget'],max_stream_bytes,check)
                 expected_image_bytes = ((obj['/Width'] * components * bits + 7) // 8) * obj['/Height']
                 if len(image_data) != expected_image_bytes:
                     raise FilingPDFError('pdf_invalid_decoded_image_length')
-                state['stream_bytes'] += len(image_data)
                 if not image_data:
                     raise FilingPDFError('pdf_empty_image_stream')
-                if state['stream_bytes'] > max_stream_bytes:
-                    raise FilingPDFError('pdf_stream_limit')
                 state['streams'].append({'kind': 'image', 'sha256': _sha(image_data), 'bytes': len(image_data)})
                 state['image_operations'] += 1
                 state['findings'].add('raster_image')
@@ -921,7 +1237,8 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
         with apply_configuration(**caps), _diagnostics() as notices:
             try:
                 _pulse(check)
-                reader = PdfReader(io.BytesIO(decoded), strict=True)
+                stream_budget = {'decoded_stream_bytes':0,'inventory_bytes':0}
+                reader = _strict_pdf_reader(decoded,stream_budget,max_stream_bytes,check)
                 if reader.is_encrypted:
                     raise FilingPDFError('pdf_encrypted')
                 count = _page_tree(reader, max_pages, check)
@@ -930,10 +1247,10 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
                 document_findings = _document_findings(reader.root_object)
                 pages, chars, stream_bytes = [], 0, 0
                 font_cache = {}
-                inventory_bytes = 0
+                inventory_bytes = stream_budget['inventory_bytes']
                 for index, page in enumerate(reader.pages):
                     _pulse(check)
-                    state = dict(stream_bytes=stream_bytes, streams=[], operators=set(), findings=set(document_findings),
+                    state = dict(stream_budget=stream_budget, streams=[], operators=set(), findings=set(document_findings),
                         support_limitations=set(), native_text_operations=0, nonempty_text_operations=0,
                         image_operations=0, vector_paint_operations=0, form_operations=0,
                         font_cache=font_cache, fonts={}, font_inventory=[], text_shows=[], geometry_operations=[], graphics_resources=[],
@@ -950,9 +1267,9 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
                     if '/Group' in page:
                         _page_group(page['/Group'], resources)
                     data = _inspect_stream(page.get('/Contents'), resources, reader, state, check, max_stream_bytes)
-                    stream_bytes = state['stream_bytes']
+                    stream_bytes = stream_budget['decoded_stream_bytes']
                     text = ''.join(state['text_chunks'])
-                    inventory_bytes = state['inventory_bytes']
+                    inventory_bytes = stream_budget['inventory_bytes']
                     runs = state['plain_runs']
                     if any((ord(char) < 32 and char not in '\n\r\t') or char == '\ufffd'
                            or 0xD800 <= ord(char) <= 0xDFFF for char in text):
@@ -988,16 +1305,20 @@ def extract_pdf_evidence(body: bytes, *, max_pdf_bytes: int, max_text_chars: int
                 _pulse(check)
                 if notices:
                     raise FilingPDFError('pdf_parser_recovery_warning')
-                return dict(version=VERSION, schema_version=2, input_sha256=_sha(body), input_bytes=len(body),
+                receipt = dict(version=VERSION, schema_version=3, input_sha256=_sha(body), input_bytes=len(body),
                     decoded_sha256=_sha(decoded), decoded_bytes=len(decoded), encoding=encoding,
                     library='pypdf', library_version=pypdf.__version__, page_count=count, pages=pages,
-                    decoded_stream_bytes=stream_bytes,
+                    decoded_stream_bytes=stream_budget['decoded_stream_bytes'],
+                    parser_streams=reader.parser_stream_receipts,
+                    application_stream_bytes=stream_budget['decoded_stream_bytes']-stream_budget.get('parser_stream_bytes',0),
                     text=text, text_sha256=_sha(text.encode('utf-8')), text_chars=len(text),
                     findings=sorted({item for page in pages for item in page['findings']}),
                     support_limitations=sorted({item for page in pages for item in page['support_limitations']}),
                     native_text_complete=True, mapping_trust='source_declared_unicode',
                     text_order='content_invocation_order_with_recorded_baseline_separators', supported_text_layout=all(page['supported_text_layout'] for page in pages),
                     visual_meaning_verified=False)
+                validate_pdf_stream_accounting(receipt)
+                return receipt
             except LimitReachedError:
                 raise FilingPDFError('pdf_stream_or_structure_limit') from None
             except FilingPDFError:

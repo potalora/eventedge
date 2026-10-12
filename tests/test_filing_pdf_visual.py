@@ -47,7 +47,8 @@ def extract(body,**changes):
 def test_visual_receipt_makes_only_authorized_structural_claim():
     body=image_pdf(content=b'BT /F1 0.48 Tf 1 g 99.9974 Tz (0) Tj ET',unembedded=True)
     result=extract(body)
-    assert result['version']=='sec-pdf-structural-visual-v1'
+    from tradingagents.strategies.data_sources.filing_pdf_visual import VERSION
+    assert result['version']==VERSION
     assert result['input_sha256']==hashlib.sha256(body).hexdigest()
     assert result['visual_presence'] is True
     assert result['native_text_complete'] is False and result['order_authority'] is False

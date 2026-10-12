@@ -50,7 +50,8 @@ def test_rehashed_pdf_native_inventory_cannot_replace_original_proof(damage):
     case = pdf_source()
     evidence, _raw, inputs = case
     pdf = evidence['pdf_evidence']['selected.pdf']
-    assert pdf['version'] == 'sec-native-pdf-evidence-v2'
+    from tradingagents.strategies.data_sources.filing_pdf import VERSION
+    assert pdf['version'] == VERSION
     page = pdf['pages'][0]
     assert page['fonts'] and page['text_shows'] and page['geometry_operations']
     if damage == 'font_inventory':

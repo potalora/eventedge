@@ -77,6 +77,8 @@ def _availability_timestamp(value: object, *, date_only: bool, field: str) -> da
 
 def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
     """Resolve when source evidence became available without using economic dates."""
+    if strategy == 'state_economics' and metadata.get('state_economics_policy') == 'state_unemployment_v1':
+        return _availability_timestamp(_required(metadata, 'available_at', strategy), date_only=False, field='available_at')
     values: list[datetime] = []
     if metadata.get("observed_at") not in (None, ""):
         values.append(
@@ -226,15 +228,26 @@ def canonical_event_key(
         else:
             raise ValueError("govt_contracts candidate lacks source identity")
     elif strategy == "state_economics":
-        family = "state_economics_observation_window"
-        payload = {
-            "source_observation_ids": sorted(
-                str(item)
-                for item in _required(metadata, "source_observation_ids", strategy)
-            ),
-            "window_end": _required(metadata, "window_end", strategy),
-            "regional_sector": _required(metadata, "regional_sector", strategy),
-        }
+        if metadata.get('state_economics_policy') == 'state_unemployment_v1':
+            from ..data_sources.state_economics_policy import SERIES, day
+            event = _required(metadata, 'state_event', strategy)
+            if not isinstance(event, dict) or event.get('series_id') != SERIES.get(event.get('state')):
+                raise ValueError('invalid state source event identity')
+            period, vintage = day(event.get('observation_date')), day(event.get('vintage_date'))
+            native = f'fred:{event["series_id"]}:{period.isoformat()}:{vintage.isoformat()}'
+            if period.day != 1 or event.get('source_observation_id') != native:
+                raise ValueError('invalid state source event identity')
+            family, payload = 'fred_state_unemployment_vintage', native
+        else:
+            family = "state_economics_observation_window"
+            payload = {
+                "source_observation_ids": sorted(
+                    str(item)
+                    for item in _required(metadata, "source_observation_ids", strategy)
+                ),
+                "window_end": _required(metadata, "window_end", strategy),
+                "regional_sector": _required(metadata, "regional_sector", strategy),
+            }
     elif strategy == "weather_ag":
         family = "weather_observation_window"
         payload = {

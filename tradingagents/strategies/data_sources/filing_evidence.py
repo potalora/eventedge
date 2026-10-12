@@ -502,12 +502,12 @@ def _inventory(document):
 
 def extract_supported_pdf_evidence(body, *, policy, max_document_bytes, max_total_text_bytes, check=None):
     """Select the prospective proof before extraction; errors never select a fallback."""
-    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICIES, SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3
     from .filing_pdf import extract_pdf_evidence, FilingPDFError
     if not isinstance(policy, str) or policy not in SUPPORTED_DOCUMENT_POLICIES:
         raise EvidenceError('invalid_supported_document_policy')
     try:
-        if policy == SUPPORTED_DOCUMENT_POLICY_V2:
+        if policy in {SUPPORTED_DOCUMENT_POLICY_V2, SUPPORTED_DOCUMENT_POLICY_V3}:
             from .filing_pdf_visual import extract_pdf_visual_evidence, FilingPDFVisualError
             try:
                 receipt = extract_pdf_visual_evidence(body, max_pdf_bytes=max_document_bytes,
@@ -522,6 +522,14 @@ def extract_supported_pdf_evidence(body, *, policy, max_document_bytes, max_tota
         return receipt, receipt['text'], 'native_pdf_text'
     except FilingPDFError as error:
         raise EvidenceError(str(error)) from None
+
+
+def _selected_document_limit(document, max_document_bytes, supported_document_policy):
+    from .filing_material_policy import SUPPORTED_DOCUMENT_POLICY_V3
+    if supported_document_policy == SUPPORTED_DOCUMENT_POLICY_V3 and document['filename'].lower().endswith(('.htm', '.html')):
+        from .filing_html_structural import MAX_HTML_BYTES
+        return MAX_HTML_BYTES
+    return max_document_bytes
 
 
 def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 * 1024 * 1024,
@@ -552,7 +560,7 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
     dependencies, issues = [], []
     primary_soup = None
     primary_size = (primary['body_end'] - primary['body_start']) if body_reader else len(primary['body'])
-    if primary_size <= max_document_bytes and primary['filename'].lower().endswith(('.htm', '.html')):
+    if primary_size <= _selected_document_limit(primary, max_document_bytes, supported_document_policy) and primary['filename'].lower().endswith(('.htm', '.html')):
         primary_body = read_body(primary)
         soup = BeautifulSoup(primary_body, 'html.parser')
         _check(check)
@@ -595,7 +603,7 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
             issues.append({'code': 'ambiguous_required_dependency', 'required': required})
         else:
             selected.add(matches[0])
-    units, total, pdf_evidence = [], 0, {}
+    units, total, pdf_evidence, html_evidence = [], 0, {}, {}
     ownership_primary_body = None
     for index in sorted(selected):
         document = documents[index]
@@ -605,7 +613,7 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
             if (_range_sha(document['body'], 0, len(document['body']), check=check) != document['body_sha256']
                     or len(document['body']) != document['body_end'] - document['body_start']):
                 raise EvidenceError('document_integrity_mismatch')
-            if len(document['body']) > max_document_bytes:
+            if len(document['body']) > _selected_document_limit(document, max_document_bytes, supported_document_policy):
                 raise EvidenceError('document_byte_limit')
             suffix = document['filename'].lower()
             if index == primary_index and parsed['form'].startswith('SCHEDULE 13') and suffix.endswith('.xml'):
@@ -613,6 +621,17 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
                 representation = 'ownership_form_data'
                 if supported_document_policy:
                     ownership_primary_body = document['body']
+            elif suffix.endswith(('.htm', '.html')) and supported_document_policy == 'verified_supported_documents_v3':
+                from .filing_html_structural import extract_html_structural_evidence, structural_html_source_text, FilingHTMLStructuralError
+                try:
+                    receipt = extract_html_structural_evidence(document['body'], documents=documents,
+                        body_reader=read_body, max_inventory_bytes=max_total_text_bytes, check=check)
+                except FilingHTMLStructuralError as error:
+                    raise EvidenceError(str(error)) from None
+                html_evidence[document['filename']] = receipt
+                total += receipt['inventory_bytes']
+                text = structural_html_source_text(document['body'], receipt, check=check)
+                representation = 'structural_html' if receipt['visual_presence'] else 'full_visible_text'
             elif suffix.endswith(('.htm', '.html', '.txt')):
                 text = _visible_text(document['body'], soup=primary_soup if index == primary_index else None, check=check)
                 representation = 'full_visible_text'
@@ -623,7 +642,7 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
                 pdf_evidence[document['filename']] = receipt
             else:
                 raise EvidenceError('unsupported_document_format')
-            if not text and representation not in {'native_pdf_text', 'structural_visual_pdf'}:
+            if not text and representation not in {'native_pdf_text', 'structural_visual_pdf', 'structural_html'}:
                 raise EvidenceError('empty_selected_document')
             _check(check)
             size = len(text.encode('utf-8'))
@@ -646,6 +665,8 @@ def _build_evidence(parsed: dict, *, required_exhibits=(), max_document_bytes=8 
     if supported_document_policy:
         result['supported_document_policy'] = supported_document_policy
         result['pdf_evidence'] = pdf_evidence
+        if supported_document_policy == 'verified_supported_documents_v3':
+            result['html_evidence'] = html_evidence
         if ownership_primary_body is not None:
             import base64
             from .filing_ownership_lineage import ownership_facts, OwnershipLineageError
@@ -677,7 +698,7 @@ def build_evidence_from_buffer(selected_frame, raw_buffer, *, required_exhibits=
         start, end = document['body_start'], document['body_end']
         if not 0 <= start <= end <= len(raw_buffer):
             raise EvidenceError('document_integrity_mismatch')
-        if end - start > max_document_bytes:
+        if end - start > _selected_document_limit(document, max_document_bytes, supported_document_policy):
             raise EvidenceError('document_byte_limit')
         body = raw_buffer[start:end]
         _check(check)

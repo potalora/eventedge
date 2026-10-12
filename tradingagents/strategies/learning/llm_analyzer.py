@@ -794,6 +794,26 @@ Analyze for PQC regime signal and trading direction. Return JSON.""" + self._reg
     # Agricultural weather analysis (ag_weather)
     # ------------------------------------------------------------------
 
+    def analyze_state_economics(self, *, ticker: str, state_event: dict, state_exposure: dict,
+                                regime_context: dict | None = None) -> dict[str, Any]:
+        """Required assessment of a retained release and reviewed issuer exposure."""
+        system = '''Assess only the retained state unemployment event and reviewed source registry exposure.
+The registry asserts operating geography; it does not establish causal returns.
+Distinguish observation period, original/revised vintage, and acquisition availability.
+Do not call a rate change a consensus surprise without expectations evidence.
+Do not infer exposure from headquarters, incorporation, sector ETFs, or momentum.
+Do not invent tickers, exposure weights, release times, or performance evidence.
+Return neutral when the evidence does not support a directional thesis.
+Return ONLY JSON with exactly: contract_version ("state-assessment-v1"),
+direction ("long"/"short"/"neutral"), conviction (number 0-1), rationale,
+evidence_claim (one factual source-grounded attribution assertion), event_id
+(copy state_event.source_observation_id), target_ticker (copy supplied ticker),
+exposure_quote (copy the exact supplied geography_quote).'''
+        user = json.dumps({'ticker': ticker, 'state_event': state_event,
+                           'state_exposure': state_exposure, 'regime': regime_context}, allow_nan=False)
+        result = self._call_llm(system, user, role='bounded')
+        return _parse_json_response(result) if result else {}
+
     def analyze_commodity_macro(self, ticker: str, commodity_name: str,
                                 cot_context: dict, macro_context: dict,
                                 regime_context: dict | None = None) -> dict[str, Any]:

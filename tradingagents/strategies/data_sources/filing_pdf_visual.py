@@ -13,7 +13,7 @@ import math
 import zlib
 from . import filing_pdf as native
 
-VERSION = 'sec-pdf-structural-visual-v1'
+VERSION = 'sec-pdf-structural-visual-v2'
 
 class FilingPDFVisualError(ValueError):
     pass
@@ -28,7 +28,7 @@ def _reserve(state, size):
     state['inventory_bytes'] += size
     if state['inventory_bytes'] > state['limit']:fail('inventory_limit')
 
-def _record(value, state, active=(), depth=0):
+def _record(value, state, active=(), depth=0, *, font_program=False):
     """Typed source declarations, never inferred Unicode or font rendering."""
     from pypdf.generic import NameObject, BooleanObject, NullObject, TextStringObject, ByteStringObject
     native._pulse(state['check'])
@@ -49,9 +49,13 @@ def _record(value, state, active=(), depth=0):
     if isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value):return int(value) if isinstance(value,int) else float(value)
     if isinstance(value,list):return [_record(v,state,(*active,id(value)),depth+1) for v in value]
     if isinstance(value,dict):
-        if hasattr(value,'_data') and not set(value)<={'/Length','/Filter','/DecodeParms','/Length1','/Length2','/Length3','/Subtype'}:fail('unsupported_resource_stream_dependency')
+        if hasattr(value,'_data'):
+            allowed={'/Length','/Filter','/DecodeParms','/Length1','/Length2','/Length3','/Subtype'}
+            if font_program:allowed.add('/Type')
+            if not set(value)<=allowed:fail('unsupported_resource_stream_dependency')
+            if '/Type' in value and (not isinstance(value['/Type'],NameObject) or value['/Type']!='/Stream'):fail('invalid_font_program_stream_type')
         for key in value:_reserve(state,len(str(key))*6+3)
-        result={str(k):_record(v,state,(*active,id(value)),depth+1) for k,v in value.items()}
+        result={str(k):_record(v,state,(*active,id(value)),depth+1,font_program=k in ('/FontFile','/FontFile2','/FontFile3')) for k,v in value.items()}
         if hasattr(value,'_data'):
             data=_decode_stream(value,state,'resource')
             result['stream']={'encoded_sha256':native._sha(value._data),'encoded_bytes':len(value._data),
@@ -98,7 +102,7 @@ def _decode_stream(stream,state,kind,*,image=False):
     return data
 
 def _jpeg(data,width,height,components,bits,state):
-    """Complete marker/segment framing only. Entropy bytes are opaque by design."""
+    """Complete marker framing only; entropy and application payloads stay opaque."""
     if not data.startswith(b'\xff\xd8'):fail('jpeg_soi')
     pos=2;frame=None;scans=[];segments=[];tables=set();quant=set();ended=False
     while pos<len(data):
@@ -111,7 +115,7 @@ def _jpeg(data,width,height,components,bits,state):
         if marker==0xd9:
             if pos!=len(data) or frame is None or not scans:fail('jpeg_early_or_trailing_eoi')
             ended=True;break
-        if marker not in (0xc0,0xc2,0xc4,0xdb,0xda,0xdd,0xe0,0xee,0xfe):fail('jpeg_unsupported_marker')
+        if marker not in (0xc0,0xc2,0xc4,0xdb,0xda,0xdd,0xe0,0xe1,0xee,0xfe):fail('jpeg_unsupported_marker')
         if pos+2>len(data):fail('jpeg_truncated_segment')
         length=int.from_bytes(data[pos:pos+2],'big')
         if length<2 or pos+length>len(data):fail('jpeg_segment_length')
@@ -177,30 +181,102 @@ def _jpeg(data,width,height,components,bits,state):
                           'entropy_start':entropy_start,'entropy_end':pos,'entropy_sha256':native._sha(data[entropy_start:pos]),'restart_markers':restart_count})
     if not ended:fail('jpeg_missing_eoi')
     return {'frame':frame,'segments':segments,'scans':scans,'framing':'complete',
-            'entropy_validation':'not_performed','pixel_validation':'not_performed','sha256':native._sha(data),'bytes':len(data)}
+            'entropy_validation':'not_performed','pixel_validation':'not_performed','application_metadata_validation':'not_performed','sha256':native._sha(data),'bytes':len(data)}
 
-def _image(obj,resources,state):
+def _ext_gstate(value):
+    """Structural smoothness declaration; functions and graphics masks still fail."""
+    if not isinstance(value,dict) or hasattr(value,'_data'):fail('invalid_extgstate')
+    if '/SM' in value:
+        smoothness=native._object(value['/SM'])
+        if not native._numbers([smoothness]) or isinstance(smoothness,bool) or not 0<=smoothness<=1:fail('invalid_smoothness')
+    # Keep the native finite checks for every other entry, including all unknown
+    # dependencies. Do not remove anything but the independently checked /SM.
+    native._ext_gstate({key:item for key,item in value.items() if key!='/SM'})
+
+
+def _color_components(value,resources,state,active=()):
+    """Device or Indexed-of-device spaces only; no hidden functions/profiles."""
+    from pypdf.generic import NameObject,TextStringObject,ByteStringObject
+    native._pulse(state['check']);value=native._object(value)
+    if id(value) in active or len(active)>=32:fail('color_cycle_or_depth')
+    active=(*active,id(value))
+    if isinstance(value,NameObject):
+        if value in native._DEVICE_COLORS:return native._color_components(value,resources)
+        if value=='/Pattern':fail('unsupported_pattern_color_space')
+        return _color_components(native._resource(resources,'/ColorSpace',value),resources,state,active)
+    if not isinstance(value,list) or len(value)!=4 or not isinstance(value[0],NameObject) or value[0]!='/Indexed':fail('unsupported_color_space')
+    base=native._object(value[1]);high=native._object(value[2]);lookup=native._object(value[3])
+    if not isinstance(base,NameObject) or base not in native._DEVICE_COLORS or not integer(high) or high>255:fail('invalid_indexed_color_space')
+    components=native._color_components(base,resources)
+    if isinstance(lookup,(TextStringObject,ByteStringObject)):data=native._raw_text(lookup)
+    elif isinstance(lookup,dict) and hasattr(lookup,'_data') and set(lookup)<={'/Length','/Filter','/DecodeParms'}:
+        data=_decode_stream(lookup,state,'indexed_palette')
+    else:fail('invalid_indexed_palette')
+    if len(data)!=(high+1)*components:fail('indexed_palette_length')
+    return 1
+
+
+def _metadata(value,state):
+    from pypdf.generic import NameObject
+    value=native._object(value)
+    if not isinstance(value,dict) or not hasattr(value,'_data') or not set(value)<={'/Type','/Subtype','/Length','/Filter','/DecodeParms'}:fail('invalid_metadata_stream')
+    if not isinstance(value.get('/Type'),NameObject) or value['/Type']!='/Metadata' or not isinstance(value.get('/Subtype'),NameObject) or value['/Subtype']!='/XML':fail('invalid_metadata_stream')
+    data=_decode_stream(value,state,'metadata')
+    return {'dictionary':{str(k):_record(v,state) for k,v in value.items()},
+        'encoded_sha256':native._sha(value._data),'encoded_bytes':len(value._data),
+        'decoded_sha256':native._sha(data),'decoded_bytes':len(data),'semantics':'unverified'}
+
+
+def _image(obj,resources,state,active=(),role='image'):
     from pypdf.generic import BooleanObject,NameObject
+    native._pulse(state['check']);obj=native._object(obj)
+    if id(obj) in active or len(active)>=32:fail('image_cycle_or_depth')
+    active=(*active,id(obj))
+    if not isinstance(obj,dict) or not hasattr(obj,'_data'):fail('invalid_image_stream')
     if not isinstance(obj.get('/Subtype'),NameObject) or obj['/Subtype']!='/Image':fail('invalid_image_subtype')
     if '/Type' in obj and (not isinstance(obj['/Type'],NameObject) or obj['/Type']!='/XObject'):fail('invalid_image_type')
-    allowed={'/Type','/Subtype','/Width','/Height','/BitsPerComponent','/ColorSpace','/Filter','/DecodeParms','/Decode','/Length','/ImageMask','/Interpolate','/Intent'}
+    allowed={'/Type','/Subtype','/Width','/Height','/BitsPerComponent','/ColorSpace','/Filter','/DecodeParms','/Decode','/Length','/ImageMask','/Interpolate','/Intent','/Mask','/SMask','/Name','/Metadata','/HRes','/VRes'}
     if not set(obj)<=allowed:fail('unsupported_image_dependency')
-    if any(not integer(obj.get(k),1) for k in ('/Width','/Height','/BitsPerComponent')):fail('image_dimensions')
-    if obj['/BitsPerComponent'] not in (1,2,4,8,16):fail('image_bit_depth')
-    if '/ImageMask' in obj and (not isinstance(obj['/ImageMask'],BooleanObject) or obj['/ImageMask'].value):fail('image_mask')
+    if any(not integer(obj.get(k),1) for k in ('/Width','/Height')):fail('image_dimensions')
+    if '/ImageMask' in obj and not isinstance(obj['/ImageMask'],BooleanObject):fail('image_mask')
+    stencil=bool(obj.get('/ImageMask') is not None and obj['/ImageMask'].value)
+    bits=native._object(obj.get('/BitsPerComponent',1 if stencil else None))
+    if not integer(bits,1) or bits not in (1,2,4,8,16):fail('image_bit_depth')
+    if stencil:
+        if bits!=1 or any(key in obj for key in ('/ColorSpace','/Mask','/SMask')):fail('invalid_stencil_dependency')
+        components=1
+    else:components=_color_components(obj.get('/ColorSpace'),resources,state)
+    if role=='explicit_mask' and not stencil:fail('invalid_explicit_mask')
+    if role=='soft_mask' and (stencil or not isinstance(native._object(obj.get('/ColorSpace')),NameObject) or native._object(obj['/ColorSpace'])!='/DeviceGray' or any(k in obj for k in ('/Mask','/SMask'))):fail('invalid_soft_mask')
     if '/Interpolate' in obj and not isinstance(obj['/Interpolate'],BooleanObject):fail('image_interpolate')
-    if '/Intent' in obj and obj['/Intent'] not in native._RENDER_INTENTS:fail('image_intent')
-    components=native._color_components(obj.get('/ColorSpace'),resources)
-    if '/Decode' in obj and not native._numbers(native._object(obj['/Decode']),components*2):fail('image_decode_array')
+    if '/Intent' in obj and (not isinstance(obj['/Intent'],NameObject) or obj['/Intent'] not in native._RENDER_INTENTS):fail('image_intent')
+    if '/Name' in obj and not isinstance(obj['/Name'],NameObject):fail('image_name')
+    # These retained producer keys are opaque private resolution declarations,
+    # never image dimensions, colour, visibility, or rendering instructions.
+    for key in ('/HRes','/VRes'):
+        if key in obj and (not native._numbers([obj[key]]) or isinstance(obj[key],bool) or obj[key]<=0):fail('image_private_resolution')
+    decode=native._object(obj.get('/Decode'))
+    if decode is not None and (not native._numbers(decode,components*2) or (stencil and list(decode) not in ([0,1],[1,0]))):fail('image_decode_array')
     filters=_filters(obj);is_jpeg=bool(filters and filters[-1] in ('/DCTDecode','/DCT'))
     data=_decode_stream(obj,state,'image',image=True)
-    declared=((obj['/Width']*components*obj['/BitsPerComponent']+7)//8)*obj['/Height']
-    jpeg=_jpeg(data,obj['/Width'],obj['/Height'],components,obj['/BitsPerComponent'],state) if is_jpeg else None
+    declared=((obj['/Width']*components*bits+7)//8)*obj['/Height']
+    jpeg=_jpeg(data,obj['/Width'],obj['/Height'],components,bits,state) if is_jpeg else None
     if not is_jpeg and len(data)!=declared:fail('raw_image_length')
+    dictionary={}
+    for key,value in obj.items():
+        if key in ('/Mask','/SMask'):
+            value=native._object(value)
+            if key=='/Mask' and isinstance(value,list):
+                if len(value)!=2*components or any(not integer(v) or v>2**bits-1 for v in value) or any(value[i]>value[i+1] for i in range(0,len(value),2)):fail('invalid_color_key_mask')
+                dictionary[key]=_record(value,state)
+            else:dictionary[key]=_image(value,resources,state,active,'soft_mask' if key=='/SMask' else 'explicit_mask')
+        elif key=='/Metadata':dictionary[key]=_metadata(value,state)
+        else:dictionary[key]=_record(value,state)
     return {'encoded_sha256':native._sha(obj._data),'encoded_bytes':len(obj._data),'decoded_sha256':native._sha(data),'decoded_bytes':len(data),
-            'width':int(obj['/Width']),'height':int(obj['/Height']),'components':components,'bits':int(obj['/BitsPerComponent']),
+            'width':int(obj['/Width']),'height':int(obj['/Height']),'components':components,'bits':int(bits),
+            'image_role':role,'image_mask':stencil,
             'filters':filters,'declared_raster_bytes':declared,'declared_raster_bytes_validity':'unverified','jpeg':jpeg,
-            'dictionary':{str(k):_record(v,state) for k,v in obj.items()}}
+            'dictionary':dictionary}
 
 def _font(font,state):
     from pypdf.generic import NameObject,TextStringObject,ByteStringObject
@@ -301,8 +377,8 @@ def _resources(resources,state,active=()):
                     # independently parsed in inventory mode as well.
                     receipt={'form':_stream(obj,resources,state,None,(*active,id(obj)),inventory_only=True)}
                 else:fail('unsupported_xobject')
-            elif category=='/ExtGState':native._ext_gstate(obj);receipt=_record(obj,state)
-            elif category=='/ColorSpace':native._color_components(obj,resources);receipt=_record(obj,state)
+            elif category=='/ExtGState':_ext_gstate(obj);receipt=_record(obj,state)
+            elif category=='/ColorSpace':_color_components(obj,resources,state);receipt=_record(obj,state)
             else:receipt=_record(obj,state)
             result[category][str(name)]=receipt
     return result,images
@@ -338,7 +414,11 @@ def _stream(stream,resources,state,page_box,active=(),inventory_only=False,inher
         if operator not in native._KNOWN:fail('unknown_operator')
         if operator in native._ZERO_OPERANDS and operands:fail('operator_operands')
         if operator in native._NUMERIC_OPERANDS and not native._numbers(operands,native._NUMERIC_OPERANDS[operator]):fail('operator_operands')
-        native._visual_operator(operator,operands,resources,colors)
+        if operator in (b'gs',b'CS',b'cs'):
+            if len(operands)!=1 or not isinstance(operands[0],NameObject):fail('invalid_visual_operands')
+            if operator==b'gs':_ext_gstate(native._resource(resources,'/ExtGState',operands[0]))
+            else:colors[0 if operator==b'CS' else 1]=_color_components(operands[0],resources,state)
+        else:native._visual_operator(operator,operands,resources,colors)
         receipt={'operator_index':index,'operator':operator.decode(),'operands':[_record(v,state) for v in operands],
                  'ctm':list(cm),'source_byte_start':start,'source_byte_end':end,'content_sha256':native._sha(data)}
         _append(state,ops,receipt)
@@ -501,7 +581,7 @@ def extract_pdf_visual_evidence(body:bytes,*,max_pdf_bytes:int,max_pages:int,max
             image_maximum_buffer_size=max_stream_bytes,page_tree_maximum_entries=max_pages*4+100,page_tree_maximum_depth=100)
         with apply_configuration(**caps),native._diagnostics() as notices:
             try:
-                reader=PdfReader(io.BytesIO(decoded),strict=True)
+                reader=native._strict_pdf_reader(decoded,state,max_stream_bytes,check)
                 if reader.is_encrypted:fail('encrypted')
                 count=native._page_tree(reader,max_pages,check)
                 if len(reader.pages)!=count:fail('page_count_mismatch')
@@ -536,8 +616,9 @@ def extract_pdf_visual_evidence(body:bytes,*,max_pdf_bytes:int,max_pages:int,max
                         'tabs':str(page['/Tabs']) if '/Tabs' in page else None})
                     pages.append(row)
                 if notices:fail('parser_recovery_warning')
-                return {'version':VERSION,'schema_version':1,'library':'pypdf','library_version':pypdf.__version__,
+                return {'version':VERSION,'schema_version':2,'library':'pypdf','library_version':pypdf.__version__,
                     'input_sha256':native._sha(body),'input_bytes':len(body),'decoded_sha256':native._sha(decoded),'decoded_bytes':len(decoded),'encoding':encoding,
+                    'parser_streams':reader.parser_stream_receipts,'application_stream_bytes':state['decoded_stream_bytes']-state.get('parser_stream_bytes',0),
                     'page_count':count,'pages':pages,'document_declarations':document_declarations,'decoded_stream_bytes':state['decoded_stream_bytes'],'inventory_bytes':state['inventory_bytes'],
                     'visual_presence':any(_presence(p) for p in pages),'native_text_complete':False,'encoded_image_validity':'unverified',
                     'visual_meaning':'unresolved','native_unicode':'unverified','text_visibility':'unverified','order_authority':False}
@@ -553,7 +634,7 @@ def validate_pdf_visual_receipt(receipt):
     """Validate shape/limited claims only; authenticity requires raw re-extraction."""
     import re
     required={'version','schema_version','library','library_version','input_sha256','input_bytes',
-        'decoded_sha256','decoded_bytes','encoding','page_count','pages','document_declarations','decoded_stream_bytes','inventory_bytes',
+        'decoded_sha256','decoded_bytes','encoding','page_count','pages','document_declarations','decoded_stream_bytes','inventory_bytes','parser_streams','application_stream_bytes',
         'visual_presence','native_text_complete','encoded_image_validity','visual_meaning','native_unicode','text_visibility','order_authority'}
     def require(condition):
         if not condition:fail('invalid_receipt')
@@ -562,15 +643,50 @@ def validate_pdf_visual_receipt(receipt):
     def walk(value,depth=0):
         require(depth<=64)
         if isinstance(value,dict):
+            if 'image_role' in value:image_receipt(value,value['image_role'],invocation='operator_index' in value)
             for key,item in value.items():
                 require(isinstance(key,str))
                 if key.endswith('sha256'):require(digest(item))
-                if key in ('entropy_validation','pixel_validation'):require(item=='not_performed')
+                if key in ('entropy_validation','pixel_validation','application_metadata_validation'):require(item=='not_performed')
                 if key in ('declared_raster_bytes_validity','visibility'):require(item=='unverified')
                 walk(item,depth+1)
         elif isinstance(value,list):
             for item in value:walk(item,depth+1)
         else:require(value is None or type(value) in (str,bool,int) or type(value) is float and math.isfinite(value))
+    def image_receipt(value,role='image',invocation=False,depth=0):
+        require(depth<=32 and isinstance(value,dict) and role in ('image','explicit_mask','soft_mask'))
+        keys={'encoded_sha256','encoded_bytes','decoded_sha256','decoded_bytes','width','height','components','bits','filters',
+            'declared_raster_bytes','declared_raster_bytes_validity','jpeg','dictionary','image_role','image_mask'}
+        if invocation:keys|={'name','operator_index','ctm','bounds','positive_area_page_intersection','visibility'}
+        require(set(value)==keys and value['image_role']==role and type(value['image_mask']) is bool)
+        for key in ('encoded_bytes','decoded_bytes','width','height','components','bits','declared_raster_bytes'):require(integer(value[key],1))
+        require(value['components'] in (1,3,4) and value['bits'] in (1,2,4,8,16))
+        require(value['declared_raster_bytes_validity']=='unverified' and isinstance(value['filters'],list))
+        dictionary=value['dictionary'];require(isinstance(dictionary,dict))
+        require(value['width']==dictionary.get('/Width') and value['height']==dictionary.get('/Height'))
+        require(value['image_mask']==dictionary.get('/ImageMask',False))
+        require(value['bits']==dictionary.get('/BitsPerComponent',1 if value['image_mask'] else None))
+        require(value['declared_raster_bytes']==((value['width']*value['components']*value['bits']+7)//8)*value['height'])
+        if value['image_mask']:require(value['bits']==value['components']==1 and not any(k in dictionary for k in ('/ColorSpace','/Mask','/SMask')))
+        if role=='explicit_mask':require(value['image_mask'])
+        if role=='soft_mask':require(not value['image_mask'] and dictionary.get('/ColorSpace')=='/DeviceGray' and not any(k in dictionary for k in ('/Mask','/SMask')))
+        for key in ('/Mask','/SMask'):
+            if key not in dictionary:continue
+            mask=dictionary[key]
+            if key=='/Mask' and isinstance(mask,list):
+                require(len(mask)==value['components']*2 and all(integer(v) and v<=2**value['bits']-1 for v in mask))
+                require(all(mask[i]<=mask[i+1] for i in range(0,len(mask),2)))
+            else:image_receipt(mask,'soft_mask' if key=='/SMask' else 'explicit_mask',depth=depth+1)
+        if '/Metadata' in dictionary:
+            metadata=dictionary['/Metadata']
+            require(isinstance(metadata,dict) and set(metadata)=={'dictionary','encoded_sha256','encoded_bytes','decoded_sha256','decoded_bytes','semantics'} and metadata['semantics']=='unverified')
+        if value['jpeg'] is None:require(value['decoded_bytes']==value['declared_raster_bytes'])
+        else:
+            jpg=value['jpeg']
+            require(isinstance(jpg,dict) and set(jpg)=={'frame','segments','scans','framing','entropy_validation','pixel_validation','application_metadata_validation','sha256','bytes'})
+            require(jpg['framing']=='complete' and jpg['entropy_validation']==jpg['pixel_validation']==jpg['application_metadata_validation']=='not_performed')
+            require(isinstance(jpg['frame'],dict) and isinstance(jpg['segments'],list) and isinstance(jpg['scans'],list) and bool(jpg['scans']))
+            require(jpg['sha256']==value['decoded_sha256'] and jpg['bytes']==value['decoded_bytes'])
     def content(value,page=False):
         keys={'streams','resources','operations','image_invocations','content_sha256','content_bytes'}
         if page:keys|={'page_number','page_geometry'}
@@ -600,21 +716,11 @@ def validate_pdf_visual_receipt(receipt):
             if 'form' in row:
                 require(set(row)=={'name','operator_index','form'});content(row['form'])
             else:
-                require(set(row)=={'name','operator_index','ctm','bounds','positive_area_page_intersection','visibility',
-                    'encoded_sha256','encoded_bytes','decoded_sha256','decoded_bytes','width','height','components','bits','filters',
-                    'declared_raster_bytes','declared_raster_bytes_validity','jpeg','dictionary'})
+                image_receipt(row,invocation=True)
                 require(finite(row['ctm'],6) and finite(row['bounds'],4) and type(row['positive_area_page_intersection']) is bool)
-                for key in ('encoded_bytes','decoded_bytes','width','height','components','bits','declared_raster_bytes'):require(integer(row[key],1))
-                require(isinstance(row['dictionary'],dict) and isinstance(row['filters'],list))
-                if row['jpeg'] is not None:
-                    jpg=row['jpeg']
-                    require(isinstance(jpg,dict) and set(jpg)=={'frame','segments','scans','framing','entropy_validation','pixel_validation','sha256','bytes'})
-                    require(jpg['framing']=='complete' and jpg['entropy_validation']==jpg['pixel_validation']=='not_performed')
-                    require(isinstance(jpg['frame'],dict) and isinstance(jpg['segments'],list) and isinstance(jpg['scans'],list) and bool(jpg['scans']))
-                    require(jpg['sha256']==row['decoded_sha256'] and jpg['bytes']==row['decoded_bytes'])
     try:
         require(isinstance(receipt,dict) and set(receipt)==required)
-        require(receipt['version']==VERSION and type(receipt['schema_version']) is int and receipt['schema_version']==1)
+        require(receipt['version']==VERSION and type(receipt['schema_version']) is int and receipt['schema_version']==2)
         require(receipt['library']=='pypdf' and isinstance(receipt['library_version'],str) and bool(receipt['library_version']))
         require(receipt['native_text_complete'] is False and receipt['order_authority'] is False)
         require(receipt['encoded_image_validity']==receipt['native_unicode']==receipt['text_visibility']=='unverified')
@@ -637,6 +743,7 @@ def validate_pdf_visual_receipt(receipt):
             require(geometry['struct_parents'] is None or integer(geometry['struct_parents']))
             require(geometry['tabs'] in (None,'/R','/C','/S'))
         require(receipt['visual_presence']==any(_presence(page) for page in receipt['pages']))
+        native.validate_pdf_stream_accounting(receipt)
         walk(receipt)
         return True
     except FilingPDFVisualError:raise

@@ -17,6 +17,9 @@ import xml.etree.ElementTree as ET
 
 
 POLICY = 'complete_ownership_lineage_v1'
+POLICY_V2 = 'complete_ownership_lineage_v2'
+UNIT_REFERENCE = 'complete_selected_unit_v1'
+MAX_INLINE_REFERENCE_BYTES = 65536
 _ACCESSION = re.compile(r'[0-9]{10}-[0-9]{2}-[0-9]{6}')
 _FAMILIES = {'SCHEDULE 13D', 'SCHEDULE 13G'}
 
@@ -75,7 +78,132 @@ def _one(root, path, *, optional=False):
     return nodes[0].text.strip()
 
 
-def _incorporations(text, path, *, locator_text=None):
+def _policy(evidence):
+    return POLICY_V2 if evidence.get('supported_document_policy') == 'verified_supported_documents_v3' else POLICY
+
+
+def _selected_unit(evidence, filename):
+    units = [unit for unit in evidence['units'] if unit['filename'] == filename]
+    inventory = [doc for doc in evidence['document_inventory'] if doc['filename'] == filename]
+    keys = ('filename','type','sequence','body_start','body_end','body_sha256')
+    if len(units) != 1 or len(inventory) != 1 or any(units[0][key] != inventory[0][key] for key in keys):
+        raise OwnershipLineageError('invalid_incorporation_source_unit')
+    unit = units[0]
+    text = unit['text']
+    if not isinstance(text,str) or unit['text_start'] != 0 or unit['text_end'] != len(text) or unit['text_sha256'] != hashlib.sha256(text.encode('utf-8')).hexdigest():
+        raise OwnershipLineageError('invalid_incorporation_source_text')
+    return unit
+
+
+def _html_hrefs(evidence, unit, *, check=None):
+    if _policy(evidence) != POLICY_V2 or not unit['filename'].lower().endswith(('.htm','.html')):
+        return []
+    from .filing_html_structural import validate_html_structural_receipt, iter_html_structural_tokens
+    receipt = evidence.get('html_evidence', {}).get(unit['filename'])
+    if not isinstance(receipt,dict):
+        raise OwnershipLineageError('missing_incorporation_html_receipt')
+    validate_html_structural_receipt(receipt,check=check)
+    if (receipt['input_sha256'] != unit['body_sha256'] or receipt['input_bytes'] != unit['body_end']-unit['body_start']
+            or receipt['source_text_sha256'] != unit['text_sha256']
+            or receipt['source_text_chars'] != len(unit['text'])
+            or receipt['source_text_utf8_bytes'] != len(unit['text'].encode('utf-8'))
+            or receipt['source_text_use'] != 'incorporation_locator_only_not_analysis'):
+        raise OwnershipLineageError('invalid_incorporation_html_binding')
+    hrefs = []
+    for token in iter_html_structural_tokens(receipt):
+        _check(check)
+        if token['kind'] in {'start','empty'} and token['tag']=='a' and 'href' in token['attributes']:
+            hrefs.append(token['attributes']['href'])
+    return hrefs
+
+
+def _unit_binding(evidence, unit):
+    receipt = evidence.get('html_evidence', {}).get(unit['filename'])
+    return {'accession': evidence['accession'], **{key:unit[key] for key in ('filename','body_start','body_end','body_sha256','text_sha256')},
+        'text_utf8_bytes':len(unit['text'].encode('utf-8')), 'text_char_start':0, 'text_char_end':len(unit['text']),
+        'html_receipt_sha256':_digest(receipt) if receipt is not None else None}
+
+
+def _unit_incorporations(evidence, unit, *, check=None):
+    _check(check)
+    if _policy(evidence) != POLICY_V2:
+        return _incorporations(unit['text'], 'unit:' + unit['filename'])
+    unit = _selected_unit(evidence, unit['filename'])
+    hrefs = _html_hrefs(evidence, unit, check=check)
+    return _incorporations(unit['text'], 'unit:' + unit['filename'],
+        locator_text=unit['text']+'\n'+'\n'.join(hrefs), source_unit=_unit_binding(evidence,unit))
+
+
+def resolve_incorporation_reference(reference, evidence, *, check=None):
+    """Return the complete bound locator source; never analysis authority."""
+    _check(check)
+    if reference.get('reference_kind') == UNIT_REFERENCE:
+        if _policy(evidence) != POLICY_V2 or 'quote' in reference or type(reference.get('source_unit')) is not dict:
+            raise OwnershipLineageError('invalid_incorporation_reference_kind')
+        binding = reference['source_unit']
+        filename = binding.get('filename')
+        if reference.get('source_path') != 'unit:' + str(filename):
+            raise OwnershipLineageError('invalid_incorporation_source_path')
+        unit = _selected_unit(evidence,filename)
+        _html_hrefs(evidence,unit,check=check)
+        if binding != _unit_binding(evidence,unit):
+            raise OwnershipLineageError('invalid_incorporation_source_binding')
+        if len(json.dumps(binding,sort_keys=True,ensure_ascii=True,separators=(',',':')).encode()) > MAX_INLINE_REFERENCE_BYTES:
+            raise OwnershipLineageError('incorporation_reference_byte_limit')
+        return unit['text']
+    if 'reference_kind' in reference or 'source_unit' in reference:
+        raise OwnershipLineageError('invalid_incorporation_reference_kind')
+    text = reference.get('quote')
+    if not isinstance(text,str) or len(text.encode('utf-8')) > MAX_INLINE_REFERENCE_BYTES:
+        raise OwnershipLineageError('incorporation_reference_byte_limit')
+    if _policy(evidence)==POLICY_V2 and str(reference.get('source_path','')).startswith('unit:'):
+        unit = _selected_unit(evidence,reference['source_path'][5:])
+        if text != unit['text']:
+            raise OwnershipLineageError('invalid_incorporation_source_text')
+        _html_hrefs(evidence,unit,check=check)
+    return text
+
+
+def resolve_incorporation_locators(reference, evidence, *, check=None):
+    text = resolve_incorporation_reference(reference,evidence,check=check)
+    if _policy(evidence)==POLICY_V2 and str(reference.get('source_path','')).startswith('unit:'):
+        unit = _selected_unit(evidence,reference['source_path'][5:])
+        return text+'\n'+'\n'.join(_html_hrefs(evidence,unit,check=check))
+    if _policy(evidence)==POLICY_V2:
+        import base64
+        try:
+            raw=base64.b64decode(evidence['ownership_primary_body'],validate=True)
+            primary=[unit for unit in evidence['units'] if unit['selection']=='primary']
+            if len(primary)!=1 or hashlib.sha256(raw).hexdigest()!=primary[0]['body_sha256']:
+                raise OwnershipLineageError('invalid_incorporation_primary_body')
+            xml=raw.strip()
+            if xml.startswith(b'<XML>') and xml.endswith(b'</XML>'):xml=xml[5:-6].strip()
+            if re.search(rb'<!\s*(?:DOCTYPE|ENTITY)\b',xml,re.I):
+                raise OwnershipLineageError('unsafe_ownership_xml')
+            root=ET.fromstring(xml)
+            forms=[node for node in root if node.tag.split('}',1)[-1]=='formData']
+            parts=reference.get('source_path','').split('/')
+            if len(forms)!=1 or len(parts)<2 or parts[:2]!=['','formData'] or len(parts)>65 or any(not re.fullmatch('[A-Za-z][A-Za-z0-9]*',part) for part in parts[1:]):
+                raise OwnershipLineageError('ambiguous_incorporation_xml_path')
+            node=forms[0]
+            for part in parts[2:]:
+                _check(check)
+                children=[child for child in node if child.tag.split('}',1)[-1]==part]
+                if len(children)!=1:raise OwnershipLineageError('ambiguous_incorporation_xml_path')
+                node=children[0]
+            if list(node):raise OwnershipLineageError('invalid_incorporation_xml_leaf')
+            raw_text=(node.text or '').strip()
+            from .filing_evidence import _visible_text
+            if _visible_text(raw_text.encode('utf-8'),check=check)!=text:
+                raise OwnershipLineageError('invalid_incorporation_xml_projection')
+            return raw_text
+        except (KeyError,TypeError,ValueError,ET.ParseError) as error:
+            if isinstance(error,OwnershipLineageError):raise
+            raise OwnershipLineageError('invalid_incorporation_primary_body') from error
+    return text
+
+
+def _incorporations(text, path, *, locator_text=None, source_unit=None):
     if not (re.search(r'\bincorporat\w*', text, re.I)
             and re.search(r'\breference\b', text, re.I)):
         return []
@@ -84,7 +212,7 @@ def _incorporations(text, path, *, locator_text=None):
         r'is incorporated (?:herein )?by reference\.?', text, re.I)
     if internal:
         return []
-    if len(text.encode('utf-8')) > 65536:
+    if len(text.encode('utf-8')) > MAX_INLINE_REFERENCE_BYTES and source_unit is None:
         raise OwnershipLineageError('incorporation_reference_byte_limit')
     locators = text if locator_text is None else locator_text
     targets = set(_ACCESSION.findall(locators))
@@ -97,8 +225,128 @@ def _incorporations(text, path, *, locator_text=None):
             accession = compact[:10] + '-' + compact[10:12] + '-' + compact[12:]
             targets.add(accession)
             documents.append({'accession': accession, 'filename': match[2]})
-    return [{'source_path': path, 'quote': text, 'target_accessions': sorted(targets),
-             'target_documents': sorted(documents, key=lambda value: (value['accession'], value['filename']))}]
+    if source_unit is not None:
+        documents = [{'accession':accession,'filename':filename} for accession,filename in sorted({(doc['accession'],doc['filename']) for doc in documents})]
+    reference = {'source_path': path, 'target_accessions': sorted(targets),
+        'target_documents': sorted(documents, key=lambda value: (value['accession'], value['filename']))}
+    if len(text.encode('utf-8')) > MAX_INLINE_REFERENCE_BYTES:
+        reference.update(reference_kind=UNIT_REFERENCE, source_unit=source_unit)
+        if len(json.dumps(reference,sort_keys=True,ensure_ascii=True,separators=(',',':')).encode()) > MAX_INLINE_REFERENCE_BYTES:
+            raise OwnershipLineageError('incorporation_reference_byte_limit')
+    else:
+        reference['quote'] = text
+    return [reference]
+
+
+def _primary_form_data(evidence):
+    """Read only the exact retained native primary needed for local locators."""
+    import base64
+    try:
+        raw=base64.b64decode(evidence['ownership_primary_body'],validate=True)
+        primary=[unit for unit in evidence['units'] if unit['selection']=='primary']
+        if len(primary)!=1 or hashlib.sha256(raw).hexdigest()!=primary[0]['body_sha256']:
+            raise OwnershipLineageError('invalid_incorporation_primary_body')
+        xml=raw.strip()
+        if xml.startswith(b'<XML>') and xml.endswith(b'</XML>'):xml=xml[5:-6].strip()
+        if re.search(rb'<!\s*(?:DOCTYPE|ENTITY)\b',xml,re.I):
+            raise OwnershipLineageError('unsafe_ownership_xml')
+        root=ET.fromstring(xml)
+        namespace='{http://www.sec.gov/edgar/schedule13D}'
+        forms=root.findall(namespace+'formData')
+        if root.tag!=namespace+'edgarSubmission' or len(forms)!=1:
+            raise OwnershipLineageError('unsupported_ownership_schema')
+        return forms[0]
+    except (KeyError,TypeError,ValueError,ET.ParseError) as error:
+        if isinstance(error,OwnershipLineageError):raise
+        raise OwnershipLineageError('invalid_incorporation_primary_body') from error
+
+
+def _primary_incorporations(text,path,*,locator_text,evidence,form_data=None,check=None):
+    """Resolve only wholly recognized same-original primary XML references.
+
+    Every incorporation/reference token must belong to a finite explicit local
+    clause. A missing target or even one unrecognized clause leaves the complete
+    original reference unresolved. Selected exhibit references are independent.
+    """
+    references=_incorporations(text,path,locator_text=locator_text)
+    allowed={'/formData/items1To7/item4/transactionPurpose',
+        '/formData/items1To7/item5/percentageOfClassSecurities',
+        '/formData/items1To7/item5/numberOfShares',
+        '/formData/items1To7/item6/contractDescription'}
+    if (_policy(evidence)!=POLICY_V2 or filing_form_family(evidence['form'])!='SCHEDULE 13D'
+            or path not in allowed or not references or references[0]['target_accessions']
+            or re.search(r'<\s*a\b|https?://|www\.',locator_text,re.I)):
+        return references
+    _check(check)
+    try:
+        form_data=_primary_form_data(evidence) if form_data is None else form_data
+        namespace='{http://www.sec.gov/edgar/schedule13D}'
+        if form_data.tag!=namespace+'formData':return references
+        def unique(parts):
+            node=form_data
+            for part in parts:
+                _check(check)
+                children=node.findall(namespace+part)
+                if len(children)!=1:raise OwnershipLineageError('ambiguous_local_incorporation_target')
+                node=children[0]
+            return node
+        source=unique(path.split('/')[2:])
+        if list(source) or (source.text or '').strip()!=locator_text:return references
+        primary=[u for u in evidence['units'] if u['selection']=='primary']
+        if len(primary)!=1:return references
+        primary=_selected_unit(evidence,primary[0]['filename'])
+        if primary['representation']!='ownership_form_data':return references
+        destination=path.split('/')[3][4:]
+        spans=[];files=set()
+        def local_scope(value):
+            if value.casefold()=='schedule 13d':return True
+            cover=unique(['coverPageHeader'])
+            number=_one(cover,namespace+'amendmentNo',optional=True)
+            return evidence['form']=='SCHEDULE 13D/A' and value.casefold()=='amendment no. '+str(number)
+        scope=r'(Schedule 13D|Amendment No\. [1-9][0-9]{0,2})'
+        item_pattern=(r'\bThe information set forth in Item ([46]) of this '+scope+
+            r'(?: regarding the Subscription Agreement)? is (?:hereby )?incorporated by reference into this Item ([456])\.')
+        for match in re.finditer(item_pattern,text,re.I):
+            if match[3]!=destination or not local_scope(match[2]):return references
+            leaf={'4':'transactionPurpose','6':'contractDescription'}[match[1]]
+            target=unique(['items1To7','item'+match[1]])
+            value=_one(target,namespace+leaf)
+            from .filing_evidence import _visible_text
+            if not _visible_text(value.encode('utf-8'),check=check):return references
+            files.add(primary['filename']);spans.append(match.span())
+        cover_pattern=(r'\bThe information set forth in rows (\(7\) through \(10\)|\(11\) and \(13\)) '
+            r'of the cover page of this '+scope+r' is incorporated by reference into this Item (5)\.')
+        for match in re.finditer(cover_pattern,text,re.I):
+            if match[3]!=destination or not local_scope(match[2]):return references
+            people=unique(['reportingPersons']).findall(namespace+'reportingPersonInfo')
+            if not people:return references
+            fields=('soleVotingPower','sharedVotingPower','soleDispositivePower','sharedDispositivePower') if match[1].lower()=='(7) through (10)' else ('aggregateAmountOwned','percentOfClass')
+            for person in people:
+                _check(check)
+                for field in fields:_one(person,namespace+field)
+            files.add(primary['filename']);spans.append(match.span())
+        exhibit_pattern=(r'\b(?:a copy of )?which is attached (?:hereto as Exhibit (99\.[1-9][0-9]?)'
+            r'|as Exhibit (99\.[1-9][0-9]?) hereto) and is incorporated herein by reference\.')
+        for match in re.finditer(exhibit_pattern,text,re.I):
+            number=match[1] or match[2]
+            matches=[doc for doc in evidence['document_inventory'] if doc['type'].upper()=='EX-'+number]
+            if len(matches)!=1:return references
+            unit=_selected_unit(evidence,matches[0]['filename'])
+            if unit['selection']!='dependency':return references
+            files.add(unit['filename']);spans.append(match.span())
+        intro=re.compile(r'\bItem 6 of the Schedule 13D is hereby amended to incorporate the following at the end thereof:',re.I)
+        for match in intro.finditer(text):
+            if destination!='6' or evidence['form']!='SCHEDULE 13D/A':return references
+            files.add(primary['filename']);spans.append(match.span())
+        tokens=list(re.finditer(r'\b(?:incorporat\w*|referenc\w*)\b',text,re.I))
+        if not files or not tokens or not all(any(start<=m.start() and m.end()<=end for start,end in spans) for m in tokens):
+            return references
+        accession=evidence['accession']
+        return [{**references[0],'target_accessions':[accession],
+            'target_documents':[{'accession':accession,'filename':name} for name in sorted(files)]}]
+    except OwnershipLineageError:
+        # Positive local proof is optional; absence stays an acquisition duty.
+        return references
 
 
 def ownership_facts(evidence, primary_body, *, check=None):
@@ -220,14 +468,15 @@ def ownership_facts(evidence, primary_body, *, check=None):
         # href/accession locators so formatting cannot hide an obligation.
         from .filing_evidence import _visible_text
         text = _visible_text(raw_text.encode('utf-8'), check=check) if raw_text else ''
-        incorporations.extend(_incorporations(text, current_path, locator_text=raw_text))
+        incorporations.extend(_primary_incorporations(text,current_path,locator_text=raw_text,
+            evidence=evidence,form_data=form_data,check=check))
         for child in node:
             visit(child, current_path)
     visit(form_data, '')
     for unit in evidence['units']:
         if unit['selection'] != 'primary':
-            incorporations.extend(_incorporations(unit['text'], 'unit:' + unit['filename']))
-    value = {'policy': POLICY, 'accession': evidence['accession'], 'form': evidence['form'],
+            incorporations.extend(_unit_incorporations(evidence,unit,check=check))
+    value = {'policy': _policy(evidence), 'accession': evidence['accession'], 'form': evidence['form'],
         'family': family, 'is_amendment': evidence['form'].endswith('/A'),
         'filing_date': evidence['filing_date'], 'accepted_at': evidence['accepted_at'],
         'subject_cik': subject,
@@ -245,16 +494,22 @@ def validate_ownership_facts(facts, evidence, primary_body, *, check=None):
     return facts
 
 
-def _facts(facts, evidence):
+def _facts(facts, evidence, *, check=None):
     if evidence['structural_status'] != 'complete' or evidence['issues'] != []:
         raise OwnershipLineageError('incomplete_ownership_submission')
-    if (facts['policy'] != POLICY or facts['accession'] != evidence['accession']
+    if (facts['policy'] != _policy(evidence) or facts['accession'] != evidence['accession']
             or facts['form'] != evidence['form'] or facts['filing_date'] != evidence['filing_date']
             or facts['accepted_at'] != evidence['accepted_at']
             or facts['subject_cik'] != evidence['issuer_candidates'][0]['cik']
             or facts['source_identity_sha256'] != ownership_evidence_digest(evidence)
             or facts['facts_sha256'] != _digest({k: v for k, v in facts.items() if k != 'facts_sha256'})):
         raise OwnershipLineageError('ownership_facts_mismatch')
+    if _policy(evidence)==POLICY_V2:
+        expected = [reference for unit in evidence['units'] if unit['selection']!='primary'
+            for reference in _unit_incorporations(evidence,unit,check=check)]
+        actual = [reference for reference in facts['incorporations'] if reference.get('source_path','').startswith('unit:')]
+        if actual != expected:
+            raise OwnershipLineageError('ownership_unit_references_mismatch')
     if not facts['reporters'] or not facts['securities']['cusips']:
         raise OwnershipLineageError('unproven_ownership_identity')
     return facts
@@ -294,7 +549,7 @@ def ownership_lineage(current, facts_by_accession, submissions, histories, archi
     from .fetch_errors import SourceFetchError
     _check(check)
     accession = current.get('accession') if isinstance(current, dict) else None
-    receipt = {'policy': POLICY, 'status': 'technical_failure', 'reason': 'invalid_lineage_input',
+    receipt = {'policy': _policy(current), 'status': 'technical_failure', 'reason': 'invalid_lineage_input',
         'current_accession': accession, 'subject_cik': None, 'reporters': [], 'securities': {},
         'chain_accessions': [], 'candidate_accessions': [], 'source_accessions': [],
         'incorporated_accessions': [], 'obligations': []}
@@ -323,7 +578,7 @@ def ownership_lineage(current, facts_by_accession, submissions, histories, archi
         if candidate not in facts_by_accession:
             duty('native_ownership_facts', accession=candidate)
             return None
-        fact = _facts(facts_by_accession[candidate], evidence)
+        fact = _facts(facts_by_accession[candidate], evidence,check=check)
         if fact['accession'] != candidate:
             raise OwnershipLineageError('ownership_accession_mismatch')
         proof['facts'][candidate] = fact
@@ -452,6 +707,19 @@ def ownership_lineage(current, facts_by_accession, submissions, histories, archi
             edge_count += 1 + len(reference['target_accessions'])
             if edge_count > max_edges:
                 raise OwnershipLineageError('lineage_edge_limit')
+            source_evidence = submissions[candidate]
+            reference_text = resolve_incorporation_reference(reference,source_evidence,check=check)
+            if _policy(source_evidence)==POLICY_V2:
+                locators = resolve_incorporation_locators(reference,source_evidence,check=check)
+                binding = reference.get('source_unit')
+                if reference['source_path'].startswith('unit:'):
+                    binding = _unit_binding(source_evidence,_selected_unit(source_evidence,reference['source_path'][5:]))
+                expected = (_incorporations(reference_text,reference['source_path'],locator_text=locators,source_unit=binding)
+                    if reference['source_path'].startswith('unit:') else
+                    _primary_incorporations(reference_text,reference['source_path'],locator_text=locators,
+                        evidence=source_evidence,check=check))
+                if expected != [reference]:
+                    raise OwnershipLineageError('invalid_incorporation_reference_locators')
             targets = reference['target_accessions']
             if not targets:
                 duty('resolve_incorporation', source_accession=candidate, **reference)
@@ -461,7 +729,7 @@ def ownership_lineage(current, facts_by_accession, submissions, histories, archi
                     incorporated.add(target)
                 if target not in submissions:
                     duty('incorporated_submission', accession=target,
-                        source_accession=candidate, source_path=reference['source_path'], quote=reference['quote'],
+                        source_accession=candidate, **reference,
                         required_exhibits=[doc['filename'] for doc in reference['target_documents']
                                           if doc['accession'] == target])
                     continue
@@ -471,7 +739,7 @@ def ownership_lineage(current, facts_by_accession, submissions, histories, archi
                 target_files = {unit['filename'] for unit in target_evidence['units']}
                 required_files = {doc['filename'] for doc in reference['target_documents']
                                   if doc['accession'] == target and doc['filename'] != target + '.txt'}
-                if not required_files and re.search(r'agreement|contract|exhibit', reference['quote'], re.I):
+                if not required_files and re.search(r'agreement|contract|exhibit', reference_text, re.I):
                     required_files = {doc['filename'] for doc in target_evidence['document_inventory']
                                       if doc['type'].upper().startswith('EX-')}
                     if not required_files:
@@ -485,7 +753,7 @@ def ownership_lineage(current, facts_by_accession, submissions, histories, archi
                 if target != candidate:
                     for unit in target_evidence['units']:
                         reference_queue.extend((target, nested) for nested in
-                            _incorporations(unit['text'], 'unit:' + unit['filename']))
+                            _unit_incorporations(target_evidence,unit,check=check))
         completed_incorporations = set()
         def check_incorporation_cycles(candidate, active):
             _check(check)

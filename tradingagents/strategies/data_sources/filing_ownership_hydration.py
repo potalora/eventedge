@@ -11,7 +11,7 @@ from functools import partial
 import re
 from urllib.parse import urlsplit
 
-from .filing_ownership_lineage import ownership_lineage
+from .filing_ownership_lineage import ownership_lineage, resolve_incorporation_reference, resolve_incorporation_locators, OwnershipLineageError
 from .edgar_source import normalize_filing_form
 from .request_policy import provider_timeout
 
@@ -41,13 +41,26 @@ def _metadata(accession, histories, archives):
     return matches[0]
 
 
-def _reference_ciks(obligation):
+def _reference_source(obligation, submissions):
+    source = obligation.get('source_accession')
+    if source in submissions:
+        return submissions[source]
+    if 'reference_kind' in obligation:
+        raise OwnershipLineageError('missing_incorporation_source')
+    return {}
+
+
+def _reference_ciks(obligation, submissions=None, *, check=None):
     """Only a native exact SEC URL supplies a new directory/history CIK."""
     accession = obligation.get('accession')
     if not isinstance(accession, str):
         return []
+    if 'quote' not in obligation and 'reference_kind' not in obligation:
+        return []
+    evidence = _reference_source(obligation,submissions or {})
+    locators = resolve_incorporation_locators(obligation,evidence,check=check)
     results = set()
-    for url in re.findall(r'https://www\.sec\.gov/Archives/edgar/data/[^\s<>"\']+', obligation.get('quote', '')):
+    for url in re.findall(r'https://www\.sec\.gov/Archives/edgar/data/[^\s<>"\']+', locators):
         parsed = urlsplit(url.rstrip('.,);'))
         match = re.fullmatch(r'/Archives/edgar/data/([1-9][0-9]{0,9})/' + accession.replace('-', '')
             + r'/[A-Za-z0-9][A-Za-z0-9_.-]{0,254}', parsed.path)
@@ -108,7 +121,7 @@ def hydrate_ownership_dependencies(source, current_accessions, *, corpus, histor
                         # A referenced exact URL may identify another issuer's
                         # index. Its history provides form/date; accession
                         # numbering never supplies those facts.
-                        locator_ciks = set(_reference_ciks(obligation))
+                        locator_ciks = set(_reference_ciks(obligation,corpus,check=lambda: provider_timeout('edgar')))
                         if kind.startswith('incorporated_'):
                             subject = facts.get(accession, {}).get('subject_cik')
                             if subject:
@@ -140,7 +153,8 @@ def hydrate_ownership_dependencies(source, current_accessions, *, corpus, histor
                     if kind == 'incorporated_exhibit':
                         required.add(obligation['filename'])
                     if kind == 'incorporated_submission' and not required and re.search(
-                            r'agreement|contract|exhibit', obligation.get('quote', ''), re.I):
+                            r'agreement|contract|exhibit', resolve_incorporation_reference(obligation,_reference_source(obligation,corpus),
+                                check=lambda: provider_timeout('edgar')), re.I):
                         required.add(ALL_EXHIBITS)
                     spec['required_exhibits'].update(required)
                     key = ('body', target)
