@@ -89,6 +89,7 @@ def blocked(*args, **kwargs):
     attempts.append(True)
     raise AssertionError('SDK import attempted network')
 socket.socket.connect = blocked
+socket.socket.connect_ex = blocked
 socket.create_connection = blocked
 from openbb import obb
 routes = [obb.equity.profile, obb.equity.shorts.short_interest, obb.famafrench.factors]
