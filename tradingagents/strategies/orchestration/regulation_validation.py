@@ -98,6 +98,32 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
     try:
         scope = validate_regulation_policy(data, config)
         if scope is None:
+            from .research_resilience import configured as resilience_configured
+            source = data.get('regulations', {})
+            if (resilience_configured(config) and config.get('regulation_evidence_policy') is not None
+                    and isinstance(source.get('error'), str) and source['error'].strip()):
+                by_identity = {}
+                for row in records:
+                    value = row if isinstance(row, dict) else vars(row)
+                    identity = value['policy_id'], value['strategy']
+                    if identity in by_identity:
+                        raise ValueError('duplicate regulatory failure health')
+                    by_identity[identity] = value
+                if not policy_ids:
+                    raise ValueError('missing regulatory failure horizons')
+                for policy_id in policy_ids:
+                    for strategy, sources in strategy_sources.items():
+                        record = by_identity.get((policy_id, strategy))
+                        evidence = record.get('evidence', {}) if record is not None else {}
+                        if (record is None or record['status'] != 'data_failure' or record['signal_count'] != 0
+                                or evidence.get('candidate_count') != 0
+                                or evidence.get('data_sources') != sorted(sources)
+                                or 'regulation_source_coverage' not in evidence
+                                or evidence['regulation_source_coverage'] is not None
+                                or evidence.get('regulation_assessments') != []
+                                or evidence.get('provider_errors', {}).get('regulations') != source['error']):
+                            raise ValueError('unbound regulatory acquisition failure')
+                return None
             if any('regulation_source_coverage' in (row if isinstance(row, dict) else vars(row)).get('evidence', {})
                    for row in records):
                 raise ValueError('unbound regulatory health')

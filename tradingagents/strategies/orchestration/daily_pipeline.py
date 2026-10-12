@@ -118,6 +118,7 @@ class DailyRunState:
     model_deadline: float | None = None
     model_coverage: dict[str, Any] = field(default_factory=lambda: {"complete": True})
     source_digest: str = ''
+    research_screening_receipt: dict[str, Any] | None = None
     new_entry_eligibility: dict[str, Any] | None = None
     ineligible_new_entries: set[str] = field(default_factory=set)
 
@@ -313,6 +314,8 @@ def finalize_daily_results(
             state.session, state.epoch_id,
             state.owner._policy_id_for_horizon(cohort["config"].horizon),
         )
+        if state.research_screening_receipt is not None:
+            result['research_screening_receipt'] = state.research_screening_receipt
         if decision is not None:
             result["committee_decision_status"] = decision["status"]
             if decision["status"].get("degraded"):
@@ -1270,6 +1273,33 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
         try:
             from .decision_clock import validate_completed_replay
             validate_completed_replay(owner, session, state.epoch_id, state.completed)
+            from .research_resilience import configured as resilience_configured, validate_projection
+            if resilience_configured(owner._base_config.get('autoresearch', {})):
+                from .research_screening import load_screening
+                from .source_inputs import SourceInputError, daily_source_store
+                source_store, source_identity = daily_source_store(owner, state.trading_date)
+                source_data = source_store.load_frozen(source_identity)
+                if not isinstance(source_data, dict):
+                    raise SourceInputError('completed research replay lacks source inputs')
+                source_digest = hashlib.sha256(source_store.encode(source_data,
+                    **source_store.codec_limits).encode()).hexdigest()
+                horizons = tuple(sorted({cohort['config'].horizon for cohort in owner.cohorts}))
+                restored = load_screening(owner, session, source_digest, horizons)
+                if restored is None:
+                    raise SourceInputError('completed research replay lacks screening')
+                state.horizon_signals, state.model_coverage, state.research_screening_receipt = restored
+                for horizon, (_, regime, _) in state.horizon_signals.items():
+                    engine = next(cohort['engine'] for cohort in owner.cohorts if cohort['config'].horizon == horizon)
+                    validate_projection(engine, source_data, regime)
+                for cohort in state.completed:
+                    from .research_resilience import validate_book_source_scope
+                    horizon = cohort['config'].horizon
+                    regime = state.horizon_signals[horizon][1]
+                    decision = cohort['ledger'].committee_decision(session, state.epoch_id,
+                        owner._policy_id_for_horizon(horizon))
+                    validate_book_source_scope(decision.get('status', {}) if isinstance(decision, dict) else {},
+                        regime, codec_limits=source_store.codec_limits)
+                    state.results[cohort['config'].name]['regime'] = regime
         except Exception as error:
             _log_boundary_failure('decision_replay', session, error)
             assign_failures(state.results, [*state.completed, *state.stage_only],
@@ -1638,6 +1668,8 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     """Run each required horizon once and merge governed reference bars."""
     import time
     owner, session = state.owner, state.session
+    from .research_resilience import configured as resilience_configured
+    resilience = resilience_configured(owner._base_config.get('autoresearch', {}))
     state.first_engine = owner.cohorts[0]["engine"]
     lookback_start = (
         datetime.strptime(state.trading_date, "%Y-%m-%d") - timedelta(days=90)
@@ -1673,7 +1705,7 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         except (ValueError, TypeError, KeyError):
             raise SourceInputError('frozen Court portfolio scope invalid') from None
         from .decision_clock import policy, PROSPECTIVE
-        if policy(owner._base_config) == PROSPECTIVE:
+        if policy(owner._base_config) == PROSPECTIVE or resilience:
             from .source_inputs import source_codec_limits
             state.source_digest = hashlib.sha256(source_store.encode(
                 state.shared_data, **source_codec_limits(owner._base_config)).encode()).hexdigest()
@@ -1693,28 +1725,53 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     from tradingagents.strategies.orchestration.multi_strategy_engine import hold_incomplete_model_sample, model_sample_incomplete
     if state.model_deadline is None:
         state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
-    with candidate_response_memo():
-        for horizon in sorted({cohort["config"].horizon for cohort in state.valid}):
-            with model_budget(state.model_deadline):
-                signals, regime, health = owner._screen_for_horizon(
-                    state.shared_data, state.trading_date, horizon
-                )
+    horizons = tuple(sorted({cohort["config"].horizon for cohort in
+                             (owner.cohorts if resilience else state.valid)}))
+    restored = None
+    if resilience:
+        from .research_screening import load_screening, freeze_screening
+        try:
+            restored = load_screening(owner, session, state.source_digest, horizons)
+        except (OSError, SourceInputError):
+            logger.exception("Accepted research screening invalid for %s", state.trading_date)
+            return state.fail_candidates("research_screening_invalid")
+    if restored is not None:
+        state.horizon_signals, state.model_coverage, state.research_screening_receipt = restored
+    else:
+        with candidate_response_memo():
+            for horizon in horizons:
+                with model_budget(state.model_deadline):
+                    signals, regime, health = owner._screen_for_horizon(
+                        state.shared_data, state.trading_date, horizon
+                    )
+                try:
+                    signals, health = _include_retained_late_signals(state, horizon, signals, health)
+                    if resilience and regime['research_hold_reasons']:
+                        from .research_resilience import hold_signals
+                        from .source_inputs import source_codec_limits
+                        hold_signals(signals, regime['research_hold_reasons'][0], codec_limits=source_codec_limits(owner._base_config))
+                except (KeyError, TypeError, ValueError):
+                    logger.error("Retained candidate evidence invalid for %s/%s", state.trading_date, horizon)
+                    return state.fail_candidates("retained_candidate_evidence_invalid")
+                state.horizon_signals[horizon] = (signals, regime, health)
+                logger.info("Horizon %s: %d signals", horizon, len(signals))
+        combined = [signal for signals, _, _ in state.horizon_signals.values() for signal in signals]
+        phase_health = [record for _, _, health in state.horizon_signals.values() for record in health]
+        if model_sample_incomplete(combined, phase_health):
+            state.model_coverage = {"complete": False, "reason": "model_deadline_exhausted"}
+            # Health carries failure even when candidate filters removed every
+            # timeout marker. Include retained-late observations merged above.
+            for horizon, (signals, regime, health) in state.horizon_signals.items():
+                _, health = hold_incomplete_model_sample(combined, health, incomplete=True)
+                state.horizon_signals[horizon] = (signals, regime, health)
+        if resilience:
             try:
-                signals, health = _include_retained_late_signals(state, horizon, signals, health)
-            except (KeyError, TypeError, ValueError):
-                logger.error("Retained candidate evidence invalid for %s/%s", state.trading_date, horizon)
-                return state.fail_candidates("retained_candidate_evidence_invalid")
-            state.horizon_signals[horizon] = (signals, regime, health)
-            logger.info("Horizon %s: %d signals", horizon, len(signals))
-    combined = [signal for signals, _, _ in state.horizon_signals.values() for signal in signals]
-    phase_health = [record for _, _, health in state.horizon_signals.values() for record in health]
-    if model_sample_incomplete(combined, phase_health):
-        state.model_coverage = {"complete": False, "reason": "model_deadline_exhausted"}
-        # Health carries failure even when candidate filters removed every
-        # timeout marker. Include retained-late observations merged above.
-        for horizon, (signals, regime, health) in state.horizon_signals.items():
-            _, health = hold_incomplete_model_sample(combined, health, incomplete=True)
-            state.horizon_signals[horizon] = (signals, regime, health)
+                (state.horizon_signals, state.model_coverage,
+                 state.research_screening_receipt) = freeze_screening(
+                    owner, session, state.source_digest, state.horizon_signals, state.model_coverage)
+            except (OSError, SourceInputError):
+                logger.exception("Research screening publication failed for %s", state.trading_date)
+                return state.fail_candidates("research_screening_invalid")
     health_failure = _persist_screen_health(state)
     if health_failure is not None:
         return health_failure
@@ -2533,12 +2590,33 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     # Reference/volatility/enrichment wall time consumes the original model
     # allowance. No later SDK operation may start on a fresh per-call clock.
     from .decision_clock import prepare_decision_inputs
+    from .research_resilience import configured as resilience_configured
+    resilience = resilience_configured(state.owner._base_config.get('autoresearch', {}))
+    hold_reasons = ()
+    if resilience:
+        if state.model_coverage.get('complete') is False or time.monotonic() >= state.model_deadline:
+            hold_reasons = ('model_deadline_exhausted',)
+        elif state.horizon_signals and all(regime.get('research_hold_reasons')
+                for _, regime, _ in state.horizon_signals.values()):
+            hold_reasons = tuple(sorted({reason for _, regime, _ in state.horizon_signals.values()
+                                        for reason in regime['research_hold_reasons']}))
+    def fetch_enrichment():
+        from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+        try:
+            return state.owner._fetch_openbb_enrichment(all_signals)
+        except SourceFetchError as error:
+            if not resilience:
+                raise
+            # Only typed provider failures cross this boundary. Codec, identity,
+            # accounting and unexpected internal exceptions remain hard failures.
+            return {'errors': {'openbb': {'reason_code': error.reason_code}}}
     try:
         with provider_budget("openbb", state.model_deadline):
             enrichment, decision_context = prepare_decision_inputs(
                 state.owner, state.session, state.shared_data, state.source_digest,
-                lambda: state.owner._fetch_openbb_enrichment(all_signals),
-                eligibility=state.new_entry_eligibility, deadline=state.model_deadline)
+                fetch_enrichment,
+                eligibility=state.new_entry_eligibility, deadline=state.model_deadline,
+                **({'hold_reasons': hold_reasons} if resilience else {}))
     except Exception as error:
         _log_boundary_failure('decision_inputs', state.session, error)
         return state.fail_candidates('decision_inputs_invalid')

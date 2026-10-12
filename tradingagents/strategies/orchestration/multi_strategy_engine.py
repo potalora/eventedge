@@ -275,6 +275,8 @@ def hold_incomplete_model_sample(signals, health, *, incomplete=False):
         signal["journal_only"] = True
         signal.setdefault("metadata", {}).update(analysis_status="failed",
             analysis_failure_reason="model_deadline_exhausted", non_actionable_reason="model_sample_incomplete")
+    from .research_resilience import hold_signals
+    hold_signals(signals, 'model_sample_incomplete')
     for record in health:
         for event in record.evidence.get('state_economic_events', []):
             event.update(journal_only=True, analysis_status='failed',
@@ -313,6 +315,8 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from .research_resilience import configured as research_resilience_configured
+        research_resilience_configured(self.ar_config)
         from .congress_policy import configured
         configured(self.ar_config)
         from tradingagents.strategies.data_sources.filing_attribution_policy import configured as filing_attribution_configured
@@ -417,22 +421,45 @@ class MultiStrategyEngine:
         shared across cohorts so LLM non-determinism doesn't confound results.
         """
         from .congress_policy import configured, audit_scope, DECLARATION_KEY, POLICY as CONGRESS_POLICY
+        from .research_resilience import configured as resilience_configured, project_sources
+        resilience = resilience_configured(self.ar_config)
+        research_scope = None
+        research_hold_reasons = []
         congress_audit_scope = audit_scope(data, self.ar_config, trading_date)
         signal_data = ({key: value for key, value in data.items() if key not in ('congress', DECLARATION_KEY)}
                        if configured(self.ar_config) else data)
+        if resilience:
+            from .source_inputs import source_codec_limits
+            names = set(data) | {'fred', 'yfinance'}
+            if self.ar_config.get('equity_universe_policy'):
+                names.add('equity_universe')
+            names.update(source for strategy in self.paper_trade_strategies
+                         for source in strategy.data_sources)
+            _, research_scope = project_sources(data, names,
+                codec_limits=source_codec_limits(self.config))
+            signal_data = {key: value for key, value in signal_data.items()
+                           if key in research_scope['usable_sources']}
         from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
         scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
+        if resilience and any(not isinstance(data.get(source), dict)
+                or not isinstance(data[source].get('error'), str) or not data[source]['error'].strip()
+                for source in scope_errors):
+            raise ValueError('invalid_scoped_source_evidence')
         from .regulation_inputs import validate_regulation_policy
         regulation_source_scope = None
         try:
             regulation_source_scope = validate_regulation_policy(data, self.ar_config)
         except ValueError:
+            if resilience:
+                raise
             scope_errors['regulations'] = 'invalid_regulation_evidence_policy'
         from .filing_policy_validation import validate_filing_comparison_policy
         filing_comparison_scope = None
         try:
             filing_comparison_scope = validate_filing_comparison_policy(data, self.ar_config)
         except ValueError:
+            if resilience:
+                raise
             scope_errors['edgar'] = 'invalid_filing_comparison_policy'
         from .filing_attribution_validation import validate_filing_attribution_policy
         from tradingagents.strategies.data_sources.filing_attribution_policy import (
@@ -441,16 +468,21 @@ class MultiStrategyEngine:
         filing_attribution_scope = None
         try:
             filing_attribution_scope = validate_filing_attribution_policy(data, self.ar_config)
-            if filing_attribution_configured(self.ar_config):
+            if filing_attribution_configured(self.ar_config) and not resilience:
                 signal_data = dict(signal_data, edgar=(signal_edgar(data['edgar'], filing_attribution_scope)
                     if filing_attribution_scope is not None else {}))
         except ValueError:
+            if resilience:
+                raise
             scope_errors['edgar'] = 'invalid_filing_attribution_policy'
             signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
         from .filing_acquisition_validation import validate_filing_acquisition_policy
+        filing_acquisition_scope = None
         try:
-            validate_filing_acquisition_policy(data, self.ar_config)
+            filing_acquisition_scope = validate_filing_acquisition_policy(data, self.ar_config)
         except ValueError:
+            if resilience:
+                raise
             scope_errors['edgar'] = 'invalid_filing_acquisition_policy'
             signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
         from .filing_material_validation import validate_filing_material_policy, signal_edgar as material_signal_edgar
@@ -458,33 +490,70 @@ class MultiStrategyEngine:
         filing_material_scope = None
         try:
             filing_material_scope = validate_filing_material_policy(data, self.ar_config)
-            if filing_material_configured(self.ar_config) and 'edgar' not in scope_errors:
+            if filing_material_configured(self.ar_config) and not resilience and 'edgar' not in scope_errors:
                 signal_data = dict(signal_data, edgar=(material_signal_edgar(data['edgar'],
                     filing_material_scope, projected_edgar=signal_data.get('edgar'))
                     if filing_material_scope is not None else {}))
         except ValueError:
+            if resilience:
+                raise
             scope_errors['edgar'] = 'invalid_filing_material_policy'
             signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        filing_isolation = None
+        if resilience and filing_material_configured(self.ar_config):
+            from .filing_research_isolation import isolate_filing_research
+            projected_edgar, filing_isolation = isolate_filing_research(data.get('edgar', {}),
+                self.ar_config, strict_material_scope=filing_material_scope,
+                acquisition_scope=filing_acquisition_scope)
+            if filing_isolation['discovery_scope']['outcome'] == 'complete':
+                signal_data = dict(signal_data, edgar=projected_edgar)
+            else:
+                signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
         regime_model = self._build_regime_model(signal_data)
+        if resilience:
+            # Every analyzer and committee consumes the shared regime. Unknown
+            # dependencies therefore hold all new entries, including unrelated
+            # otherwise healthy source candidates.
+            if any(regime_model[key] is None for key in
+                   ('vix_level', 'credit_spread_bps', 'yield_curve_slope')):
+                research_hold_reasons.append('shared_regime_unavailable')
+            regime_model['research_source_scope'] = research_scope
+            regime_model['filing_research_isolation'] = filing_isolation
+            regime_model['research_hold_reasons'] = research_hold_reasons
         regime_model.setdefault("timestamp", datetime.now().isoformat())
-        if 'courtlistener' in scope_proofs:
+        if 'courtlistener' in scope_proofs and (not resilience or 'courtlistener' in signal_data):
             from .scoped_sources import litigation_context
             regime_model['litigation_context'] = litigation_context(data, scope_proofs['courtlistener'])
+
+        if resilience:
+            from .research_resilience import digest as research_digest
+            codec_limits = source_codec_limits(self.config)
+            regime_model['research_projection_sha256'] = research_digest(signal_data, codec_limits=codec_limits)
 
         universe = None
         universe_failure = False
         if self.ar_config.get("equity_universe_policy"):
             from tradingagents.strategies.data_sources.equity_universe import EquityUniverse, POLICY
-            try:
-                if self.ar_config["equity_universe_policy"] != POLICY:
-                    raise ValueError("unsupported equity universe policy")
-                universe_data = data.get("equity_universe", {})
-                if universe_data.get("error"):
-                    raise ValueError("equity universe acquisition failed")
-                universe = EquityUniverse(universe_data.get("snapshot"),
-                    company_map=data.get("edgar", {}).get("company_tickers"))
-            except (ValueError, TypeError, AttributeError):
+            if resilience and self.ar_config['equity_universe_policy'] != POLICY:
+                raise ValueError('invalid_research_universe_policy')
+            if resilience and 'equity_universe' not in signal_data:
                 universe_failure = True
+            else:
+                try:
+                    if self.ar_config["equity_universe_policy"] != POLICY:
+                        raise ValueError("unsupported equity universe policy")
+                    selected = signal_data if resilience else data
+                    universe_data = selected.get("equity_universe", {})
+                    if universe_data.get("error"):
+                        raise ValueError("equity universe acquisition failed")
+                    universe = EquityUniverse(universe_data.get("snapshot"),
+                        company_map=selected.get("edgar", {}).get("company_tickers"))
+                except (ValueError, TypeError, AttributeError):
+                    if resilience and universe_data.get('snapshot') is not None:
+                        raise
+                    universe_failure = True
+        if resilience and universe_failure:
+            research_hold_reasons.append('required_universe_unavailable')
         from tradingagents.strategies.data_sources.state_economics_policy import configured as state_configured
         state_enabled = state_configured(self.ar_config)
         state_failure = None
@@ -497,11 +566,17 @@ class MultiStrategyEngine:
                 state_scope = state_policy_scope(data, self.ar_config, trading_date, universe=universe)
                 state_coverage = state_scope['source_coverage']
                 if state_scope['exposure_registry_error']:
+                    if resilience:
+                        raise ValueError('invalid_state_exposure_registry')
                     state_failure = state_scope['exposure_registry_error']
                 elif not state_coverage['complete']:
                     state_failure = 'incomplete_state_unemployment_coverage'
             except (ValueError, TypeError, KeyError):
+                if resilience and (not isinstance(data.get('fred'), dict)
+                        or not data['fred'].get('error') or data['fred'].get('state_unemployment') is not None):
+                    raise
                 state_failure = 'invalid_state_unemployment_evidence'
+        analysis_inputs = {}
         all_signals: list[dict] = []
         health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
@@ -525,7 +600,10 @@ class MultiStrategyEngine:
                 from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
                 with candidate_universe(universe):
                     candidates = (admit_candidates(strategy.name, [], budget=None)
-                        if any(source in scope_errors for source in strategy.data_sources) or (strategy.name == 'state_economics' and state_failure == 'invalid_state_unemployment_evidence')
+                        if any(source in scope_errors or (resilience and source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES)
+                               for source in strategy.data_sources) or (resilience and filing_isolation is not None
+                                   and strategy.name == 'quantum_readiness'
+                                   and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete') or (strategy.name == 'state_economics' and state_failure == 'invalid_state_unemployment_evidence')
                         else strategy.screen(signal_data, trading_date, params))
                     if not hasattr(candidates, "admission_manifest"):
                         candidates = admit_candidates(strategy.name, candidates, budget=None)
@@ -536,7 +614,17 @@ class MultiStrategyEngine:
                 admission_manifest = None
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
-            if candidates:
+            if resilience:
+                for candidate in candidates:
+                    analysis_inputs[id(candidate)] = research_digest({
+                        'candidate': asdict(candidate), 'strategy': strategy.name,
+                        'regime': regime_model, 'projection_sha256': regime_model['research_projection_sha256']},
+                        codec_limits=codec_limits)
+            if research_hold_reasons:
+                for candidate in candidates:
+                    candidate.journal_only = True
+                    candidate.metadata['non_actionable_reason'] = research_hold_reasons[0]
+            if candidates and not research_hold_reasons:
                 filing_options = ({'filing_data': signal_data, 'universe': universe}
                     if (self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
                         or self.ar_config.get('regulation_evidence_policy') is not None) else {})
@@ -565,6 +653,14 @@ class MultiStrategyEngine:
                         candidate.metadata.setdefault("non_actionable_reason", "equity_universe_unresolved")
                         candidate.journal_only = True
             provider_errors = _provider_errors(data, strategy.data_sources)
+            if resilience:
+                for source in strategy.data_sources:
+                    if source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES:
+                        provider_errors.setdefault(source, research_scope['sources'][source]['reason'])
+                if filing_isolation is not None and strategy.name == 'quantum_readiness' and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete':
+                    provider_errors['edgar'] = 'aggregate_dependency_gap'
+                if research_hold_reasons:
+                    provider_errors['shared_regime'] = research_hold_reasons[0]
             provider_errors.update({source: reason for source, reason in scope_errors.items()
                                     if source in strategy.data_sources})
             if strategy.name == 'state_economics' and state_enabled and state_failure:
@@ -668,6 +764,10 @@ class MultiStrategyEngine:
                 if filing_material_scope is not None:
                     from copy import deepcopy
                     health_record.evidence['filing_material_scope'] = deepcopy(filing_material_scope)
+            if resilience:
+                health_record.evidence['research_source_scope'] = research_scope
+                health_record.evidence['filing_research_isolation'] = filing_isolation
+                health_record.evidence['research_hold_reasons'] = list(research_hold_reasons)
             health.append(health_record)
             for c in candidates:
                 if c.metadata.get("equity_universe_excluded"):
@@ -686,6 +786,14 @@ class MultiStrategyEngine:
                         "journal_only": c.journal_only,
                     }
                 )
+            if resilience:
+                from .research_resilience import bind_signal
+                for candidate in candidates:
+                    if candidate.metadata.get('equity_universe_excluded'):
+                        continue
+                    signal = next(row for row in reversed(all_signals) if row['metadata'] is candidate.metadata)
+                    bind_signal(signal, regime_model, strategy.data_sources, analysis_inputs[id(candidate)],
+                                codec_limits=codec_limits)
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))
 
         all_signals, health = hold_incomplete_model_sample(all_signals, health)
@@ -840,6 +948,27 @@ class MultiStrategyEngine:
             )
         )
         epoch_id = marked_account.epoch_id
+        from .research_resilience import configured as resilience_configured
+        resilience = resilience_configured(self.ar_config)
+        exit_data = data
+        original_enrichment = enrichment
+        enrichment_scope = None
+        if resilience:
+            from .research_resilience import validate_projection, validate_signal, validate_retained_signal, project_enrichment
+            from .source_inputs import source_codec_limits
+            exit_data = validate_projection(self, data, shared_regime)
+            enrichment, enrichment_scope = project_enrichment(enrichment, codec_limits=source_codec_limits(self.config))
+            strategy_sources = {strategy.name: strategy.data_sources for strategy in self.paper_trade_strategies}
+            for signal in shared_signals:
+                if signal.get('journal_only') or signal.get('metadata', {}).get('non_actionable_reason'):
+                    continue
+                if shared_regime['research_hold_reasons']:
+                    raise ValueError('invalid_research_candidate_during_hold')
+                if signal.get('metadata', {}).get('retained_from_signal_id'):
+                    validate_retained_signal(signal, self.ledger, session, epoch_id, policy_id)
+                else:
+                    validate_signal(signal, shared_regime, strategy_sources.get(signal.get('strategy'), ()),
+                                    codec_limits=source_codec_limits(self.config))
         from tradingagents.strategies.orchestration.decision_clock import resolve_cutoff, policy, PROSPECTIVE, require_live_staging
         decision_context = data.get('_decision_context')
         cutoff = resolve_cutoff(self.config, session, decision_context)
@@ -1021,6 +1150,13 @@ class MultiStrategyEngine:
                     bound_at=cutoff,
                 )
         if replaying:
+            if resilience:
+                from .research_resilience import validate_book_source_scope
+                accepted_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
+                status = accepted_decision.get('status', {}) if isinstance(accepted_decision, dict) else {}
+                validate_book_source_scope(status, shared_regime, codec_limits=source_codec_limits(self.config))
+                if status.get('research_enrichment_scope') != enrichment_scope:
+                    raise ValueError('research_enrichment_scope_conflict')
             records = self.ledger.read_signals(
                 session, session, epoch_id=epoch_id, policy_id=policy_id
             )
@@ -1347,9 +1483,26 @@ class MultiStrategyEngine:
         # coverage remains independent of the surviving selection input.
         incomplete_model_phase = model_sample_incomplete(shared_signals) or (
             model_coverage is not None and model_coverage.get("complete") is False)
+        if resilience and 'model_deadline_exhausted' in enrichment_scope['hold_reasons']:
+            incomplete_model_phase = True
         phase_model_coverage = {"complete": not incomplete_model_phase}
         if incomplete_model_phase:
             phase_model_coverage["reason"] = "model_deadline_exhausted"
+        research_authority = None
+        if resilience:
+            from .research_resilience import digest as research_digest, POLICY as RESEARCH_POLICY
+            research_authority = {'version': 'research-book-authority-v1', 'policy': RESEARCH_POLICY,
+                'source_bundle_sha256': shared_regime['research_source_scope']['source_bundle_sha256'],
+                'source_scope_sha256': research_digest(shared_regime['research_source_scope'], codec_limits=source_codec_limits(self.config)),
+                'filing_isolation_sha256': research_digest(shared_regime.get('filing_research_isolation'), codec_limits=source_codec_limits(self.config)),
+                'projection_sha256': shared_regime['research_projection_sha256'],
+                'shared_context_sha256': research_digest(shared_regime, codec_limits=source_codec_limits(self.config)),
+                'entry_hold': bool(incomplete_model_phase or shared_regime['research_hold_reasons']),
+                'hold_reasons': (['model_deadline_exhausted'] if incomplete_model_phase else list(shared_regime['research_hold_reasons'])),
+                'eligible_signal_ids': sorted(record.signal_id for _, record in timely),
+                'candidate_receipts': {record.signal_id: signal['metadata']['research_admission'] for signal, record in timely},
+                'retained_origins': {record.signal_id: signal['metadata']['retained_from_signal_id']
+                    for signal, record in timely if signal['metadata'].get('retained_from_signal_id')}}
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
         frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
         if frozen_decision is None:
@@ -1372,13 +1525,18 @@ class MultiStrategyEngine:
                 model_coverage=phase_model_coverage,
             )
             decision_status = dict(committee.last_decision_status)
-            failures = _enrichment_failures(enrichment or {})
+            if research_authority is not None:
+                decision_status['research_authority'] = research_authority
+                decision_status['research_enrichment_scope'] = enrichment_scope
+                if not enrichment_scope['research_coverage_complete']:
+                    decision_status['degraded'] = True
+            failures = _enrichment_failures(original_enrichment or {})
             if failures:
                 decision_status["enrichment_failures"] = failures
-            if "short_interest_acquisition" in (enrichment or {}):
+            if "short_interest_acquisition" in (original_enrichment or {}):
                 from tradingagents.strategies.data_sources.finra_bulk import validated_acquisition
                 decision_status["short_interest_acquisition"] = validated_acquisition(
-                    enrichment["short_interest_acquisition"])
+                    original_enrichment["short_interest_acquisition"])
             decision_status["selected_signal_ids"] = sorted({
                 record.signal_id for _, record in timely for rec in recommendations
                 if record.ticker == rec.ticker and record.direction == rec.direction
@@ -1389,6 +1547,10 @@ class MultiStrategyEngine:
                 "policy_decisions": [asdict(row) for row in committee.last_policy_decisions]}
             self.ledger.record_committee_decision(session, epoch_id, policy_id, frozen_decision)
         else:
+            if resilience and frozen_decision['status'].get('research_authority') != research_authority:
+                raise ValueError('research_book_authority_conflict')
+            if resilience and frozen_decision['status'].get('research_enrichment_scope') != enrichment_scope:
+                raise ValueError('research_enrichment_scope_conflict')
             from tradingagents.strategies.modules.base import OptionSpec
             from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
             from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicyDecision
@@ -1481,7 +1643,7 @@ class MultiStrategyEngine:
             rec_specs.append((recommendation, contributor_records))
 
         exit_specs, cancellations = (self._build_exit_specs(
-            session, cutoff, eligible_session, raw_bars, data, horizon
+            session, cutoff, eligible_session, raw_bars, exit_data, horizon
         ) if decision_context is None else ([], []))
         staged_ids: list[str] = []
 
@@ -1491,7 +1653,7 @@ class MultiStrategyEngine:
             if decision_context is not None:
                 publication_at = require_live_staging(self.config, session, decision_context)
                 current_exit_specs, current_cancellations = self._build_exit_specs(
-                    session, publication_at, eligible_session, raw_bars, data, horizon)
+                    session, publication_at, eligible_session, raw_bars, exit_data, horizon)
             zero_share_candidates: set[tuple[str, str]] = set()
             for intent in current_cancellations:
                 self.ledger.cancel_intent(
@@ -2926,8 +3088,19 @@ class MultiStrategyEngine:
     def _analyze_candidate(self, c: Candidate, strategy_name: str, regime_context: dict | None, analyzer, *,
                            filing_data: dict | None = None, universe=None) -> None:
         """Validate one assessment using this worker's independent analyzer state."""
+        from copy import deepcopy
+        import hashlib
+        from .research_resilience import configured as resilience_configured
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
         from tradingagents.strategies.candidate_response_reuse import begin_candidate_response, commit_candidate_response, end_candidate_response
+        resilience = resilience_configured(self.ar_config)
+        if resilience:
+            # A refusal before the call boundary must not inherit the preceding
+            # candidate's request, returned text, or transport provenance.
+            analyzer.last_research_request = None
+            analyzer.last_call_response = {'received': False, 'text': None}
+            analyzer.last_call_provenance = {}
+            analyzer.last_call_failure = ''
         analysis_type = c.metadata.get("analysis_type", "")
         llm_result = {}
         full_filing = c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1'
@@ -3081,6 +3254,13 @@ class MultiStrategyEngine:
             else:
                 raise ValueError(f"unsupported_required_analysis:{analysis_type}")
             model_timeout()
+            if resilience:
+                observed = getattr(analyzer, 'last_call_response', None)
+                if isinstance(observed, dict) and observed.get('received') is True and type(observed.get('text')) is str:
+                    try:
+                        observed['text'].encode('utf-8')
+                    except UnicodeEncodeError as error:
+                        raise ValueError('invalid_response_encoding') from error
             provenance = getattr(analyzer, "last_call_provenance", None)
             if isinstance(provenance, dict) and provenance:
                 c.metadata["model_provenance"] = dict(provenance)
@@ -3178,8 +3358,35 @@ class MultiStrategyEngine:
                 c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
             logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
         finally:
+            if resilience:
+                observed = getattr(analyzer, 'last_call_response', None)
+                text = observed.get('text') if isinstance(observed, dict) and observed.get('received') is True else None
+                raw, encoding = None, None
+                if type(text) is str:
+                    encoding = 'utf-8'
+                    try:
+                        raw = text.encode('utf-8')
+                    except UnicodeEncodeError:
+                        # Keep invalid scalars losslessly and explicitly. They
+                        # cannot become a validated assessment or memo entry.
+                        raw = text.encode('utf-8', errors='surrogatepass')
+                        encoding = 'utf-8-surrogatepass'
+                status = c.metadata.get('analysis_status', 'failed')
+                request = getattr(analyzer, 'last_research_request', None)
+                provenance = getattr(analyzer, 'last_call_provenance', None)
+                c.metadata['research_model_outcome'] = {
+                    'version': 'research-model-outcome-v1',
+                    'model_request': deepcopy(request) if isinstance(request, dict) else None,
+                    'response_received': raw is not None,
+                    'response_sha256': hashlib.sha256(raw).hexdigest() if raw is not None else None,
+                    'response_bytes': len(raw) if raw is not None else None, 'response_encoding': encoding,
+                    # This records this assessment, before any later timeout
+                    # holds the complete sample through final candidate flags.
+                    'analysis_status': status,
+                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason') if status == 'failed' else None,
+                    'model_provenance': deepcopy(provenance) if isinstance(provenance, dict) else {},
+                }
             if regulation_call_started:
-                from copy import deepcopy
                 attempt = getattr(analyzer, 'last_regulation_attempt', None)
                 provenance = getattr(analyzer, 'last_call_provenance', None)
                 if isinstance(attempt, dict):

@@ -25,6 +25,15 @@ def validate_regulation_policy(data, config):
             if graph is not None or labeled:
                 raise ValueError('undeclared regulation evidence')
             return None
+        from .research_resilience import configured as resilience_configured
+        if (resilience_configured(config) and policy == POLICY and graph is None
+                and isinstance(source.get('error'), str) and source['error'].strip()):
+            # An outage before graph publication is a retained research gap.
+            # A declared accepted record without its graph is still corruption.
+            if any(row.get('regulation_evidence_status') == 'complete'
+                   for row in source.get('proposed_rules', [])):
+                raise ValueError('accepted regulation evidence graph missing')
+            return None
         if policy != POLICY or graph is None:
             raise ValueError('missing regulation evidence graph')
         summary = validate_regulation_source(source)

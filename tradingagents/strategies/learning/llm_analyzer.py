@@ -139,6 +139,7 @@ class LLMAnalyzer:
         self._thesis_effort = self.config.get("autoresearch", {}).get("thesis_effort", self._effort)
         self.last_call_provenance: dict[str, Any] = {}
         self.last_call_failure = ""
+        self.last_research_request: dict[str, Any] | None = None
         self._provider_clients: dict[str, Any] = {}
         # Older models use temperature zero by default. Sonnet 5 omits sampling
         # controls because adaptive thinking rejects non-default values.
@@ -175,6 +176,7 @@ class LLMAnalyzer:
         result._prompt_overrides = dict(self._prompt_overrides)
         result.last_call_provenance = {}
         result.last_call_failure = ""
+        result.last_research_request = None
         result._client = fork_client(self._client)
         result._provider_clients = {name: fork_client(client) for name, client in self._provider_clients.items()}
         return result
@@ -247,6 +249,12 @@ class LLMAnalyzer:
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
         model = self._model_name if role == "bounded" else self._thesis_model
         effort = self._effort if role == "bounded" else self._thesis_effort
+        from tradingagents.strategies.orchestration.research_resilience import configured as resilience_configured
+        from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
+        self.last_research_request = None
+        if resilience_configured(self.config.get('autoresearch', {})):
+            self.last_research_request = request_receipt(model=model, role=role, effort=effort,
+                max_tokens=max_tokens, temperature=self._temperature, system=system, prompt=user)
         self.last_call_response = {'received': False, 'text': None}
         def observed_response(text):
             if type(text) is str:

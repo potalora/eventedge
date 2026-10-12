@@ -1646,6 +1646,9 @@ class SessionExecutor:
             },
         }
         policy_document = self.portfolio_policy_document()
+        from .research_resilience import configured as research_resilience_configured, POLICY as RESEARCH_POLICY
+        if research_resilience_configured(self.ar_config):
+            semantic_inputs['research_resilience_policy'] = RESEARCH_POLICY
         if self.pricing_version == SIP_PRICING_VERSION:
             # Bind current provider and benchmark semantics against same-session
             # source-policy substitution.

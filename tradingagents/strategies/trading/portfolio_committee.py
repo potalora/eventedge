@@ -135,6 +135,7 @@ class PortfolioCommittee:
         self.last_decision_status: dict[str, Any] = {}
         self._model_failure_reason = ""
         self.last_call_provenance: dict[str, Any] = {}
+        self.last_research_request: dict[str, Any] | None = None
 
     def synthesize(
         self,
@@ -162,6 +163,7 @@ class PortfolioCommittee:
             List of TradeRecommendation sorted by confidence descending.
         """
         self.last_policy_decisions = ()
+        self.last_research_request = None
         self._model_failure_reason = ""
         self.last_call_provenance = {"configured_model": self._model_name,
             "returned_model": None, "returned_revision": None, "identity_status": "unpinned",
@@ -179,6 +181,14 @@ class PortfolioCommittee:
         if (model_coverage is not None and model_coverage.get("complete") is False) or any(
             (s.get("metadata") or {}).get("analysis_failure_reason") == "model_deadline_exhausted" for s in signals):
             self.last_decision_status.update(status="failed", degraded=True, reason="model_deadline_exhausted")
+            return []
+        from tradingagents.strategies.orchestration.research_resilience import configured as resilience_configured
+        holds = (regime_context or {}).get('research_hold_reasons', [])
+        if resilience_configured(self.config.get('autoresearch', {})) and holds:
+            if not isinstance(holds, list) or any(type(reason) is not str or not reason for reason in holds):
+                raise ValueError('invalid_research_hold')
+            self.last_decision_status.update(status='research_hold', degraded=True,
+                reason=holds[0], research_hold_reasons=list(holds))
             return []
         signals = [s for s in signals if not s.get("journal_only") and not (s.get("metadata") or {}).get("non_actionable_reason")]
         self.last_decision_status["eligible_count"] = len(signals)
@@ -211,6 +221,8 @@ class PortfolioCommittee:
                 logger.warning("LLM synthesis failed; holding cash", exc_info=True)
             if self.last_call_provenance:
                 self.last_decision_status["model_provenance"] = dict(self.last_call_provenance)
+            if self.last_research_request is not None:
+                self.last_decision_status['model_request'] = dict(self.last_research_request)
             if ranked is None:
                 self.last_decision_status.update(status="failed", degraded=True,
                     reason=self._model_failure_reason or "model_unavailable")
@@ -940,6 +952,13 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
 
     def _call_llm(self, *, system: str, prompt: str, max_tokens: int = 1024):
         """SDK retries are off; rate-limit backoff consumes one shared deadline."""
+        from tradingagents.strategies.orchestration.research_resilience import configured as resilience_configured
+        from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
+        self.last_research_request = None
+        if resilience_configured(self.config.get('autoresearch', {})):
+            self.last_research_request = request_receipt(model=self._model_name, role='committee',
+                effort=self._effort, max_tokens=max_tokens, temperature=self._temperature,
+                system=system, prompt=prompt)
         from tradingagents.strategies.llm_utils import call_analysis_model
         from tradingagents.strategies.chatgpt_plan_client import require_configured_billing
         from tradingagents.strategies.runtime_deadline import (

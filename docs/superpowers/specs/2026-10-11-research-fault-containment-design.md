@@ -1,6 +1,6 @@
 # Research fault containment for the next generation
 
-Status: approved for implementation following Pedro's request for a system that can finish safely despite unpredictable research-data quality and explicit answer, "Implement this resilience policy." This prospectively changes the earlier requirement that every parser failure block operational acceptance; original full-source/full-analysis acceptance remains false when gaps exist. Implementation and verification remain pending. No deployment is authorized. The separately approved SoundThinking whole-filing quarantine and next-generation Luna extraction pilot keep their own scopes.
+Status: approved following Pedro's request for a system that can finish safely despite unpredictable research-data quality and explicit answer, "Implement this resilience policy." This prospectively changes the earlier requirement that every parser failure block operational acceptance; original full-source/full-analysis acceptance remains false when gaps exist. The opt-in implementation is in final verification. On October 12 Pedro authorized an isolated local deployment and local testing to free the VPS for maintenance; VPS deployment and production mutation remain unauthorized. The separately approved SoundThinking whole-filing quarantine and next-generation Luna extraction pilot keep their own scopes.
 
 ## Intended behavior
 

@@ -56,6 +56,7 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "daily_loss_basis",
         "signal_return_basis",
         "benchmark_return_basis",
+        "research_resilience_policy",
     }
 )
 _NESTED_POLICY_KEYS = {
@@ -167,13 +168,17 @@ def _validate_execution_policy_schema(policy: object) -> None:
     optional = {
         "portfolio_policy", "price_source_policy", "benchmark_price_source_policy",
         "risk_discipline", "carrying_cost_clock", "corporate_action_terms", "daily_loss_basis",
-        "signal_return_basis", "benchmark_return_basis"
+        "signal_return_basis", "benchmark_return_basis", "research_resilience_policy"
     }
     missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
         )
+    if "research_resilience_policy" in policy:
+        from .research_resilience import configured
+        if not configured(policy):
+            raise ValueError("invalid_research_resilience_policy")
     source_keys = {"price_source_policy", "benchmark_price_source_policy"}
     if actual & source_keys and not source_keys.issubset(actual):
         raise ValueError("execution_policy price source policy pair is incomplete")

@@ -36,7 +36,7 @@ Pedro approved excluding `0001772351-26-000012` in full from trading decisions, 
 
 The administrative exhibit has low incremental signal, but the primary XML also contains unassessed merger terms. The whole filing, including all duplicate occurrences and dependent analyses, is excluded. Source acquisition and raw replay audit remain required; strict failed counts and original full-analysis failure remain visible. The historical v1/v2/v3 manifests are unchanged. Focused regression, source-byte mutation and actual two-child parser/capture checks are recorded in `data/forward-readiness/known-low-signal-v4-independent/`. Final integration, full-suite and exact-commit CI evidence is tracked separately from native acceptance.
 
-The separately approved [broader resilience design](../specs/2026-10-11-research-fault-containment-design.md) requires record/dependency isolation, safe research holds, preserved exits and recovery tests. Its implementation is pending; it is not implemented by this registry. Known low-value exclusions alone cannot prove resilience to unfamiliar failures.
+The separately approved [broader resilience design](../specs/2026-10-11-research-fault-containment-design.md) requires record/dependency isolation, safe research holds, preserved exits and recovery tests. Its opt-in application implementation passed the October 12 full suite (7,209 non-live tests); exact-commit CI and the fresh local native/replay campaign remain separate pending gates. This registry alone does not implement that behavior. Known low-value exclusions alone cannot prove resilience to unfamiliar failures.
 
 ## Required next-generation work: Luna document extraction
 
