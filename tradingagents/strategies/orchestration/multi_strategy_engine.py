@@ -315,6 +315,8 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from .filing_research_policy import configured as filing_research_disabled
+        filing_research_disabled(self.ar_config)
         from .research_resilience import configured as research_resilience_configured
         research_resilience_configured(self.ar_config)
         from .congress_policy import configured
@@ -2560,6 +2562,11 @@ class MultiStrategyEngine:
     def _fetch_edgar_events(self, trading_date: str | None = None,
                             universe_data: dict | None = None) -> dict[str, Any]:
         """Preserve valid EDGAR categories while exposing every failed operation."""
+        from .filing_research_policy import configured as filing_research_disabled
+        if filing_research_disabled(self.ar_config):
+            return {'error': 'filing_research_disabled',
+                    'coverage': {'complete': False, 'reason': 'filing_research_disabled',
+                                 'filing_research_policy': 'disabled_v1'}}
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         filing_policy = self.ar_config.get('filing_evidence_policy')

@@ -1,5 +1,9 @@
 # Source reliability verification and release notes
 
+## Current scope: bulk acquisition retired, October 12
+
+Pedro approved a targeted rollback: stop bulk full-filing/media acquisition and keep the useful trading and research-resilience fixes. The [reduced-scope configuration and closeout](../research/2026-10-12-bulk-filing-rollback.md) supersede the retry requirements below. Earlier campaign descriptions remain historical evidence, including their failures and then-pending work. The prospective disabled filing policy deliberately excludes EDGAR-dependent research and entries; it does not claim complete coverage, deployment or a successful live run.
+
 ## Prospective committee direction contract: October 12
 
 A read-only check of R6 committee dispatch 32 joins the exact request, complete inference stream, 711-byte response and durable `horizon_6m_size_100k` decision. The response is valid JSON but uses `SHORT` and `LONG`; both the frozen and current strict parser reject the unchanged first row at the exact lowercase direction check. The rejection and zero recommendations remain correct. The system prompt lists the direction field but omits its required lowercase values. Uppercase appears in policy prose, while input signals use lowercase; an influence on model casing is plausible, not proven.

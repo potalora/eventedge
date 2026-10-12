@@ -2,6 +2,8 @@
 
 An autonomous event-driven trading research system with 11 enabled strategies across 16 paper portfolio scenarios (4 time horizons × 4 portfolio sizes). A twelfth strategy identity is retained as an explicit policy exclusion. This is a personal research project.
 
+The current closeout candidate uses the [reduced research profile](docs/research/2026-10-12-bulk-filing-rollback.md): bulk filing/media acquisition is disabled, and EDGAR-dependent research and new entries are explicitly excluded. The capabilities below describe the system; the profile's actual coverage is narrower. This topic-branch candidate is not deployed.
+
 ## What it does
 
 Strategies examine events such as SEC filings, insider trades, and congressional disclosures. An LLM portfolio committee combines their signals and sizes positions for each scenario book.

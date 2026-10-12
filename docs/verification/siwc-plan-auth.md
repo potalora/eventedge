@@ -1,5 +1,9 @@
 # EventEdge ChatGPT plan authorization
 
+## Current scope: bulk acquisition retired, October 12
+
+Pedro approved a targeted rollback: stop bulk full-filing/media acquisition and keep the useful trading and research-resilience fixes. The [reduced-scope configuration and closeout](../research/2026-10-12-bulk-filing-rollback.md) supersede the retry requirements below. Earlier campaign descriptions remain historical evidence, including their failures and then-pending work. The prospective disabled filing policy deliberately excludes EDGAR-dependent research and entries; it does not claim complete coverage, deployment or a successful live run.
+
 ## Prospective committee response clarification: October 12
 
 The closed R6 HTTP200 committee response is valid JSON with uppercase directions; an exact offline parser invocation reproduces the correct schema rejection. The prompt omitted the existing lowercase `long`/`short` contract. An independently reviewed one-sentence prompt clarification leaves response validation, all model/risk settings and historical evidence unchanged. Its focused selection passed 130 tests and four additional independent cases checked the remaining size profiles. The source record documents the exact evidence and limits; it does not infer that prompt wording caused the model response or that the clarification guarantees compliance.
