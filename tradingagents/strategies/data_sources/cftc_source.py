@@ -1,23 +1,81 @@
 """CFTC Commitments of Traders data source.
 
-Wraps the `cot_reports` library to fetch COT positioning data.
-No API key needed — data is public. Graceful ImportError skip
-if cot_reports not installed.
+Fetches the same public annual COT archives as `cot_reports`, with bounded
+status-aware transport and in-memory parsing. No API key is needed.
 """
 
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import time
+import zipfile
+import zlib
 from typing import Any
 
 import pandas as pd
+import requests
 
 from .evidence import current_session_date, require_current_vintage, acquisition_time
-from .request_policy import provider_call, provider_budget, current_provider_deadline
+from .request_policy import provider_request, provider_budget, current_provider_deadline, provider_timeout
 from .fetch_errors import SourceFetchError, source_date, source_number, source_text
 
 logger = logging.getLogger(__name__)
+
+MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_REPORT_BYTES = 64 * 1024 * 1024
+
+
+def _archive_get(url: str, **options) -> requests.Response:
+    """One killable HTTP operation; the shared request policy owns retries."""
+    from tradingagents.strategies.runtime_deadline import bounded_transport
+
+    result = bounded_transport({'kind': 'http_get_bytes', 'url': url,
+        'timeout': options['timeout'], 'max_bytes': MAX_ARCHIVE_BYTES}, options['timeout'])
+    error = result.get('error')
+    if error == 'timeout':
+        raise requests.Timeout()
+    if error == 'transport_error':
+        raise requests.ConnectionError()
+    if error or type(result.get('status_code')) is not int:
+        raise SourceFetchError('CFTC archive transport invalid', reason_code='invalid_response')
+    response = requests.Response()
+    response.status_code = result['status_code']
+    response.headers.update(result.get('headers', {}))
+    try:
+        response._content = base64.b64decode(result['body_base64'], validate=True)
+        response._content_consumed = True
+        if len(response.content) > MAX_ARCHIVE_BYTES:
+            raise ValueError('oversized archive')
+    except (KeyError, TypeError, ValueError):
+        raise SourceFetchError('CFTC archive transport invalid', reason_code='invalid_response') from None
+    return response
+
+
+def _annual_report(year: int, prefix: str, member: str) -> pd.DataFrame:
+    response = provider_request('cftc', 'GET',
+        f'https://cftc.gov/files/dea/history/{prefix}{year}.zip',
+        operation='cot_report', transport=_archive_get)
+    try:
+        provider_timeout('cftc')
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            entries = [entry for entry in archive.infolist() if entry.filename == member]
+            if len(entries) != 1 or entries[0].file_size > MAX_REPORT_BYTES:
+                raise ValueError('invalid annual archive member')
+            with archive.open(entries[0]) as report:
+                body = report.read(MAX_REPORT_BYTES + 1)
+            if len(body) > MAX_REPORT_BYTES:
+                raise ValueError('oversized annual report')
+        frame = pd.read_csv(io.BytesIO(body), low_memory=False)
+        provider_timeout('cftc')
+        return frame
+    except SourceFetchError:
+        raise
+    except (zipfile.BadZipFile, zlib.error, KeyError, ValueError, OSError, RuntimeError, UnicodeError):
+        raise SourceFetchError('CFTC annual archive invalid', reason_code='invalid_response') from None
+    finally:
+        response.close()
 
 # Column names in the cot_reports library output (disaggregated report)
 COL_MARKET = "Market_and_Exchange_Names"
@@ -88,16 +146,14 @@ class CFTCSource:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        import cot_reports as cot
-
-        # Map our friendly names to cot_reports library's expected strings
-        cot_type_map = {
-            "legacy_futures": "legacy_fut",
-            "disaggregated_futures": "disaggregated_fut",
-            "traders_in_financial_futures": "traders_in_financial_futures_fut",
+        # Preserve cot_reports' exact annual URLs and expected member names.
+        annual_reports = {
+            "legacy_futures": ("deacot", "annual.txt"),
+            "disaggregated_futures": ("fut_disagg_txt_", "f_year.txt"),
+            "traders_in_financial_futures": ("fut_fin_txt_", "FinFutYY.txt"),
         }
-        cot_type = cot_type_map.get(report_type)
-        if cot_type is None:
+        archive_spec = annual_reports.get(report_type)
+        if archive_spec is None:
             raise ValueError(f"Unknown report type: {report_type}")
 
         from datetime import date, timedelta
@@ -107,7 +163,9 @@ class CFTCSource:
         start = end - timedelta(weeks=lookback_weeks + 2)
         frames = []
         for year in range(start.year, end.year + 1):
-            frame = provider_call("cftc", "cot_report", lambda year=year: cot.cot_year(year, cot_report_type=cot_type, store_txt=False))
+            provider_timeout('cftc')
+            frame = _annual_report(year, *archive_spec)
+            provider_timeout('cftc')
             if not isinstance(frame, pd.DataFrame) or not {COL_MARKET, COL_DATE, COL_MM_LONG, COL_MM_SHORT}.issubset(frame.columns):
                 raise SourceFetchError("CFTC report invalid", reason_code="invalid_response")
             frames.append(frame)
@@ -130,6 +188,7 @@ class CFTCSource:
                                    partial_data={"raw_report": df[valid & (df[COL_DATE].astype(str).str[:10] <= as_of)].copy()})
 
         df = df[df[COL_DATE].astype(str).str[:10] <= as_of].copy()
+        provider_timeout('cftc')
         self._cache[cache_key] = df
         return df
 

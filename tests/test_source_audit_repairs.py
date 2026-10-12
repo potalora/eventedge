@@ -110,15 +110,15 @@ def test_cftc_rolling_lookback_and_acquisition_availability(monkeypatch):
     monkeypatch.setattr(mod, 'current_session_date', lambda: '2026-01-31', raising=False)
     years = []
     options = []
-    def annual(year, **kw):
+    def annual(year, *spec):
         years.append(year)
-        options.append(kw)
+        options.append(spec)
         dates = pd.date_range('2025-02-04', periods=48, freq='7D') if year == 2025 else pd.date_range('2026-01-06', periods=4, freq='7D')
         return pd.DataFrame({mod.COL_MARKET:[mod.COMMODITY_CODES['gold']]*len(dates),mod.COL_DATE:dates.strftime('%Y-%m-%d'),mod.COL_MM_LONG:[200]*48 if year==2025 else [10,20,30,100],mod.COL_MM_SHORT:[0]*len(dates)})
-    monkeypatch.setitem(sys.modules, 'cot_reports', NS(cot_year=annual))
+    monkeypatch.setattr(mod, '_annual_report', annual)
     row = mod.CFTCSource().fetch({'commodities':['gold'],'lookback_weeks':52,'as_of':'2026-01-31'})['gold']
     assert set(years) >= {2025,2026}
-    assert options == [{'cot_report_type':'disaggregated_fut','store_txt':False} for _ in years]
+    assert options == [('fut_disagg_txt_', 'f_year.txt') for _ in years]
     assert row['percentile'] == round(3/52,4) and row['lookback_observations'] == 52
     assert row['observation_date'] == '2026-01-27'
     assert row['available_at'] == row['acquired_at'] and row['available_at'] > row['observation_date']
@@ -220,7 +220,7 @@ def test_multi_request_acquisition_shares_one_absolute_budget(provider, monkeypa
         def annual(*a,**kw):
             calls.append(kw);clock[0]+=61
             return pd.DataFrame({cot_mod.COL_MARKET:[cot_mod.COMMODITY_CODES['gold']],cot_mod.COL_DATE:['2025-12-30'],cot_mod.COL_MM_LONG:[1],cot_mod.COL_MM_SHORT:[0]})
-        monkeypatch.setitem(sys.modules,'cot_reports',NS(cot_year=annual))
+        monkeypatch.setattr(cot_mod, '_annual_report', annual)
     call={'edgar':lambda:EDGARSource().search_filings('10-K'), 'usaspending':lambda:USASpendingSource().search_contracts(date_from='2026-10-01',date_to='2026-10-09'),'cftc':lambda:cot_mod.CFTCSource()._fetch_raw_report()}[provider]
     with pytest.raises(SourceFetchError) as exc:
         call()
@@ -268,7 +268,7 @@ def test_drought_keeps_observation_period_separate_from_acquisition(monkeypatch)
 def test_cftc_invalid_date_is_not_silently_filtered_out_of_annual_report(monkeypatch):
     import tradingagents.strategies.data_sources.cftc_source as mod
     frame=pd.DataFrame({mod.COL_MARKET:[mod.COMMODITY_CODES['gold']],mod.COL_DATE:['not-a-date'],mod.COL_MM_LONG:[10],mod.COL_MM_SHORT:[0]})
-    monkeypatch.setitem(sys.modules,'cot_reports',NS(cot_year=lambda *a,**kw:frame))
+    monkeypatch.setattr(mod, '_annual_report', lambda *a: frame)
     source=mod.CFTCSource()
     with pytest.raises(SourceFetchError):
         source._fetch_raw_report()

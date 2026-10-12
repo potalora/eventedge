@@ -141,6 +141,34 @@ def _execute_plan(payload):
 
 
 def execute(payload):
+    if payload['kind'] == 'http_get_bytes':
+        import base64
+        import requests
+        limit = payload.get('max_bytes')
+        if type(limit) is not int or not 1 <= limit <= 16 * 1024 * 1024:
+            return {'error': 'invalid_response'}
+        try:
+            with requests.get(payload['url'], timeout=payload['timeout'], stream=True) as response:
+                result = {'status_code': response.status_code,
+                          'headers': {'Retry-After': response.headers.get('Retry-After', '')},
+                          'body_base64': ''}
+                if not 200 <= response.status_code < 300:
+                    return result
+                length = response.headers.get('Content-Length')
+                if isinstance(length, str) and length.isascii() and length.isdigit():
+                    if len(length) > 20 or int(length) > limit:
+                        return {'error': 'invalid_response'}
+                content = bytearray()
+                for chunk in response.iter_content(chunk_size=65536):
+                    if not isinstance(chunk, bytes) or len(content) + len(chunk) > limit:
+                        return {'error': 'invalid_response'}
+                    content.extend(chunk)
+                result['body_base64'] = base64.b64encode(content).decode('ascii')
+                return result
+        except requests.Timeout:
+            return {'error': 'timeout'}
+        except requests.RequestException:
+            return {'error': 'transport_error'}
     if payload["kind"] == "http_get":
         import requests
         try:

@@ -10,6 +10,7 @@ from collections import Counter
 from copy import deepcopy
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
+import io
 from pathlib import Path
 import subprocess
 from datetime import date, datetime, timedelta, timezone
@@ -18,6 +19,7 @@ import json
 import math
 import socket
 import sys
+import zipfile
 from types import ModuleType, SimpleNamespace
 
 import pandas as pd
@@ -61,7 +63,7 @@ class TransportFixture:
     def response(payload, status=200, *, headers=None):
         response = requests.Response()
         response.status_code = status
-        response._content = (payload if isinstance(payload, str) else json.dumps(payload)).encode()
+        response._content = payload if isinstance(payload, bytes) else (payload if isinstance(payload, str) else json.dumps(payload)).encode()
         response._content_consumed = True
         response.headers.update(headers or {})
         return response
@@ -73,6 +75,12 @@ class TransportFixture:
         self.calls[url.split("?")[0]] += 1
         params = kwargs.get("params") or {}
         self.request_trace.append((url, dict(params)))
+        if url.startswith('https://cftc.gov/files/dea/history/fut_disagg_txt_'):
+            year = int(url.rsplit('_', 1)[1].removesuffix('.zip'))
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as output:
+                output.writestr('f_year.txt', self.cot(year).to_csv(index=False))
+            return self.response(archive.getvalue())
         if "data.alpaca.markets" in url:
             requested = params["start"][:10]
             opening = 184 if requested == "2026-10-05" else 182
@@ -287,11 +295,20 @@ def pipeline(monkeypatch, tmp_path):
     monkeypatch.setattr(socket, "create_connection", forbid_socket)
     monkeypatch.setattr(requests.sessions.Session, "request", lambda _self, method, url, **kwargs: fixture.http(method, url, **kwargs))
     monkeypatch.setattr(yfinance, "download", fixture.yahoo)
+    # Availability remains optional in production; the archive fixture itself
+    # does not need the cot_reports package installed in baseline CI.
+    monkeypatch.setitem(sys.modules, 'cot_reports', ModuleType('cot_reports'))
     from tradingagents.strategies.data_sources.fred_source import FREDSource
     monkeypatch.setattr(FREDSource, "_get_series", lambda _self, series_id, **kwargs: fixture.fred(series_id, **kwargs))
-    cot = ModuleType("cot_reports")
-    cot.cot_year = fixture.cot
-    monkeypatch.setitem(sys.modules, "cot_reports", cot)
+    from tradingagents.strategies import runtime_deadline, transport_worker
+    original_transport = runtime_deadline.bounded_transport
+    def source_transport(payload, timeout):
+        # Retain offline response boundaries inside the disposable binary HTTP
+        # worker; real process reaping has separate transport acceptance tests.
+        if payload['kind'] == 'http_get_bytes':
+            return transport_worker.execute(payload)
+        return original_transport(payload, timeout)
+    monkeypatch.setattr(runtime_deadline, 'bounded_transport', source_transport)
     from tradingagents.strategies import llm_utils
     monkeypatch.setattr(llm_utils, "call_analysis_model", fixture.model)
     # Accelerate provider pacing while exercising the real request/retry policy.

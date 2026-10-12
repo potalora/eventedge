@@ -115,7 +115,7 @@ def test_other_required_operation_errors_are_explicit(provider,monkeypatch):
         source._http=SimpleNamespace(get=fail)
         call=lambda:source.fetch_recent_earnings('2026-10-01','2026-10-06')
     elif provider=='cftc':
-        monkeypatch.setitem(sys.modules,'cot_reports',SimpleNamespace(cot_year=fail))
+        monkeypatch.setattr('tradingagents.strategies.data_sources.cftc_source._archive_get', fail)
         source=CFTCSource();call=lambda:source._fetch_raw_report()
     elif provider=='regulations':
         source=RegulationsSource(api_key=SECRET);call=lambda:source.search_documents()

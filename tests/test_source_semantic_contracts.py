@@ -207,7 +207,7 @@ def test_cftc_invalid_numeric_observation_is_not_cached(monkeypatch):
     import sys
     from tradingagents.strategies.data_sources.cftc_source import CFTCSource, COL_MARKET, COL_DATE, COL_MM_LONG, COL_MM_SHORT
     frame = pd.DataFrame({COL_MARKET: ['GOLD'], COL_DATE: ['2026-10-01'], COL_MM_LONG: [float('inf')], COL_MM_SHORT: [0]})
-    monkeypatch.setitem(sys.modules, 'cot_reports', SimpleNamespace(cot_year=lambda *a, **kw: frame))
+    monkeypatch.setattr('tradingagents.strategies.data_sources.cftc_source._annual_report', lambda *a: frame)
     source = CFTCSource()
     with provider_budget('cftc', 100, clock=lambda: 0, sleep=lambda _: None, limits=()):
         with pytest.raises(SourceFetchError):
@@ -221,7 +221,7 @@ def test_cftc_valid_positioning_survives_invalid_report_sibling(monkeypatch):
     frame = pd.DataFrame({COL_MARKET: [COMMODITY_CODES['gold']] * 4 + ['BAD'],
                           COL_DATE: ['2026-09-10', '2026-09-17', '2026-09-24', '2026-10-01', '2026-10-01'],
                           COL_MM_LONG: [10, 20, 30, 40, float('inf')], COL_MM_SHORT: [0] * 5})
-    monkeypatch.setitem(sys.modules, 'cot_reports', SimpleNamespace(cot_year=lambda *a, **kw: frame))
+    monkeypatch.setattr('tradingagents.strategies.data_sources.cftc_source._annual_report', lambda *a: frame)
     source = CFTCSource()
     with provider_budget('cftc', 100, clock=lambda: 0, sleep=lambda _: None, limits=()):
         with pytest.raises(SourceFetchError) as exc:
