@@ -583,6 +583,8 @@ class GenerationInfo:
     status: str  # "active", "paused", "retired"
     description: str  # User-provided description
     run_history: list[dict] = field(default_factory=list)
+    config_file: str | None = None
+    config_sha256: str | None = None
 
 
 class GenerationManifestError(ValueError):
@@ -633,7 +635,7 @@ class GenerationManager:
     # ------------------------------------------------------------------
 
     @_lifecycle_locked
-    def start_generation(self, description: str) -> GenerationInfo:
+    def start_generation(self, description: str, *, config_file=None) -> GenerationInfo:
         """Create a new generation from current HEAD.
 
         1. Capture current commit and branch.
@@ -642,6 +644,9 @@ class GenerationManager:
         4. Create an isolated state directory.
         5. Persist to manifest.
         """
+        from .generation_config import read_generation_config, FROZEN_CONFIG_NAME
+
+        profile = read_generation_config(config_file) if config_file is not None else None
         # 0. Warn about uncommitted changes (worktree won't include them)
         status_result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -690,6 +695,12 @@ class GenerationManager:
         # 4. Create state directory
         state_dir = self._generations_dir / gen_id
         state_dir.mkdir(parents=True, exist_ok=True)
+        frozen_config = None
+        if profile is not None:
+            frozen_config = state_dir / FROZEN_CONFIG_NAME
+            descriptor = os.open(frozen_config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'wb') as handle:
+                handle.write(profile[0])
 
         # 5. Build info and persist
         info = GenerationInfo(
@@ -702,10 +713,16 @@ class GenerationManager:
             status="active",
             description=description,
             run_history=[],
+            config_file=str(frozen_config) if frozen_config is not None else None,
+            config_sha256=profile[2] if profile is not None else None,
         )
 
         manifest = self._load_manifest()
-        manifest["generations"].append(asdict(info))
+        record = asdict(info)
+        if profile is None:
+            record.pop('config_file')
+            record.pop('config_sha256')
+        manifest["generations"].append(record)
         self._save_manifest(manifest)
 
         logger.info(
@@ -991,6 +1008,22 @@ class GenerationManager:
     ) -> dict:
         """Produce the existing worker result and collect process diagnostics."""
         env = os.environ.copy()
+        from .generation_config import CONFIG_FILE_ENV, CONFIG_SHA_ENV, read_generation_config
+
+        env.pop(CONFIG_FILE_ENV, None)
+        env.pop(CONFIG_SHA_ENV, None)
+        if gen_data.get('config_file') is not None or gen_data.get('config_sha256') is not None:
+            try:
+                if not gen_data.get('config_file') or not gen_data.get('config_sha256'):
+                    raise ValueError('generation_config_invalid')
+                read_generation_config(gen_data['config_file'], gen_data['config_sha256'])
+            except ValueError:
+                failure = {'success': False, 'elapsed_s': 0.0, 'error': 'generation_config_invalid'}
+                if preflight_mode is None:
+                    failure['outcome'] = RunOutcome.FAILED.value
+                return failure
+            env[CONFIG_FILE_ENV] = gen_data['config_file']
+            env[CONFIG_SHA_ENV] = gen_data['config_sha256']
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
         env["PYTHONPATH"] = str(Path(gen_data["worktree_path"]).resolve())
         env["EVENTEDGE_GENERATION_ID"] = gen_data["gen_id"]
@@ -1304,7 +1337,8 @@ class GenerationManager:
             raise GenerationManifestError("generation manifest is unreadable or malformed") from error
         if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
             raise GenerationManifestError("generation manifest requires a generations list")
-        required = {item.name for item in fields(GenerationInfo)}
+        optional_config = {'config_file', 'config_sha256'}
+        required = {item.name for item in fields(GenerationInfo)} - optional_config
         seen = set()
         for row in data["generations"]:
             if not isinstance(row, dict) or not required.issubset(row):
@@ -1320,6 +1354,14 @@ class GenerationManager:
                 not isinstance(entry, dict) for entry in row["run_history"]
             ):
                 raise GenerationManifestError("generation manifest has an invalid run history")
+            if optional_config & row.keys():
+                from .generation_config import FROZEN_CONFIG_NAME
+
+                if (type(row.get('config_file')) is not str
+                        or row['config_file'] != str(Path(row['state_dir']) / FROZEN_CONFIG_NAME)
+                        or type(row.get('config_sha256')) is not str
+                        or not re.fullmatch(r'[0-9a-f]{64}', row['config_sha256'])):
+                    raise GenerationManifestError('generation manifest has invalid configuration identity')
             seen.add(identity)
         return data
 

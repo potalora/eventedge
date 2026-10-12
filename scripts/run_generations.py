@@ -373,6 +373,7 @@ def _main():
     # start
     p_start = sub.add_parser("start", help="Start a new generation from current HEAD")
     p_start.add_argument("description", help="Description of this generation")
+    p_start.add_argument("--config-file", default=None, help="Freeze a secret-free JSON configuration overlay for this generation")
 
     # run-daily
     p_daily = sub.add_parser("run-daily", help="Run all active generations for a date")
@@ -512,7 +513,8 @@ def _main():
         _exit_runtime_lock_error(error)
 
     if args.command == "start":
-        gen = manager.start_generation(args.description)
+        gen = (manager.start_generation(args.description) if args.config_file is None else
+               manager.start_generation(args.description, config_file=args.config_file))
         print(f"Started {gen.gen_id}")
         print(f"  Commit:    {gen.git_commit[:12]}")
         print(f"  Branch:    {gen.git_branch}")

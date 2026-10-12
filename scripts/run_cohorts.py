@@ -278,8 +278,22 @@ def _build_config(args: argparse.Namespace) -> dict:
     from dotenv import load_dotenv
     from tradingagents.default_config import DEFAULT_CONFIG
 
-    load_dotenv()
-    config = dict(DEFAULT_CONFIG)
+    from tradingagents.strategies.orchestration.generation_config import (
+        CONFIG_FILE_ENV, CONFIG_SHA_ENV, apply_generation_config,
+    )
+
+    # A frozen generation receives credentials from its explicit launcher.
+    # Implicit discovery could inject unfrozen behavior into a later session.
+    if CONFIG_FILE_ENV not in os.environ and CONFIG_SHA_ENV not in os.environ:
+        load_dotenv()
+    profile = os.environ.get(CONFIG_FILE_ENV)
+    digest = os.environ.get(CONFIG_SHA_ENV)
+    if CONFIG_FILE_ENV in os.environ or CONFIG_SHA_ENV in os.environ:
+        if not profile or not digest:
+            raise ValueError('generation_config_invalid')
+        config = apply_generation_config(DEFAULT_CONFIG, profile, digest)
+    else:
+        config = dict(DEFAULT_CONFIG)
     config["autoresearch"] = dict(config.get("autoresearch", {}))
     state_dir_override = os.environ.get("AUTORESEARCH_STATE_DIR")
     if state_dir_override:
