@@ -178,6 +178,23 @@ These tests do not establish account eligibility, available model names, plan
 capacity, successful native proof or production deployment. Existing frozen
 native bundles do not gain a new transport by this application change.
 
+### October 12 local account and campaign evidence
+
+EventEdge connected with its own Mac grant. Bounded real high-effort marker
+requests returned the requested GPT-6 Luna and GPT-6.1 Sol names; returned
+revisions remain unpinned. The app-credit switch was observed off before the
+checks and again after refreshing settings. No API-key fallback was used.
+These observations are retained under `data/forward-readiness/local-siwc-2026-10-12/`;
+they do not establish subscription capacity for a complete workload or a VPS grant.
+
+Exact application commit `898c965` passed its SDK-present local suite and both
+CI jobs. The subsequent authorized Mac r3 campaign passed its fresh Luna/Sol
+connection preflight and ran 20 independently verified model-worker streams,
+but failed its independent raw-source audit. It produced no committee decisions,
+staging, orders or fills, and has no accepted replay. Connection, transport,
+operational completion and full source coverage remain distinct claims. See
+the [dated source verification](2026-10-06-source-reliability.md#exact-committed-verification-and-failed-mac-r3-campaign).
+
 ## Primary references
 
 - [OpenAI registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)

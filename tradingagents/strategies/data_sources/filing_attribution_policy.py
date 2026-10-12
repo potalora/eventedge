@@ -47,10 +47,14 @@ def configured(config):
 
 
 def _structural_roles(evidence):
-    """Use the full native evidence contract, preserving all joint source roles."""
+    """Validate complete source roles, including inventoried visual deferrals."""
     from .filing_assessment import _validate_evidence
     try:
-        _validate_evidence(evidence, allow_joint_issuers=True)
+        # Attribution supplies an issuer binding, never model admissibility.
+        # Structural HTML/PDF receipts retain all source validation requirements;
+        # the independent material and model boundaries still reject their text.
+        _validate_evidence(evidence, allow_joint_issuers=True,
+                           allow_unsupported_documents=True)
     except (ValueError, KeyError, TypeError, AttributeError):
         _fail()
 

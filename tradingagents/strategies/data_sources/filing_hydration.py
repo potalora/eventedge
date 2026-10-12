@@ -564,7 +564,6 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
                          'analysis_adequacy': 'not_assessed'}}
     if attribution_policy:
         result['coverage']['attribution_policy'] = attribution_policy
-        result['attribution_scope'] = build_scope(result, copied, equity_universe, company_map)
     if prospective:
         result['coverage']['material_policy'] = material_policy
         from tradingagents.strategies.orchestration.filing_supported_scope import build_supported_dispositions
@@ -594,6 +593,9 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             accepted_evidence_bytes=accepted_bytes, accepted_evidence_objects=accepted_objects,
             rejected_evidence_bytes=rejected_bytes, rejected_evidence_objects=rejected_objects,
             acquired_accessions=len(corpus))
+    if attribution_policy:
+        # Bind the final rows, including supported dispositions and failures.
+        result['attribution_scope'] = build_scope(result, copied, equity_universe, company_map)
     if material_policy:
         from tradingagents.strategies.orchestration.filing_material_validation import build_material_scope
         result['coverage']['material_policy'] = material_policy
