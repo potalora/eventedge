@@ -209,10 +209,20 @@ def _source(evidence, original, raw, required_exhibits, check):
         and evidence['observed_at'] == original['observed_at'], 'original_identity_mismatch')
     if check is not None:
         check()
+    reconciliation = None
+    if 'inventory_reconciliation' in evidence:
+        from .filing_inventory_reconciliation import validate_reconciled_evidence
+        # Retained evidence has native header/count bounds. Authenticate those
+        # before projecting the acquisition proof that raw framing re-binds.
+        validate_reconciled_evidence(evidence,
+            original={key: original[key] for key in ('identity', 'sha256', 'size', 'observed_at')},
+            check=check)
+        reconciliation = {key: evidence['inventory_reconciliation'][key]
+            for key in ('version', 'original', 'metadata')}
     framed = frame_submission(raw, expected_accession=identity['accession'], expected_form=identity['form'],
         expected_date=identity['filing_date'], observed_at=original['observed_at'],
         max_submission_bytes=MAX_SUBMISSION_BYTES, check=check,
-        inventory_reconciliation=evidence.get('inventory_reconciliation'))
+        inventory_reconciliation=reconciliation)
     parsed = select_primary(framed, raw, check=check)
     baseline = build_evidence_from_buffer(parsed, raw, required_exhibits=required_exhibits,
         max_document_bytes=MAX_DOCUMENT_BYTES, max_total_text_bytes=MAX_TOTAL_TEXT_BYTES, check=check,
@@ -220,6 +230,8 @@ def _source(evidence, original, raw, required_exhibits, check):
     for key in ('version', 'format', 'accession', 'form', 'filing_date', 'observed_at', 'accepted_at',
                 'submission_sha256', 'header_sha256', 'roles', 'issuer_candidates', 'document_inventory', 'dependencies'):
         _require(evidence[key] == baseline[key], 'source_evidence_mismatch')
+    _require(evidence.get('inventory_reconciliation') == baseline.get('inventory_reconciliation'),
+        'source_inventory_reconciliation_mismatch')
     if check is not None:
         check()
     return parsed, baseline

@@ -1,5 +1,11 @@
 # Forward test after the assumption audit
 
+## Closed Mac r6 campaign: October 12
+
+The `a54517d` application passed 7,296 local SDK-present tests and both [CI jobs](https://github.com/potalora/eventedge/actions/runs/38231241476) on an identical tree; the private helper freeze passed 1,084 cases with one skip. Its fresh local r6 campaign nevertheless failed verification after all four horizons and sixteen execution/staging paths. No recommendations or new order intents were created. Fifteen committees had recorded HTTP503 transport failures and one returned invalid model output. Those research gaps are distinct from the blocking inventory-guard/spool-closure and candidate-audit defects.
+
+The next freeze requires the independently reviewed exact-policy inventory guard, correctly bound observed strategy call, and supported-proof repair that validates the full retained reconciliation before raw reframing. Preserve r6 unchanged and failed; do not replay it or substitute the offline tests for a new run. All original source900/model2400/per-call120 and resource caps remain fixed. See the [closed-r6 verification record](../verification/2026-10-06-source-reliability.md#closed-mac-r6-campaign-october-12) for complete acquisition gaps and evidence limits. Native operational acceptance, immutable replay and original full coverage remain unproved; no production change is authorized.
+
 ## Closed Mac r5 campaign: October 12
 
 The fresh r5 campaign on `f7a1e0e` reached all four horizons and sixteen committee/staging paths, then failed the final candidate-population capture audit. All sixteen committees durably recorded `failed / ModelTransportError`, with zero recommendations, selected signals, entry intents, fills or lots. Independent inspection proves eight successful HTTP200 analysis responses and sixteen HTTP503 committee failures before SDK-observed inference bytes. The response-body cause and transience of those 503 responses remain unknown. Classified committee failures may be contained research gaps under the approved policy; they are never successful model responses. The final capture defect and absent immutable replay keep r5 operational acceptance false.

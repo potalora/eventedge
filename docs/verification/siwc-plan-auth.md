@@ -1,5 +1,11 @@
 # EventEdge ChatGPT plan authorization
 
+## Closed Mac r6 campaign: October 12
+
+The `a54517d` application passed its SDK-present local suite and both [CI jobs](https://github.com/potalora/eventedge/actions/runs/38231241476). R6 independently retained and verified all 36 main-workload model attempts: twenty candidate responses and one committee response received HTTP200; fifteen committee requests received HTTP503 with no SDK-observed inference fragment. The positive committee response failed native response validation. The retained negative classifications are `provider_error` and `stream_interrupted`; an exact upstream cause or transient condition is not established. Similar-sized committee prompts include both positive and negative transport outcomes, so prompt size alone does not prove the cause.
+
+All sixteen books reached execution/staging and created no recommendations or entry intents. Fully recorded model failures may be contained research gaps under the approved policy, but r6 also has blocking inventory-guard/spool-closure and candidate-audit failures. Its native acceptance remains false and immutable replay was not attempted. Local authentication, transport success, valid analysis, safe containment and full coverage are separate claims. The [closed-r6 verification record](2026-10-06-source-reliability.md#closed-mac-r6-campaign-october-12) records preserved failures and prospective repairs. No paid fallback, credential change, VPS mutation or deployment occurred.
+
 ## Closed Mac r5 campaign: October 12
 
 The fresh r5 campaign on `f7a1e0e` reached all four horizons and sixteen committee/staging paths, then failed the final candidate-population capture audit. All sixteen committees durably recorded `failed / ModelTransportError`, with zero recommendations, selected signals, entry intents, fills or lots. Independent inspection proves eight successful HTTP200 analysis responses and sixteen HTTP503 committee failures before SDK-observed inference bytes. The response-body cause and transience of those 503 responses remain unknown. Classified committee failures may be contained research gaps under the approved policy; they are never successful model responses. The final capture defect and absent immutable replay keep r5 operational acceptance false.
