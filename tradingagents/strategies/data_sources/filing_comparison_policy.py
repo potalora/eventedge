@@ -100,6 +100,28 @@ def history_comparison(current, histories, archives, *, require_full_history=Tru
     return result, proof
 
 
+def source_comparison_evidence(graph, evidence):
+    """Authenticate source structure and report its separate analysis disposition.
+
+    Parser attestations bind the declared policy, original and exact evidence;
+    raw capture audit remains required. This never grants model permission.
+    """
+    from .filing_assessment import _validate_evidence
+    from .filing_supported_policy import POLICIES, _checked_local_proof
+    policy = graph['coverage'].get('material_policy')
+    if policy not in POLICIES:
+        return _validate_evidence(evidence, allow_joint_issuers=True), 'admitted'
+    if evidence.get('supported_document_policy') != policy:
+        raise ValueError('source evidence policy differs')
+    accession = evidence['accession']
+    proof = graph['supported_source_proofs'][accession]
+    _checked_local_proof(proof, evidence, graph['supported_originals'][accession])
+    issuers = _validate_evidence(evidence, allow_joint_issuers=True,
+        allow_unsupported_documents=True)
+    status = 'failed' if proof['residual_failures'] else 'deferred' if proof['reasons'] else 'admitted'
+    return issuers, status
+
+
 def validate_source_comparison(graph, binding, current, prior):
     """Validate a retained source comparison without granting model permission.
 
@@ -107,7 +129,6 @@ def validate_source_comparison(graph, binding, current, prior):
     FILER must nevertheless prove the same exact nearest prior from genuine
     retained history; attribution never exempts a prior or history check.
     """
-    from .filing_assessment import _validate_evidence
     from .filing_attribution_policy import POLICY as ATTRIBUTION_POLICY
     from .filing_hydration import PRIOR_POLICY
     try:
@@ -115,8 +136,8 @@ def validate_source_comparison(graph, binding, current, prior):
                 or graph['coverage']['attribution_policy'] != ATTRIBUTION_POLICY
                 or current['form'] not in ('10-K', '10-Q')):
             raise ValueError('source attribution not enabled')
-        current_ciks = sorted(_validate_evidence(current, allow_joint_issuers=True))
-        prior_ciks = sorted(_validate_evidence(prior, allow_joint_issuers=True))
+        current_ciks = sorted(source_comparison_evidence(graph, current)[0])
+        prior_ciks = sorted(source_comparison_evidence(graph, prior)[0])
         if current_ciks != prior_ciks:
             raise ValueError('prior issuer roles differ')
         comparison, proof = history_comparison(current, graph['history_corpus'],

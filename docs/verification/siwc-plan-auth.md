@@ -1,5 +1,13 @@
 # EventEdge ChatGPT plan authorization
 
+## Closed Mac r5 campaign: October 12
+
+The fresh r5 campaign on `f7a1e0e` reached all four horizons and sixteen committee/staging paths, then failed the final candidate-population capture audit. All sixteen committees durably recorded `failed / ModelTransportError`, with zero recommendations, selected signals, entry intents, fills or lots. Independent inspection proves eight successful HTTP200 analysis responses and sixteen HTTP503 committee failures before SDK-observed inference bytes. The response-body cause and transience of those 503 responses remain unknown. Classified committee failures may be contained research gaps under the approved policy; they are never successful model responses. The final capture defect and absent immutable replay keep r5 operational acceptance false.
+
+The independent audits verified all 3,314 completed SEC originals (7,314,315,892 raw bytes), 1,316 durable-book checks, absence of all 110 recorded owned PIDs and 608 unchanged protected files. Complete byte acquisition did not mean parsing succeeded: 3,158 requests failed after HTTP200 acquisition, and one strict source-identity mismatch failed before acquisition. The request-167 failure is now proven to be publisher-facts validation on insufficient ownership evidence, followed by shared-dispatcher closure and reuse of its failed state. A separate strict-model/structural-source comparator mismatch is proven on actual retained bodies, without reconstructing missing history. The exact screen-return capture repair and publisher precondition repair are independently accepted; comparator implementation/review and fresh full verification remain pending. No closed run was rewritten or replayed. Original full-source/full-analysis coverage remains false, and local evidence does not establish VPS deployment. See the [source verification record](2026-10-06-source-reliability.md#closed-mac-r5-campaign-october-12) for the complete census and limitations.
+
+The prospective candidate-capture and publisher precondition repairs are independently accepted. Comparator independent review is accepted. The final application commit, composed local SDK/CI and helper verification, a fresh local native campaign and immutable replay remain pending. A source-admitted current filing still needs an analysis-admissible required prior; structural availability alone cannot supply model authority. The [closed-r5 source-verification record](2026-10-06-source-reliability.md#closed-mac-r5-campaign-october-12) retains the detailed causes, overlapping test receipts and limits. R5 remains failed; no local result authorizes merge, VPS changes or deployment.
+
 This optional backend uses EventEdge's own Sign in with ChatGPT registration.
 It does not read Codex or Pi credentials and has no API-key fallback. It does
 not use code from the noncommercial SIWC devkit.
@@ -194,6 +202,8 @@ but failed its independent raw-source audit. It produced no committee decisions,
 staging, orders or fills, and has no accepted replay. Connection, transport,
 operational completion and full source coverage remain distinct claims. See
 the [dated source verification](2026-10-06-source-reliability.md#exact-committed-verification-and-failed-mac-r3-campaign).
+
+The subsequent `f7a1e0e` application also passed its local SDK suite and both CI jobs. R4 passed fresh bounded Luna/Sol connection checks but stopped at mandatory corporate-action validation before any main-workload model request. Its connection success does not establish full-workload capacity, operational completion or replay. The original action cause remains unproven; all sixteen books and the shared epoch are invalid.
 
 ## Primary references
 

@@ -42,7 +42,7 @@ def build_material_scope(graph, collections):
     from tradingagents.strategies.data_sources.filing_acquisition import complete_submission_url
     from tradingagents.strategies.data_sources.filing_assessment import _validate_evidence
     from tradingagents.strategies.data_sources.filing_comparison_policy import (
-        validate_current_only_binding, validate_source_comparison,
+        source_comparison_evidence, validate_current_only_binding, validate_source_comparison,
     )
     try:
         if (graph.get('policy') != 'complete_submission_v1' or not isinstance(collections, dict)
@@ -89,7 +89,8 @@ def build_material_scope(graph, collections):
                 _fail()
             counts = {'total_rows': len(rows), 'quarantined_rows': 0}
             if prospective:
-                counts.update(deferred_rows=0, admitted_rows=0, disposition_failed_rows=0)
+                counts.update(deferred_rows=0, admitted_rows=0, disposition_failed_rows=0,
+                    prior_analysis_unavailable_rows=0)
             for index, row in enumerate(rows):
                 if not isinstance(row, dict):
                     _fail()
@@ -155,8 +156,14 @@ def build_material_scope(graph, collections):
                                 validate_source_comparison(graph, row['comparison_binding'], value, corpus[prior_ref])
                             else:
                                 from .filing_inputs import _comparison
-                                _validate_evidence(corpus[prior_ref])
+                                if not prospective:
+                                    _validate_evidence(corpus[prior_ref])
                                 _comparison(graph, row['comparison_binding'], value, corpus[prior_ref])
+                            if prospective:
+                                prior_status = source_comparison_evidence(graph, corpus[prior_ref])[1]
+                                if prior_status != 'admitted':
+                                    counts['prior_analysis_unavailable_rows'] += 1
+                                    failed = True
                         else:
                             failed = True
                     # Quarantined prior evidence never becomes an exception for another current filing.
@@ -202,12 +209,17 @@ def build_material_scope(graph, collections):
             'scoped_complete': scoped_failed == 0 and global_complete,
             'scoped_failed_rows': scoped_failed, 'by_collection': by_collection, 'rows': entries}
         if prospective:
+            prior_unavailable = sum(item['prior_analysis_unavailable_rows'] for item in by_collection.values())
+            declared_prior_unavailable = coverage.get('prior_analysis_unavailable_rows', 0)
+            if type(declared_prior_unavailable) is not int or declared_prior_unavailable != prior_unavailable:
+                _fail()
             deferred = [key for key, receipt in dispositions.items() if receipt['status'] == 'deferred']
             scope.update(prospective_scope_broadened=True, original_full_analysis_coverage=False,
                 source_proof_authority='bounded_parser_attestation_requires_raw_capture_audit',
                 deferred_rows=sum(item['deferred_rows'] for item in by_collection.values()),
                 admitted_rows=sum(item['admitted_rows'] for item in by_collection.values()),
                 disposition_failed_rows=sum(item['disposition_failed_rows'] for item in by_collection.values()),
+                prior_analysis_unavailable_rows=prior_unavailable,
                 deferred_accessions=sorted(deferred),
                 disposition_failures=deepcopy(graph.get('supported_disposition_failures', {})),
                 supported_dispositions=[{'accession': key, 'status': receipt['status'],
@@ -246,6 +258,9 @@ def validate_filing_material_policy(data, config):
             _fail()
         for key in ('scoped_complete', 'scoped_failed_rows', 'quarantined_rows'):
             if _digest(graph['coverage'].get(key)) != _digest(expected[key]):
+                _fail()
+        if expected.get('prospective_scope_broadened'):
+            if _digest(graph['coverage'].get('prior_analysis_unavailable_rows', 0)) != _digest(expected['prior_analysis_unavailable_rows']):
                 _fail()
         return _summary(expected)
     except (KeyError, TypeError, AttributeError, ValueError) as error:

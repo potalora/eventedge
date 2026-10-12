@@ -335,7 +335,11 @@ def _local_source_outcome(current, *, original, raw_submission, required_exhibit
             for dep in baseline['dependencies']:
                 if dep['resolution'] == 'unresolved_local':
                     fail('unresolved_local_dependency', dependency=dep)
-            if current['form'].startswith('SCHEDULE 13'):
+            # Publisher facts require the complete selected ownership envelope.
+            # Incomplete selected documents already have negative residuals;
+            # they cannot supply publisher facts or an ownership disposition.
+            if (current['form'].startswith('SCHEDULE 13')
+                    and current['structural_status'] == 'complete' and current['issues'] == []):
                 primary_doc = parsed['documents'][parsed['primary_index']]
                 primary = raw_submission[primary_doc['body_start']:primary_doc['body_end']]
                 dependencies['publisher_facts'] = publisher_facts(current, primary, check=check)
@@ -413,7 +417,9 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
             _require(any(item.get('code') == 'pdf_capability_limit' and item.get('filename') == name
                 for item in proof['residual_failures']), 'stripped_pdf_capability_failure')
     if evidence.get('issues') or evidence.get('structural_status') != 'complete':
-        _require(bool(proof['residual_failures']), 'stripped_structural_failure')
+        _require({'code': 'incomplete_current_evidence'} in proof['residual_failures']
+            and all({'code': 'selected_document_failure', 'issue': issue} in proof['residual_failures']
+                for issue in evidence.get('issues', [])), 'stripped_structural_failure')
     if not proof['residual_failures']:
         _require(proof['selected_documents'] == [
             {'filename': u['filename'], 'body_sha256': u['body_sha256'],
@@ -468,7 +474,9 @@ def _checked_local_proof(proof, evidence, original, primary_body=None, *, check=
     if primary_body is None and evidence.get('ownership_primary_body') is not None:
         import base64
         primary_body = base64.b64decode(evidence['ownership_primary_body'], validate=True)
-    if primary_body is not None:
+    if evidence.get('issues') or evidence.get('structural_status') != 'complete':
+        _require(proof['publisher_facts'] == [], 'publisher_facts_on_incomplete_evidence')
+    elif primary_body is not None:
         _require(proof['publisher_facts'] == publisher_facts(evidence, primary_body, check=check), 'local_publisher_facts_mismatch')
     elif proof['publisher_facts']:
         raise SupportedDispositionError('missing_raw_publisher_facts_body')

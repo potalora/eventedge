@@ -587,8 +587,21 @@ def hydrate_filings(source, collections: dict, *, equity_universe=None,
             return False
         result['supported_dispositions'] = build_supported_dispositions(result, copied,
             on_receipt=accept_disposition, check=lambda: provider_timeout('edgar'))
+        from .filing_comparison_policy import source_comparison_evidence
+        prior_analysis_unavailable_rows = 0
+        prior_dispositions = {}
+        for rows in refs.values():
+            for row in rows:
+                if row.get('requires_prior') and row.get('prior_status') == 'available':
+                    prior_ref = row['prior_evidence_ref']
+                    if prior_ref not in prior_dispositions:
+                        prior_dispositions[prior_ref] = source_comparison_evidence(result, corpus[prior_ref])[1]
+                    if prior_dispositions[prior_ref] != 'admitted':
+                        prior_analysis_unavailable_rows += 1
+                        failed_row_ids.add(id(row))
         deadline_exhausted = provider_clock_time('edgar') >= current_provider_deadline('edgar')
         result['coverage'].update(failed_rows=len(failed_row_ids), deadline_exhausted=deadline_exhausted,
+            prior_analysis_unavailable_rows=prior_analysis_unavailable_rows,
             complete=not failed_row_ids and not deadline_exhausted and discovery_complete and not resource_exhausted,
             accepted_evidence_bytes=accepted_bytes, accepted_evidence_objects=accepted_objects,
             rejected_evidence_bytes=rejected_bytes, rejected_evidence_objects=rejected_objects,
