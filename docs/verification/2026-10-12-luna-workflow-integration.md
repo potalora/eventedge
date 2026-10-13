@@ -152,6 +152,13 @@ provides a current trading edge. The earlier journal-only checkpoint at
 `b4f66a4` is preserved and is superseded for feature completion by this explicit
 decision-eligible policy.
 
+The causal harness uses five recent observations for unrelated core-market,
+VIX and daily FRED research context. Monthly and weekly economic histories,
+candidate, benchmark and protective-position volatility requests retain their
+full histories and ordinary validation. This avoids
+repeatedly hashing a large unrelated fixture during each sixteen-book replay;
+the wider source-reliability harness retains its full provider histories.
+
 ## Verification and remaining limits
 
 - Historical/lifecycle, retry, recovery and hold selection: 56 passed.

@@ -12,7 +12,7 @@ same-model request exercises automatic review; correlated model errors remain
 possible, so agreement is not an independent extraction-accuracy claim.
 """
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import partial
 import base64
@@ -144,6 +144,37 @@ def _boundaries_and_protection(document_pipeline, monkeypatch):
     fixture.scoped_committee_inputs = []
     fixture.simulated_price_requests = []
     fixture.blind_verification_prompts = []
+
+    # These causal tests need current macro context, not a full unrelated ETF
+    # momentum history. Keep the SDK boundary and all requested symbols, but
+    # retain only five recent core-market observations. Candidate and governed
+    # volatility requests still receive their complete history; the broader
+    # source-reliability harness retains the full core-market fixture.
+    import yfinance
+    original_yahoo = yfinance.download
+
+    def yahoo(tickers, **kwargs):
+        frame = original_yahoo(tickers, **kwargs)
+        symbols = [tickers] if isinstance(tickers, str) else tickers
+        core_context = (
+            kwargs.get('start') == (fixture.session - timedelta(days=90)).isoformat()
+            and ({'SPY', 'SHY', 'TLT', 'DBA'} <= set(symbols) or symbols == ['^VIX'])
+        )
+        return frame.tail(5) if core_context else frame
+
+    monkeypatch.setattr(yfinance, 'download', yahoo)
+
+    # Daily credit/VIX/yield context uses the latest observation. Preserve the
+    # complete monthly and weekly histories used by commodity macro screens.
+    from tradingagents.strategies.data_sources.fred_source import FREDSource
+    original_fred = FREDSource._get_series
+
+    def fred(source, series_id, **kwargs):
+        series = original_fred(source, series_id, **kwargs)
+        daily_context = {'BAMLH0A0HYM2', 'BAMLC0A4CBBB', 'T10Y2Y', 'VIXCLS'}
+        return series.tail(5) if series_id in daily_context else series
+
+    monkeypatch.setattr(FREDSource, '_get_series', fred)
 
     def model(client, *, system, prompt, **kwargs):
         if 'portfolio manager' not in system:
