@@ -69,4 +69,5 @@ broader extraction-quality claim. Any further native pilot needs a prospectively
 frozen sample, policy, prompt and finite attempt count. Original parser failures
 and the malformed-font exclusion remain in force. This pilot resumed no research
 acquisition or generation and enabled no analysis/trading path. The subsequent
-workflow remains journal-only; nothing was merged or deployed.
+workflow adds explicit reviewed scoped-claim eligibility for ordinary PAPER
+decision gates; nothing was merged or deployed.

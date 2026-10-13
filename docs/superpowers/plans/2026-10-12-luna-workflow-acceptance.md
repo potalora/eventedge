@@ -5,6 +5,23 @@ The persistent local continuity experiment remains optional, paused, and is not
 an engineering acceptance gate. No production deployment or active generation
 patch is authorized.
 
+Pedro's later clarification supersedes the initial journal-only completion
+criterion below. Add `verified_scoped_claims_v1` decision eligibility: independent
+source/issuer/as-of/claim/context verification, generic conservative unit
+semantics, and a scoped Sol sufficiency/claim-use contract. Eligible directional
+candidates follow ordinary committee, sizing/risk and PAPER staging/execution;
+neutral results abstain. Test positive entry/fill/carry/stop/replay and paired
+invalid/uncertain/stale/misbound exclusions across all sixteen books, reusing the
+existing harness and retained native response. Keep original failed native
+verdicts and unrelated full-filing exclusions. No additional native call campaign.
+
+The final clarification removes hand-entered expected claims as a runtime
+dependency. For a supplied document and answer-free issuer/date/scope policy,
+produce an automatic verification receipt from a separate blind bounded source
+check, then admit only supported/context-sufficient claims to normal decisions.
+Test gold stays external. Preserve optional historical review receipts; document
+same-model correlation risk and do not claim guaranteed visual accuracy.
+
 ## Implementation boundary
 
 - Add opt-in `bounded_document_research_v1`: at most four explicitly selected,
@@ -20,7 +37,9 @@ patch is authorized.
   attachment identities into request receipts and bypass text-only reuse.
 - Structural validation cannot independently prove visual transcription accuracy.
   Preserve that limitation, original failures and unassessed pages. These research
-  observations remain journal-only and cannot authorize orders.
+  observations remain journal-only unless the separate verified scoped-claim
+  policy admits them to ordinary decision gates; recognition alone never
+  authorizes orders.
 - Use ordinary immutable source/screening checkpoints, committee selection,
   16-book staging/accounting and replay. Other valid candidates and protective
   exits continue independently.

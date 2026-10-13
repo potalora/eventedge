@@ -9,13 +9,22 @@ not merged or deployed.
 ## Research behavior
 
 `autoresearch.bounded_document_research_policy = bounded_document_research_v1`
-adds a journal-only strategy and a separate `bounded_documents` source. Its
+adds a strategy and a separate `bounded_documents` source. Its
 explicit registry contains at most four retained originals, exact acquisition
 timestamps, original/render hashes, selected page identities and finite
 extraction questions. Intake performs no discovery, rendering or network fetch.
 Registry coverage means only that the configured inputs were loaded; it does
-not certify complete-document extraction. A credential-free local profile with
-one PDF and one scan is defined privately; it has not started a generation.
+not certify complete-document extraction. The default research mode remains
+journal-only. The opt-in next-generation
+[`document-informed-paper.json`](../../configs/document-informed-paper.json)
+also enables `bounded_document_decision_policy = verified_scoped_claims_v1`.
+Combine that template with a private retained registry and answer-free decision
+scopes, then freeze the complete configuration through the ordinary generation
+configuration interface. Missing or invalid scopes cannot become trading
+candidates. A complete credential-free local autonomous profile with the scanned
+original and source/issuer/date/scope policy is defined privately. Its registry
+contains no review answers, expected values or extracted claims. It has not
+started a generation; its finite decision window is explicit and expires.
 
 The analyzer sends attachments to native Luna/high, validates strict response
 identity, page/probe coverage, printed number precision, explicit units and
@@ -32,10 +41,55 @@ Skipped analysis still carries valid event identity; an exhausted deadline
 cannot attribute a preceding document's attempt to the next candidate. Health
 coverage uses the exact configured strategy set.
 
-Every document observation remains journal-only with `trading_authority=false`.
-Structural checks do not independently prove transcription or row association.
-Original parser failures, unassessed pages, and the separate disabled bulk EDGAR
-research disposition survive successful selected-page analysis.
+Decision eligibility binds the particular claims and their required context:
+issuer name/CIK and ticker, original/render
+and acquisition identities, declared purpose/economic date, required pages and
+claim IDs, and a bounded effective window of at most 31 days. The review binds
+exact printed values/precision, units/scales, full row/column associations and
+citations, plus coverage of the declared context. Uncertainty, material missing
+context, expired scope, conflicting claims or mismatched identity excludes the
+dependent decision. Perfect transcription of unneeded pages is not required.
+
+New documents do not require somebody to enter the extracted answers. The
+runtime producer is `LLMAnalyzer.analyze_bounded_document_evidence`: after
+primary recognition, `prepare_automatic_verification` prepares a separate blind
+Luna/high attachment request using only the original pages/probes and declared
+source/issuer/date/context policy. It receives neither the primary transcription
+and answers nor test gold. `build_automatic_review` validates that response,
+source/provenance bindings, context sufficiency and conservative typed-claim
+agreement, then produces a sealed `automatic_review_v1` receipt. Eligibility is
+rechecked before scoped Sol analysis. Verification completion time is read after
+the blind response, so a call crossing the session cutoff cannot be backdated.
+
+This is a separate request to the same model family, not independent model
+diversity or guaranteed visual accuracy. Correlated model risk is explicit.
+Wrong identities, conflicting readings, uncertainty, missing material context,
+bad provenance or exhausted deadlines exclude the dependent decision. There is
+one additional bounded verification request per supplied document, within the
+existing model/per-call/resource limits, with no new retry loop.
+
+Previously configured human or independent visual reviews remain an optional
+compatible input path. Their authorship is a configuration trust boundary, not
+something the pure verifier can authenticate. The retained scan review was a
+separate retrospective root comparison, not human approval. Manual receipts
+alone do not prove the unattended path. All runtime/generated review and call
+receipts are retained; source/review answers never become Luna recognition gold.
+
+Generic count-unit handling accepts `Shares` and `Number of Shares`. A full
+descriptive count label can reduce to shares/securities only when its suffix
+is independently bound in the matched row/column context. Share and security
+counts, unknown units, currencies, scales and per-unit rates remain distinct.
+No numeric fuzzy matching, per-document answer exception or model retry is used.
+Both historical frozen native verdicts remain failed.
+
+Only verified claims and declared context reach the decision-eligible Sol prompt.
+Sol must identify the claims used and assess context sufficiency; unsupported
+directional claims fail, while neutral/no-edge assessments abstain. A validated
+directional candidate then follows ordinary admission, committee, sizing/risk,
+current price/account/time safeguards and governed PAPER staging/execution. No
+document or model response bypasses those gates. Original parser failures,
+unassessed pages and disabled bulk-filing research remain visible and are not
+cleared wholesale by this bounded capability.
 
 ## Native scan result, including failed criteria
 
@@ -69,7 +123,11 @@ without alteration; see the [earlier pilot record](2026-10-12-luna-document-pilo
 
 | Scenario | Expected | Observed evidence |
 | --- | --- | --- |
-| Valid document, ordinary committee/accounting | Complete all sixteen books without granting document order authority | Four horizon observations stayed journal-only; no document signal entered an order intent. |
+| New supplied document, no runtime expected claim values | Runtime producer creates a verification receipt, then ordinary Sol/committee/risk stages and fills a PAPER entry | Answer-free registry and blind prompts checked externally; all five simulated sessions and sixteen books completed entry/fill/carry/stop/replay. Model responses and prices were constructed; test gold was external to runtime configuration. |
+| Blind check finds insufficient context | No Sol call or dependent entry; unrelated work and protective exits continue | Paired answer-free case passed across all sixteen books, including next-session/replay and unrelated earnings/protective-stop controls. |
+| Independently verified document claim, directional scoped thesis | Change ordinary decision inputs; committee/risk stage a PAPER entry, next-session fill, carry, stop and replay | Five simulated October 12–16 sessions passed across all sixteen books. Review hash, recognition receipt, verified claim, thesis claim IDs, signal, intent and fill lineage were checked. |
+| Uncertain extraction, expired scope, issuer mismatch or conflicting reviewed value | Suppress the dependent entry while unrelated work and protective exits continue | Four paired public cases passed; unrelated earnings entered/filled and independently accepted protective stops executed across all sixteen books. |
+| Actual retained native scan response with reviewed claims | Same causal pipeline using unchanged real source/Luna bytes, without forcing the actual native thesis to trade | Private positive five-session case passed; separate conflicting-value case suppressed only the dependent entry. Directional Sol, committee responses and prices were constructed; the real native Sol neutral response is preserved unchanged. |
 | Uncertain/malformed recognition, shared research hold or refused dispatch | Exclude affected analysis while safely completing accounting/staging | Focused composed regressions passed; uncertainty/malformed responses made zero thesis calls and unaffected earnings work continued. |
 | Interruption after four staging commits, then resume/replay | Reuse accepted inputs and avoid duplicate effects | Passed with exact retained source bytes and actual corrective Luna response replayed only against frozen request hashes. All ledger dumps and accepted bytes stayed unchanged on replay. |
 | Two optional CFTC outages, then recovery | Preserve accepted history and complete usable degraded runs | Accelerated October 12–14 sequence completed all sixteen books each session; commodity health recovered on the third session. Each replay made zero new provider/model calls and preserved ledgers. |
@@ -86,15 +144,32 @@ SIP trade count are explicitly constructed. These separate sequences establish
 operational behavior, not contemporaneous PIT evidence, executable fills, alpha
 or a historical model backtest.
 
+The new causal decision tests use constructed Microsoft prices publicly and
+constructed Cadre prices in the retained-response replay. They do not relabel
+KTOS history as another issuer's prices. Their directional responses prove
+decision causality and guard behavior, not that the actual historical pledge
+provides a current trading edge. The earlier journal-only checkpoint at
+`b4f66a4` is preserved and is superseded for feature completion by this explicit
+decision-eligible policy.
+
 ## Verification and remaining limits
 
 - Historical/lifecycle, retry, recovery and hold selection: 56 passed.
-- Initial composed related selection: 168 passed, before the final unit fix.
-- Missing-unit correction plus original composed selection: 61 passed; final
-  scientific/abbreviated-unit correction: 55 focused tests passed, including the
-  two added cases. Counts overlap and are not additive.
-- Final retained-response replay plus changed composed fixture: 10 passed,
-  including two private retained-data cases and eight public workflow cases.
+- Final affected intake, recognition, eligibility, workflow and report selection:
+  223 passed, including 66 eligibility cases.
+- Two additional paper-only preflight cases passed before any model call;
+  the ordinary positive lifecycle passed again after that guard was added.
+- Public positive/four-negative causal selection: five passed; the positive
+  passed again after making the same harness reusable for retained inputs.
+- Actual retained native response: positive causal case passed, then the paired
+  conflicting-value case passed, with no new native calls.
+- Unattended producer: answer-free positive lifecycle and blind-context-failure
+  cases passed. The final positive rerun retained raw verification responses and
+  checked that runtime registry bytes stayed answer-free and unchanged.
+- Unattended analyzer normal/after-cutoff cases passed; late verification never
+  reached Sol. Scoped Sol numeric-fact substitution controls also passed.
+- Earlier journal-only source interruption/recovery replay selection: ten passed.
+  Counts overlap and are not additive.
 - Required non-live CI runs both baseline and pinned OpenBB environments on the
   exact topic-branch commit. Its final status is recorded on PR #50.
 
@@ -104,7 +179,11 @@ and JUnit receipts remain private under
 generated evidence are committed. Public tests and the sanitized historical
 fixture are reproducible without those private documents.
 
-The frozen native exact-string quality criterion did not pass. Broader unseen
+The automatic verifier is implemented and exercised through constructed model
+boundaries; no additional native blind-verification call or broad accuracy
+campaign was run. Existing real native recognition and its neutral Sol result
+remain separate preserved evidence. The frozen exact-string quality criterion
+did not pass. Broader unseen
 document accuracy, complete transcription, whole-filing recovery and immutable
 provider revisions remain unverified. Deployment, server-specific authentication,
 scheduler/alert delivery and investment performance remain separate decisions.

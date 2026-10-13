@@ -3145,13 +3145,29 @@ class MultiStrategyEngine:
             if not full_filing and not full_regulation and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
                 raise ValueError("missing_source_text")
             if analysis_type == 'bounded_document_research':
-                # Selected pages cannot authorize trading, even after a valid
-                # scoped thesis. Preserve complete-filing failures separately.
+                # Held until independent claim/context verification and scoped
+                # thesis validation. Ordinary committee/risk still own orders.
                 c.journal_only = True
+                decision_policy = self.ar_config.get('bounded_document_decision_policy')
+                decision_options = ({'decision_scope':c.metadata.get('bounded_document_decision_scope'),
+                                     'ticker':c.ticker} if decision_policy is not None else {})
+                scope = decision_options.get('decision_scope')
+                if isinstance(scope,dict) and 'independent_review' not in scope:
+                    decision_options['verification_clock'] = lambda:datetime.now(timezone.utc).isoformat()
                 llm_result = analyzer.analyze_bounded_document_evidence(
                     c.metadata['bounded_document_evidence'], session_as_of=c.date,
-                    regime_context=regime_context)
-                if (llm_result.get('journal_only') is not True
+                    regime_context=regime_context, **decision_options)
+                if decision_policy is not None:
+                    eligibility = llm_result.get('decision_eligibility', {})
+                    if (decision_policy != 'verified_scoped_claims_v1'
+                            or eligibility.get('eligible') is not True
+                            or eligibility.get('policy') != decision_policy
+                            or eligibility.get('execution_authority') != 'ordinary_committee_and_risk_gates'
+                            or llm_result.get('assessment_scope') != 'selected_pages'
+                            or llm_result.get('journal_only') is not (llm_result.get('direction') == 'neutral')):
+                        raise ValueError('invalid_bounded_document_eligibility')
+                    c.journal_only = llm_result['journal_only']
+                elif (llm_result.get('journal_only') is not True
                         or llm_result.get('trading_authority') is not False
                         or llm_result.get('assessment_scope') != 'selected_pages'):
                     raise ValueError('invalid_bounded_document_authority')

@@ -204,6 +204,106 @@ def test_real_analyzer_forwards_document_then_scoped_sol_and_retains_both_attemp
     assert 'unsupported_selected_visual_content' in retained['recognition']['residual_failures']
 
 
+def test_verified_claims_inform_scoped_thesis_without_admitting_unreviewed_transcription():
+    receipt = {'eligible':True,'required_claim_ids':['revenue'],
+               'verified_claims':[{'id':'revenue','printed_value':'1,204.50','unit':'USD millions'}],
+               'context_limitations':['Selected revenue context only']}
+    observed = module().validate_recognition(json.dumps(recognition(prepare())),prepare())
+    observed['pages'][0]['transcription'] += '\nUNREVIEWED FACT 999999'
+    system,user = module().prepare_thesis(observed, decision_eligibility=receipt)
+    assert '1,204.50' in user and 'UNREVIEWED FACT' not in user
+    assert 'ordinary' in system and 'context_sufficient' in system
+    response = {'assessment_scope':'selected_pages','direction':'long','score':.9,
+        'rationale':'Constructed directional thesis uses independently reviewed claim.',
+        'evidence_claim':'Revenue is 1,204.50 USD millions.',
+        'context_sufficient':True,'used_claim_ids':['revenue']}
+    result = module().validate_thesis(json.dumps(response),decision_eligibility=receipt)
+    assert result['journal_only'] is False and result['decision_eligibility'] == receipt
+    assert 'trading_authority' not in result
+    response['evidence_claim'] = 'Reviewed revenue is 1,204.50.'
+    assert module().validate_thesis(json.dumps(response),decision_eligibility=receipt)['journal_only'] is False
+    response['context_sufficient'] = False
+    with pytest.raises(ValueError):
+        module().validate_thesis(json.dumps(response),decision_eligibility=receipt)
+
+
+@pytest.mark.parametrize('execution',[{'mode':'live','execution_enabled':False},
+                                     {'mode':'paper','execution_enabled':True}])
+def test_decision_policy_rejects_real_execution_before_any_model_call(analyzer,execution):
+    worker,calls,_ = analyzer
+    worker.config['autoresearch']['bounded_document_decision_policy'] = 'verified_scoped_claims_v1'
+    worker.config['execution'] = execution
+    with pytest.raises(ValueError,match='invalid_document_decision_paper_only'):
+        worker.analyze_bounded_document_evidence(evidence(),session_as_of='2026-10-12',ticker='MSFT',decision_scope={})
+    assert not calls
+
+
+@pytest.mark.parametrize('number',['1,204.51','1e6'])
+def test_scoped_thesis_cannot_replace_reviewed_numeric_source_facts(number):
+    eligibility = {'required_claim_ids':['revenue'],
+        'verified_claims':[{'id':'revenue','printed_value':'1,204.50','unit':'USD millions'}]}
+    response = {'assessment_scope':'selected_pages','direction':'long','score':.9,
+        'rationale':'Constructed directional analysis.', 'evidence_claim':'Revenue is '+number+' USD millions.',
+        'context_sufficient':True,'used_claim_ids':['revenue']}
+    with pytest.raises(ValueError,match='invalid_document_decision_claim'):
+        module().validate_thesis(json.dumps(response),decision_eligibility=eligibility)
+
+
+@pytest.mark.parametrize('after_cutoff',[False,True])
+def test_unattended_analyzer_produces_review_from_blind_source_check_without_runtime_answers(analyzer,tmp_path,monkeypatch,after_cutoff):
+    from test_document_decision_workflow import decision_payload
+    from tradingagents.strategies.orchestration.bounded_document_inputs import load_retained_documents
+    worker,_,_ = analyzer
+    payload = decision_payload(tmp_path)
+    scope = deepcopy(payload['registry_entry']['decision_scope'])
+    scope.pop('independent_review')
+    worker.config['autoresearch']['bounded_document_decision_policy'] = 'verified_scoped_claims_v1'
+    worker.config['execution'] = {'mode':'paper','execution_enabled':False}
+    source = load_retained_documents({'bounded_document_research_policy':POLICY,
+        'bounded_document_registry':[payload['registry_entry']]},'2026-10-12')
+    value = source['bounded_documents'][0]['evidence']
+    raw = json.loads(payload['recognition_text'])
+    seen = []
+    clock = {'now':'2026-10-12T22:00:00+00:00'}
+    def call(system,user,*,role='thesis',document_inputs=None,**kwargs):
+        seen.append((system,user,role,document_inputs))
+        if 'Independent blind source verification' in system:
+            assert '1,204.50' not in user and '999.00' not in user
+            if after_cutoff:
+                clock['now'] = '2026-10-13T04:00:01+00:00'
+            output = {'recognition':raw,'context_sufficient':True,'material_context_failures':[]}
+        elif document_inputs is not None:
+            output = raw
+        else:
+            output = payload['thesis_response']
+        text = json.dumps(output)
+        worker.last_call_response = {'received':True,'text':text}
+        worker.last_call_provenance = {'configured_model':'gpt-6-luna'if role=='bounded'else'gpt-6.1-sol',
+            'returned_model':'gpt-6-luna'if role=='bounded'else'gpt-6.1-sol',
+            'identity_status':'unpinned','role':role,'billing_mode':'chatgpt_plan',
+            'reasoning_effort':'high'}
+        if document_inputs is not None:
+            from tradingagents.strategies.plan_document_inputs import encode_document_inputs,document_input_metadata
+            worker.last_call_provenance['document_inputs'] = document_input_metadata(encode_document_inputs(document_inputs))
+        return text
+    monkeypatch.setattr(worker,'_call_llm',call)
+    if after_cutoff:
+        with pytest.raises(ValueError,match='invalid_document_decision_review_time'):
+            worker.analyze_bounded_document_evidence(value,session_as_of='2026-10-12',
+                ticker='MSFT',decision_scope=scope,verification_clock=lambda:clock['now'])
+        assert [stage[2]for stage in seen] == ['bounded','bounded']
+        return
+    result = worker.analyze_bounded_document_evidence(value,session_as_of='2026-10-12',
+        ticker='MSFT',decision_scope=scope,verification_clock=lambda:clock['now'])
+    assert [stage[2]for stage in seen] == ['bounded','bounded','thesis']
+    assert seen[0][3] is not None and seen[1][3] is not None and seen[2][3] is None
+    assert result['journal_only'] is False
+    attempt = result['bounded_document_research']
+    assert attempt['verification_attempt']['response_sha256']
+    assert attempt['automatic_review']['reviewer']['kind'] == 'automatic_visual'
+    assert result['decision_eligibility']['verification_basis'] == 'automatic_review_v1'
+
+
 def test_failed_recognition_never_invokes_sol_and_retains_original_attempt(analyzer):
     worker,calls,faults=analyzer
     faults.append(lambda value:value['pages'][0].update(status='uncertain'))

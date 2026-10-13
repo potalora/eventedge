@@ -15,6 +15,7 @@ import re
 import stat
 
 POLICY = 'bounded_document_research_v1'
+DECISION_POLICY = 'verified_scoped_claims_v1'
 MAX_DOCUMENTS = 4
 MAX_ORIGINAL_BYTES = 16 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024
@@ -27,6 +28,8 @@ _ATTACHMENT_KEYS = _FILE_KEYS | {'source_sha256', 'pages', 'render_identity'}
 
 
 def configured(ar_config):
+    if ar_config.get('bounded_document_decision_policy') not in (None, DECISION_POLICY):
+        raise ValueError('invalid_bounded_document_decision_policy')
     value = ar_config.get('bounded_document_research_policy')
     if value is None:
         return False
@@ -104,6 +107,8 @@ def load_retained_documents(ar_config, trading_date):
     scope = {'policy': POLICY, 'population': 'configured_retained_document_registry',
              'configured_count': len(registry) if type(registry) is list else None,
              'accepted_count': 0, 'complete': False, 'residual_failures': residuals}
+    if ar_config.get('bounded_document_decision_policy') is not None:
+        scope['decision_policy'] = ar_config['bounded_document_decision_policy']
     failure = {'error': 'bounded_document_intake_invalid', 'reason_code': 'invalid_response',
                'bounded_documents': [], 'bounded_document_scope': scope, 'coverage': {'complete': False}}
     try:
@@ -111,7 +116,7 @@ def load_retained_documents(ar_config, trading_date):
         from tradingagents.strategies.bounded_document_research import validate_evidence
         records, identities = [], set()
         for item in registry:
-            _require(type(item) is dict and set(item) == _ENTRY_KEYS)
+            _require(type(item) is dict and set(item) in (_ENTRY_KEYS, _ENTRY_KEYS | {'decision_scope'}))
             _require(type(item['ticker']) is str and re.fullmatch(r'[A-Z][A-Z0-9.-]{0,15}', item['ticker']))
             _require(type(item['document_id']) is str and item['document_id'] not in identities)
             identities.add(item['document_id'])
@@ -132,7 +137,12 @@ def load_retained_documents(ar_config, trading_date):
             evidence.update(policy=POLICY, original=original, attachments=attachments,
                             residual_failures=per_document_residuals)
             validate_evidence(evidence, session_as_of=trading_date)
-            records.append({'ticker': item['ticker'], 'evidence': evidence})
+            record = {'ticker': item['ticker'], 'evidence': evidence}
+            if 'decision_scope' in item:
+                _require(type(item['decision_scope']) is dict
+                    and len(json.dumps(item['decision_scope'], allow_nan=False).encode()) <= 256 * 1024)
+                record['decision_scope'] = deepcopy(item['decision_scope'])
+            records.append(record)
         accepted_scope = dict(scope, accepted_count=len(records), complete=True,
             registry_sha256=hashlib.sha256(json.dumps(registry, sort_keys=True, separators=(',', ':'),
                                                      allow_nan=False).encode()).hexdigest())

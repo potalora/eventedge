@@ -51,6 +51,20 @@ def test_disabled_policy_does_no_intake(registry):
         intake().configured({'bounded_document_research_policy': 'wrong'})
 
 
+def test_decision_scope_is_retained_separately_from_luna_request_and_candidates_start_held(registry):
+    registry['bounded_document_decision_policy'] = 'verified_scoped_claims_v1'
+    scope = {'policy':'verified_scoped_claims_v1','independent_review':{'receipt_sha256':'a'*64}}
+    registry['bounded_document_registry'][0]['decision_scope'] = scope
+    result = intake().load_retained_documents(registry, '2026-10-12')
+    assert result['coverage']['complete']
+    assert result['bounded_document_scope']['decision_policy'] == 'verified_scoped_claims_v1'
+    row = result['bounded_documents'][0]
+    assert row['decision_scope'] == scope and 'decision_scope' not in row['evidence']
+    candidate = strategy().screen({'bounded_documents':result}, '2026-10-12', {'analysis_budget':4})[0]
+    assert candidate.journal_only  # ordinary analysis must validate before admission
+    assert candidate.metadata['bounded_document_decision_scope'] == scope
+
+
 def test_intake_preserves_exact_bytes_page_mapping_and_residuals(registry):
     result = intake().load_retained_documents(registry, '2026-10-12')
     assert result['coverage'] == {'complete': True}

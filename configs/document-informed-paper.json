@@ -1,0 +1,16 @@
+{
+  "execution": {"mode": "paper", "execution_enabled": false},
+  "autoresearch": {
+    "filing_research_policy": "disabled_v1",
+    "research_resilience_policy": "dependency_isolation_v1",
+    "bounded_document_research_policy": "bounded_document_research_v1",
+    "bounded_document_decision_policy": "verified_scoped_claims_v1",
+    "llm_billing_mode": "chatgpt_plan",
+    "autoresearch_model": "gpt-6-luna",
+    "llm_effort": "high",
+    "thesis_model": "gpt-6.1-sol",
+    "thesis_effort": "high",
+    "portfolio_committee_model": "gpt-6.1-sol",
+    "portfolio_committee_effort": "high"
+  }
+}

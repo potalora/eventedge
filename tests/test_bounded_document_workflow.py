@@ -43,10 +43,34 @@ def test_bounded_document_candidate_retains_scoped_analysis_and_never_gains_orde
     assert candidate.metadata['bounded_document_source']['document_id'] == 'retained-original'
 
 
+def test_verified_document_candidate_can_reach_ordinary_decisions_only_after_analysis():
+    engine = object.__new__(MultiStrategyEngine)
+    engine.ar_config = {'bounded_document_decision_policy':'verified_scoped_claims_v1'}
+    seen = []
+    receipt = {'eligible':True,'policy':'verified_scoped_claims_v1',
+               'execution_authority':'ordinary_committee_and_risk_gates','receipt_sha256':'b'*64}
+    def analyze(value, *, session_as_of, regime_context, decision_scope, ticker):
+        seen.append((ticker,decision_scope))
+        return {'direction':'long','score':.9,'conviction':.9,'rationale':'Verified bounded claim supports constructed thesis.',
+                'journal_only':False,'assessment_scope':'selected_pages','decision_eligibility':receipt,
+                'bounded_document_research':{'receipt_sha256':'a'*64}}
+    candidate = Candidate(ticker='MSFT',date='2026-10-12',journal_only=True,
+        metadata={'analysis_type':'bounded_document_research','bounded_document_evidence':{},
+                  'bounded_document_decision_scope':{'independent_review':'bound'}})
+    engine._analyze_candidate(candidate,'bounded_document_research',{},
+        SimpleNamespace(analyze_bounded_document_evidence=analyze))
+    assert candidate.metadata['analysis_status'] == 'validated'
+    assert seen == [('MSFT',{'independent_review':'bound'})]
+    assert not candidate.journal_only and candidate.direction == 'long'
+    assert candidate.metadata['llm_analysis']['decision_eligibility'] == receipt
+
+
 @pytest.fixture
 def document_pipeline(pipeline, monkeypatch, request):
     fixture, previous, config, repo = pipeline
     retained = getattr(request, 'param', None)
+    if callable(retained):
+        retained = retained(repo)
     if retained is not None:
         from tradingagents.strategies.orchestration.bounded_document_inputs import load_retained_documents
         entry = deepcopy(retained['registry_entry'])
@@ -65,6 +89,8 @@ def document_pipeline(pipeline, monkeypatch, request):
     config['autoresearch'].update(bounded_document_research_policy=value['policy'],
         bounded_document_registry=[entry], research_resilience_policy='dependency_isolation_v1',
         filing_research_policy='disabled_v1', llm_billing_mode='chatgpt_plan')
+    if retained is not None and retained.get('decision_policy') is not None:
+        config['autoresearch']['bounded_document_decision_policy'] = retained['decision_policy']
     from tradingagents.strategies import chatgpt_plan_client, llm_utils
     monkeypatch.setattr(chatgpt_plan_client, '_profile_identity', lambda path: 'offline-profile')
     from tradingagents.strategies.bounded_document_research import prepare_recognition
@@ -73,24 +99,40 @@ def document_pipeline(pipeline, monkeypatch, request):
     original_model = fixture.model
 
     def model(client, *, system, prompt, **kwargs):
+        def observed(text):
+            callback = kwargs.get('response_observer')
+            if callback is not None:
+                callback(text)
+            return text
         if kwargs.get('document_inputs') is not None:
+            provenance = kwargs.get('provenance')
+            if provenance is not None:
+                from tradingagents.strategies.plan_document_inputs import encode_document_inputs,document_input_metadata
+                provenance.update(configured_model='gpt-6-luna',returned_model='gpt-6-luna',reasoning_effort='high',
+                    role='bounded',billing_mode='chatgpt_plan',identity_status='unpinned',
+                    document_inputs=document_input_metadata(encode_document_inputs(kwargs['document_inputs'])))
+            if 'Independent blind source verification' in system:
+                fixture.model_calls['document_verification'] += 1
+                return observed(json.dumps(retained['verification_response']))
             fixture.model_calls['document_recognition'] += 1
             if retained is not None:
                 import hashlib
                 assert hashlib.sha256(system.encode()).hexdigest() == retained['system_sha256']
                 assert hashlib.sha256(prompt.encode()).hexdigest() == retained['user_sha256']
-                return retained['recognition_text']
+                return observed(retained['recognition_text'])
             response = recognition(prepared)
             if fixture.recognition_fault == 'uncertain':
                 response['pages'][0].update(status='uncertain', uncertainties=['Unclear source cell'])
             if fixture.recognition_fault == 'malformed':
-                return '{'
-            return json.dumps(response)
-        if 'Immutable scoped recognition receipt:' in prompt:
+                return observed('{')
+            return observed(json.dumps(response))
+        if 'Immutable scoped recognition receipt:' in prompt or 'Immutable verified decision evidence:' in prompt:
             fixture.model_calls['document_thesis'] += 1
-            return json.dumps({'assessment_scope':'selected_pages','direction':'neutral','score':0,
+            if retained is not None and retained.get('thesis_response') is not None:
+                return observed(json.dumps(retained['thesis_response']))
+            return observed(json.dumps({'assessment_scope':'selected_pages','direction':'neutral','score':0,
                 'rationale':'Selected historical page warrants abstention.',
-                'evidence_claim':'The selected page prints Revenue in USD millions.'})
+                'evidence_claim':'The selected page prints Revenue in USD millions.'}))
         return original_model(client, system=system, prompt=prompt, **kwargs)
 
     monkeypatch.setattr(llm_utils, 'call_analysis_model', model)

@@ -330,8 +330,9 @@ class LLMAnalyzer:
 
     def analyze_bounded_document_evidence(
         self, evidence: dict, *, session_as_of=None, regime_context: dict | None = None,
+        decision_scope=None, ticker=None, verification_as_of=None, verification_clock=None,
     ) -> dict[str, Any]:
-        """Recognize retained selected pages, then obtain a journal-only thesis.
+        """Recognize pages, then obtain a scoped thesis with optional eligibility.
 
         Structural validation is not independent extraction truth. Complete
         source residual failures survive every successful selected-page result.
@@ -357,7 +358,7 @@ class LLMAnalyzer:
             attempt['receipt_sha256'] = hashlib.sha256(json.dumps(compact, sort_keys=True,
                 separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode('utf-8')).hexdigest()
 
-        def call(system, user, *, role, document_inputs=None):
+        def call(system, user, *, role, document_inputs=None, stage_name=None):
             model = self._model_name if role == 'bounded' else self._thesis_model
             effort = self._effort if role == 'bounded' else self._thesis_effort
             stage = {'model_request': request_receipt(model=model, role=role, effort=effort,
@@ -365,7 +366,7 @@ class LLMAnalyzer:
                 'model_provenance': {}, 'model_call_started': True, 'response_received': False,
                 'response_text': None, 'response_sha256': None, 'response_bytes': None,
                 'response_encoding': None, 'response_over_limit': False, 'validation_status': 'failed'}
-            attempt['recognition_attempt' if role == 'bounded' else 'thesis_attempt'] = stage
+            attempt[stage_name or ('recognition_attempt' if role == 'bounded' else 'thesis_attempt')] = stage
             text = self._call_llm(system, user, role=role,
                                  **({'document_inputs': document_inputs} if document_inputs is not None else {}))
             stage['model_provenance'] = deepcopy(self.last_call_provenance)
@@ -391,6 +392,10 @@ class LLMAnalyzer:
 
         try:
             ar = self.config.get('autoresearch', {})
+            if ar.get('bounded_document_decision_policy') is not None:
+                execution = self.config.get('execution', {})
+                if execution.get('mode') != 'paper' or execution.get('execution_enabled') is not False:
+                    raise ValueError('invalid_document_decision_paper_only')
             if (ar.get('bounded_document_research_policy') != POLICY
                     or ar.get('llm_billing_mode') != 'chatgpt_plan'
                     or self._model_name != 'gpt-6-luna' or self._effort != 'high'
@@ -404,9 +409,37 @@ class LLMAnalyzer:
             model_timeout()
             stage['validation_status'] = 'validated'
             attempt['recognition'] = recognition
-            system, user = prepare_thesis(recognition, regime_suffix=self._regime_suffix(regime_context))
+            decision_eligibility = None
+            decision_policy = ar.get('bounded_document_decision_policy')
+            if decision_policy is not None:
+                from tradingagents.strategies.document_decision_eligibility import (
+                    POLICY as DECISION_POLICY, assess_decision_eligibility,
+                    prepare_automatic_verification, build_automatic_review,
+                )
+                if decision_policy != DECISION_POLICY:
+                    raise ValueError('invalid_document_decision_policy')
+                if type(decision_scope) is dict and 'independent_review' not in decision_scope:
+                    system,user = prepare_automatic_verification(request,decision_scope)
+                    checked,check_stage = call(system,user,role='bounded',document_inputs=request.document_inputs,
+                        stage_name='verification_attempt')
+                    if verification_clock is not None:
+                        verification_as_of = verification_clock()
+                    elif verification_as_of is None:
+                        from datetime import datetime,timezone
+                        verification_as_of = datetime.now(timezone.utc).isoformat()
+                    automatic_review = build_automatic_review(recognition,checked,request,decision_scope,
+                        ticker=ticker,session_as_of=session_as_of,verified_at=verification_as_of,
+                        model_provenance=check_stage['model_provenance'])
+                    check_stage['validation_status'] = 'validated'
+                    attempt['automatic_review'] = deepcopy(automatic_review)
+                    decision_scope = {**decision_scope,'independent_review':automatic_review}
+                decision_eligibility = assess_decision_eligibility(recognition, decision_scope,
+                    ticker=ticker, session_as_of=session_as_of)
+                attempt['decision_eligibility'] = deepcopy(decision_eligibility)
+            system, user = prepare_thesis(recognition, regime_suffix=self._regime_suffix(regime_context),
+                decision_eligibility=decision_eligibility)
             text, stage = call(system, user, role='thesis')
-            result = validate_thesis(text)
+            result = validate_thesis(text, decision_eligibility=decision_eligibility)
             model_timeout()
             stage['validation_status'] = 'validated'
             attempt['validation_status'] = 'validated'

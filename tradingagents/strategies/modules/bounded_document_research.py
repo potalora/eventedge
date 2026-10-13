@@ -1,4 +1,4 @@
-"""Journal-only admission for explicitly retained, selected document evidence."""
+"""Held admission until explicitly retained claims pass scoped analysis."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -35,7 +35,7 @@ class BoundedDocumentResearchStrategy:
             raise ValueError('bounded_document_screen_invalid')
         candidates = []
         for row in rows:
-            if type(row) is not dict or set(row) != {'ticker', 'evidence'}:
+            if type(row) is not dict or set(row) not in ({'ticker', 'evidence'}, {'ticker', 'evidence', 'decision_scope'}):
                 raise ValueError('bounded_document_screen_invalid')
             evidence = row['evidence']
             validate_evidence(evidence, session_as_of=date)
@@ -47,6 +47,8 @@ class BoundedDocumentResearchStrategy:
                 metadata={'analysis_type': self.name, 'needs_llm_analysis': True,
                           'bounded_document_evidence': deepcopy(evidence),
                           'bounded_document_source': compact_source(evidence),
+                          **({'bounded_document_decision_scope':deepcopy(row['decision_scope'])}
+                             if 'decision_scope' in row else {}),
                           'bounded_document_discovery_id': source_key,
                           'observed_at': evidence['as_of']}))
         return admit_candidates(self.name, candidates, budget)
