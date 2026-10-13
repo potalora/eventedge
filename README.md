@@ -104,6 +104,9 @@ source failures between consecutive sessions in those reports. Contract/access
 failures require repair immediately; temporary failures escalate after three
 observed sessions. Fresh validated success closes the incident. Stable transition
 IDs support monitor deduplication, while missing observations never imply recovery.
+The optional receipt-backed consumer and [bounded acceptance drills](docs/verification/2026-10-13-source-acceptance.md)
+check notification delivery, duplicate suppression, missing reports and host
+boundaries. They do not install or change the production monitor.
 
 Clef runs an optional evidence check after all books finish staging. It samples
 up to five distinct events with retained source evidence and asks whether that

@@ -44,18 +44,33 @@ continuity; it must be treated as unknown monitoring history, never proof that a
 old repair was completed.
 
 The `alerts` list contains transition events with stable `alert_id` values.
-The notification consumer should deduplicate by `alert_id` and notify on opening,
+The callable `source_notifications` consumer deduplicates by `alert_id` and notifies on opening,
 escalation, loss of observation and recovery. Re-reading the same report must not
 send another message. Unchanged failures remain in `open_incidents` without a new
 notification. An open repair-required incident stays visible until supported
 recovery. Inspect the canonical source diagnostics for exact reason/status and
 affected strategy/cohort scope; never put raw responses or credentials in alerts.
 
-This MVP emits events to the existing report/log interface. It does not install
-or verify an external notification transport. Before an authorized rollout,
-the existing scheduler/monitor must demonstrate delivery and deduplication of
-one controlled failure and recovery, and alert when the daily report itself is
-missing or unreadable. A missing report means unknown health. Host, process,
+The consumer checks the exact expected generation, commit and session, and the
+matching JSON/Markdown pair. Missing, invalid or mismatched reports emit one
+report-unavailable event per expected session; a valid return emits recovery.
+Its separate JSON receipt file binds generation, commit, recipient and test mode.
+It records uncertainty before sending and acknowledges only a confirmed message
+receipt. A proven rejection can retry on the next invocation; an uncertain send
+requires destination reconciliation before any retry. It retains 90 days of
+confirmed events, preserves unresolved uncertain sends, and stops safely at its
+2,048-event/1 MiB limit. Keep this file across monitor invocations; never reset it
+to work around an uncertain delivery. The caller supplies a bounded transport
+and must surface state errors or uncertain delivery for operator attention.
+
+The [isolated acceptance drill](verification/2026-10-13-source-acceptance.md)
+verified five labeled TEST events through the existing Discord transport with
+confirmed receipts and duplicate suppression. This does not install the consumer
+in the scheduled monitor. During an explicitly authorized rollout, wire the
+consumer into the existing monitor with a durable receipt path and verified
+recipient, then verify the deployed report and scheduled invocation. Keep one
+owner for these source alerts to avoid a second summary sender duplicating them.
+A missing report means unknown health. Host, process,
 authentication, disk capacity and report freshness remain separate operational
 checks; this source policy does not replace them.
 
@@ -85,6 +100,13 @@ mutation. Reuse the existing retry, source isolation, historical lifecycle and
 replay tests. Do not require natural outages or weeks of market days, broaden the
 provider campaign, or rerun unrelated passing suites without a relevant change.
 
-Code/test acceptance and production delivery acceptance are separate. This
-change is prepared for PR review; deployment and external alert delivery need
-their own explicit rollout and evidence.
+Run `python scripts/run_source_notification_drill.py` for the safe local receipt
+sink. Supplying a real transport callback is an explicit action: the reusable
+drill never discovers recipients or sends external messages by default.
+`scripts/check_target_host_smoke.py` collects bounded read-only host facts;
+credential presence and an active timer do not prove authentication or a healthy
+application run.
+
+Code/test acceptance, isolated transport acceptance and scheduled production
+acceptance are separate. This change is prepared for PR review; deployment and
+monitor installation require their own explicit rollout and evidence.
