@@ -285,6 +285,8 @@ class CohortOrchestrator:
             raise ValueError("CohortOrchestrator is paper-only")
         from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
         strategies = configure_strategies(get_paper_trade_strategies(), ar_config)
+        from .bounded_document_inputs import configure_strategies as configure_document_strategies
+        strategies = configure_document_strategies(strategies, ar_config)
         strategy_names = tuple(
             getattr(strategy, "name", None) for strategy in strategies
         )
@@ -479,7 +481,7 @@ class CohortOrchestrator:
     ) -> bool:
         """Persist one shared horizon's evidence and enforce full coverage."""
         valid = (
-            len(health) == len(self._active_strategy_names) == 12
+            len(health) == len(self._active_strategy_names)
             and {record.strategy for record in health} == self._active_strategy_names
             and all(record.epoch_id == self._epoch_id for record in health)
             and all(record.session == session for record in health)

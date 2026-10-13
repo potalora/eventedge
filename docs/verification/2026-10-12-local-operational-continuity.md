@@ -1,6 +1,11 @@
 # Local operational continuity: preparation and acceptance contract
 
-Full live end-to-end acceptance remains pending. Engineering checks and the retained Luna document pilot do not establish reliable daily operation. The next step is a frozen local paper candidate running the ordinary generation lifecycle across real sessions on the same books.
+This optional real-clock experiment is paused. Its five-session requirement is
+not an engineering acceptance prerequisite. Pedro's subsequent direction is
+implemented by the finite [Luna workflow and historical operational checks](2026-10-12-luna-workflow-integration.md),
+including document recognition in the actual research workflow. The contract
+below remains available for a later sustained live observation; it does not
+establish deployed scheduler reliability or investment performance.
 
 ## Runtime and scope
 
@@ -12,7 +17,7 @@ Keep the existing approved source identity and `configs/research-without-bulk-fi
 
 Source/model/per-call budgets remain 900/2400/120 seconds. Reuse the reviewed 3500-second outer watchdog with sampled aggregate RSS at 8 GiB, 96 processes, 1 MiB outer console output and three-second cleanup. Replay uses a separate 120-second outer watchdog and 110-second model budget. Existing source/document bounds remain unchanged; private retained data stays below the existing 8 GiB capture ceiling with 24 GiB minimum free disk before launch. Sampling is not a kernel memory/disk quota.
 
-The first prospective reference is October 12, 2026, after its actual 16:00 Eastern close and before October 13's 09:30 Eastern opening. The same chat's weekday 16:05 continuation must re-evaluate the actual XNYS calendar each time. Local scheduling requires the Mac and app to be running. A missed or interrupted session remains visible and cannot be repaired by backdating, resetting books or chasing success with another same-day attempt.
+The originally planned prospective reference was October 12, 2026, after its actual 16:00 Eastern close and before October 13's 09:30 Eastern opening. Continuation is paused; any later authorized resumption must re-evaluate the actual XNYS calendar. Local scheduling requires the Mac and app to be running. A missed or interrupted session remains visible and cannot be repaired by backdating, resetting books or chasing success with another same-day attempt.
 
 ## What counts
 

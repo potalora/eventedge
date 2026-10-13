@@ -140,6 +140,7 @@ class LLMAnalyzer:
         self.last_call_provenance: dict[str, Any] = {}
         self.last_call_failure = ""
         self.last_research_request: dict[str, Any] | None = None
+        self.last_bounded_document_attempt: dict[str, Any] | None = None
         self._provider_clients: dict[str, Any] = {}
         # Older models use temperature zero by default. Sonnet 5 omits sampling
         # controls because adaptive thinking rejects non-default values.
@@ -177,6 +178,7 @@ class LLMAnalyzer:
         result.last_call_provenance = {}
         result.last_call_failure = ""
         result.last_research_request = None
+        result.last_bounded_document_attempt = None
         result._client = fork_client(self._client)
         result._provider_clients = {name: fork_client(client) for name, client in self._provider_clients.items()}
         return result
@@ -241,7 +243,7 @@ class LLMAnalyzer:
             f"Factor regime into your conviction level."
         )
 
-    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis") -> str:
+    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis", document_inputs=None) -> str:
         """Make a single LLM call. Returns response text or empty string."""
         from tradingagents.strategies.candidate_response_reuse import reused_candidate_response, retain_candidate_response
         from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
@@ -263,8 +265,21 @@ class LLMAnalyzer:
         self.last_call_provenance = {"configured_model": model, "returned_model": None,
                                      "returned_revision": None, "identity_status": "unpinned",
                                      "response_id": None, "reasoning_effort": effort, "role": role}
+        # Attachment identity is not part of the legacy candidate memo key.
+        # Clear pending state as well: a prior plain request must not be committed
+        # accidentally after a document call (including a failed call).
+        if document_inputs is not None:
+            from tradingagents.strategies.candidate_response_reuse import _CANDIDATE
+            candidate_request = _CANDIDATE.get()
+            if candidate_request is not None:
+                candidate_request.key = candidate_request.digest = candidate_request.pending = None
         try:
             model_timeout()
+            if document_inputs is not None:
+                from tradingagents.strategies.plan_document_inputs import encode_document_inputs
+                encode_document_inputs(document_inputs)
+                if role != 'bounded':
+                    raise ValueError('invalid_bounded_document')
             plan_client = configured_plan_client(self.config, model)
             mixed_provider = uses_responses(model) != uses_responses(self._model_name)
             if plan_client is not None and mixed_provider:
@@ -286,7 +301,7 @@ class LLMAnalyzer:
                 self.last_call_failure = "model_unavailable"
                 return ""
             require_configured_billing(client, self.config, model)
-            reused = reused_candidate_response(client, model=model, system=system, prompt=user,
+            reused = None if document_inputs is not None else reused_candidate_response(client, model=model, system=system, prompt=user,
                                                 max_tokens=max_tokens, temperature=self._temperature,
                                                 effort=effort, role=role)
             if reused is not None:
@@ -299,9 +314,11 @@ class LLMAnalyzer:
                 system=system, prompt=user, temperature=self._temperature,
                 effort=effort, provenance=self.last_call_provenance,
                 response_observer=observed_response,
+                **({"document_inputs": document_inputs} if document_inputs is not None else {}),
             )
             self.last_call_provenance["role"] = role
-            retain_candidate_response(text, self.last_call_provenance)
+            if document_inputs is None:
+                retain_candidate_response(text, self.last_call_provenance)
             return text
         except ModelDeadlineExceeded:
             self.last_call_failure = "model_deadline_exhausted"
@@ -310,6 +327,103 @@ class LLMAnalyzer:
             self.last_call_failure = "analysis_unavailable"
             logger.error("LLM call failed")
             return ""
+
+    def analyze_bounded_document_evidence(
+        self, evidence: dict, *, session_as_of=None, regime_context: dict | None = None,
+    ) -> dict[str, Any]:
+        """Recognize retained selected pages, then obtain a journal-only thesis.
+
+        Structural validation is not independent extraction truth. Complete
+        source residual failures survive every successful selected-page result.
+        """
+        import hashlib
+        from tradingagents.strategies.bounded_document_research import (
+            POLICY, MAX_RESPONSE_BYTES, prepare_recognition, validate_recognition,
+            prepare_thesis, validate_thesis,
+        )
+        from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        self.last_call_failure = ''
+        self.last_call_provenance = {}
+        self.last_call_response = None
+        self.last_research_request = None
+        attempt = {'version': 'bounded-document-research-attempt-v1', 'validation_status': 'not_started',
+                   'source_identity': None, 'recognition': None, 'recognition_attempt': None,
+                   'thesis_attempt': None, 'failure_reason': None}
+        self.last_bounded_document_attempt = attempt
+
+        def seal_attempt():
+            compact = {key: value for key, value in attempt.items() if key != 'receipt_sha256'}
+            attempt['receipt_sha256'] = hashlib.sha256(json.dumps(compact, sort_keys=True,
+                separators=(',', ':'), ensure_ascii=True, allow_nan=False).encode('utf-8')).hexdigest()
+
+        def call(system, user, *, role, document_inputs=None):
+            model = self._model_name if role == 'bounded' else self._thesis_model
+            effort = self._effort if role == 'bounded' else self._thesis_effort
+            stage = {'model_request': request_receipt(model=model, role=role, effort=effort,
+                max_tokens=4096, temperature=self._temperature, system=system, prompt=user),
+                'model_provenance': {}, 'model_call_started': True, 'response_received': False,
+                'response_text': None, 'response_sha256': None, 'response_bytes': None,
+                'response_encoding': None, 'response_over_limit': False, 'validation_status': 'failed'}
+            attempt['recognition_attempt' if role == 'bounded' else 'thesis_attempt'] = stage
+            text = self._call_llm(system, user, role=role,
+                                 **({'document_inputs': document_inputs} if document_inputs is not None else {}))
+            stage['model_provenance'] = deepcopy(self.last_call_provenance)
+            observed = self.last_call_response
+            raw_text = observed.get('text') if type(observed) is dict and observed.get('received') is True else None
+            if type(raw_text) is str:
+                encoding = 'utf-8'
+                try:
+                    raw = raw_text.encode('utf-8')
+                except UnicodeEncodeError:
+                    raw = raw_text.encode('utf-8', errors='surrogatepass')
+                    encoding = 'utf-8-surrogatepass'
+                stage.update(response_received=True, response_sha256=hashlib.sha256(raw).hexdigest(),
+                    response_bytes=len(raw), response_encoding=encoding,
+                    response_over_limit=len(raw) > MAX_RESPONSE_BYTES,
+                    response_text=raw_text if len(raw) <= MAX_RESPONSE_BYTES else None)
+            model_timeout()
+            if self.last_call_failure == 'model_deadline_exhausted':
+                raise ModelDeadlineExceeded('model_deadline_exhausted')
+            if self.last_call_failure or not text or stage['response_over_limit']:
+                raise ValueError('invalid_bounded_document')
+            return text, stage
+
+        try:
+            ar = self.config.get('autoresearch', {})
+            if (ar.get('bounded_document_research_policy') != POLICY
+                    or ar.get('llm_billing_mode') != 'chatgpt_plan'
+                    or self._model_name != 'gpt-6-luna' or self._effort != 'high'
+                    or self._thesis_model != 'gpt-6.1-sol' or self._thesis_effort != 'high'):
+                raise ValueError('invalid_bounded_document')
+            model_timeout()
+            request = prepare_recognition(evidence, session_as_of=session_as_of)
+            attempt['source_identity'] = json.loads(request.context_json)
+            text, stage = call(request.system, request.user, role='bounded', document_inputs=request.document_inputs)
+            recognition = validate_recognition(text, request)
+            model_timeout()
+            stage['validation_status'] = 'validated'
+            attempt['recognition'] = recognition
+            system, user = prepare_thesis(recognition, regime_suffix=self._regime_suffix(regime_context))
+            text, stage = call(system, user, role='thesis')
+            result = validate_thesis(text)
+            model_timeout()
+            stage['validation_status'] = 'validated'
+            attempt['validation_status'] = 'validated'
+            seal_attempt()
+            return result | {'bounded_document_research': deepcopy(attempt)}
+        except ModelDeadlineExceeded:
+            self.last_call_failure = 'model_deadline_exhausted'
+            raise
+        except ValueError:
+            if not self.last_call_failure:
+                self.last_call_failure = 'invalid_bounded_document'
+            raise
+        finally:
+            if attempt['validation_status'] != 'validated':
+                attempt['validation_status'] = 'failed'
+                attempt['failure_reason'] = self.last_call_failure or 'analysis_unavailable'
+            seal_attempt()
 
     # ------------------------------------------------------------------
     # Filing analysis (P3: 10-K/10-Q material changes)

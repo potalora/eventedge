@@ -391,8 +391,9 @@ def _candidate_issues(state: Path, epoch: str | None, session: str, diagnose) ->
         return []
 
 
-def _health_coverage(health: list[dict], epoch: str | None, session: str, diagnose, disabled=None) -> list[dict]:
-    strategies = {strategy.name for strategy in get_paper_trade_strategies()}
+def _health_coverage(health: list[dict], epoch: str | None, session: str, diagnose, disabled=None, *, strategies=None) -> list[dict]:
+    strategies = ({strategy.name for strategy in get_paper_trade_strategies()}
+                  if strategies is None else set(strategies))
     failures = []
     scoped = {}
     for row in health:
@@ -552,7 +553,18 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                 retained_sources.update({key: envelope['payload'][key] for key in ('fred','edgar','equity_universe') if key in envelope['payload']})
                 retained_sources['_state_config'] = state_config
         from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
-        required={source for strategy in configure_strategies(get_paper_trade_strategies(), state_config) for source in strategy.data_sources if source!='openbb'}
+        from .bounded_document_inputs import POLICY as DOCUMENT_POLICY, configure_strategies as document_strategies
+        document_config = {}
+        if 'bounded_documents' in envelope['payload']:
+            document_scope = envelope['payload']['bounded_documents'].get('bounded_document_scope', {})
+            if (document_scope.get('policy') != DOCUMENT_POLICY
+                    or document_scope.get('population') != 'configured_retained_document_registry'):
+                raise ValueError('bounded document source scope invalid')
+            document_config = {'bounded_document_research_policy': DOCUMENT_POLICY}
+            if retained_sources is not None:
+                retained_sources['_bounded_document_config'] = document_config
+            result['bounded_document_scope'] = document_scope
+        required={source for strategy in document_strategies(configure_strategies(get_paper_trade_strategies(), state_config), document_config) for source in strategy.data_sources if source!='openbb'}
         for source in sorted(required-set(envelope['payload'])):
             diagnose('accepted_source_missing',source)
             result['observations'][source]='missing'
@@ -673,6 +685,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         disabled = report['sources'].get('declared_exclusions', {})
         from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
         report_strategies = configure_strategies(get_paper_trade_strategies(), retained_sources.get('_state_config', {}))
+        from .bounded_document_inputs import configure_strategies as document_strategies
+        report_strategies = document_strategies(report_strategies, retained_sources.get('_bounded_document_config', {}))
         epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
         report['epoch_id'] = epoch
         report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
@@ -685,7 +699,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             # Completion records the phase, validity records accepted inputs.
             row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
-        report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled)
+        report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled,
+            strategies={strategy.name for strategy in report_strategies})
         try:
             expected_attribution = report['sources'].get('filing_attribution_scope')
             source_error_digest = report['sources'].get('filing_source_error_sha256')

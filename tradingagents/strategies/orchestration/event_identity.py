@@ -1,4 +1,4 @@
-"""Source-native event identities for the 12 active paper strategies."""
+"""Source-native event identities for configured paper research strategies."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ ACTIVE_STRATEGY_NAMES = frozenset(
         "weather_ag",
         "commodity_macro",
         "quantum_readiness",
+        "bounded_document_research",
     }
 )
 
@@ -143,7 +144,26 @@ def canonical_event_key(
     family: str
     payload: object
 
-    if strategy == "earnings_call":
+    if strategy == 'bounded_document_research':
+        import re
+        source = metadata.get('bounded_document_source')
+        if not isinstance(source, dict):
+            raise ValueError('bounded document candidate lacks retained source identity')
+        document_id = _required(source, 'document_id', strategy)
+        original_sha = _required(source, 'original_sha256', strategy)
+        pages = _required(source, 'selected_pages', strategy)
+        if (not isinstance(document_id, str) or not document_id.strip()
+                or not isinstance(original_sha, str) or re.fullmatch('[0-9a-f]{64}', original_sha) is None
+                or type(pages) is not list or not 1 <= len(pages) <= 8
+                or any(type(page) is not int or page < 1 for page in pages)
+                or len(set(pages)) != len(pages)):
+            raise ValueError('bounded document candidate source identity invalid')
+        available = _availability_timestamp(_required(source, 'as_of', strategy),
+            date_only=False, field='as_of')
+        family = 'retained_document_pages'
+        payload = {'document_id': document_id, 'original_sha256': original_sha,
+                   'selected_pages': pages, 'as_of': available.isoformat()}
+    elif strategy == "earnings_call":
         family = "fiscal_period"
         payload = {
             "year": _required(metadata, "year", strategy),

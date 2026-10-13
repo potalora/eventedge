@@ -331,6 +331,8 @@ class MultiStrategyEngine:
         # Load strategies (paper-trade only)
         from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
         self.paper_trade_strategies = configure_strategies(strategies or get_paper_trade_strategies(), self.ar_config)
+        from .bounded_document_inputs import configure_strategies as configure_document_strategies
+        self.paper_trade_strategies = configure_document_strategies(self.paper_trade_strategies, self.ar_config)
 
         # Data source registry
         self.registry = registry or build_default_registry(self.ar_config)
@@ -631,6 +633,9 @@ class MultiStrategyEngine:
                     if (self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
                         or self.ar_config.get('regulation_evidence_policy') is not None) else {})
                 candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model, **filing_options)
+            from .bounded_document_inputs import release_candidate_bytes
+            for candidate in candidates:
+                release_candidate_bytes(candidate)
             universe_assessments = []
             if universe is not None:
                 for candidate in candidates:
@@ -2161,6 +2166,8 @@ class MultiStrategyEngine:
             needed_sources.update(s.data_sources)
 
         available = set(self.registry.available_sources())
+        if self.ar_config.get('bounded_document_research_policy') is not None:
+            available.add('bounded_documents')
         logger.info("Needed sources: %s, available: %s", needed_sources, available)
         for source in sorted(needed_sources - available):
             data[source] = {"error": "source unavailable or skipped"}
@@ -2173,6 +2180,9 @@ class MultiStrategyEngine:
 
         # Fetch API-key sources in parallel (I/O bound, no dependency on each other)
         api_fetches: dict[str, tuple] = {}
+        if 'bounded_documents' in needed_sources:
+            from .bounded_document_inputs import load_retained_documents
+            api_fetches['bounded_documents'] = (load_retained_documents, (self.ar_config, end_date))
         if "finnhub" in needed_sources and "finnhub" in available:
             finnhub_budget_cap_s = max(
                 fetch_timeout_s - _FINNHUB_FETCH_SAFETY_MARGIN_S,
@@ -3109,6 +3119,8 @@ class MultiStrategyEngine:
             analyzer.last_call_provenance = {}
             analyzer.last_call_failure = ''
         analysis_type = c.metadata.get("analysis_type", "")
+        if analysis_type == 'bounded_document_research':
+            analyzer.last_bounded_document_attempt = None
         llm_result = {}
         full_filing = c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1'
         full_regulation = analysis_type == 'regulation' and (
@@ -3132,7 +3144,18 @@ class MultiStrategyEngine:
             fields = required_text_fields.get(analysis_type)
             if not full_filing and not full_regulation and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
                 raise ValueError("missing_source_text")
-            if full_filing:
+            if analysis_type == 'bounded_document_research':
+                # Selected pages cannot authorize trading, even after a valid
+                # scoped thesis. Preserve complete-filing failures separately.
+                c.journal_only = True
+                llm_result = analyzer.analyze_bounded_document_evidence(
+                    c.metadata['bounded_document_evidence'], session_as_of=c.date,
+                    regime_context=regime_context)
+                if (llm_result.get('journal_only') is not True
+                        or llm_result.get('trading_authority') is not False
+                        or llm_result.get('assessment_scope') != 'selected_pages'):
+                    raise ValueError('invalid_bounded_document_authority')
+            elif full_filing:
                 from tradingagents.strategies.orchestration.filing_inputs import filing_analysis_inputs
                 filing_arguments = filing_analysis_inputs(c, filing_data, universe)
                 llm_result = analyzer.analyze_filing_evidence(
@@ -3365,6 +3388,14 @@ class MultiStrategyEngine:
                 c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
             logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
         finally:
+            if analysis_type == 'bounded_document_research':
+                # Exact bytes already live in the immutable daily source bundle.
+                # Retain compact identity in each horizon/book checkpoint.
+                from .bounded_document_inputs import release_candidate_bytes
+                release_candidate_bytes(c)
+                attempt = getattr(analyzer, 'last_bounded_document_attempt', None)
+                if isinstance(attempt, dict) and c.metadata.get('analysis_status') != 'validated':
+                    c.metadata['bounded_document_attempt'] = deepcopy(attempt)
             if resilience:
                 observed = getattr(analyzer, 'last_call_response', None)
                 text = observed.get('text') if isinstance(observed, dict) and observed.get('received') is True else None

@@ -1,12 +1,17 @@
 # Retained-document Luna pilot
 
+This records the earlier attachment pilot. The subsequent
+[bounded document workflow](2026-10-12-luna-workflow-integration.md) adds an actual
+research caller and a scanned populated-table sample. Its outcomes and limits
+are separate; the pilot's original failed and passed receipts remain unchanged.
+
 The approved next-generation pilot now has an opt-in application attachment path, a fixed retained-document sample, independent probe validation and read-only replay. The first two actual ChatGPT-plan calls failed their frozen quality contracts. After a separately frozen prompt correction, one follow-up per input **passed all ten sampled probes across four pages**. The original failures remain unchanged. These corrective results concern previously seen samples; complete transcription and broader document quality remain unverified. The existing v4 candidate still has OCR/vision disabled; this work gives no analysis, order, source-recovery or deployment authority. The earlier resilience milestone remains closed at its separately recorded commit.
 
 ## Application interface
 
 `PlanDocumentInput` requires explicit PNG/PDF bytes, a safe filename and an independently supplied SHA256. The parent and disposable worker validate format signatures, exact hashes, canonical base64 and finite bounds: 4 MiB per input, 8 MiB total, eight inputs. There is no URL, file-ID, path-fetch or truncation fallback. These are transport-integrity checks, not PDF validity or completeness checks.
 
-`call_analysis_model(..., document_inputs=[...])` accepts attachments only with the native `ChatGPTPlanClient` and `gpt-6-luna`. Native profile binding, paid-environment removal, zero SDK retries, no redirects, the strict completed Responses stream and existing model deadlines remain in force. Ordinary text requests retain their prior shape. Successful provenance records ordered input hashes, formats, filenames and sizes without document content. No existing research caller or configuration enables this optional interface.
+`call_analysis_model(..., document_inputs=[...])` accepts attachments only with the native `ChatGPTPlanClient` and `gpt-6-luna`. Native profile binding, paid-environment removal, zero SDK retries, no redirects, the strict completed Responses stream and existing model deadlines remain in force. Ordinary text requests retain their prior shape. Successful provenance records ordered input hashes, formats, filenames and sizes without document content. At this pilot checkpoint no research caller enabled the optional interface; the later bounded workflow supplies that caller behind an explicit policy.
 
 `luna_document_pilot.py` independently compares requested page coverage, printed numeric literals, units, row/column associations and source-linked support against gold read before inference. Unknown fields, invalid schema, missing/duplicate pages or probes, bad citations and numeric-boundary corruption fail. Model uncertainty remains unresolved only after schema validation. Blank-cell checks are deliberately limited to independently verified pages containing no numeric values; mixed populated/blank tables are unsupported. A passing sample receipt would still leave complete transcription, unselected pages and whole-document quality unverified.
 
@@ -57,4 +62,11 @@ Replay proves anchored artifact integrity and deterministic validation. It does 
 
 ## Remaining gate
 
-The prompt/schema correction is verified on these previously seen samples only. A populated numeric table, wider independent samples and complete-page checks remain necessary before any broader extraction-quality claim or next-generation semantic integration. Any further pilot needs a prospectively frozen sample, policy, prompt and finite attempt count. Original parser failures and the malformed-font exclusion remain in force. No research acquisition or generation was resumed, no analysis/trading path was enabled, and nothing was merged or deployed.
+The prompt/schema correction was verified on these previously seen samples only.
+The later bounded workflow addresses integration and a populated numeric table;
+wider independent samples and complete-page checks remain necessary for any
+broader extraction-quality claim. Any further native pilot needs a prospectively
+frozen sample, policy, prompt and finite attempt count. Original parser failures
+and the malformed-font exclusion remain in force. This pilot resumed no research
+acquisition or generation and enabled no analysis/trading path. The subsequent
+workflow remains journal-only; nothing was merged or deployed.

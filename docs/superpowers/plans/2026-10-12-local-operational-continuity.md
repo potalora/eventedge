@@ -1,5 +1,10 @@
 # Local operational continuity implementation plan
 
+This plan's real-clock observation is now optional and paused. The subsequent
+[finite workflow acceptance plan](2026-10-12-luna-workflow-acceptance.md) supersedes
+the five-session engineering prerequisite. Retain this implementation and its
+evidence for a later explicitly chosen live observation.
+
 > **For agentic workers:** Use the existing Superpowers test-first and verification workflows, with one bounded implementation agent for generation configuration. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Establish five consecutive eligible live-source paper sessions on persistent isolated books, with useful complete execution and immutable replay, before claiming initial operational acceptance.
