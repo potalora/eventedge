@@ -592,6 +592,9 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                 if status is not None and (type(status) is not int or not 100<=status<=599):
                     raise ValueError('source status invalid')
                 safe = {key:event.get(key) for key in ('provider','operation','reason_code','http_status','attempts','recovered')}
+                # Request-budget identity can differ from the observed source
+                # (e.g. Alpaca transports the equity-universe source).
+                safe['source'] = source
                 safe['reason_code'] = event.get('reason_code') or 'success'
                 if event['recovered']:
                     result['recovered'].append(safe)
@@ -932,6 +935,20 @@ def render_operational_report(report: dict) -> str:
                     lines.append(f"- {row['policy_id']} / {row['strategy']}: {row['status']} ({', '.join(row['sources']) or 'no source identity'}).")
                 else:
                     lines.append(f"- {row['provider']}: {row['reason_code']}; HTTP {row.get('http_status') or 'unknown'}; attempts {row.get('attempts','unknown')}.")
+    if 'source_incidents' in report:
+        policy = report['source_incidents']
+        lines.extend(['', '## Source incident policy', '',
+            f"Policy: {policy['policy']}; assessment: {policy['assessment_status']}; previous-session history: {policy['history_status']}.",
+            'Incident status is operational evidence and does not change trading permissions.'])
+        for incident in policy['open_incidents']:
+            lines.append(f"- {incident['provider']}: **{incident['status']}**.")
+        if policy['assessment_status'] == 'unavailable':
+            lines.append('Source incident assessment unavailable; inspect the evidence diagnostics below.')
+        elif not policy['open_incidents']:
+            lines.append('No observed open source incidents; this does not establish unobserved source health.')
+        for alert in policy['alerts']:
+            lines.append(f"- Event {alert['kind']}: {alert['provider']} ({alert['alert_id']}).")
+        lines.append('Repair procedure and monitor contract: docs/source-incident-policy.md.')
     if report['preflight_incidents']:
         lines.extend(['','## Preflight incidents',''])
         for item in report['preflight_incidents']:
@@ -966,8 +983,10 @@ def _publish(path: Path, content: str) -> None:
 
 
 def write_operational_report(report: dict, output_dir: str | Path) -> dict[str, Path]:
+    from .source_incidents import load_source_incidents
     output=Path(output_dir)
     output.mkdir(parents=True,exist_ok=True)
+    report['source_incidents'] = load_source_incidents(report, output)
     basename=f"{report['session']}-{report['generation_id']}-operational-report"
     paths={'json':output/(basename+'.json'),'markdown':output/(basename+'.md')}
     _publish(paths['json'],json.dumps(report,sort_keys=True,indent=2,allow_nan=False)+'\n')

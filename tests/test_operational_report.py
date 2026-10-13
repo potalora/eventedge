@@ -554,6 +554,51 @@ def test_cli_writes_deterministic_json_and_markdown_for_completed_session(native
     assert len(list(output.glob('*.json')))==len(list(output.glob('*.md')))==1
 
 
+def test_cli_publishes_actionable_source_incident_without_rewriting_trading_evidence(native_evidence,tmp_path,capsys):
+    from scripts.generate_operational_report import main
+    repo,state,wire=native_evidence
+    source_path=next((state/'source_inputs').glob('*.json'))
+    envelope=SourceInputStore.decode(source_path.read_text())
+    envelope['payload']['edgar']={'error':'provider response invalid',
+        '_coverage':{'status':'failed','reason_code':'invalid_response'}}
+    envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
+    source_path.write_text(SourceInputStore.encode(envelope))
+    _attempt(repo,wire)
+    before_source=source_path.read_bytes()
+    before_manifest=(state.parent/'manifest.json').read_bytes()
+    output=tmp_path/'reports'
+    args=['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
+          '--output-dir',str(output),'--snapshot-guaranteed']
+    assert main(args)==2  # Existing contradictory clean evidence remains invalid.
+    summary=json.loads(capsys.readouterr().out)['reports'][0]
+    published=json.loads(next(output.glob('*.json')).read_text())
+    policy=published['source_incidents']
+    edgar=next(row for row in policy['open_incidents'] if row['provider']=='edgar')
+    assert edgar['status']=='repair_required'
+    assert summary['source_incidents']==policy
+    assert policy['alerts']
+    assert 'repair_required' in next(output.glob('*.md')).read_text()
+    assert main(args)==2
+    repeated=json.loads(capsys.readouterr().out)['reports'][0]
+    assert repeated['source_incidents']==policy
+    assert source_path.read_bytes()==before_source
+    assert (state.parent/'manifest.json').read_bytes()==before_manifest
+
+
+def test_source_policy_cannot_suppress_report_for_invalid_manifest(native_evidence,tmp_path,capsys):
+    from scripts.generate_operational_report import main
+    repo,state,wire=native_evidence
+    (state.parent/'manifest.json').write_text('{}')
+    output=tmp_path/'reports'
+    assert main(['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
+                 '--output-dir',str(output),'--snapshot-guaranteed'])==2
+    assert list(output.glob('*.json')), 'Invalid evidence still needs its diagnostic report'
+    published=json.loads(next(output.glob('*.json')).read_text())
+    assert published['source_incidents']['assessment_status']=='unavailable'
+    assert published['evidence_complete'] is False
+    assert {'code':'manifest_invalid'} in published['diagnostics']
+
+
 @pytest.mark.parametrize('damage',['missing','outcome_conflict','missing_artifact'])
 def test_exact_manifest_history_must_match_immutable_attempt(native_evidence,damage):
     repo,state,wire=native_evidence
@@ -634,6 +679,23 @@ def test_native_request_diagnostics_allow_success_none_and_zero_attempt_deadline
     assert report['outcome']=='clean'
     assert report['sources']['recovered'][0]['reason_code']=='success'
     assert any(row.get('attempts')==0 for row in report['sources']['unresolved'])
+
+
+def test_report_binds_transport_diagnostics_to_the_observed_source(native_evidence,tmp_path):
+    repo,state,wire=native_evidence
+    path=next((state/'source_inputs').glob('*.json'))
+    envelope=SourceInputStore.decode(path.read_text())
+    envelope['payload']['equity_universe']={'error':'deadline','_request_diagnostics':[{
+        'provider':'alpaca','operation':'assets','reason_code':'timeout',
+        'http_status':None,'attempts':0,'recovered':False}]}
+    envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
+    path.write_text(SourceInputStore.encode(envelope))
+    _attempt(repo,wire)
+    report=_report(repo)
+    diagnostic=next(row for row in report['sources']['unresolved'] if row['provider']=='alpaca')
+    assert diagnostic['source']=='equity_universe'
+    write_operational_report(report,tmp_path/'reports')
+    assert [row['provider'] for row in report['source_incidents']['open_incidents']]==['equity_universe']
 
 
 def test_wrong_shared_epoch_window_cannot_claim_accounting_valid(native_evidence):

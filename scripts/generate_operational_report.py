@@ -53,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
                 paths = write_operational_report(report,output)
                 reports.append({'generation':generation,'outcome':report['outcome'],
                                 'evidence_complete':report['evidence_complete'],
+                                'source_incidents':report['source_incidents'],
                                 'json':str(paths['json']),'markdown':str(paths['markdown'])})
         print(json.dumps({'reports':reports},sort_keys=True))
         return 0 if all(row['evidence_complete'] and row['outcome'] in {'clean','degraded'} for row in reports) else 2
