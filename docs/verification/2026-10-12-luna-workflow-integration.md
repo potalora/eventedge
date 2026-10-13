@@ -179,6 +179,10 @@ the wider source-reliability harness retains its full provider histories.
   Counts overlap and are not additive.
 - Required non-live CI runs both baseline and pinned OpenBB environments on the
   exact topic-branch commit. Its final status is recorded on PR #50.
+  The pinned OpenBB job has a 40-minute aggregate limit after a slower hosted
+  runner reached 95% at the former 30-minute cutoff. Baseline remains at 30
+  minutes; test selection, runner resources and source/model/runtime budgets
+  are unchanged.
 
 Generated originals, native captures, preparations, visual review, supervision
 and JUnit receipts remain private under
