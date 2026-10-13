@@ -110,8 +110,19 @@ def test_worker_retains_failed_blind_capture_and_stops_before_sol(tmp_path, monk
         return text
 
     monkeypatch.setattr(llm_utils, 'call_analysis_model', transport)
-    assert module.main(['--registry',str(path),'--auth-path','/private/auth.json',
-        '--as-of','2026-10-12','--output',str(output)]) == 1
+    import logging
+    import os
+    previous_logging = logging.root.manager.disable
+    previous_umask = os.umask(0o027)
+    logging.disable(logging.ERROR)
+    try:
+        assert module.main(['--registry',str(path),'--auth-path','/private/auth.json',
+            '--as-of','2026-10-12','--output',str(output)]) == 1
+        observed_umask = os.umask(0o027)
+        assert (logging.root.manager.disable, observed_umask) == (logging.ERROR, 0o027)
+    finally:
+        logging.disable(previous_logging)
+        os.umask(previous_umask)
     attempt = json.loads((output / 'analyzer-attempt.json').read_text())
     receipt = json.loads((output / 'smoke-receipt.json').read_text())
     assert calls == ['gpt-6-luna','gpt-6-luna']
@@ -131,3 +142,56 @@ def test_preflight_rejects_date_cutoff_beyond_scope_before_native_calls(tmp_path
         module.prepare_smoke(items, '2026-10-12', '/private/auth.json')
     _, record = module.prepare_smoke(items, '2026-10-12T23:00:00+00:00', '/private/auth.json')
     assert record['decision_scope']['economic_date'] == '2026-10-12'
+
+
+def test_worker_restores_callers_logging_and_umask_on_preflight_exception(tmp_path):
+    import logging
+    import os
+    module = harness()
+    path = tmp_path / 'invalid-registry.json'
+    path.write_text('[]')
+    previous_logging = logging.root.manager.disable
+    previous_umask = os.umask(0o027)
+    logging.disable(logging.ERROR)
+    try:
+        with pytest.raises(ValueError, match='one_retained_document_required'):
+            module.main(['--registry',str(path),'--auth-path','/private/auth.json',
+                '--as-of','2026-10-12','--output',str(tmp_path / 'run')])
+        observed_umask = os.umask(0o027)
+        assert (logging.root.manager.disable, observed_umask) == (logging.ERROR, 0o027)
+    finally:
+        logging.disable(previous_logging)
+        os.umask(previous_umask)
+
+
+def test_worker_restores_callers_logging_and_umask_on_successful_return(tmp_path, monkeypatch):
+    import logging
+    import os
+    from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
+    module = harness()
+    path = tmp_path / 'registry.json'
+    path.write_text(json.dumps(registry(tmp_path)))
+
+    def constructed_analysis(analyzer, evidence, **kwargs):
+        attempt = {'validation_status':'validated', 'automatic_review':{'version':'automatic_review_v1'},
+            'decision_eligibility':{'eligible':True,'verification_basis':'automatic_review_v1'}}
+        for stage, model, role in [('recognition_attempt','gpt-6-luna','bounded'),
+                ('verification_attempt','gpt-6-luna','bounded'),('thesis_attempt','gpt-6.1-sol','thesis')]:
+            attempt[stage] = {'model_call_started':True,'response_received':True,'validation_status':'validated',
+                'model_provenance':{'configured_model':model,'returned_model':model,
+                    'reasoning_effort':'high','role':role,'billing_mode':'chatgpt_plan'}}
+        analyzer.last_bounded_document_attempt = attempt
+        return {'analysis_status':'validated','direction':'neutral','score':0}
+
+    monkeypatch.setattr(LLMAnalyzer, 'analyze_bounded_document_evidence', constructed_analysis)
+    previous_logging = logging.root.manager.disable
+    previous_umask = os.umask(0o027)
+    logging.disable(logging.ERROR)
+    try:
+        assert module.main(['--registry',str(path),'--auth-path','/private/auth.json',
+            '--as-of','2026-10-12','--output',str(tmp_path / 'run')]) == 0
+        observed_umask = os.umask(0o027)
+        assert (logging.root.manager.disable, observed_umask) == (logging.ERROR, 0o027)
+    finally:
+        logging.disable(previous_logging)
+        os.umask(previous_umask)

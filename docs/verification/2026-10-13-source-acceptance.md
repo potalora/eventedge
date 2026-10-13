@@ -102,10 +102,18 @@ Private, untracked evidence is under
 `data/forward-readiness/source-acceptance-20261013/`: local and Discord drill
 results/receipt files, host inspection/snapshot, native failed attempts and
 continuation receipts, and focused JUnit output. No credentials or raw native
-responses are committed. Final combined focused verification passed 322 tests
+responses are committed. Final combined focused verification passed 333 tests
 with one existing websockets deprecation warning. Critical Ruff checks and diff
 checks passed. Independent review found one host-boundary acceptance defect;
 seven new regression cases covered its repair, and the narrow recheck found no
 remaining P1/P2 issue. These suites cover the new consumers/harnesses and their
 existing source/report/document contracts; the PR checks record the full
 baseline and optional-SDK regression results for the final commit.
+
+The first full CI run on `a141704` exposed a process-global logging leak from
+calling the smoke CLI in-process: two later cleanup-warning assertions failed
+in both environments. The harness now restores the caller's logging threshold
+and umask in `finally`, with success, failed-analysis and preflight-exception
+coverage. The ordered harness plus complete cleanup-stress selection passed
+19 tests and is included in the final 333-test selection. Native captures and
+their failed/continuation verdicts are unchanged by this harness-isolation fix.

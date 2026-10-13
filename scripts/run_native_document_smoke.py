@@ -99,40 +99,45 @@ def main(argv=None):
     parser.add_argument('--as-of', required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
-    os.umask(0o077)
-    logging.disable(logging.CRITICAL)
-    args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
-    registry_bytes = args.registry.read_bytes()
-    config, record = prepare_smoke(json.loads(registry_bytes), args.as_of, args.auth_path)
-    from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-    from tradingagents.strategies.runtime_deadline import model_budget
-    analyzer = LLMAnalyzer(config)
-    started = time.monotonic()
-    result = None
-    error_class = None
+    previous_logging = logging.root.manager.disable
+    previous_umask = os.umask(0o077)
     try:
-        with model_budget(started + 350):
-            result = analyzer.analyze_bounded_document_evidence(record['evidence'], session_as_of=args.as_of,
-                ticker=record['ticker'], decision_scope=record['decision_scope'])
-    except Exception as error:
-        error_class = type(error).__name__
-    attempt = analyzer.last_bounded_document_attempt
-    save(args.output / 'analyzer-attempt.json', attempt)
-    if result is not None:
-        save(args.output / 'analysis-result.json', result)
-    summary = summarize(attempt, result, error_class)
-    summary.update(elapsed_seconds=time.monotonic()-started,
-        completed_at=datetime.now(timezone.utc).isoformat(),
-        registry_sha256=hashlib.sha256(registry_bytes).hexdigest(),
-        registry_unchanged=args.registry.read_bytes() == registry_bytes,
-        original_sha256=record['evidence']['original']['sha256'],
-        runtime={'system':platform.system(),'machine':platform.machine(),
-            'python_version':platform.python_version(),'executable':sys.executable})
-    if not summary['registry_unchanged']:
-        summary['status'] = 'failed'
-    save(args.output / 'smoke-receipt.json', summary)
-    print(json.dumps({key:summary[key] for key in ('status','native_calls_attempted','error_class','elapsed_seconds')}))
-    return int(summary['status'] != 'passed')
+        logging.disable(logging.CRITICAL)
+        args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
+        registry_bytes = args.registry.read_bytes()
+        config, record = prepare_smoke(json.loads(registry_bytes), args.as_of, args.auth_path)
+        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
+        from tradingagents.strategies.runtime_deadline import model_budget
+        analyzer = LLMAnalyzer(config)
+        started = time.monotonic()
+        result = None
+        error_class = None
+        try:
+            with model_budget(started + 350):
+                result = analyzer.analyze_bounded_document_evidence(record['evidence'], session_as_of=args.as_of,
+                    ticker=record['ticker'], decision_scope=record['decision_scope'])
+        except Exception as error:
+            error_class = type(error).__name__
+        attempt = analyzer.last_bounded_document_attempt
+        save(args.output / 'analyzer-attempt.json', attempt)
+        if result is not None:
+            save(args.output / 'analysis-result.json', result)
+        summary = summarize(attempt, result, error_class)
+        summary.update(elapsed_seconds=time.monotonic()-started,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            registry_sha256=hashlib.sha256(registry_bytes).hexdigest(),
+            registry_unchanged=args.registry.read_bytes() == registry_bytes,
+            original_sha256=record['evidence']['original']['sha256'],
+            runtime={'system':platform.system(),'machine':platform.machine(),
+                'python_version':platform.python_version(),'executable':sys.executable})
+        if not summary['registry_unchanged']:
+            summary['status'] = 'failed'
+        save(args.output / 'smoke-receipt.json', summary)
+        print(json.dumps({key:summary[key] for key in ('status','native_calls_attempted','error_class','elapsed_seconds')}))
+        return int(summary['status'] != 'passed')
+    finally:
+        logging.disable(previous_logging)
+        os.umask(previous_umask)
 
 
 if __name__ == '__main__':
