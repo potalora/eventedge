@@ -17,8 +17,17 @@ def retirement(source='cftc', strategies=('commodity_macro',)):
         'disabled_strategies': {strategy: REASON for strategy in strategies}}
 
 
-def test_explicit_retirement_stops_only_reviewed_source_acquisition(tmp_path):
+def test_explicit_retirement_stops_only_reviewed_source_acquisition(tmp_path, monkeypatch):
     from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
+    from tradingagents.strategies.orchestration import multi_strategy_engine as engine_module
+    # Source retirement is a decision acquisition: test it at a valid evening
+    # instant, independently of the wall-clock time at which pytest is invoked.
+    now = datetime(2026, 10, 14, 22, tzinfo=timezone.utc)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    monkeypatch.setattr(engine_module, 'datetime', FixedDatetime)
     calls = []
     config = {'autoresearch': {**retirement(), 'state_dir': str(tmp_path)}}
     strategy = SimpleNamespace(name='commodity_macro', data_sources=['cftc', 'fred'])
@@ -27,7 +36,7 @@ def test_explicit_retirement_stops_only_reviewed_source_acquisition(tmp_path):
     engine._fetch_cftc_data = lambda *args: calls.append('cftc') or {}
     engine._fetch_fred_data = lambda *args: calls.append('fred') or {}
     from tradingagents.strategies.orchestration.decision_clock import latest_completed_session
-    session = latest_completed_session(datetime.now(timezone.utc)).isoformat()
+    session = latest_completed_session(now).isoformat()
     data = engine._fetch_all_data('2026-07-01', session)
     assert calls == ['fred']
     assert 'cftc' not in data

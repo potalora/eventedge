@@ -388,6 +388,11 @@ def _run_preflight(config: dict, trading_date: str, mode: str) -> None:
         return
     print(rendered, file=sys.stderr)
     if normalized is not None:
+        for failure in normalized.get("screen_runtime_failures", []):
+            print(
+                f"PREFLIGHT RUNTIME FAILED: {failure['phase']} {failure['reason_code']}",
+                file=sys.stderr,
+            )
         for failure in normalized.get("screen_source_failures", []):
             status = failure["http_status"] or "unknown"
             print(

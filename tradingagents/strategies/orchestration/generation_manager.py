@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -40,6 +41,87 @@ from tradingagents.strategies.orchestration.runtime_lock import (
 logger = logging.getLogger(__name__)
 
 _MAX_RUN_HISTORY = 100
+_PREFLIGHT_REAP_TIMEOUT_S = 5
+
+
+def _run_preflight_worker(command, *, cwd, env, timeout, pass_fds):
+    """Own the diagnostic process group, including native source transports.
+
+    A killed screen cannot reap its own transports. Keep stdout/stderr separate
+    and retain subprocess.run's completed/timeout evidence contract while
+    terminating the whole owned session on every exit.
+    """
+    process = None
+    pending_signal = None
+    previous_handlers = {}
+
+    def kill_group():
+        if process is None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def propagate_signal(signum, frame):
+        previous = previous_handlers[signum]
+        if callable(previous):
+            previous(signum, frame)
+        elif previous != signal.SIG_IGN:
+            # Preserve the original signal exit status, rather than turning
+            # controller termination into an ordinary failed preflight.
+            signal.signal(signum, previous)
+            os.kill(os.getpid(), signum)
+
+    def forward_signal(signum, frame):
+        nonlocal pending_signal
+        if previous_handlers[signum] == signal.SIG_IGN:
+            return
+        if process is None:
+            # A signal during Popen must not strand a newly detached child.
+            # Defer termination until its PID is available, without changing
+            # the child's inherited signal mask or using unsafe preexec code.
+            pending_signal = (signum, frame)
+            return
+        kill_group()
+        process.wait(timeout=_PREFLIGHT_REAP_TIMEOUT_S)
+        propagate_signal(signum, frame)
+
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, forward_signal)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True,
+                                   start_new_session=True, pass_fds=pass_fds)
+        if pending_signal is not None:
+            signum, frame = pending_signal
+            pending_signal = None
+            forward_signal(signum, frame)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_group()
+            stdout, stderr = process.communicate(timeout=_PREFLIGHT_REAP_TIMEOUT_S)
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        # A native child can remain even when the screen itself already exited.
+        try:
+            kill_group()
+            if process is not None and process.poll() is None:
+                process.wait(timeout=_PREFLIGHT_REAP_TIMEOUT_S)
+        finally:
+            try:
+                if process is not None:
+                    for stream in (process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
+            finally:
+                for signum, previous in previous_handlers.items():
+                    signal.signal(signum, previous)
+                if pending_signal is not None:
+                    propagate_signal(*pending_signal)
 
 # Wall-clock ceiling for a single generation's cohort run. This is an outer
 # backstop: if a run gets suspended (e.g. the laptop sleeps on battery) or a
@@ -397,6 +479,8 @@ def normalize_preflight_report(
     wire_keys = {"ok", "preflight_mode"}
     if mode in {"screen", "all"}:
         wire_keys.update({"screen_ok", "screen_failure_count", "screen_source_failures"})
+        if "screen_runtime_failures" in report:
+            wire_keys.add("screen_runtime_failures")
     if mode in {"governed", "all"}:
         wire_keys.update(
             {
@@ -442,6 +526,7 @@ def normalize_preflight_report(
                 return None
         from tradingagents.strategies.orchestration.preflight import (
             canonical_screen_source_failures,
+            canonical_screen_runtime_failures,
         )
         source_failures = canonical_screen_source_failures(
             report.get("screen_source_failures")
@@ -459,6 +544,11 @@ def normalize_preflight_report(
         normalized["screen_ok"] = screen_ok
         normalized["screen_failure_count"] = failure_count
         normalized["screen_source_failures"] = source_failures
+        if "screen_runtime_failures" in report:
+            runtime_failures = canonical_screen_runtime_failures(report["screen_runtime_failures"])
+            if runtime_failures is None or len(runtime_failures) + len(source_failures) > failure_count:
+                return None
+            normalized["screen_runtime_failures"] = runtime_failures
     if mode in {"governed", "all"}:
         state_status = report.get("state_status")
         probe_status = report.get("governed_probe_status")
@@ -568,7 +658,9 @@ def _preflight_subprocess_result(
     result["success"] = bool(returncode == 0 and normalized["ok"] is True and ready)
     if not result["success"]:
         status = result.get("governed_probe_status", "failed")
-        result["error"] = f"preflight {mode} status: {status}"
+        runtime = result.get("screen_runtime_failures", [])
+        result["error"] = (f"preflight {mode} runtime: " + ', '.join(row['reason_code'] for row in runtime)
+                           if runtime else f"preflight {mode} status: {status}")
     return result
 
 
@@ -1107,6 +1199,8 @@ class GenerationManager:
             inherited_lock=inherited_lock,
             capture=capture,
         )
+        if preflight_mode is not None and "config_sha256" in capture:
+            result = {**result, "config_sha256": capture["config_sha256"]}
         finished_at = datetime.now(timezone.utc)
         try:
             date_index = extra_args.index("--date") + 1
@@ -1165,12 +1259,15 @@ class GenerationManager:
             try:
                 if not gen_data.get('config_file') or not gen_data.get('config_sha256'):
                     raise ValueError('generation_config_invalid')
-                read_generation_config(gen_data['config_file'], gen_data['config_sha256'])
+                _, _, validated_config_sha256 = read_generation_config(
+                    gen_data['config_file'], gen_data['config_sha256']
+                )
             except ValueError:
                 failure = {'success': False, 'elapsed_s': 0.0, 'error': 'generation_config_invalid'}
                 if preflight_mode is None:
                     failure['outcome'] = RunOutcome.FAILED.value
                 return failure
+            capture['config_sha256'] = validated_config_sha256
             env[CONFIG_FILE_ENV] = gen_data['config_file']
             env[CONFIG_SHA_ENV] = gen_data['config_sha256']
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
@@ -1196,15 +1293,21 @@ class GenerationManager:
 
         start = time.monotonic()
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=gen_data["worktree_path"],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_GENERATION_TIMEOUT_S,
-                pass_fds=pass_fds,
-            )
+            if preflight_mode is not None:
+                proc = _run_preflight_worker(
+                    cmd, cwd=gen_data["worktree_path"], env=env,
+                    timeout=_GENERATION_TIMEOUT_S, pass_fds=pass_fds,
+                )
+            else:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=gen_data["worktree_path"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=_GENERATION_TIMEOUT_S,
+                    pass_fds=pass_fds,
+                )
             elapsed = time.monotonic() - start
             capture.update(
                 {

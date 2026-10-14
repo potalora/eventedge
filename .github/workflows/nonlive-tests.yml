@@ -21,8 +21,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[chatgpt-plan]' pytest
-      - name: Run non-live suite
-        run: python -m pytest -q -m 'not live' tests
+      - name: Scheduled workflow acceptance gate
+        run: python -m pytest -q -m 'scheduled_acceptance and not live' tests
+      - name: Run remaining non-live suite
+        run: python -m pytest -q -m 'not live and not scheduled_acceptance' tests
 
   test-openbb:
     runs-on: ubuntu-latest
@@ -40,5 +42,7 @@ jobs:
           python -m pip install -r requirements-ci-openbb.txt -e '.[chatgpt-plan,openbb,commodities]'
           python -m pip check
           openbb-build
-      - name: Run non-live suite with OpenBB installed
-        run: python -m pytest -q -m 'not live' tests
+      - name: Scheduled workflow acceptance gate with OpenBB installed
+        run: python -m pytest -q -m 'scheduled_acceptance and not live' tests
+      - name: Run remaining non-live suite with OpenBB installed
+        run: python -m pytest -q -m 'not live and not scheduled_acceptance' tests

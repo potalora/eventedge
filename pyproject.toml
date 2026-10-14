@@ -54,6 +54,7 @@ commodities = [
 [tool.pytest.ini_options]
 markers = [
     "live: marks tests that hit real APIs (deselect with '-m \"not live\"')",
+    "scheduled_acceptance: isolated scheduled-entrypoint rehearsal with external IO fixtures",
 ]
 
 [tool.setuptools.packages.find]

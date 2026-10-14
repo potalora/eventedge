@@ -338,10 +338,24 @@ def bounded_process(command: list[str], *, cwd: Path, env: dict, timeout: int, p
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
+            # A shell leader can exit before a child forwards termination into
+            # its separately owned preflight group. Give the entire outer
+            # group the existing grace, reaping the leader while we wait.
+            grace_deadline = time.monotonic() + 10
+            while True:
+                process.poll()
+                try:
+                    os.killpg(process.pid, 0)
+                except ProcessLookupError:
+                    break
+                except PermissionError:
+                    # macOS can report EPERM transiently for a dying group.
+                    # Unknown liveness must retain, not shorten, its grace.
+                    pass
+                remaining = grace_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(.05, remaining))
             # The group may still contain a child even if its leader exited.
             try:
                 os.killpg(process.pid, signal.SIGKILL)

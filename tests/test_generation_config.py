@@ -189,3 +189,35 @@ def test_start_cli_accepts_optional_config_file(manager, profile, monkeypatch):
     monkeypatch.setattr('sys.argv', ['run_generations.py', 'start', 'profiled', '--config-file', str(profile)])
     run_generations._main()
     assert manager.list_generations()[0].config_sha256 == hashlib.sha256(profile.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize('status', ['success', 'runtime', 'malformed', 'timeout', 'launch_error'])
+def test_preflight_attempt_binds_only_validated_profile(manager, profile, monkeypatch, status):
+    """Operational resolution can require the exact frozen profile on every attempt."""
+    from tradingagents.strategies.orchestration import generation_manager as gm
+    info = manager.start_generation('bound preflight', config_file=profile)
+    wire = {'ok':status == 'success', 'preflight_mode':'screen',
+            'screen_ok':status == 'success', 'screen_failure_count':0 if status == 'success' else 1,
+            'screen_source_failures':[], 'screen_runtime_failures':[] if status == 'success' else
+                [{'phase':'acquisition','reason_code':'acquisition_failed'}]}
+    def run(cmd, **options):
+        if status == 'timeout':
+            raise gm.subprocess.TimeoutExpired(cmd, 1)
+        if status == 'launch_error':
+            raise OSError('worker unavailable')
+        return SimpleNamespace(stdout='invalid' if status == 'malformed' else json.dumps(wire, indent=2),
+                               stderr='', returncode=0 if status == 'success' else 1)
+    monkeypatch.setattr(gm, '_run_preflight_worker', run)
+    row = manager._load_manifest()['generations'][0]
+    result = manager._run_cohorts_subprocess(row, ['--date','2026-10-14','--preflight'],
+                                           preflight_mode='screen', write_log=False)
+    assert result['config_sha256'] == info.config_sha256
+    artifact = json.loads(Path(result['evidence_path']).read_text())
+    assert artifact['result']['config_sha256'] == info.config_sha256
+    assert result['success'] is (status == 'success')
+    Path(info.config_file).write_text('{}')
+    rejected = manager._run_cohorts_subprocess(row, ['--date','2026-10-14','--preflight'],
+                                              preflight_mode='screen', write_log=False)
+    assert rejected['error'] == 'generation_config_invalid'
+    assert 'config_sha256' not in rejected
+    assert 'config_sha256' not in json.loads(Path(rejected['evidence_path']).read_text())['result']

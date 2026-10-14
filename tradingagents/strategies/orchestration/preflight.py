@@ -42,6 +42,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Mapping
+from copy import copy, deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ _LOWER_HEX = frozenset("0123456789abcdef")
 _SCREEN_SOURCES = frozenset({
     "yfinance", "edgar", "usaspending", "congress", "fred", "finnhub",
     "regulations", "courtlistener", "noaa", "usda", "drought_monitor", "cftc",
+    "bounded_documents",
 })
 _SOURCE_FAILURE_REASONS = frozenset({
     "timeout", "transport_error", "http_error", "invalid_response",
@@ -64,6 +66,28 @@ _SOURCE_FAILURE_KEYS = frozenset({
     "source", "reason_code", "http_status", "attempts", "operation_count",
 })
 _MAX_SOURCE_OPERATIONS = 256
+_SCREEN_RUNTIME_FAILURES = frozenset({
+    ('acquisition', 'prospective_reference_invalid'),
+    ('acquisition', 'acquisition_failed'),
+    ('screen', 'screen_runtime_error'),
+})
+
+
+def canonical_screen_runtime_failures(value: object) -> list[dict[str, str]] | None:
+    """Bound non-provider failures without exposing exception text."""
+    if not isinstance(value, list) or len(value) > len(_SCREEN_RUNTIME_FAILURES):
+        return None
+    pairs = []
+    for row in value:
+        if (not isinstance(row, dict) or set(row) != {'phase', 'reason_code'}
+                or not isinstance(row['phase'], str)
+                or not isinstance(row['reason_code'], str)
+                or (row['phase'], row['reason_code']) not in _SCREEN_RUNTIME_FAILURES):
+            return None
+        pairs.append((row['phase'], row['reason_code']))
+    if pairs != sorted(set(pairs)):
+        return None
+    return [dict(row) for row in value]
 
 
 def canonical_screen_source_failures(value: object) -> list[dict[str, Any]] | None:
@@ -606,18 +630,48 @@ def _run_screen_preflight(
         raise ValueError(f"{trading_date} is not an XNYS session")
 
     work_dir = tempfile.mkdtemp(prefix="eventedge-preflight-")
+    report: dict[str, Any] = {
+        "trading_date": trading_date,
+        "fetched_sources": [],
+        "horizons": {},
+        "failures": [],
+        "source_warnings": [],
+        "screen_source_failures": [],
+        "screen_runtime_failures": [],
+    }
+
+    def runtime_failure(phase: str, reason: str) -> None:
+        diagnostic = {"phase": phase, "reason_code": reason}
+        if diagnostic not in report["screen_runtime_failures"]:
+            report["screen_runtime_failures"].append(diagnostic)
+            report["screen_runtime_failures"].sort(key=lambda row: (row['phase'], row['reason_code']))
+        report["failures"].append({"horizon": "shared", "strategy": "runtime",
+                                   "ticker": None, "error": reason})
+
     try:
+        # All writable locations belong to this diagnostic invocation. In
+        # particular an inherited operational-cache environment must not select
+        # the real cache. Behavioral policies and retained document paths stay
+        # intact; diagnostic acquisition does not impersonate another profile.
+        isolated = deepcopy(config)
+        isolated_ar = dict(isolated.get("autoresearch", {}))
+        for key in ("state_dir", "source_cache_dir", "results_dir"):
+            isolated_ar[key] = str(Path(work_dir) / key)
+        isolated["autoresearch"] = isolated_ar
+        for key in ("data_cache_dir", "results_dir", "project_dir"):
+            isolated[key] = str(Path(work_dir) / key)
         if engine is None:
             from tradingagents.strategies.orchestration.multi_strategy_engine import (
                 MultiStrategyEngine,
             )
 
-            # Isolation: preflight must never touch real generation state.
-            isolated = dict(config)
-            isolated_ar = dict(isolated.get("autoresearch", {}))
-            isolated_ar["state_dir"] = work_dir
-            isolated["autoresearch"] = isolated_ar
             engine = MultiStrategyEngine(isolated, use_llm=False)
+        else:
+            # Test/integration callers retain ownership of their engine. The
+            # acquisition path uses only these copied configuration mappings.
+            engine = copy(engine)
+            engine.config = isolated
+            engine.ar_config = isolated_ar
 
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
             HORIZON_PARAMS,
@@ -626,18 +680,20 @@ def _run_screen_preflight(
         lookback_start = (
             datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=90)
         ).strftime("%Y-%m-%d")
-        shared_data = engine._fetch_all_data(lookback_start, trading_date)
-
-        report: dict[str, Any] = {
-            "trading_date": trading_date,
-            "fetched_sources": sorted(
-                key for key in shared_data if not key.startswith("_")
-            ),
-            "horizons": {},
-            "failures": [],
-            "source_warnings": [],
-            "screen_source_failures": [],
-        }
+        try:
+            shared_data = engine._fetch_all_data(
+                lookback_start, trading_date, acquisition_purpose="screen_diagnostic"
+            )
+        except Exception as error:  # noqa: BLE001 - preserve a bounded wire failure
+            reason = ("prospective_reference_invalid" if isinstance(error, ValueError)
+                      and str(error) in {
+                          'prospective reference is not the latest completed session',
+                          'prospective decision is after the next reference-session open',
+                      } else "acquisition_failed")
+            runtime_failure("acquisition", reason)
+            report["ok"] = False
+            return report
+        report["fetched_sources"] = sorted(key for key in shared_data if not key.startswith("_"))
 
         # Fetchers preserve provider failures separately from successful empty
         # responses. Report each shared source once, without copying provider
@@ -687,8 +743,11 @@ def _run_screen_preflight(
                 try:
                     params = strategy.get_default_params(horizon=horizon)
                     candidates = strategy.screen(shared_data, trading_date, params)
-                except Exception as exc:  # noqa: BLE001 - report every break
-                    error = f"screen failed: {exc!r}"
+                except Exception:  # noqa: BLE001 - report every break
+                    error = "screen failed: screen_runtime_error"
+                    diagnostic = {"phase": "screen", "reason_code": "screen_runtime_error"}
+                    if diagnostic not in report["screen_runtime_failures"]:
+                        report["screen_runtime_failures"].append(diagnostic)
                     entry["errors"].append(error)
                     report["failures"].append(
                         {
@@ -734,6 +793,10 @@ def _run_screen_preflight(
             report["horizons"][horizon] = horizon_report
 
         report["ok"] = not report["failures"]
+        return report
+    except Exception:  # noqa: BLE001 - initialization/projection failures are explicit
+        runtime_failure("screen", "screen_runtime_error")
+        report["ok"] = False
         return report
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

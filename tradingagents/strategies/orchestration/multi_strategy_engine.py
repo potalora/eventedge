@@ -2096,10 +2096,13 @@ class MultiStrategyEngine:
 
     def _fetch_all_data(self, start_date: str, end_date: str, *,
                         acquisition_deadline: float | None = None,
-                        litigation_target_owner=None) -> dict[str, Any]:
+                        litigation_target_owner=None,
+                        acquisition_purpose: str = 'decision') -> dict[str, Any]:
         """Fetch all data needed by active strategies.
 
-        Returns nested dict: {source_name: {data_type: data}}.
+        Returns nested dict: {source_name: {data_type: data}}. The explicit
+        screen diagnostic has no decision-clock authority and cannot supply a
+        decision acquisition receipt. Ordinary acquisition keeps its clock gate.
         """
         import time
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
@@ -2113,7 +2116,14 @@ class MultiStrategyEngine:
         acquisition_cutoff = datetime.now(timezone.utc)
         from tradingagents.strategies.orchestration.decision_clock import mutable_vintage, policy, PROSPECTIVE
         decision_policy = policy(self.config)
-        vintage = mutable_vintage(self.config, date.fromisoformat(end_date), now=acquisition_cutoff)
+        if not isinstance(acquisition_purpose, str) or acquisition_purpose not in {'decision', 'screen_diagnostic'}:
+            raise ValueError('invalid source acquisition purpose')
+        diagnostic = acquisition_purpose == 'screen_diagnostic'
+        if diagnostic:
+            from .trading_calendar import exchange_date
+            vintage = exchange_date(acquisition_cutoff).isoformat()
+        else:
+            vintage = mutable_vintage(self.config, date.fromisoformat(end_date), now=acquisition_cutoff)
         fetch_timeout_s = max(0.0, _fetch_timeout_s())
         outer_deadline = acquisition_deadline
         if outer_deadline is not None:
@@ -2130,6 +2140,8 @@ class MultiStrategyEngine:
                 cache_dir, ttl_s=self.ar_config.get("source_cache_ttl_s", 300)
             )
             config_fingerprint = source_configuration_fingerprint(self.config, exclude_horizon=True)
+            if diagnostic:
+                config_fingerprint += ':screen-diagnostic-v1'
 
         def acquire(name, fetcher, args):
             diagnostics = []
@@ -2163,7 +2175,7 @@ class MultiStrategyEngine:
         data.update(declaration(self.ar_config))
         from .source_lifecycle_policy import declaration as lifecycle_declaration
         data.update(lifecycle_declaration(self.ar_config, self.paper_trade_strategies))
-        if decision_policy == PROSPECTIVE:
+        if decision_policy == PROSPECTIVE and not diagnostic:
             data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
                                             'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
         universe_policy = self.ar_config.get("equity_universe_policy")

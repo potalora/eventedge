@@ -84,7 +84,7 @@ class TestRunPreflight:
         monkeypatch.setattr(
             engine,
             "_fetch_all_data",
-            lambda start, end: _govt_contracts_fixture("2026-07-07"),
+            lambda start, end, **kwargs: _govt_contracts_fixture("2026-07-07"),
         )
 
         report = run_preflight(config, "2026-08-06", engine=engine)
@@ -104,7 +104,7 @@ class TestRunPreflight:
         config, engine = _make_engine(tmp_path)
         monkeypatch.setattr(
             engine, "_fetch_all_data",
-            lambda start, end: _govt_contracts_fixture("2026-07-07 17:57:06"),
+            lambda start, end, **kwargs: _govt_contracts_fixture("2026-07-07 17:57:06"),
         )
         report = run_preflight(config, "2026-08-06", engine=engine)
         govt = report["horizons"]["30d"]["govt_contracts"]
@@ -118,7 +118,7 @@ class TestRunPreflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
         config, engine = _make_engine(tmp_path)
-        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end, **kwargs: {})
 
         broken = MagicMock()
         broken.name = "broken_strategy"
@@ -142,7 +142,7 @@ class TestRunPreflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
         config, engine = _make_engine(tmp_path)
-        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end, **kwargs: {})
 
         llm_mapped = MagicMock()
         llm_mapped.name = "regulatory_pipeline"
@@ -185,7 +185,7 @@ class TestRunPreflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
         config, engine = _make_engine(tmp_path)
-        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end, **kwargs: {})
 
         run_preflight(config, "2026-08-06", engine=engine)
 
@@ -683,7 +683,7 @@ class TestGovernedPreflight:
         self._freeze_preflight_completion(
             monkeypatch, datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
         )
-        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end, **kwargs: {})
         snapshot = self._snapshot(tmp_path)
         report = run_preflight(
             config,
@@ -713,7 +713,7 @@ class TestGovernedPreflight:
         from tradingagents.strategies.orchestration.preflight import run_preflight
 
         config, engine = _make_engine(tmp_path)
-        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end, **kwargs: {})
         snapshot = self._snapshot(tmp_path)
         report = run_preflight(
             config,
@@ -752,7 +752,7 @@ class TestGovernedPreflight:
         self._freeze_preflight_completion(
             monkeypatch, datetime(2026, 8, 10, 21, tzinfo=timezone.utc)
         )
-        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end: {})
+        monkeypatch.setattr(engine, "_fetch_all_data", lambda start, end, **kwargs: {})
         broken = MagicMock()
         broken.name = "broken_strategy"
         broken.screen.side_effect = RuntimeError("boom")
@@ -987,7 +987,7 @@ class TestGenerationManagerPreflight:
             if failure_kind == "timeout"
             else RuntimeError(expected_error)
         )
-        monkeypatch.setattr(gm.subprocess, "run", MagicMock(side_effect=failure))
+        monkeypatch.setattr(gm, "_run_preflight_worker", MagicMock(side_effect=failure))
 
         result = manager.run_preflight("2026-08-06", mode="screen")["gen_004"]
 
@@ -1046,7 +1046,7 @@ class TestGenerationManagerPreflight:
             stdout="diagnostic\n" + json.dumps(report, indent=2) + "\nPREFLIGHT\n",
             stderr="",
         )
-        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+        monkeypatch.setattr(gm, "_run_preflight_worker", lambda *args, **kwargs: process)
         result = manager._run_cohorts_subprocess(
             {
                 "gen_id": "gen_001",
@@ -1083,7 +1083,7 @@ class TestGenerationManagerPreflight:
             stdout=json.dumps({"ok": True, "horizon_fake": {}}),
             stderr="",
         )
-        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+        monkeypatch.setattr(gm, "_run_preflight_worker", lambda *args, **kwargs: process)
 
         result = manager._run_cohorts_subprocess(
             {

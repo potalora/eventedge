@@ -29,7 +29,8 @@ class _Engine:
     def __init__(self, data):
         self.data = data
 
-    def _fetch_all_data(self, start, end):
+    def _fetch_all_data(self, start, end, *, acquisition_purpose):
+        assert acquisition_purpose == "screen_diagnostic"
         return self.data
 
 
@@ -191,7 +192,7 @@ def test_managed_archive_retains_safe_source_diagnostics(mode, failed, monkeypat
     report = run_preflight({}, "2026-10-07", engine=_Engine(data), mode=mode)
     wire = normalize_preflight_report(report, mode=mode, trading_date="2026-10-07")
     process = subprocess.CompletedProcess([], int(failed), stdout=json.dumps(wire, indent=2), stderr="")
-    monkeypatch.setattr(generation_manager.subprocess, "run", lambda *args, **kwargs: process)
+    monkeypatch.setattr(generation_manager, "_run_preflight_worker", lambda *args, **kwargs: process)
     manager = object.__new__(generation_manager.GenerationManager)
     manager._repo_root = tmp_path
     manager._venv_python = Path(sys.executable)

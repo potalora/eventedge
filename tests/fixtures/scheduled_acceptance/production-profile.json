@@ -1,0 +1,130 @@
+{
+  "autoresearch": {
+    "autoresearch_model": "gpt-6-luna",
+    "award_attribution_policy": "verified_listed_targets_v1",
+    "bounded_document_decision_policy": "verified_scoped_claims_v1",
+    "bounded_document_registry": [
+      {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "path": "/home/hermes/trading_agents/data/document-inputs/cdre-20260930-0001104659-26-112476/scan18-page-18.png",
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "decision_scope": {
+          "as_of": "2026-10-10T04:24:12.342826+00:00",
+          "context_limitations": [
+            "The exhibit is dated December 16, 2021; it is not current holdings or a current catalyst.",
+            "Only the three selected page-18 value/unit/row/column claims are independently reviewed; pages 1-17 remain unassessed.",
+            "No sum of table shares and totals A/C is authorized; same-class and all-class associations remain separate."
+          ],
+          "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+          "economic_date": "2021-12-16",
+          "effective_from": "2026-10-12T16:00:00+00:00",
+          "effective_until": "2026-10-17T03:59:59+00:00",
+          "issuer": {
+            "cik": "0001860543",
+            "name": "Cadre Holdings, Inc."
+          },
+          "material_context_failures": [],
+          "original_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "policy": "verified_scoped_claims_v1",
+          "purpose": "Assess the historical pledge security counts as bounded issuer evidence; determine only supported present relevance without treating the exhibit as current holdings.",
+          "required_claim_ids": [
+            "table_shares",
+            "total_A",
+            "total_C"
+          ],
+          "required_pages": [
+            18
+          ],
+          "ticker": "CDRE"
+        },
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "path": "/home/hermes/trading_agents/data/document-inputs/cdre-20260930-0001104659-26-112476/0001104659-26-112476-tm2626642d1_ex99-1.pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+        },
+        "original_pages": 18,
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ],
+        "ticker": "CDRE"
+      }
+    ],
+    "bounded_document_research_policy": "bounded_document_research_v1",
+    "candidate_analysis_workers": 32,
+    "chatgpt_plan_auth_path": "/home/hermes/.config/eventedge/plan-auth.json",
+    "congress_disclosure_policy": "display_audit_only_v1",
+    "courtlistener_focused": {
+      "case_ids": [],
+      "issuer_query_limit": 5,
+      "lookback_sessions": 5,
+      "shortlist_limit": 5,
+      "watchlist": [
+        "AAPL"
+      ]
+    },
+    "courtlistener_scope_policy": "focused_litigation_v1",
+    "decision_clock_policy": "prospective_next_open_v1",
+    "disabled_strategies": {
+      "congressional_trades": "display_audit_only_v1",
+      "state_economics": "unsupported_state_event_proxy"
+    },
+    "equity_universe_policy": "us_exchange_listed_sip_v1",
+    "filing_research_policy": "disabled_v1",
+    "llm_billing_mode": "chatgpt_plan",
+    "llm_effort": "high",
+    "new_entry_eligibility_policy": "reference_session_activity_v1",
+    "paper_trade": {
+      "portfolio_committee_effort": "high",
+      "portfolio_committee_model": "gpt-6.1-sol"
+    },
+    "regulation_evidence_policy": "complete_document_text_v1",
+    "regulation_retrieval_policy": "verified_government_copy_v1",
+    "research_resilience_policy": "dependency_isolation_v1",
+    "results_dir": "/home/hermes/trading_agents/data/results/bounded_documents",
+    "source_cache_dir": "/home/hermes/trading_agents/data/source_cache",
+    "thesis_effort": "high",
+    "thesis_model": "gpt-6.1-sol"
+  },
+  "data_cache_dir": "/home/hermes/trading_agents/data/dataflows_cache",
+  "execution": {
+    "execution_enabled": false,
+    "mode": "paper"
+  },
+  "project_dir": "/home/hermes/trading_agents",
+  "results_dir": "/home/hermes/trading_agents/data/results"
+}

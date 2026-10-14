@@ -148,7 +148,11 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
         )
         company_map = data.get('edgar', {}).get('company_tickers', {})
         snapshot = data.get('equity_universe', {}).get('snapshot')
-        universe = EquityUniverse(snapshot, company_map=company_map) if snapshot is not None else None
+        # An independent SEC outage can leave no company map, including the
+        # reporter's empty-map projection. Match native asset-only construction;
+        # retain the original map for every regulatory target-binding check.
+        universe_map = None if type(company_map) is dict and not company_map else company_map
+        universe = EquityUniverse(snapshot, company_map=universe_map) if snapshot is not None else None
         counts, context_consumers = [], []
         for policy_id in sorted(policy_ids):
             for strategy, sources in sorted(strategy_sources.items()):

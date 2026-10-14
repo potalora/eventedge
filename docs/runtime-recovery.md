@@ -6,6 +6,12 @@ it does not authorize installation, a production patch, or activation.
 
 ## Deployment prerequisites
 
+Run the [scheduled workflow acceptance gate](scheduled-workflow-acceptance.md)
+against the candidate before deployment acceptance. It rehearses the composed
+entrypoints with the frozen profile, disposable state and external IO fixtures.
+Idle heartbeats, installed unit metadata and component tests cannot replace that
+check; isolated acceptance also does not establish live provider or model health.
+
 Deploy through a new generation after Pedro explicitly authorizes deployment.
 Both the application launcher and that generation's frozen worktree must contain
 this controller, the persisted-only guards, and the inherited runtime-lock

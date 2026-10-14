@@ -44,6 +44,7 @@ _PREFLIGHT_LABELS = {
     'governed': 'governed (price readiness)',
     'all': 'all (source screening and price readiness)',
 }
+_CONFIG_DIGEST = re.compile(r'[0-9a-f]{64}')
 
 
 def _safe_id(value: Any) -> bool:
@@ -206,8 +207,22 @@ def _attempts(repo: Path, generation: str, session: str, commit: str, diagnose) 
             else:
                 entry['preflight_mode'] = mode
                 entry['preflight_ok'] = item['result'].get('success')
+                entry['screen_ok'] = item['result'].get('screen_ok')
+                entry['generation_commit'] = item['generation_commit']
+                configuration = item['result'].get('config_sha256')
+                if configuration is not None and (not isinstance(configuration, str)
+                        or not _CONFIG_DIGEST.fullmatch(configuration)):
+                    raise ValueError('invalid preflight configuration')
+                entry['configuration'] = configuration
+                if 'screen_runtime_failures' in item['result']:
+                    from .preflight import canonical_screen_runtime_failures
+                    runtime = canonical_screen_runtime_failures(item['result']['screen_runtime_failures'])
+                    if runtime is None:
+                        raise ValueError('invalid preflight runtime diagnostics')
+                    entry['runtime_failures'] = runtime
                 entry['screen_failure_count'] = item['result'].get('screen_failure_count')
                 entry['failures'] = _preflight_failures(item)
+                entry['source_failures'] = entry['failures']
             attempts.append(entry)
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
             diagnose('attempt_unreadable', path.name)
@@ -219,6 +234,30 @@ def _attempts(repo: Path, generation: str, session: str, commit: str, diagnose) 
         if daily[-1]['result']!=daily[-2]['result'] or daily[-1]['wire']!=daily[-2]['wire']:
             diagnose('attempt_order_ambiguous')
     return attempts, daily[-1] if daily else None
+
+
+def _preflight_runtime_observations(attempts, generation, session):
+    """Retain failures; resolve only with a later, equivalent native screen."""
+    observations = []
+    preflights = [row for row in attempts if row['action'] == 'preflight']
+    for failed in preflights:
+        if failed['configuration'] is None or not failed.get('runtime_failures'):
+            continue  # Legacy/unbound evidence cannot establish notification identity.
+        identity = (failed['generation_commit'], failed['configuration'], failed['preflight_mode'])
+        later = next((row for row in preflights
+            if (row['generation_commit'], row['configuration'], row['preflight_mode']) == identity
+            and row['started_at'] > failed['finished_at']
+            and row['process_status'] == 'completed' and row['process_return_code'] == 0
+            and row['preflight_ok'] is True and row['screen_ok'] is True
+            and row.get('runtime_failures') == [] and row['source_failures'] == []
+            and type(row['screen_failure_count']) is int and row['screen_failure_count'] == 0), None)
+        for failure in failed.get('runtime_failures', []):
+            observations.append({'attempt_id': failed['attempt_id'], 'generation_id': generation,
+                'generation_commit': failed['generation_commit'], 'configuration': failed['configuration'],
+                'session': session, 'preflight_mode': failed['preflight_mode'], **failure,
+                'status': 'resolved' if later else 'open',
+                'resolved_by': later['attempt_id'] if later else None})
+    return observations
 
 
 def _manifest_history(metadata: dict, attempts: list[dict], latest: dict | None, repo: Path, session: str, diagnose) -> None:
@@ -694,6 +733,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                   'epoch_id':None,'outcome':'incomplete','evidence_complete':False,'accounting_valid':False,
                   'input_coverage_valid':False,'staging_complete':False,'staging_valid':False,'performance_claims_withheld':True,
                   'attempt_counts':{'daily':0,'preflight':0},'attempts':[],'preflight_incidents':[],
+                  'preflight_runtime_observations':[],
                   'source_health_failures':[],'candidate_input_issues':[],'sources':{'recovered':[],'unresolved':[]},'volatility':{'valid':False},'cohorts':{},'diagnostics':diagnostics}
         try:
             manifest = _load_json(repo/'data/generations/manifest.json')
@@ -715,9 +755,11 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['preflight_incidents'] = [
             {'attempt_id':row['attempt_id'],'process_return_code':row['process_return_code'],
              'preflight_mode':row['preflight_mode'],
-             'screen_failure_count':row['screen_failure_count'],'failures':row['failures']}
-            for row in attempts if row['action']=='preflight' and (row['preflight_ok'] is not True or row['failures'])
+             'screen_failure_count':row['screen_failure_count'],'failures':row['failures'],
+             **({'runtime_failures':row['runtime_failures']} if 'runtime_failures' in row else {})}
+            for row in attempts if row['action']=='preflight' and (row['preflight_ok'] is not True or row['failures'] or row.get('runtime_failures'))
         ]
+        report['preflight_runtime_observations'] = _preflight_runtime_observations(attempts, generation, session)
         retained_sources = {}
         report['sources'] = _sources(state,generation,session,commit,diagnose, retained_sources=retained_sources)
         disabled = report['sources'].get('declared_exclusions', {})
@@ -1022,6 +1064,13 @@ def render_operational_report(report: dict) -> str:
         for item in report['preflight_incidents']:
             label = _PREFLIGHT_LABELS.get(item.get('preflight_mode'), 'unknown mode')
             lines.append(f"- {item['attempt_id']}: {label}; return code {item['process_return_code']}; " + '; '.join(f"{row['source']} {row['reason_code']} HTTP {row['http_status'] or 'unknown'}" for row in item['failures']))
+            for failure in item.get('runtime_failures', []):
+                lines.append(f"  Runtime phase {failure['phase']}: {failure['reason_code']}. Inspect the preserved attempt and frozen configuration before rerunning this mode.")
+    if report.get('preflight_runtime_observations'):
+        lines.extend(['', '## Preflight runtime observations', '',
+            'Runtime observations are separate from provider repair incidents. Recovery requires a later successful equivalent screen; original failures remain preserved.', ''])
+        for row in report['preflight_runtime_observations']:
+            lines.append(f"- {row['attempt_id']}: {row['status']}; generation={row['generation_id']}; session={row['session']}; mode={row['preflight_mode']}; phase={row['phase']}; reason={row['reason_code']}; commit={row['generation_commit']}; configuration={row['configuration']}; resolved_by={row['resolved_by'] or 'none'}.")
     if 'decision_shadow' in report:
         shadow = report['decision_shadow']
         counts = ', '.join(f'{status}: {count}' for status,count in sorted(shadow['event_counts'].items())) or 'no recorded events'

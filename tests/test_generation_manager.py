@@ -323,7 +323,7 @@ class TestGenerationDailyRun:
         process = MagicMock(
             returncode=0, stdout=json.dumps(report, indent=2), stderr=""
         )
-        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+        monkeypatch.setattr(gm, "_run_preflight_worker", lambda *args, **kwargs: process)
         before = identity()
 
         results = manager.run_preflight("2026-08-06", mode="screen")
@@ -712,7 +712,7 @@ class TestGenerationDailyRun:
             returncode=1, stdout=json.dumps(report, indent=2), stderr=""
         )
         with (
-            patch.object(gm_mod.subprocess, "run", return_value=process),
+            patch.object(gm_mod, "_run_preflight_worker", return_value=process),
             patch.object(
                 gm_mod,
                 "persist_run_evidence",
