@@ -572,7 +572,7 @@ def test_cli_publishes_actionable_source_incident_without_rewriting_trading_evid
           '--output-dir',str(output),'--snapshot-guaranteed']
     assert main(args)==2  # Existing contradictory clean evidence remains invalid.
     summary=json.loads(capsys.readouterr().out)['reports'][0]
-    published=json.loads(next(output.glob('*.json')).read_text())
+    published=json.loads((output/f'{SESSION}-{GENERATION}-operational-report.json').read_text())
     policy=published['source_incidents']
     edgar=next(row for row in policy['open_incidents'] if row['provider']=='edgar')
     assert edgar['status']=='repair_required'
@@ -593,8 +593,8 @@ def test_source_policy_cannot_suppress_report_for_invalid_manifest(native_eviden
     output=tmp_path/'reports'
     assert main(['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
                  '--output-dir',str(output),'--snapshot-guaranteed'])==2
-    assert list(output.glob('*.json')), 'Invalid evidence still needs its diagnostic report'
-    published=json.loads(next(output.glob('*.json')).read_text())
+    assert (output/f'{SESSION}-{GENERATION}-operational-report.json').is_file(), 'Invalid evidence still needs its diagnostic report'
+    published=json.loads((output/f'{SESSION}-{GENERATION}-operational-report.json').read_text())
     assert published['source_incidents']['assessment_status']=='unavailable'
     assert published['evidence_complete'] is False
     assert {'code':'manifest_invalid'} in published['diagnostics']

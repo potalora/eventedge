@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -477,7 +478,7 @@ def test_cli_has_only_source_owned_request_and_export_operations():
     assert path.is_file(), "source-only CLI must exist"
     result = subprocess.run(
         [
-            str(Path(__file__).resolve().parents[1] / ".venv/bin/python"),
+            sys.executable,
             str(path),
             "--help",
         ],
