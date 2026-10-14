@@ -41,6 +41,14 @@ failure remains a failure, backed by every dependent strategy's original health
 record; it does not invalidate unrelated, already completed execution.
     """
     config = owner._base_config.get('autoresearch', {})
+    from .source_lifecycle_policy import declared_scope, validate_health as validate_retirement_health
+    retirement_strategies = (owner.cohorts[0]['engine'].paper_trade_strategies
+        if config.get('source_lifecycle_policy') is not None else [])
+    retirement_scope = declared_scope(data, config, retirement_strategies)
+    if retirement_scope is not None:
+        retirement_records = owner._metric_store.read_strategy_health(epoch, session=date.fromisoformat(session), limit=1000)
+        validate_retirement_health(retirement_scope, retirement_records,
+            {owner._policy_id_for_horizon(row['config'].horizon) for row in owner.cohorts})
     from .filing_policy_validation import validate_filing_comparison_policy
     validate_filing_comparison_policy(data, config)
     from .filing_attribution_validation import (

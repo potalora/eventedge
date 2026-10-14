@@ -763,3 +763,37 @@ def test_shared_metric_epoch_is_authoritative_when_book_epoch_tables_are_empty(n
     assert report['outcome']=='clean'
     assert report['accounting_valid'] is True
     assert report['evidence_complete'] is True
+
+
+def test_report_and_cli_reuse_verified_inherited_exclusive_lock(native_evidence, monkeypatch, tmp_path):
+    repo, state, wire = native_evidence
+    _attempt(repo, wire)
+    from tradingagents.strategies.orchestration import operational_report as module
+    from tradingagents.strategies.orchestration.runtime_lock import runtime_lock, RuntimeLockBusy
+    from scripts import generate_operational_report as cli
+    lock_path = tmp_path / 'runtime.lock'
+    monkeypatch.setattr(module, 'canonical_runtime_lock_path', lambda root: lock_path)
+    monkeypatch.setattr(cli, 'canonical_runtime_lock_path', lambda root: lock_path)
+    with runtime_lock(lock_path, exclusive=True) as lock:
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_FD', str(lock.fd))
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_MODE', 'exclusive')
+        report = module.build_operational_report(repo, GENERATION, SESSION)
+        assert report['evidence_complete'], report['diagnostics']
+        assert cli.main(['--repo-root', str(repo), '--generation', GENERATION, '--date', SESSION,
+                         '--output-dir', str(tmp_path / 'reports')]) == 0
+        # Neither report path may release or downgrade the controller's lease.
+        with pytest.raises(RuntimeLockBusy):
+            with runtime_lock(lock_path, exclusive=False):
+                pass
+
+
+def test_invalid_recovery_receipt_cannot_authorize_complete_report(native_evidence):
+    repo, state, wire = native_evidence
+    _attempt(repo, wire)
+    directory = state / 'runtime_recovery'
+    directory.mkdir()
+    (directory / (SESSION + '.json')).write_text('{"version":"unknown"}')
+    report = _report(repo)
+    assert report['evidence_complete'] is False
+    assert report['performance_claims_withheld'] is True
+    assert {'code': 'recovery_receipt_invalid'} in report['diagnostics']

@@ -16,10 +16,15 @@ operational report; it adds no service, database, provider calls or repair agent
 | Source disappears, is disabled, or evidence is missing | Keep the previous incident unresolved. Missing observations cannot count as success or extend a consecutive-failure streak. | Check configuration and evidence; intentionally removing a dependency is a reviewed behavior change. |
 | Required price, account, risk or time input fails | Existing mandatory gates remain blocking. | Repair the dependency; never relax a gate to obtain a clean report. |
 
-There is no extra retry loop between daily sessions and no automatic provider
+There is no extra provider-acquisition retry loop between daily sessions and no automatic provider
 substitution, schema guessing, source disabling or code update. Existing scoped
 exclusions and risk protections continue to determine which decisions are
 permitted. The incident policy itself cannot authorize a trade or change a book.
+
+The candidate [unattended runtime controller](runtime-recovery.md) can resume
+committed work using accepted inputs after process interruption. It adds no
+provider retries, replacement of frozen failed observations, or repair authority.
+Its operating limits and deployment prerequisites are documented separately.
 
 ## Report and alert contract
 

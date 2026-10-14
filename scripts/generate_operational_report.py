@@ -13,7 +13,7 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tradingagents.strategies.orchestration.operational_report import (
-    build_operational_report, write_operational_report,
+    build_operational_report, write_operational_report, report_runtime_guard,
 )
 from tradingagents.strategies.orchestration.source_repair import publish_repair_proposal
 from tradingagents.strategies.orchestration.source_repair_intervention import publish_intervention_proposal
@@ -36,9 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = arguments.repo_root.resolve()
     output = arguments.output_dir or repo / 'docs/reports'
     try:
-        guard = nullcontext() if arguments.snapshot_guaranteed else runtime_lock(
-            canonical_runtime_lock_path(repo), exclusive=False
-        )
+        guard = report_runtime_guard(repo, snapshot_guaranteed=arguments.snapshot_guaranteed)
         with guard:
             if arguments.generation:
                 generations = [arguments.generation]

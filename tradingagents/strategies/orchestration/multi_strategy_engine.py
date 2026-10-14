@@ -334,6 +334,9 @@ class MultiStrategyEngine:
         from .bounded_document_inputs import configure_strategies as configure_document_strategies
         self.paper_trade_strategies = configure_document_strategies(self.paper_trade_strategies, self.ar_config)
 
+        from .source_lifecycle_policy import configured as lifecycle_configured
+        lifecycle_configured(self.ar_config, self.paper_trade_strategies)
+
         # Data source registry
         self.registry = registry or build_default_registry(self.ar_config)
 
@@ -429,9 +432,13 @@ class MultiStrategyEngine:
         resilience = resilience_configured(self.ar_config)
         research_scope = None
         research_hold_reasons = []
+        from .source_lifecycle_policy import declared_scope, DECLARATION_KEY as LIFECYCLE_KEY, health_evidence
+        retirement_scope = declared_scope(data, self.ar_config, self.paper_trade_strategies)
         congress_audit_scope = audit_scope(data, self.ar_config, trading_date)
         signal_data = ({key: value for key, value in data.items() if key not in ('congress', DECLARATION_KEY)}
                        if configured(self.ar_config) else data)
+        if retirement_scope is not None:
+            signal_data = {key: value for key, value in signal_data.items() if key != LIFECYCLE_KEY}
         if resilience:
             from .source_inputs import source_codec_limits
             names = set(data) | {'fred', 'yfinance'}
@@ -589,6 +596,7 @@ class MultiStrategyEngine:
             if disabled_reason:
                 from tradingagents.strategies.metrics.identity import _stable_id
                 disabled_evidence = {"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}
+                disabled_evidence.update(health_evidence(retirement_scope, strategy.name))
                 if strategy.name == 'congressional_trades' and disabled_reason == CONGRESS_POLICY:
                     disabled_evidence['disclosure_policy'] = CONGRESS_POLICY
                     if congress_audit_scope is not None:
@@ -1513,6 +1521,8 @@ class MultiStrategyEngine:
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
         frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
         if frozen_decision is None:
+            from .runtime_recovery import require_acquisition_allowed
+            require_acquisition_allowed('committee_decision')
             positions = []
             for position in self.ledger.open_positions():
                 item = dict(position)
@@ -2151,6 +2161,8 @@ class MultiStrategyEngine:
         data: dict[str, Any] = {}
         from .congress_policy import declaration
         data.update(declaration(self.ar_config))
+        from .source_lifecycle_policy import declaration as lifecycle_declaration
+        data.update(lifecycle_declaration(self.ar_config, self.paper_trade_strategies))
         if decision_policy == PROSPECTIVE:
             data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
                                             'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
@@ -2164,6 +2176,7 @@ class MultiStrategyEngine:
         needed_sources: set[str] = set()
         for s in self.paper_trade_strategies:
             needed_sources.update(s.data_sources)
+        needed_sources.difference_update(self.ar_config.get("retired_sources", {}))
 
         available = set(self.registry.available_sources())
         if self.ar_config.get('bounded_document_research_policy') is not None:
@@ -3132,6 +3145,8 @@ class MultiStrategyEngine:
         reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
 
         try:
+            if not c.ticker and 'edgar' in self.ar_config.get('retired_sources', {}):
+                raise ValueError('invalid_retired_source_identity_dependency')
             model_timeout()
             required_text_fields = {
                 "earnings_call": ("analysis_text", "transcript_text"),
@@ -3377,6 +3392,8 @@ class MultiStrategyEngine:
             elif not ticker:
                 ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
                 ticker = ticker.strip().upper()
+                if 'edgar' in self.ar_config.get('retired_sources', {}):
+                    raise ValueError('invalid_retired_source_identity_dependency')
                 edgar = self.registry.get("edgar")
                 if not ticker or edgar is None or not edgar.validate_ticker(ticker):
                     raise ValueError("unresolved_issuer")

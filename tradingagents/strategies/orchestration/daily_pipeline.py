@@ -1354,6 +1354,8 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
 
     owner, session = state.owner, state.session
     if state.fresh:
+        from .runtime_recovery import require_acquisition_allowed
+        require_acquisition_allowed('execution_inputs')
         benchmarks: set[str] = set()
         for cohort in state.fresh:
             name, executor = cohort["config"].name, cohort["executor"]
@@ -1684,6 +1686,8 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         source_store, source_identity = daily_source_store(owner, state.trading_date)
         state.shared_data = source_store.load_frozen(source_identity)
         if state.shared_data is None:
+            from .runtime_recovery import require_acquisition_allowed
+            require_acquisition_allowed('shared_sources')
             deadline = None
             fetch_options = {}
             source_config = owner._base_config.get('autoresearch', {})
@@ -1740,6 +1744,8 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
     if restored is not None:
         state.horizon_signals, state.model_coverage, state.research_screening_receipt = restored
     else:
+        from .runtime_recovery import require_acquisition_allowed
+        require_acquisition_allowed('screening')
         with candidate_response_memo():
             for horizon in horizons:
                 with model_budget(state.model_deadline):
@@ -2010,6 +2016,8 @@ def _resolve_candidate_bars(
 
     if not unresolved:
         return None
+    from .runtime_recovery import require_acquisition_allowed
+    require_acquisition_allowed('candidate_bars')
     max_age = timedelta(
         hours=float(
             state.owner._base_config.get("autoresearch", {})
@@ -2449,6 +2457,8 @@ def run_candidate_volatility_validation(
             for cohort in state.owner.cohorts
         ):
             raise ValueError("accepted staging volatility missing after staging began")
+        from .runtime_recovery import require_acquisition_allowed
+        require_acquisition_allowed('staging_volatility')
         governed_refetch = _invalid_volatility_histories(
             state.first_engine,
             governed_tickers,
@@ -2603,6 +2613,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
             hold_reasons = tuple(sorted({reason for _, regime, _ in state.horizon_signals.values()
                                         for reason in regime['research_hold_reasons']}))
     def fetch_enrichment():
+        from .runtime_recovery import require_acquisition_allowed
+        require_acquisition_allowed('decision_enrichment')
         from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
         try:
             return state.owner._fetch_openbb_enrichment(all_signals)
@@ -2682,7 +2694,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     finalized = state.finalize()
     # Shadow evidence can run only after the whole session is durably staged.
     # Its result is never inserted into the financial worker-result contract.
-    if all(isinstance(result, dict) and not result.get("error") for result in finalized.values()):
+    from .runtime_recovery import local_recovery
+    if not local_recovery() and all(isinstance(result, dict) and not result.get("error") for result in finalized.values()):
         try:
             from tradingagents.strategies.orchestration.decision_shadow import run_decision_shadow
             run_decision_shadow(state)

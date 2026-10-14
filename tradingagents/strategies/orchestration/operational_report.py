@@ -260,6 +260,12 @@ def _declared_exclusion(row: dict, disabled: dict | None = None) -> bool:
             and (disabled or {}).get('congressional_trades') == 'display_audit_only_v1'
             and isinstance(evidence, dict) and evidence.get('disclosure_policy') == 'display_audit_only_v1'):
         reason = 'display_audit_only_v1'
+    from .source_lifecycle_policy import POLICY as LIFECYCLE_POLICY
+    if (isinstance(evidence, dict) and evidence.get('source_lifecycle_policy') == LIFECYCLE_POLICY
+            and (disabled or {}).get(row.get('strategy')) == evidence.get('reason')
+            and isinstance(evidence.get('source_lifecycle_sha256'), str)
+            and re.fullmatch('[a-f0-9]{64}', evidence['source_lifecycle_sha256'])):
+        reason = evidence['reason']
     return (row.get('status') == 'disabled_by_policy' and reason is not None
             and row.get('signal_count') == 0 and isinstance(evidence, dict)
             and evidence.get('reason') == reason)
@@ -498,6 +504,11 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                             'disabled_strategies': exclusions} if exclusions else {})
         congress_scope = audit_scope(envelope['payload'], congress_config, session,
                                     now=envelope['acquired_at'], replay=True)
+        from .source_lifecycle_policy import declared_scope, exclusions as retirement_exclusions
+        retirement_scope = declared_scope(envelope['payload'])
+        if retirement_scope is not None:
+            result['retirement_scope'] = retirement_scope
+            exclusions = {**exclusions, **retirement_exclusions(retirement_scope)}
         if exclusions:
             result['declared_exclusions'] = exclusions
         if congress_scope is not None:
@@ -564,7 +575,14 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
             if retained_sources is not None:
                 retained_sources['_bounded_document_config'] = document_config
             result['bounded_document_scope'] = document_scope
+        if retirement_scope is not None and 'bounded_document_research' in retirement_scope['strategy_sources']:
+            document_config = {'bounded_document_research_policy': DOCUMENT_POLICY}
+            if retained_sources is not None:
+                retained_sources['_bounded_document_config'] = document_config
         required={source for strategy in document_strategies(configure_strategies(get_paper_trade_strategies(), state_config), document_config) for source in strategy.data_sources if source!='openbb'}
+        if retirement_scope is not None:
+            required = {source for sources in retirement_scope['strategy_sources'].values()
+                        for source in sources if source != 'openbb'} - retirement_scope['retired_sources'].keys()
         for source in sorted(required-set(envelope['payload'])):
             diagnose('accepted_source_missing',source)
             result['observations'][source]='missing'
@@ -636,6 +654,23 @@ def _decision_shadow(state: Path, generation: str, session: str, epoch: str | No
         return unavailable
 
 
+def report_runtime_guard(repo, *, snapshot_guaranteed=False):
+    """Retain a verified controller lease without releasing or downgrading it."""
+    if snapshot_guaranteed:
+        return nullcontext()
+    from .runtime_lock import RuntimeLockInvalid
+    raw_fd = os.environ.get('EVENTEDGE_RUNTIME_LOCK_FD')
+    raw_mode = os.environ.get('EVENTEDGE_RUNTIME_LOCK_MODE')
+    if raw_fd is None and raw_mode is None:
+        return runtime_lock(canonical_runtime_lock_path(repo), exclusive=False)
+    if (not isinstance(raw_fd, str) or not raw_fd.isdecimal()
+            or raw_mode not in {'shared', 'exclusive'}):
+        raise RuntimeLockInvalid('inherited report runtime lock is invalid')
+    exclusive = raw_mode == 'exclusive'
+    return runtime_lock(canonical_runtime_lock_path(repo), exclusive=exclusive,
+        inherited_fd=int(raw_fd), inherited_exclusive=exclusive)
+
+
 def build_operational_report(repo_root: str | Path, generation: str, session: str, *, snapshot_guaranteed: bool = False) -> dict:
     """Read one stable generation/session; caller may attest an immutable snapshot.
 
@@ -646,7 +681,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
     if not _safe_id(generation) or date.fromisoformat(session).isoformat()!=session:
         raise ValueError('invalid report identity')
     repo = Path(repo_root).resolve()
-    guard = nullcontext() if snapshot_guaranteed else runtime_lock(canonical_runtime_lock_path(repo),exclusive=False)
+    guard = report_runtime_guard(repo, snapshot_guaranteed=snapshot_guaranteed)
     with guard:
         diagnostics = []
         def diagnose(code, scope=None):
@@ -691,6 +726,12 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         from .bounded_document_inputs import configure_strategies as document_strategies
         report_strategies = document_strategies(report_strategies, retained_sources.get('_bounded_document_config', {}))
         epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
+        from .source_lifecycle_policy import validate_health as validate_retirement_health
+        try:
+            validate_retirement_health(report['sources'].get('retirement_scope'), health,
+                {row['policy_id'] for row in health})
+        except (ValueError, TypeError, KeyError):
+            diagnose('source_retirement_health_conflict')
         report['epoch_id'] = epoch
         report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
         report['cohorts'] = {name:_book(state,name,generation,session,epoch,diagnose) for name in EXPECTED_COHORTS}
@@ -799,7 +840,26 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                         (failure['policy_id']=='foundation-'+horizon or failure['policy_id'].endswith(':health:'+horizon))]
                     if len(failures)!=1 or (source not in failures[0]['sources'] and failures[0]['status']!='strategy_defect'):
                         diagnose('source_health_conflict',source+':'+strategy.name+':'+horizon)
-        if latest and latest['wire']:
+        from .runtime_recovery import validate_recovery_receipt
+        recovery = None
+        try:
+            recovery = validate_recovery_receipt(state, generation, session, commit,
+                expected_configuration=metadata.get('config_sha256'))
+            if recovery is not None:
+                if (not isinstance(metadata.get('config_sha256'), str)
+                        or recovery['epoch_id'] != epoch):
+                    raise ValueError('recovery configuration or epoch unbound')
+                recovery['original_daily_outcome'] = latest['outcome'] if latest else 'missing'
+                # Recovery has its own proof. Missing original worker evidence
+                # remains visible, without being fabricated as a successful run.
+                historical = {'daily_attempt_missing', 'manifest_session_history_missing'}
+                recovery['original_attempt_diagnostics'] = [row for row in diagnostics if row['code'] in historical]
+                diagnostics[:] = [row for row in diagnostics if row['code'] not in historical]
+                report['recovery'] = recovery
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+            recovery = None
+            diagnose('recovery_receipt_invalid')
+        if latest and latest['wire'] and not (recovery is not None and latest['outcome'] == 'failed'):
             wire = latest['wire']
             try:
                 refs = aggregate_source_health_failures(wire,session,require_coverage=True)
@@ -823,7 +883,9 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             except (ValueError,TypeError,KeyError):
                 diagnose('wire_coverage_invalid')
         report['evidence_complete'] = not diagnostics
-        if latest and latest['outcome']=='failed':
+        if recovery is not None and report['evidence_complete'] and report['accounting_valid'] and report['staging_complete']:
+            report['outcome'] = ('clean' if report['input_coverage_valid'] and report['staging_valid'] else 'degraded')
+        elif latest and latest['outcome']=='failed':
             report['outcome']='failed'
         elif report['evidence_complete'] and report['accounting_valid'] and latest:
             report['outcome']=latest['outcome']
@@ -855,6 +917,12 @@ def render_operational_report(report: dict) -> str:
             label = _PREFLIGHT_LABELS.get(attempt.get('preflight_mode'), 'unknown mode')
             status = 'passed' if attempt.get('preflight_ok') is True else 'failed'
             lines.append(f"- {attempt['attempt_id']}: {label}; {status}; {attempt['process_status']}; return code {attempt['process_return_code']}.")
+    if report.get('recovery'):
+        recovery = report['recovery']
+        lines.extend(['', 'Accepted local recovery completed at ' + recovery['completed_at']
+            + '; original daily attempt outcome: ' + str(recovery['original_daily_outcome'])
+            + '. Its original attempt and preflight evidence remain preserved.',
+            'Recovery proof: `' + recovery['proof_sha256'] + '` (' + str(recovery['books_count']) + ' books).'])
     if report.get('disabled_strategies'):
         lines.extend(['', 'Policy exclusions: ' + ', '.join(f'{name} ({reason})' for name, reason in sorted(report['disabled_strategies'].items())) + '.'])
     if report['sources'].get('filing_comparison_scope'):

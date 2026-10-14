@@ -39,6 +39,8 @@ class LitigationStrategy:
 
     name = "litigation"
     track = "paper_trade"
+    # Legacy issuer resolution can acquire the SEC company identity map.
+    source_identity_dependencies = ["edgar"]
     data_sources = ["courtlistener", "yfinance", "openbb"]
 
     def __init__(self) -> None:

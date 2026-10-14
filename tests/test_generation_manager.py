@@ -1622,3 +1622,51 @@ def test_compare_opens_only_existing_state_under_shared_lock(tmp_path, monkeypat
     assert lock_modes == [False]
     after = {p.relative_to(state): p.read_bytes() for p in state.rglob('*') if p.is_file()}
     assert after == before
+
+
+@pytest.mark.parametrize('operation', ['daily', 'preflight'])
+def test_manager_reuses_controller_exclusive_lease_without_downgrading(manager, monkeypatch, operation):
+    from tradingagents.strategies.orchestration.runtime_lock import runtime_lock, RuntimeLockBusy
+
+    info = manager.start_generation('pinned whole-cycle roster')
+    seen = []
+
+    def worker(*args, inherited_lock=None, **kwargs):
+        assert inherited_lock.inherited and inherited_lock.exclusive
+        seen.append(inherited_lock.fd)
+        # A concurrent lifecycle change remains excluded even during preflight.
+        with pytest.raises(RuntimeLockBusy):
+            manager.pause_generation(info.gen_id)
+        return {'outcome': 'clean', 'success': True, 'elapsed_s': 0.0}
+
+    monkeypatch.setattr(manager, '_run_cohorts_subprocess', worker)
+    with runtime_lock(manager._runtime_lock_path, exclusive=True) as lease:
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_FD', str(lease.fd))
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_MODE', 'exclusive')
+        if operation == 'daily':
+            manager.run_daily('2026-10-13')
+        else:
+            manager.run_preflight('2026-10-13')
+        assert seen == [lease.fd]
+        with pytest.raises(RuntimeLockBusy):
+            with runtime_lock(manager._runtime_lock_path, exclusive=False):
+                pytest.fail('nested command released or downgraded controller lease')
+    with runtime_lock(manager._runtime_lock_path, exclusive=True):
+        pass
+
+
+@pytest.mark.parametrize('fd,mode', [('bad', 'exclusive'), ('999999', 'exclusive'), (None, 'exclusive'), ('3', None), ('3', 'shared')])
+def test_manager_rejects_unverified_controller_lease_before_work(manager, monkeypatch, fd, mode):
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockInvalid
+
+    manager.start_generation('reject unverified lease')
+    worker = MagicMock()
+    monkeypatch.setattr(manager, '_run_cohorts_subprocess', worker)
+    for name, value in [('EVENTEDGE_RUNTIME_LOCK_FD', fd), ('EVENTEDGE_RUNTIME_LOCK_MODE', mode)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeLockInvalid):
+        manager.run_preflight('2026-10-13')
+    worker.assert_not_called()

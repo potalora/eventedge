@@ -24,6 +24,8 @@ class RegulatoryPipelineStrategy:
 
     name = "regulatory_pipeline"
     track = "paper_trade"
+    # Legacy issuer resolution can acquire the SEC company identity map.
+    source_identity_dependencies = ["edgar"]
     data_sources = ["regulations", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:

@@ -59,7 +59,9 @@ def _runtime_lock_context(*, exclusive: bool):
         ) from error
     return runtime_lock(
         lock_path,
-        exclusive=exclusive,
+        # A verified inherited exclusive lock remains exclusive even for a
+        # read-only preflight; never downgrade the controller-owned lock.
+        exclusive=exclusive or mode_value == "exclusive",
         inherited_fd=inherited_fd,
         inherited_exclusive=mode_value == "exclusive",
     )

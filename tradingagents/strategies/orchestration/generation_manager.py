@@ -7,10 +7,12 @@ trading performance across code versions side-by-side.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -615,6 +617,7 @@ class GenerationManager:
         self._generations_dir = (self._repo_root / generations_dir).resolve()
         self._worktrees_dir = (self._repo_root / ".worktrees").resolve()
         self._manifest_path = self._generations_dir / "manifest.json"
+        self._start_intent_path = self._generations_dir / ".pending-start.json"
         self._runtime_lock_path = canonical_runtime_lock_path(self._repo_root)
 
         # Use the venv python WITHOUT resolving symlinks — resolve() follows
@@ -640,13 +643,32 @@ class GenerationManager:
 
         1. Capture current commit and branch.
         2. Allocate next gen_id.
-        3. Create a detached git worktree at the commit.
-        4. Create an isolated state directory.
-        5. Persist to manifest.
+        Record a durable intent before creating the frozen worktree and state.
+        Retrying an interrupted request resumes its original snapshot.
         """
         from .generation_config import read_generation_config, FROZEN_CONFIG_NAME
 
         profile = read_generation_config(config_file) if config_file is not None else None
+        manifest = self._load_manifest()
+        pending = self._load_start_intent()
+        if pending is not None:
+            record = pending["record"]
+            existing = self._find_gen(manifest, record["gen_id"])
+            same_request = (
+                record["description"] == description
+                and record.get("config_sha256") == (profile[2] if profile is not None else None)
+            )
+            if existing is not None:
+                immutable = record.keys() - {"status", "run_history"}
+                if any(existing.get(key) != record[key] for key in immutable):
+                    raise GenerationManifestError("pending generation conflicts with manifest; requires operator review")
+                self._clear_start_intent()
+                if same_request:
+                    return GenerationInfo(**existing)
+            else:
+                if not same_request:
+                    raise GenerationManifestError("different generation start is pending; requires operator review")
+                return self._finish_generation_start(pending, manifest)
         # 0. Warn about uncommitted changes (worktree won't include them)
         status_result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -681,26 +703,14 @@ class GenerationManager:
         # 2. Allocate gen_id
         gen_id = self._next_gen_id()
 
-        # 3. Create worktree
+        # Reject unknown historical or foreign data before recording ownership.
         worktree_path = self._worktrees_dir / gen_id
-        subprocess.run(
-            ["git", "worktree", "add", str(worktree_path), commit, "--detach"],
-            cwd=self._repo_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        logger.info("Created worktree %s at %s", gen_id, commit[:12])
-
-        # 4. Create state directory
         state_dir = self._generations_dir / gen_id
-        state_dir.mkdir(parents=True, exist_ok=True)
-        frozen_config = None
-        if profile is not None:
-            frozen_config = state_dir / FROZEN_CONFIG_NAME
-            descriptor = os.open(frozen_config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, 'wb') as handle:
-                handle.write(profile[0])
+        for path in (worktree_path, state_dir):
+            self._reject_lifecycle_symlinks(path)
+            if path.exists():
+                raise GenerationManifestError("generation target already exists; requires operator review")
+        frozen_config = state_dir / FROZEN_CONFIG_NAME if profile is not None else None
 
         # 5. Build info and persist
         info = GenerationInfo(
@@ -717,21 +727,156 @@ class GenerationManager:
             config_sha256=profile[2] if profile is not None else None,
         )
 
-        manifest = self._load_manifest()
         record = asdict(info)
         if profile is None:
             record.pop('config_file')
             record.pop('config_sha256')
+        pending = {"version": 1, "record": record, "config_text": profile[0].decode("utf-8") if profile is not None else None}
+        self._write_atomic(self._start_intent_path, json.dumps(pending).encode("utf-8"))
+        return self._finish_generation_start(pending, manifest)
+
+    @staticmethod
+    def _reject_lifecycle_symlinks(path: Path) -> None:
+        if any(item.is_symlink() for item in (path, *path.parents)):
+            raise GenerationManifestError("generation path contains a symlink; requires operator review")
+
+    def _load_start_intent(self) -> dict | None:
+        """Only a validated, manager-owned intent authorizes resuming side effects."""
+        self._reject_lifecycle_symlinks(self._start_intent_path)
+        try:
+            fd = os.open(self._start_intent_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ValueError("intent is not a regular file")
+                body = handle.read(2 * 1024 * 1024 + 1)
+            if len(body) > 2 * 1024 * 1024:
+                raise ValueError("intent is too large")
+            pending = json.loads(body)
+            if (not isinstance(pending, dict) or set(pending) != {"version", "record", "config_text"}
+                    or type(pending["version"]) is not int or pending["version"] != 1):
+                raise ValueError("invalid intent")
+            record = pending["record"]
+            self._validate_manifest({"generations": [record]})
+            if (set(record) - {item.name for item in fields(GenerationInfo)}
+                    or record["status"] != "active" or record["run_history"] != []
+                    or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["git_commit"])
+                    or record["worktree_path"] != str(self._worktrees_dir / record["gen_id"])
+                    or record["state_dir"] != str(self._generations_dir / record["gen_id"])):
+                raise ValueError("invalid intent identity")
+            config_text = pending["config_text"]
+            if record.get("config_file") is None:
+                if config_text is not None:
+                    raise ValueError("unexpected configuration")
+            elif (not isinstance(config_text, str)
+                    or hashlib.sha256(config_text.encode("utf-8")).hexdigest() != record["config_sha256"]):
+                raise ValueError("invalid configuration digest")
+            return pending
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            raise GenerationManifestError("pending generation start is invalid; requires operator review") from error
+
+    def _clear_start_intent(self) -> None:
+        self._start_intent_path.unlink()
+        self._sync_directory(self._generations_dir)
+
+    def _finish_generation_start(self, pending: dict, manifest: dict) -> GenerationInfo:
+        """Complete known interrupted creation without deleting any existing data."""
+        record = pending["record"]
+        worktree = Path(record["worktree_path"])
+        state = Path(record["state_dir"])
+        for path in (worktree, state):
+            self._reject_lifecycle_symlinks(path)
+        registered = subprocess.run(
+            ["git", "worktree", "list", "--porcelain", "-z"], cwd=self._repo_root,
+            capture_output=True, text=True, check=True,
+        ).stdout.split("\0")
+        owned = f"worktree {worktree}" in registered
+        if not worktree.exists() and not owned:
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree), record["git_commit"], "--detach"],
+                cwd=self._repo_root, capture_output=True, text=True, check=True,
+            )
+        elif not worktree.is_dir() or not owned:
+            raise GenerationManifestError("pending worktree is ambiguous; requires operator review")
+        self._verify_pending_worktree(worktree, record["git_commit"])
+        if state.exists() and not state.is_dir():
+            raise GenerationManifestError("pending state is not a directory; requires operator review")
+        state.mkdir(exist_ok=True)
+        expected = {Path(record["config_file"]).name} if record.get("config_file") else set()
+        if not state.is_dir() or any(item.name not in expected or item.is_symlink() or not item.is_file() for item in state.iterdir()):
+            raise GenerationManifestError("pending state contains unknown data; requires operator review")
+        if expected:
+            config = Path(record["config_file"])
+            body = pending["config_text"].encode("utf-8")
+            if config.exists() and config.read_bytes() != body:
+                raise GenerationManifestError("pending configuration is modified; requires operator review")
+            if not config.exists():
+                self._write_atomic(config, body)
         manifest["generations"].append(record)
         self._save_manifest(manifest)
+        self._clear_start_intent()
+        logger.info("Started generation %s at %s", record["gen_id"], record["git_commit"][:12])
+        return GenerationInfo(**record)
 
-        logger.info(
-            "Started generation %s: branch=%s commit=%s",
-            gen_id,
-            branch,
-            commit[:12],
+    def _verify_pending_worktree(self, worktree: Path, commit: str) -> None:
+        try:
+            # A foreign/modified checkout is never reset or discarded automatically.
+            self._reject_lifecycle_symlinks(worktree / ".git")
+            if not (worktree / ".git").is_file():
+                raise GenerationManifestError("pending worktree Git pointer is invalid; requires operator review")
+            common_args = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            expected_common = subprocess.run(
+                common_args, cwd=self._repo_root, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            actual_common = subprocess.run(
+                common_args, cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if Path(actual_common).resolve() != Path(expected_common).resolve():
+                raise GenerationManifestError("pending worktree belongs to another repository; requires operator review")
+            admin = Path(subprocess.run(
+                ["git", "rev-parse", "--absolute-git-dir"],
+                cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout.strip())
+            backlink = admin / "gitdir"
+            self._reject_lifecycle_symlinks(backlink)
+            if (admin.parent != Path(expected_common) / "worktrees"
+                    or not backlink.is_file()
+                    or backlink.read_text().strip() != str(worktree / ".git")):
+                raise GenerationManifestError("pending worktree Git identity conflicts; requires operator review")
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all", "--ignored"],
+                cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout
+            if head != commit or status.strip():
+                raise GenerationManifestError("pending worktree is modified; requires operator review")
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise GenerationManifestError("pending worktree Git identity is invalid; requires operator review") from error
+
+    def _runtime_guard(self, *, exclusive: bool):
+        """Retain a verified controller lease across the complete daily wrapper.
+
+        Standalone commands still acquire their normal shared/exclusive locks.
+        Only a verified inherited exclusive lease can pin the whole roster;
+        preflight must not downgrade that parent's lease to a shared lock.
+        """
+        from .runtime_lock import RuntimeLockInvalid, runtime_lock
+
+        fd_value = os.environ.get("EVENTEDGE_RUNTIME_LOCK_FD")
+        mode_value = os.environ.get("EVENTEDGE_RUNTIME_LOCK_MODE")
+        if fd_value is None and mode_value is None:
+            return runtime_lock(self._runtime_lock_path, exclusive=exclusive)
+        if (mode_value != "exclusive" or fd_value is None
+                or not re.fullmatch(r"[0-9]{1,10}", fd_value)):
+            raise RuntimeLockInvalid("inherited controller runtime lock is invalid")
+        return runtime_lock(
+            self._runtime_lock_path, exclusive=True,
+            inherited_fd=int(fd_value), inherited_exclusive=True,
         )
-        return info
 
     def run_daily(self, trading_date: str | None = None) -> dict[str, dict]:
         """Run daily trading for all active generations.
@@ -748,10 +893,8 @@ class GenerationManager:
 
             trading_date = exchange_date().isoformat()
 
-        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
-
         results: dict[str, dict] = {}
-        with runtime_lock(self._runtime_lock_path, exclusive=True) as lock:
+        with self._runtime_guard(exclusive=True) as lock:
             manifest = self._load_manifest()
 
             for gen_data in manifest["generations"]:
@@ -804,10 +947,8 @@ class GenerationManager:
 
             trading_date = exchange_date().isoformat()
 
-        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
-
         results: dict[str, dict] = {}
-        with runtime_lock(self._runtime_lock_path, exclusive=False) as lock:
+        with self._runtime_guard(exclusive=False) as lock:
             manifest = self._load_manifest()
 
             for gen_data in manifest["generations"]:
@@ -885,10 +1026,19 @@ class GenerationManager:
         if gen_data is None:
             raise ValueError(f"Generation {gen_id} not found")
 
-        gen_data["status"] = "retired"
+        # Publication precedes cleanup: an interrupted cleanup leaves a retired
+        # record and preserved state, never an active record with missing code.
+        if gen_data["status"] != "retired":
+            gen_data["status"] = "retired"
+            self._save_manifest(manifest)
+        else:
+            # A prior rename may have succeeded before directory fsync failed.
+            # Establish durability on retry before deleting the frozen code.
+            self._sync_directory(self._manifest_path.parent)
 
         if delete_worktree:
             worktree_path = gen_data["worktree_path"]
+            self._reject_lifecycle_symlinks(Path(worktree_path))
             if Path(worktree_path).exists():
                 try:
                     subprocess.run(
@@ -906,7 +1056,6 @@ class GenerationManager:
                         e.stderr.strip(),
                     )
 
-        self._save_manifest(manifest)
         logger.info("Retired generation %s", gen_id)
 
     def list_generations(self) -> list[GenerationInfo]:
@@ -1335,6 +1484,11 @@ class GenerationManager:
             return {"generations": []}
         except (ValueError, OSError) as error:
             raise GenerationManifestError("generation manifest is unreadable or malformed") from error
+        self._validate_manifest(data)
+        return data
+
+    @staticmethod
+    def _validate_manifest(data: dict) -> None:
         if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
             raise GenerationManifestError("generation manifest requires a generations list")
         optional_config = {'config_file', 'config_sha256'}
@@ -1363,20 +1517,33 @@ class GenerationManager:
                         or not re.fullmatch(r'[0-9a-f]{64}', row['config_sha256'])):
                     raise GenerationManifestError('generation manifest has invalid configuration identity')
             seen.add(identity)
-        return data
 
     def _save_manifest(self, data: dict) -> None:
         """Atomic write of manifest.json."""
         self._manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(self._manifest_path, (json.dumps(data, indent=2, default=str) + "\n").encode("utf-8"))
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _write_atomic(self, path: Path, body: bytes) -> None:
+        """Flush payload and directory entry before dependent lifecycle effects."""
         fd, tmp = tempfile.mkstemp(
-            dir=self._manifest_path.parent,
+            dir=self._generations_dir,
             suffix=".tmp",
         )
         try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2, default=str)
-                f.write("\n")
-            os.replace(tmp, self._manifest_path)
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            self._sync_directory(path.parent)
         except BaseException:
             try:
                 os.unlink(tmp)

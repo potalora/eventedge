@@ -178,6 +178,9 @@ def validate_projection(engine, data, regime):
     projected, scope = project_sources(original, names, codec_limits=limits)
     if congress_configured(engine.ar_config):
         projected = {key: value for key, value in projected.items() if key not in ('congress', DECLARATION_KEY)}
+    from .source_lifecycle_policy import declared_scope, DECLARATION_KEY as LIFECYCLE_KEY
+    if declared_scope(original, engine.ar_config, engine.paper_trade_strategies) is not None:
+        projected.pop(LIFECYCLE_KEY, None)
     filing_scope = None
     if material_configured(engine.ar_config):
         from .filing_research_isolation import isolate_filing_research
