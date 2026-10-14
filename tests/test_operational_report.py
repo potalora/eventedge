@@ -551,7 +551,8 @@ def test_cli_writes_deterministic_json_and_markdown_for_completed_session(native
     output=tmp_path/'output'
     assert main(['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
                  '--output-dir',str(output),'--snapshot-guaranteed'])==0
-    assert len(list(output.glob('*.json')))==len(list(output.glob('*.md')))==1
+    assert len(list(output.glob('*-operational-report.json')))==len(list(output.glob('*.md')))==1
+    assert len(list(output.glob('*-source-repair.json')))==1
 
 
 def test_cli_publishes_actionable_source_incident_without_rewriting_trading_evidence(native_evidence,tmp_path,capsys):
