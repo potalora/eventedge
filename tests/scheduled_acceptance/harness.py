@@ -122,6 +122,7 @@ from scripts.run_cohorts import _build_config
 from tradingagents.strategies.orchestration.source_inputs import source_configuration_fingerprint
 config=_build_config(SimpleNamespace(block_tickers=''))
 print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
+                  'regulation_retrieval_policy':config['autoresearch']['regulation_retrieval_policy'],
                   'source_configuration':source_configuration_fingerprint(config)}))
 '''
         result = subprocess.run([str(self.python),'-c',code],cwd=self.repo,env=env,
@@ -139,12 +140,15 @@ print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
         return result
 
 
-def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
+def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
+                   profile_variant='retained_production'):
     """Snapshot candidate bytes in a *separate* local Git repository.
 
     The snapshot commit has its own identity. No source-repository Git writes,
     remotes, user configuration, real credentials or production state are used.
     """
+    if profile_variant not in {'retained_production', 'government_copy_v2'}:
+        raise ValueError('unsupported acceptance profile variant')
     base = Path(tmp_path).resolve() / 'scheduled'
     repo = base / 'repo'
     repo.mkdir(parents=True)
@@ -177,11 +181,18 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
     original_body = PROFILE.read_bytes()
     assert sha(original_body) == ORIGINAL_SHA
     original = json.loads(original_body)
+    candidate = deepcopy(original)
+    if profile_variant == 'government_copy_v2':
+        assert candidate['autoresearch']['regulation_retrieval_policy'] == 'verified_government_copy_v1'
+        candidate['autoresearch']['regulation_retrieval_policy'] = 'verified_government_copy_v2'
+    policy_overrides = _changes(original, candidate)
+    candidate_body = (json.dumps(candidate, sort_keys=True, indent=2) + '\n').encode()
+    candidate_sha = sha(candidate_body) if policy_overrides else ORIGINAL_SHA
     environment_body = ENVIRONMENT_PROOF.read_bytes()
     retained_environment = json.loads(environment_body)
     assert retained_environment['version']=='retained-production-environment-v1'
     assert retained_environment['environment']=={'BLOCKED_TICKERS':'GOOGL,GOOG'}
-    normalized = deepcopy(original)
+    normalized = deepcopy(candidate)
     ar = normalized['autoresearch']
     # Auth storage refuses *any* Git ancestor, including an artifact basetemp
     # nested in the real checkout. Keep the dummy grant in its own 0700 OS-temp
@@ -214,7 +225,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
         spec.update(path=str(target), sha256=sha(body))
     document['attachments'][0]['source_sha256'] = sha(original_bytes)
     document['decision_scope']['original_sha256'] = sha(original_bytes)
-    substitutions = _changes(original, normalized)
+    substitutions = _changes(candidate, normalized)
     allowed_paths = {('project_dir',), ('results_dir',), ('data_cache_dir',),
         ('autoresearch', 'results_dir'), ('autoresearch', 'source_cache_dir'), ('autoresearch', 'chatgpt_plan_auth_path'),
         ('autoresearch', 'bounded_document_registry', 0, 'original', 'path'),
@@ -228,6 +239,8 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
     _json(profile, normalized)
     profile_sha = sha(profile.read_bytes())
     audit = {'original_sha256': ORIGINAL_SHA, 'fixture_sha256': profile_sha,
+             'profile_variant':profile_variant, 'policy_overrides':policy_overrides,
+             'candidate_profile_sha256':candidate_sha,
              'fixture_commit': commit, 'substitutions': substitutions,
              # Runtime policy is separately evidenced, not a profile edit or
              # an invented external transport response.

@@ -2945,11 +2945,8 @@ class MultiStrategyEngine:
 
         try:
             end = trading_date
-            start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime(
-                "%Y-%m-%d"
-            )
             options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
-            severity = source.fetch_drought_severity(start=start, end=end, **options)
+            severity = source.fetch_drought_severity(end=end, **options)
             composite = source.fetch_composite_score(date=trading_date, **options)
             result = {"composite_score": composite, "states": severity}
             acquisition_times = [str(row["available_at"]) for row in severity.values() if isinstance(row, dict) and row.get("available_at")]
@@ -2960,7 +2957,11 @@ class MultiStrategyEngine:
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
             error = source_fetch_error("Source acquisition failed", exc)
-            return {**error.partial_data, "error": str(error)}
+            return {**error.partial_data, "error": str(error), "_coverage": {
+                "status": "partial" if error.partial_data else "failed",
+                "reason_code": error.reason_code, "http_status": error.http_status,
+                "attempts": error.attempts,
+            }}
 
     def _fetch_cftc_data(self, trading_date: str | None = None, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch CFTC COT positioning data for commodity strategy."""

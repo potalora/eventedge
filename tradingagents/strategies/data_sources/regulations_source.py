@@ -235,8 +235,9 @@ class RegulationsSource:
         from datetime import datetime, timedelta
 
         if retrieval_policy is not None:
-            from .regulation_government_copy import POLICY as RETRIEVAL_POLICY
-            if retrieval_policy != RETRIEVAL_POLICY or evidence_policy != 'complete_document_text_v1':
+            from .regulation_government_copy import POLICIES as RETRIEVAL_POLICIES
+            if (type(retrieval_policy) is not str or retrieval_policy not in RETRIEVAL_POLICIES
+                    or evidence_policy != 'complete_document_text_v1'):
                 raise ValueError('invalid_regulation_retrieval_policy')
         if evidence_policy is not None:
             from .regulation_evidence import POLICY
@@ -351,6 +352,11 @@ class RegulationsSource:
                                             deepcopy(unit['primary_failure']),
                                             {'resource_id': unit['resource_id'], 'http_status': 200,
                                              'complete': True, 'receipt': deepcopy(unit['receipt'])}])
+                                        if 'crosswalk_receipt' in unit['government_copy']:
+                                            failures[docid]['retrieval_attempts'].append({
+                                                'resource_id': unit['resource_id'], 'http_status': 200,
+                                                'complete': True, 'receipt': deepcopy(
+                                                    unit['government_copy']['crosswalk_receipt'])})
                                     else:
                                         failures[docid]['body_receipts'][unit['resource_id']] = deepcopy(unit['receipt'])
                     corpus.pop(docid, None)
@@ -386,9 +392,12 @@ class RegulationsSource:
                                         and attempt and attempt['complete'] is True
                                         and attempt['http_status'] in {403, 404, 410}):
                                     raise
-                                from .regulation_government_copy import government_copy_plan
+                                from .regulation_government_copy import (
+                                    POLICY_V2, government_copy_plan, government_crosswalk_url, extract_government_copy,
+                                )
                                 primary_failure = deepcopy(retrieval_attempts[-1])
-                                government_url = government_copy_plan(raw_detail)['url']
+                                government_plan = government_copy_plan(raw_detail, retrieval_policy=retrieval_policy)
+                                government_url = government_plan['url']
                                 government_attempt = {}
                                 try:
                                     body = self._content_request(government_url, maximum=MAX_BODY_BYTES,
@@ -397,6 +406,22 @@ class RegulationsSource:
                                     if government_attempt:
                                         retrieval_attempts.append({'resource_id': rid, **government_attempt})
                                 government_copies[rid] = {'primary_failure': primary_failure}
+                                if retrieval_policy == POLICY_V2 and government_plan['identity']['agency_id'] == 'FTC':
+                                    try:
+                                        extract_government_copy(raw_detail, body, retrieval_policy=retrieval_policy,
+                                            check=lambda: provider_timeout('regulations'))
+                                    except ValueError as error:
+                                        if str(error) != 'missing_regulation_government_crosswalk':
+                                            raise
+                                        metadata_url = government_crosswalk_url(raw_detail, retrieval_policy=retrieval_policy)
+                                        metadata_attempt = {}
+                                        try:
+                                            self._content_request(metadata_url, maximum=MAX_DETAIL_BYTES,
+                                                capture=metadata_attempt)
+                                        finally:
+                                            if metadata_attempt:
+                                                retrieval_attempts.append({'resource_id': rid, **metadata_attempt})
+                                        government_copies[rid]['crosswalk_receipt'] = metadata_attempt['receipt']
                                 stamp = government_attempt['receipt']['observed_at']
                             else:
                                 stamp = datetime.now(timezone.utc).isoformat()

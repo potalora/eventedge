@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as day_time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -26,6 +27,23 @@ BASE_URL = "https://usdmdataservices.unl.edu/api/StateStatistics/GetDroughtSever
 STATE_FIPS = {"IA":"19", "IL":"17", "KS":"20", "NE":"31", "MN":"27",
               "IN":"18", "OH":"39", "SD":"46", "ND":"38", "MO":"29"}
 DEFAULT_AG_STATES = ["IA", "IL", "KS", "NE", "MN", "IN", "OH", "SD", "ND", "MO"]
+
+
+def _published_observation_start(end: str) -> str:
+    """Latest Tuesday map published by the reference-day/acquisition cutoff.
+
+    USDM observes Tuesday and publishes Thursday at 08:30 New York time.
+    A seven-day trailing window omits the current map on Tuesday/Wednesday.
+    Keep explicit caller windows separate from this current-week default.
+    """
+    eastern = ZoneInfo("America/New_York")
+    reference = datetime.combine(datetime.strptime(end, "%Y-%m-%d").date(), day_time.max, eastern)
+    cutoff = min(reference, datetime.fromisoformat(acquisition_time()).astimezone(eastern))
+    release_date = cutoff.date() - timedelta(days=(cutoff.weekday() - 3) % 7)
+    release = datetime.combine(release_date, day_time(8, 30), eastern)
+    if cutoff < release:
+        release_date -= timedelta(days=7)
+    return (release_date - timedelta(days=2)).isoformat()
 
 
 class DroughtMonitorSource:
@@ -68,7 +86,7 @@ class DroughtMonitorSource:
 
         Args:
             states: List of state abbreviations (default: DEFAULT_AG_STATES).
-            start: Start date YYYY-MM-DD (default: 7 days ago).
+            start: Start date YYYY-MM-DD (default: latest published weekly map).
             end: End date YYYY-MM-DD (default: today).
 
         Returns:
@@ -81,10 +99,10 @@ class DroughtMonitorSource:
             raise SourceFetchError("Drought Monitor unsupported state", reason_code="invalid_response")
         if end is None:
             end = current_session_date()
-        if start is None:
-            start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
         require_current_vintage(end, vintage_as_of, today=current_session_date())
+        if start is None:
+            start = _published_observation_start(end)
 
         # Convert dates to API format (M/d/yyyy)
         start_fmt = datetime.strptime(start, "%Y-%m-%d").strftime("%-m/%-d/%Y")
@@ -168,9 +186,8 @@ class DroughtMonitorSource:
         if date is None:
             date = current_session_date()
 
-        start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
         options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
-        severity = self.fetch_drought_severity(states, start, date, **options)
+        severity = self.fetch_drought_severity(states, end=date, **options)
 
         if not severity:
             raise SourceFetchError("Drought Monitor observations unavailable", reason_code="invalid_response")

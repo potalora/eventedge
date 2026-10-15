@@ -1,0 +1,708 @@
+{
+  "campaign": "fixed four-sample campaign 4 through 7, no omitted results",
+  "scope": "public retained SEC selected page; native model outputs",
+  "samples": {
+    "4": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield        Fax: 12034282024        To:        Fax: (970) 925-1746        Page: 7 of 9        12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\tStock\\nCert. #\\tNumber of\\nShares\\tIndicate Restricted\\nand/or Control Stock\\tFrom Whom and\\nHow Acquired\\tDate Fully\\nPaid for\\nCadre Holdings Inc.\\tN/A\\t4,000,000\\tRestricted and\\nControlled\\tDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\t\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: ______________________________ (Seal)\\nWarren B. Kanders, Member\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Number of\\nShares\\tIndicate Restricted\\nand/or Control Stock\\tFrom Whom and\\nHow Acquired\\tDate Fully\\nPaid for\\nCadre Holdings Inc.\\tN/A\\t4,000,000\\tRestricted and\\nControlled\\tDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\t\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\nStock\\nCert. #\\nNumber of\\nShares\\nIndicate Restricted\\nand/or Control Stock\\nFrom Whom and\\nHow Acquired\\nDate Fully\\nPaid for\\nCadre Holdings Inc.\\nN/A\\n4,000,000\\nRestricted and\\nControlled\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Number of\\nShares\\nIndicate Restricted\\nand/or Control Stock\\nFrom Whom and\\nHow Acquired\\nDate Fully\\nPaid for\\nCadre Holdings Inc.\\nN/A\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "5": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield     Fax: 12034282024     To:     Fax: (970) 925-1746     Page: 7 of 9     12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock\\nCert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc. | N/A | 4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield    Fax: 12034282024    To:    Fax: (970) 925-1746    Page: 7 of 9    12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock Cert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer | Stock Cert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "6": {
+      "status": "failed",
+      "native_calls_attempted": 2,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"Rule 144/145 Securities:\\nIssuer\\nStock\\nCert. #\\nNumber of\\nShares\\nIndicate Restricted\\nand/or Control Stock\\nFrom Whom and\\nWhen Acquired\\nDate Fully\\nPaid for\\nCadre Holdings Inc.\\nN/A\\n4,000,000\\nRestricted and\\nControlled\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Rule 144/145 Securities:\\nIssuer\\nStock\\nCert. #\\nNumber of\\nShares\\nIndicate Restricted\\nand/or Control Stock\\nFrom Whom and\\nWhen Acquired\\nDate Fully\\nPaid for\\nCadre Holdings Inc.\\nN/A\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\nRule 144/145 Securities:\\nIssuer | Stock\\nCert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\nKanders SAF, LLC\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer | Stock\\nCert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":null,\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":null,\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "7": {
+      "status": "failed",
+      "native_calls_attempted": 2,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"Rule 144/145 Securities:\\nIssuer | Stock\\nCert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\nRule 144/145 Securities:\\nIssuer\\nStock Cert. #\\nNumber of\\nShares\\nIndicate Restricted\\nand/or Control Stock\\nFrom Whom and\\nHow Acquired\\nDate Fully\\nPaid for\\nCadre Holdings Inc.\\nN/A\\n4,000,000\\nRestricted and\\nControlled\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\nKanders SAF, LLC\\nBy: Warren B. Kanders, Member\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer\\nStock Cert. #\\nNumber of\\nShares\\nIndicate Restricted\\nand/or Control Stock\\nFrom Whom and\\nHow Acquired\\nDate Fully\\nPaid for\\nCadre Holdings Inc.\\nN/A\\n4,000,000\\nRestricted and\\nControlled\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    }
+  },
+  "v3_campaign": "fixed four-sample campaign 8 through 11; 3 of 4 passed; no omitted results",
+  "v3_samples": {
+    "8": {
+      "status": "failed",
+      "native_calls_attempted": 1,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield        Fax: 12034282024        To:        Fax: (970) 925-1746        Page: 7 of 9        12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer                    Stock     Number of     Indicate Restricted     From Whom and       Date Fully\\n                          Cert. #    Shares       and/or Control Stock     How Acquired       Paid for\\nCadre Holdings Inc.       N/A       4,000,000    Restricted and           Distribution from\\n                                                   Controlled               Maui Holdings\\n                                                                            LLC, former\\n                                                                            holding company\\n                                                                            of Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\n   indirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n   15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nK anders SAF, LLC\\n\\nBy: ________________________________(Seal)\\nWarren B. Kanders, Member\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\n                          Shares\",\"citation\":\"Cadre Holdings Inc.       N/A       4,000,000    Restricted and           Distribution from\\n                                                   Controlled               Maui Holdings\\n                                                                            LLC, former\\n                                                                            holding company\\n                                                                            of Issuer\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": null
+    },
+    "9": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock\\nCert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock Cert. # | Number of Shares | Indicate Restricted and/or Control Stock | From Whom and When Acquired | Date Fully Paid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and Controlled | Distribution from Maui Holdings LLC, former holding company of Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of Shares\",\"citation\":\"Cadre Holdings Inc. | N/A | 4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "10": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield        Fax: 12034282024        To:        Fax: (970) 925-1746        Page: 7 of 9        12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock\\nCert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc. | N/A | 4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock Cert. # | Number of\\nShares | Indicate Restricted and/or Control Stock | From Whom and How Acquired | Date Fully Paid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and Controlled | Distribution from Maui Holdings LLC, former holding company of Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\nBy: Warren B. Kanders, Member\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Number of\\nShares | Indicate Restricted and/or Control Stock | From Whom and How Acquired | Date Fully Paid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and Controlled | Distribution from Maui Holdings LLC, former holding company of Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "11": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield    Fax: 12034282024    To:    Fax: (970) 925.1746    Page: 7 of 9    12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer | Stock Cert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\n   indirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n   15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer | Stock Cert. # | Number of\\nShares | Indicate Restricted\\nand/or Control Stock | From Whom and\\nHow Acquired | Date Fully\\nPaid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and\\nControlled | Distribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\nIssuer | Stock Cert. # | Number of\\nShares | Indicate Restricted and/or Control Stock | From Whom and How Acquired | Date Fully Paid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and Controlled | Distribution from Maui Holdings LLC, former holding company of Issuer |\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\nWarren B. K anders Roth IRA\\nAllison S. K anders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Number of\\nShares | Indicate Restricted and/or Control Stock | From Whom and How Acquired | Date Fully Paid for\\nCadre Holdings Inc. | N/A | 4,000,000 | Restricted and Controlled | Distribution from Maui Holdings LLC, former holding company of Issuer |\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    }
+  },
+  "v4_campaign": "fixed four-sample campaign 12 through 15; original request-v2 responses, no omitted results",
+  "v4_samples": {
+    "12": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "13": {
+      "status": "failed",
+      "native_calls_attempted": 1,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield\\nFax: 12034282024\\nTo:\\nFax: (970) 925-1746\\nPage: 7 of 9\\n12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc.\\n\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": null
+    },
+    "14": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"EXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Number of\\nShares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield\\n\\nFax: 12034282024\\n\\nTo:\\n\\nFax: (970) 925.1746\\n\\nPage: 7 of 9\\n\\n12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kand ers Roth IRA\\nAllison S. Kand ers Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: Warren B. Kanders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    },
+    "15": {
+      "status": "passed",
+      "native_calls_attempted": 3,
+      "source_identity": {
+        "as_of": "2026-10-10T04:24:12.342826+00:00",
+        "attachments": [
+          {
+            "filename": "scan18-page-18.png",
+            "media_type": "image/png",
+            "pages": [
+              18
+            ],
+            "render_identity": "poppler-1536-scanned-pledge-page18-v1",
+            "sha256": "cd8cde17010889be8c8a244e975bf6d788e463a3a9dbe291e0b2d3d5d8b21ee5",
+            "size_bytes": 717130,
+            "source_sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c"
+          }
+        ],
+        "document_id": "0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit",
+        "original": {
+          "filename": "pledge-original.pdf",
+          "media_type": "application/pdf",
+          "sha256": "e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c",
+          "size_bytes": 3913692
+        },
+        "original_pages": 18,
+        "policy": "bounded_document_research_v1",
+        "probes": [
+          {
+            "id": "table_shares",
+            "page": 18,
+            "question": "In the Rule 144/145 Securities table, transcribe Number of Shares for issuer Cadre Holdings Inc.; preserve issuer row, exact column heading and printed share count."
+          },
+          {
+            "id": "total_A",
+            "page": 18,
+            "question": "Transcribe total A immediately beneath the table. Preserve the complete label and printed securities count."
+          },
+          {
+            "id": "total_C",
+            "page": 18,
+            "question": "Transcribe total C immediately beneath the table. Preserve the complete label and printed securities count."
+          }
+        ],
+        "recognition_request_version": "bounded-document-recognition-request-v2",
+        "request_identity_sha256": "c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7",
+        "residual_failures": [
+          "complete_document_unassessed",
+          "pdf_unsupported_image_codec",
+          "historical_pledge_not_current_holdings"
+        ],
+        "selected_pages": [
+          18
+        ]
+      },
+      "primary_response": "{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield\\nFax: 12034282024\\nTo:\\nFax: (970) 925-1746\\nPage: 7 of 9\\n12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the Pledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the \u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their respective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and indirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly): 15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. K anders Roth IRA\\nAllison S. K anders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December 16, 2021, intending to create an instrument executed under seal.\\n\\nK anders SAF, LLC\\n\\nBy: Warren B. K anders, Member (Seal)\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Cadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]}",
+      "blind_response": "{\"recognition\":{\"version\":\"bounded-document-recognition-v1\",\"document_id\":\"0001104659-26-112476:tm2626642d1_ex99-1.pdf:2021-12-16-pledge-exhibit\",\"as_of\":\"2026-10-10T04:24:12.342826+00:00\",\"original_sha256\":\"e54577e3a617c5029eb7b8b9f55ae9acd9c86f056eccf38e0caacb8ddbc4059c\",\"request_identity_sha256\":\"c4c3e0d21f3c0f3bb37817c9d37adae28c5d5541f6b034ffcb66e46900ebc4e7\",\"pages\":[{\"page\":18,\"status\":\"readable\",\"transcription\":\"From: Sue Luckfield\\n\\nFax: 12034282024\\n\\nTo:\\n\\nFax: (970) 925-1746\\n\\nPage: 7 of 9\\n\\n12/28/2021 5:49 PM\\n\\nEXHIBIT B TO PLEDGE AGREEMENT\\n\\nRule 144/145 Securities\\n\\nThis EXHIBIT B is dated December 16, 2021 and is attached to and becomes a part of the\\nPledge Agreement dated as of December 16, 2021 between the undersigned Pledgor and Bank (the\\n\u201cPledge Agreement\u201d). All capitalized terms used and not otherwise defined herein shall have their\\nrespective meanings as set forth in the Pledge Agreement.\\n\\nRule 144/145 Securities:\\n\\nIssuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\\n\\nA. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\\n\\nB. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor (directly and\\nindirectly): 15,866,703\\n\\nC. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\\n\\nD. Total number of securities of all classes of issuer owned by Pledgor (directly and indirectly):\\n15,866,703\\n\\nE. Other persons/entities which must be aggregated with Pledgor for purposes of Rule 144:\\n\\nWarren B. Kanders Roth IRA\\n\\nAllison S. Kanders Roth IRA\\n\\nIn Witness Whereof, Pledgor has executed this Exhibit B (by its duly authorized officer as of December\\n16, 2021, intending to create an instrument executed under seal.\\n\\nKanders SAF, LLC\\n\\nBy: ______________________________ (Seal)\\nWarren B. Kanders, Member\",\"probes\":[{\"id\":\"table_shares\",\"printed_value\":\"4,000,000\",\"unit\":\"Shares\",\"row\":\"Cadre Holdings Inc.\",\"column\":\"Number of\\nShares\",\"citation\":\"Issuer\\n\\nStock\\nCert. #\\n\\nNumber of\\nShares\\n\\nIndicate Restricted\\nand/or Control Stock\\n\\nFrom Whom and\\nHow Acquired\\n\\nDate Fully\\nPaid for\\n\\nCadre Holdings Inc.\\n\\nN/A\\n\\n4,000,000\\n\\nRestricted and\\nControlled\\n\\nDistribution from\\nMaui Holdings\\nLLC, former\\nholding company\\nof Issuer\"},{\"id\":\"total_A\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor:\",\"column\":null,\"citation\":\"A. Total number of securities of same class as Rule 144/145 Securities owned by Pledgor: 15,866,703\"},{\"id\":\"total_C\",\"printed_value\":\"15,866,703\",\"unit\":\"securities\",\"row\":\"C. Total number of securities of all classes of issuer owned by Pledgor:\",\"column\":null,\"citation\":\"C. Total number of securities of all classes of issuer owned by Pledgor: 15,866,703\"}],\"uncertainties\":[]}]},\"context_sufficient\":true,\"material_context_failures\":[]}"
+    }
+  }
+}

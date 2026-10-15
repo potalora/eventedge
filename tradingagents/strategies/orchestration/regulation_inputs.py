@@ -12,8 +12,9 @@ def validate_regulation_policy(data, config):
     try:
         policy = config.get('regulation_evidence_policy')
         retrieval = config.get('regulation_retrieval_policy')
+        from tradingagents.strategies.data_sources.regulation_government_copy import POLICIES as RETRIEVAL_POLICIES
         if retrieval is not None and (
-                retrieval != 'verified_government_copy_v1' or policy != POLICY):
+                type(retrieval) is not str or retrieval not in RETRIEVAL_POLICIES or policy != POLICY):
             raise ValueError('invalid regulation retrieval policy')
         source = data.get('regulations', {})
         graph = source.get('regulation_evidence')

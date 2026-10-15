@@ -1,0 +1,1254 @@
+{
+  "accounting_valid": true,
+  "attempt_counts": {
+    "daily": 1,
+    "preflight": 3
+  },
+  "attempts": [
+    {
+      "action": "preflight",
+      "attempt_id": "20261014T154510.582950Z_13eb245fb5334775b96fe5fd192f982b.json",
+      "evidence_path": "retained-private-evidence",
+      "finished_at": "2026-10-14T15:45:10.581342+00:00",
+      "outcome": null,
+      "preflight_mode": "screen",
+      "preflight_ok": false,
+      "process_return_code": 1,
+      "process_status": "completed",
+      "screen_failure_count": null,
+      "started_at": "2026-10-14T15:45:02.425392+00:00"
+    },
+    {
+      "action": "preflight",
+      "attempt_id": "20261014T220328.006618Z_96895f952e0844e29d7f692f1c6414cb.json",
+      "evidence_path": "retained-private-evidence",
+      "finished_at": "2026-10-14T22:03:28.004189+00:00",
+      "outcome": null,
+      "preflight_mode": "screen",
+      "preflight_ok": false,
+      "process_return_code": 1,
+      "process_status": "completed",
+      "screen_failure_count": 3,
+      "started_at": "2026-10-14T22:00:04.616182+00:00"
+    },
+    {
+      "action": "preflight",
+      "attempt_id": "20261014T220331.645906Z_34f842b880854736909d339484559a3b.json",
+      "evidence_path": "retained-private-evidence",
+      "finished_at": "2026-10-14T22:03:31.644951+00:00",
+      "outcome": null,
+      "preflight_mode": "governed",
+      "preflight_ok": true,
+      "process_return_code": 0,
+      "process_status": "completed",
+      "screen_failure_count": null,
+      "started_at": "2026-10-14T22:03:29.760158+00:00"
+    },
+    {
+      "action": "daily",
+      "attempt_id": "20261014T221733.284770Z_96b4378aad804888af0c01be7a40a81e.json",
+      "evidence_path": "retained-private-evidence",
+      "finished_at": "2026-10-14T22:17:33.100910+00:00",
+      "outcome": "degraded",
+      "process_return_code": 0,
+      "process_status": "completed",
+      "started_at": "2026-10-14T22:03:33.359301+00:00"
+    }
+  ],
+  "candidate_input_issues": [],
+  "cohorts": {
+    "horizon_1y_size_100k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_1y_size_10k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_1y_size_50k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_1y_size_5k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_30d_size_100k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_30d_size_10k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_30d_size_50k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_30d_size_5k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_3m_size_100k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_3m_size_10k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_3m_size_50k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_3m_size_5k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_6m_size_100k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_6m_size_10k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_6m_size_50k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    },
+    "horizon_6m_size_5k": {
+      "accounting_valid": true,
+      "fills": {
+        "entries": 0,
+        "exits": 0,
+        "total": 0
+      },
+      "staging_complete": true,
+      "staging_valid": true,
+      "staging_volatility": {
+        "AAPL": 0.2569672220796424,
+        "AMZN": 0.4232210726614537,
+        "AZZ": 0.24939767638902732,
+        "BAC": 0.19958961761288985,
+        "BIL": 0.15,
+        "BLK": 0.22933420921091066,
+        "CDRE": 0.4814221034046324,
+        "EDUC": 0.15,
+        "SPY": 0.15,
+        "UNH": 0.2144896336102659,
+        "VT": 0.15,
+        "VTI": 0.15
+      }
+    }
+  },
+  "decision_shadow": {
+    "affects_trading": false,
+    "assessed_events": 5,
+    "choices": {
+      "insufficient": 1,
+      "supported": 4
+    },
+    "event_counts": {
+      "ok": 5
+    },
+    "mode": "shadow",
+    "model": "@cf/cloudflare/clef",
+    "selection_truncated": true,
+    "skipped_events": 8,
+    "status": "complete"
+  },
+  "diagnostics": [
+    {
+      "code": "regulation_evidence_conflict"
+    }
+  ],
+  "disabled_strategies": {
+    "congressional_trades": "display_audit_only_v1",
+    "state_economics": "unsupported_state_event_proxy"
+  },
+  "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+  "evidence_complete": false,
+  "generation_commit": "c52a62fed94b7971b143e8e30256fcdfa182d589",
+  "generation_id": "gen_020",
+  "input_coverage_valid": false,
+  "outcome": "incomplete",
+  "performance_claims_withheld": true,
+  "preflight_incidents": [
+    {
+      "attempt_id": "20261014T154510.582950Z_13eb245fb5334775b96fe5fd192f982b.json",
+      "failures": [],
+      "preflight_mode": "screen",
+      "process_return_code": 1,
+      "screen_failure_count": null
+    },
+    {
+      "attempt_id": "20261014T220328.006618Z_96895f952e0844e29d7f692f1c6414cb.json",
+      "failures": [
+        {
+          "attempts": 1,
+          "http_status": null,
+          "operation_count": 1,
+          "reason_code": "provider_error",
+          "source": "drought_monitor"
+        },
+        {
+          "attempts": 0,
+          "http_status": null,
+          "operation_count": 0,
+          "reason_code": "provider_error",
+          "source": "edgar"
+        },
+        {
+          "attempts": 1,
+          "http_status": 403,
+          "operation_count": 38,
+          "reason_code": "batch_failure",
+          "source": "regulations"
+        }
+      ],
+      "preflight_mode": "screen",
+      "process_return_code": 1,
+      "screen_failure_count": 3
+    }
+  ],
+  "schema_version": 1,
+  "session": "2026-10-14",
+  "source_health_failures": [
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_5a9e7672889bf1402f451204",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "analysis"
+      ],
+      "status": "data_failure",
+      "strategy": "bounded_document_research"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_febf09c3d1714825852522cc",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "commodity_macro"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_4dcb30b959b6562186a514b7",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "filing_analysis"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_4ebbae920366ce194e700414",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "insider_activity"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_da089d3431bbad0339ec20dc",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "quantum_readiness"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_eb2086bf84538ba660540e30",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "regulatory_pipeline"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_1y_size_100k",
+        "horizon_1y_size_10k",
+        "horizon_1y_size_50k",
+        "horizon_1y_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_3bbf55b56bb7d777289a61ef",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:1y",
+      "session": "2026-10-14",
+      "sources": [
+        "drought_monitor"
+      ],
+      "status": "data_failure",
+      "strategy": "weather_ag"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_d77c69315565bbf4e101350c",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "analysis"
+      ],
+      "status": "data_failure",
+      "strategy": "bounded_document_research"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_3109de76fc1978a1652d511a",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "commodity_macro"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_71274e35ee1b475020449b66",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "filing_analysis"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_6aaae0edecf675e1af406a23",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "insider_activity"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_3f1ec4d4aa65d92c2cb16f58",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "quantum_readiness"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_59c86beaca5fcc5427b6f280",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "regulatory_pipeline"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_30d_size_100k",
+        "horizon_30d_size_10k",
+        "horizon_30d_size_50k",
+        "horizon_30d_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_642d3d71cd527fdaf3f36cc6",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:30d",
+      "session": "2026-10-14",
+      "sources": [
+        "drought_monitor"
+      ],
+      "status": "data_failure",
+      "strategy": "weather_ag"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_3m_size_100k",
+        "horizon_3m_size_10k",
+        "horizon_3m_size_50k",
+        "horizon_3m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_06ad41b01a8c706a964364ba",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:3m",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "commodity_macro"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_3m_size_100k",
+        "horizon_3m_size_10k",
+        "horizon_3m_size_50k",
+        "horizon_3m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_68825a5ffbda272096aaa967",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:3m",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "filing_analysis"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_3m_size_100k",
+        "horizon_3m_size_10k",
+        "horizon_3m_size_50k",
+        "horizon_3m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_3c25092d9f22580079d84774",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:3m",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "insider_activity"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_3m_size_100k",
+        "horizon_3m_size_10k",
+        "horizon_3m_size_50k",
+        "horizon_3m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_3bf227d4888fb32c58a38020",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:3m",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "quantum_readiness"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_3m_size_100k",
+        "horizon_3m_size_10k",
+        "horizon_3m_size_50k",
+        "horizon_3m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_5de873353aa3472b3b0554e6",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:3m",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "regulatory_pipeline"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_3m_size_100k",
+        "horizon_3m_size_10k",
+        "horizon_3m_size_50k",
+        "horizon_3m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_204203552bf5842f594af9a7",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:3m",
+      "session": "2026-10-14",
+      "sources": [
+        "drought_monitor"
+      ],
+      "status": "data_failure",
+      "strategy": "weather_ag"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_44f09098b415732b00c4271b",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "analysis"
+      ],
+      "status": "data_failure",
+      "strategy": "bounded_document_research"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_0670c59fc6b4bc8ff57dc983",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "commodity_macro"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_4db1c87352ca1c048b61694c",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "filing_analysis"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_bf7b7dc40c21e2dba357eeb6",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "insider_activity"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_7c3c920db56e5c0e49f167e9",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "edgar"
+      ],
+      "status": "data_failure",
+      "strategy": "quantum_readiness"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_d370344a7567589dc3d82168",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "regulations"
+      ],
+      "status": "data_failure",
+      "strategy": "regulatory_pipeline"
+    },
+    {
+      "affected_cohorts": [
+        "horizon_6m_size_100k",
+        "horizon_6m_size_10k",
+        "horizon_6m_size_50k",
+        "horizon_6m_size_5k"
+      ],
+      "epoch_id": "gen_020-2026-10-14-e937c03b395bba76",
+      "health_id": "health_ba50bb0bdf203818452824f1",
+      "policy_id": "generation-config-cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d:health:6m",
+      "session": "2026-10-14",
+      "sources": [
+        "drought_monitor"
+      ],
+      "status": "data_failure",
+      "strategy": "weather_ag"
+    }
+  ],
+  "source_incidents": {
+    "alerts": [
+      {
+        "alert_id": "18e456fa0b1d74784b206b841b438cbf21c23fc0921b5d0ce7f4d41693e447d6",
+        "kind": "opened",
+        "provider": "congress"
+      },
+      {
+        "alert_id": "40c79d4452292c4b2d0a0379fa77205f964067fe49ee0c44f3cb320d18a84a59",
+        "kind": "opened",
+        "provider": "drought_monitor"
+      },
+      {
+        "alert_id": "58a2e19f91b4927711ce768a3ac19a48105d161045ac6156e2305aa69ce0c8a8",
+        "kind": "opened",
+        "provider": "edgar"
+      },
+      {
+        "alert_id": "a48b61786a2959b9cbcdb55e2c44c06199b3598fcee006838e92b79099fb72c1",
+        "kind": "opened",
+        "provider": "regulations"
+      }
+    ],
+    "assessment_status": "available",
+    "configuration": "27659af881138d96b5164f000afc29ae82f0a6afc382a5fa2baabde94b179a47",
+    "history_status": "missing",
+    "open_incidents": [
+      {
+        "consecutive_failed_sessions": 1,
+        "first_failed_session": "2026-10-14",
+        "http_status": null,
+        "last_failed_session": "2026-10-14",
+        "observation": "failed",
+        "provider": "congress",
+        "reason_code": "invalid_response",
+        "status": "repair_required"
+      },
+      {
+        "consecutive_failed_sessions": 1,
+        "first_failed_session": "2026-10-14",
+        "http_status": null,
+        "last_failed_session": "2026-10-14",
+        "observation": "failed",
+        "provider": "drought_monitor",
+        "reason_code": "provider_error",
+        "status": "degraded"
+      },
+      {
+        "consecutive_failed_sessions": 1,
+        "first_failed_session": "2026-10-14",
+        "http_status": null,
+        "last_failed_session": "2026-10-14",
+        "observation": "failed",
+        "provider": "edgar",
+        "reason_code": "provider_error",
+        "status": "degraded"
+      },
+      {
+        "consecutive_failed_sessions": 1,
+        "first_failed_session": "2026-10-14",
+        "http_status": 403,
+        "last_failed_session": "2026-10-14",
+        "observation": "failed",
+        "provider": "regulations",
+        "reason_code": "http_error",
+        "status": "repair_required"
+      }
+    ],
+    "policy": "source_incidents_v1"
+  },
+  "source_scope_limits": {
+    "congress": {
+      "acquired_at": "2026-10-14T22:03:46.428209+00:00",
+      "content_sha256": "e2325cbf1265f2d5cbae5f63bc3b949c687465f53aea8c1de7ce3f327cff77c1",
+      "extraction": "publisher_reported_not_independently_validated",
+      "filing_counts": {
+        "house": 32,
+        "senate": 7
+      },
+      "historical_availability": "not_independently_witnessed",
+      "house_additional_filings": 0,
+      "house_matched_filings": 32,
+      "house_missing_filings": 2,
+      "mode": "display_audit_only",
+      "model_context_enabled": false,
+      "policy": "display_audit_only_v1",
+      "printed_row_count": 844,
+      "publisher_generated_at": "2026-10-14T02:56:16.738Z",
+      "revision": "08ee0a16e04e0cc67b295454857f2d01bad9e379",
+      "senate_coverage": "publisher_only_unverified",
+      "signals_enabled": false,
+      "status": "partial_audit_gap",
+      "stock_disclosure_complete": false,
+      "window": {
+        "after": "2026-09-14",
+        "basis": "filing_date_inclusive",
+        "before": "2026-10-14"
+      }
+    },
+    "courtlistener": {
+      "case_count": 0,
+      "content_kind": "docket_metadata_only",
+      "coverage_basis": "declared_issuer_and_case_queries",
+      "docket_count": 24,
+      "issuer_count": 1,
+      "marketwide_coverage": false,
+      "omitted_issuer_count": 0,
+      "policy": "focused_litigation_v1",
+      "scope_sha256": "94176ebd1fa56cdb51cee84220f9d75c31119d3630a7acf3ffbf2bf653c4aa3f",
+      "target_manifest_sha256": "e18c730114b69f52502cbd504445de4ebc18a558ee277f154823e69df73c78b9",
+      "target_search_complete": true
+    },
+    "usaspending": {
+      "attribution_complete": false,
+      "counts": {
+        "unresolved": 23,
+        "verified_listed_target": 12,
+        "verified_no_listed_target": 12
+      },
+      "coverage_basis": "verified_listed_targets",
+      "policy": "verified_listed_targets_v1",
+      "scope_sha256": "cb684d529e88b32d743f916e79ef0c229759c1318b63c27289e58c8e16fcd36a"
+    }
+  },
+  "sources": {
+    "acquired_at": "2026-10-14T22:06:04.023693+00:00",
+    "bounded_document_scope": {
+      "accepted_count": 1,
+      "complete": true,
+      "configured_count": 1,
+      "decision_policy": "verified_scoped_claims_v1",
+      "policy": "bounded_document_research_v1",
+      "population": "configured_retained_document_registry",
+      "registry_sha256": "dd364aa63ae013be794a97e385d69c6f71dc5fb738f211e0dc06e30b7affcc61",
+      "residual_failures": [
+        "complete_document_unassessed",
+        "pdf_unsupported_image_codec",
+        "historical_pledge_not_current_holdings"
+      ]
+    },
+    "configuration": "27659af881138d96b5164f000afc29ae82f0a6afc382a5fa2baabde94b179a47",
+    "congress_audit_scope": {
+      "acquired_at": "2026-10-14T22:03:46.428209+00:00",
+      "content_sha256": "e2325cbf1265f2d5cbae5f63bc3b949c687465f53aea8c1de7ce3f327cff77c1",
+      "extraction": "publisher_reported_not_independently_validated",
+      "filing_counts": {
+        "house": 32,
+        "senate": 7
+      },
+      "historical_availability": "not_independently_witnessed",
+      "house_additional_filings": 0,
+      "house_matched_filings": 32,
+      "house_missing_filings": 2,
+      "mode": "display_audit_only",
+      "model_context_enabled": false,
+      "policy": "display_audit_only_v1",
+      "printed_row_count": 844,
+      "publisher_generated_at": "2026-10-14T02:56:16.738Z",
+      "revision": "08ee0a16e04e0cc67b295454857f2d01bad9e379",
+      "senate_coverage": "publisher_only_unverified",
+      "signals_enabled": false,
+      "status": "partial_audit_gap",
+      "stock_disclosure_complete": false,
+      "window": {
+        "after": "2026-09-14",
+        "basis": "filing_date_inclusive",
+        "before": "2026-10-14"
+      }
+    },
+    "declared_exclusions": {
+      "congressional_trades": "display_audit_only_v1"
+    },
+    "filing_source_error_sha256": "72faca34fed2a6cf683a66dd8d75955b5cf4d37e522a0da256185df63a0e88b8",
+    "observations": {
+      "bounded_documents": "success",
+      "cftc": "success",
+      "congress": "partial",
+      "courtlistener": "success",
+      "drought_monitor": "failed",
+      "edgar": "failed",
+      "equity_universe": "success",
+      "finnhub": "success",
+      "fred": "success",
+      "noaa": "success",
+      "openbb": "success",
+      "regulations": "partial",
+      "usaspending": "success",
+      "usda": "success",
+      "yfinance": "success"
+    },
+    "recovered": [],
+    "regulation_source_coverage": {
+      "byte_budget_exhausted": false,
+      "byte_limit": 33554432,
+      "complete_rows": 4,
+      "consumed_bytes": 793602,
+      "content_complete": false,
+      "discovery_complete": true,
+      "evidence_sha256": {
+        "EPA-HQ-OAR-2024-0078-0003": "2600ec2c276446c04ea952dc6fec85d483a40c4e6a0058d68a14488217c73ca9",
+        "EPA-HQ-OPPT-2026-7327-0001": "742913004c008d2a9d1b8b49a5ebb021aab8c383bff2fb09d09caf4886de51ce",
+        "EPA-R03-OAR-2026-6205-0001": "a20d03c459de59df5d3b2cd88fae633d3d40fd10c00dce1225dc4f454951aa5c",
+        "EPA-R09-OAR-2025-1978-0005": "795f5a3372144916d76e299559e0cf2e891d884509a81143799f9627b5a8b079"
+      },
+      "failed_document_ids": [
+        "EPA-R08-OAR-2023-0495-0075",
+        "EPA-R09-OAR-2026-4654-0001",
+        "EPA-R10-OAR-2026-3763-0012",
+        "FDA-2025-D-6952-0001",
+        "FTC-2026-1453-0001",
+        "FTC-2026-1552-0001",
+        "SEC-2026-6187-0001",
+        "SEC-2026-6207-0001",
+        "SEC-2026-6212-0001"
+      ],
+      "failed_rows": 9,
+      "manifest_sha256": "aa467a29d5bd4e7f65d9da726322c8a83f0ed4d03c5d7c733fcc991ad32a798c",
+      "policy": "complete_document_text_v1",
+      "required_rows": 13,
+      "reserved_bytes": 0,
+      "retrieval_policy": "verified_government_copy_v1"
+    },
+    "unresolved": [
+      {
+        "attempts": 1,
+        "http_status": 403,
+        "operation": "get",
+        "provider": "regulations",
+        "reason_code": "http_error",
+        "recovered": false,
+        "source": "regulations"
+      },
+      {
+        "http_status": null,
+        "provider": "congress",
+        "reason_code": "invalid_response"
+      },
+      {
+        "http_status": null,
+        "provider": "drought_monitor",
+        "reason_code": "provider_error"
+      },
+      {
+        "http_status": null,
+        "provider": "edgar",
+        "reason_code": "provider_error"
+      },
+      {
+        "http_status": null,
+        "provider": "regulations",
+        "reason_code": "batch_failure"
+      }
+    ]
+  },
+  "staging_complete": true,
+  "staging_valid": true,
+  "volatility": {
+    "acquired_at": "2026-10-14T22:12:03.863741+00:00",
+    "evidence_path": "retained-private-evidence",
+    "lookback_sessions": 60,
+    "tickers": [
+      "AAPL",
+      "AMZN",
+      "AZZ",
+      "BAC",
+      "BIL",
+      "BLK",
+      "CDRE",
+      "EDUC",
+      "SPY",
+      "UNH",
+      "VT",
+      "VTI"
+    ],
+    "valid": true
+  }
+}

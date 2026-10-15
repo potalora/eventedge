@@ -40,6 +40,10 @@ def assert_complete(harness, session):
     screening = harness.accepted_screening(session)
     effective = harness.effective_config_proof()
     assert effective['blocked_tickers']==['GOOGL','GOOG']
+    expected_retrieval = ('verified_government_copy_v2' if harness.audit['profile_variant']=='government_copy_v2'
+                          else 'verified_government_copy_v1')
+    assert effective['regulation_retrieval_policy']==expected_retrieval
+    assert report['sources']['regulation_source_coverage']['retrieval_policy']==expected_retrieval
     assert screening['binding']['source_identity']['configuration']==effective['source_configuration']
     assert set(screening['horizons'])=={'30d','3m','6m','1y'}
     for horizon in screening['horizons'].values():
@@ -56,6 +60,9 @@ def assert_complete(harness, session):
     assert any(row['kind']=='bootstrap' and any('transport_worker.py' in arg for arg in row['argv']) for row in trace)
     assert harness.audit['original_sha256']==ORIGINAL_SHA
     assert harness.audit['fixture_sha256']!=ORIGINAL_SHA
+    if harness.audit['profile_variant']=='retained_production':
+        assert harness.audit['policy_overrides']==[]
+        assert harness.audit['candidate_profile_sha256']==ORIGINAL_SHA
     return report
 
 
@@ -85,8 +92,9 @@ def test_manager_dotenv_stops_at_disposable_repository_boundary(tmp_path):
     assert not [row for row in harness.trace() if row['kind'] in {'http','sdk','model','forbidden_network','unexpected_httpx'}]
 
 
-def test_real_evening_controller_shell_workers_and_all_sixteen_books(tmp_path):
-    harness = create_harness(tmp_path)
+@pytest.mark.parametrize('profile_variant', ['retained_production', 'government_copy_v2'])
+def test_real_evening_controller_shell_workers_and_all_sixteen_books(tmp_path, profile_variant):
+    harness = create_harness(tmp_path, profile_variant=profile_variant)
     result = harness.run('2026-10-14T22:00:00+00:00')
     assert result.returncode==0, result.stdout+result.stderr
     assert_complete(harness,'2026-10-14')
@@ -182,3 +190,21 @@ print('all outbound boundaries denied before network IO')
     denied = [row for row in harness.trace() if row['kind']=='forbidden_network']
     assert len(denied)==3 and sum(row.get('boundary')=='native_curl' for row in denied)==2
     assert not [row for row in harness.trace() if row['kind'] in {'http','sdk','model'}]
+
+
+def test_candidate_v2_profile_has_one_audited_policy_change_from_retained_baseline(tmp_path):
+    harness = create_harness(tmp_path, profile_variant='government_copy_v2')
+    original = json.loads((Path(__file__).parent/'fixtures/scheduled_acceptance/production-profile.json').read_text())
+    frozen = json.loads(harness.profile.read_text())
+    assert original['autoresearch']['regulation_retrieval_policy'] == 'verified_government_copy_v1'
+    assert frozen['autoresearch']['regulation_retrieval_policy'] == 'verified_government_copy_v2'
+    assert harness.audit['original_sha256'] == ORIGINAL_SHA
+    assert harness.audit['profile_variant'] == 'government_copy_v2'
+    assert harness.audit['policy_overrides'] == [{
+        'path': ['autoresearch', 'regulation_retrieval_policy'],
+        'original': 'verified_government_copy_v1', 'fixture': 'verified_government_copy_v2'}]
+    assert all(row['path'] != ['autoresearch', 'regulation_retrieval_policy']
+               for row in harness.audit['substitutions'])
+    assert harness.audit['candidate_profile_sha256'] not in {ORIGINAL_SHA, harness.audit['fixture_sha256']}
+    assert harness.effective_config_proof()['regulation_retrieval_policy'] == 'verified_government_copy_v2'
+    assert not [row for row in harness.trace() if row['kind'] in {'http','sdk','model','forbidden_network','unexpected_httpx'}]

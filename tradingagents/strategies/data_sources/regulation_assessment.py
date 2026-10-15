@@ -120,10 +120,11 @@ unresolved applicability or an unproved issuer/exposure relationship remains ins
     request_units = []
     for unit in evidence['units']:
         projected = {key: unit[key] for key in ('unit_id', 'resource_id', 'role', 'text', 'text_sha256', 'representation')}
-        annotations = [{'kind': 'subscript', 'text_codepoint_start': change['text_codepoint_start'],
+        annotations = [{'kind': ('subscript' if change['kind'] == 'govinfo_inf_notation_v1' else 'superscript'),
+                        'text_codepoint_start': change['text_codepoint_start'],
                         'text_codepoint_end': change['text_codepoint_end']}
                        for change in unit.get('government_copy', {}).get('transformations', [])
-                       if change['kind'] == 'govinfo_inf_notation_v1']
+                       if change['kind'] in {'govinfo_inf_notation_v1', 'govinfo_sup_notation_v1'}]
         if annotations:
             projected['text_annotations'] = annotations
         request_units.append(projected)

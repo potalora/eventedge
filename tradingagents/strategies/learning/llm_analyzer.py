@@ -339,7 +339,7 @@ class LLMAnalyzer:
         """
         import hashlib
         from tradingagents.strategies.bounded_document_research import (
-            POLICY, MAX_RESPONSE_BYTES, prepare_recognition, validate_recognition,
+            POLICY, MAX_RESPONSE_BYTES, SAFE_FAILURE_CODES, prepare_recognition, validate_recognition,
             prepare_thesis, validate_thesis,
         )
         from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
@@ -448,9 +448,10 @@ class LLMAnalyzer:
         except ModelDeadlineExceeded:
             self.last_call_failure = 'model_deadline_exhausted'
             raise
-        except ValueError:
+        except ValueError as exc:
             if not self.last_call_failure:
-                self.last_call_failure = 'invalid_bounded_document'
+                reason = str(exc)
+                self.last_call_failure = reason if reason in SAFE_FAILURE_CODES else 'invalid_bounded_document'
             raise
         finally:
             if attempt['validation_status'] != 'validated':
