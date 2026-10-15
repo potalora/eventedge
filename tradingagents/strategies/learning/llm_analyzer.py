@@ -139,6 +139,7 @@ class LLMAnalyzer:
         self._thesis_effort = self.config.get("autoresearch", {}).get("thesis_effort", self._effort)
         self.last_call_provenance: dict[str, Any] = {}
         self.last_call_failure = ""
+        self.last_call_transport_failure: dict[str, Any] | None = None
         self.last_research_request: dict[str, Any] | None = None
         self.last_bounded_document_attempt: dict[str, Any] | None = None
         self._provider_clients: dict[str, Any] = {}
@@ -177,6 +178,7 @@ class LLMAnalyzer:
         result._prompt_overrides = dict(self._prompt_overrides)
         result.last_call_provenance = {}
         result.last_call_failure = ""
+        result.last_call_transport_failure = None
         result.last_research_request = None
         result.last_bounded_document_attempt = None
         result._client = fork_client(self._client)
@@ -248,7 +250,7 @@ class LLMAnalyzer:
         from tradingagents.strategies.candidate_response_reuse import reused_candidate_response, retain_candidate_response
         from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
         from tradingagents.strategies.chatgpt_plan_client import configured_plan_client, require_configured_billing
-        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, ModelTransportError, model_timeout
         model = self._model_name if role == "bounded" else self._thesis_model
         effort = self._effort if role == "bounded" else self._thesis_effort
         from tradingagents.strategies.orchestration.research_resilience import configured as resilience_configured
@@ -262,6 +264,7 @@ class LLMAnalyzer:
             if type(text) is str:
                 self.last_call_response = {'received': True, 'text': text}
         self.last_call_failure = ""
+        self.last_call_transport_failure = None
         self.last_call_provenance = {"configured_model": model, "returned_model": None,
                                      "returned_revision": None, "identity_status": "unpinned",
                                      "response_id": None, "reasoning_effort": effort, "role": role}
@@ -323,6 +326,16 @@ class LLMAnalyzer:
         except ModelDeadlineExceeded:
             self.last_call_failure = "model_deadline_exhausted"
             return ""
+        except ModelTransportError as exc:
+            from tradingagents.strategies.transport_worker import validate_error_metadata
+            status = exc.status_code
+            self.last_call_transport_failure = {
+                'status_code': status if type(status) is int and 100 <= status <= 599 else None,
+                'error_metadata': validate_error_metadata(exc.error_metadata),
+            }
+            self.last_call_failure = "analysis_unavailable"
+            logger.error("LLM transport failed")
+            return ""
         except Exception:
             self.last_call_failure = "analysis_unavailable"
             logger.error("LLM call failed")
@@ -345,6 +358,7 @@ class LLMAnalyzer:
         from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
         self.last_call_failure = ''
+        self.last_call_transport_failure = None
         self.last_call_provenance = {}
         self.last_call_response = None
         self.last_research_request = None
@@ -369,6 +383,8 @@ class LLMAnalyzer:
             attempt[stage_name or ('recognition_attempt' if role == 'bounded' else 'thesis_attempt')] = stage
             text = self._call_llm(system, user, role=role,
                                  **({'document_inputs': document_inputs} if document_inputs is not None else {}))
+            if isinstance(self.last_call_transport_failure, dict):
+                stage['transport_failure'] = deepcopy(self.last_call_transport_failure)
             stage['model_provenance'] = deepcopy(self.last_call_provenance)
             observed = self.last_call_response
             raw_text = observed.get('text') if type(observed) is dict and observed.get('received') is True else None

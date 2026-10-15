@@ -4,6 +4,7 @@ These preserve the strict refusals which the schema-perfect campaign fixture
 could not expose. Equal printed counts never establish row/citation agreement.
 """
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -256,3 +257,103 @@ def test_constructed_linear_cell_control_fits_strict_schema_without_joining_grid
     assert [p['printed_value'] for p in accepted['pages'][0]['probes']] == [p['printed_value'] for p in original]
     with pytest.raises(ValueError, match='invalid_bounded_document'):
         validate_recognition(row['primary_response'], request)
+
+
+@pytest.mark.parametrize('sample', ['16','17','18','19'])
+def test_v5_campaign_keeps_recognition_success_distinct_from_complete_analysis(sample):
+    from tradingagents.strategies.bounded_document_research import validate_thesis
+    row = CAMPAIGN['v5_samples'][sample]
+    assert CAMPAIGN['v5_plan']['app_commit'] == '99916171ef10eac1ce3af18213a9c223234f9407'
+    assert row['source_identity']['recognition_request_version'] == 'bounded-document-recognition-request-v3'
+    request = RecognitionRequest('', '', json.dumps(row['source_identity']), ())
+    primary = validate_recognition(row['primary_response'],request)
+    assert primary['validation_status'] == 'structurally_valid'
+    if sample == '19':
+        assert row['blind_response_received'] is False and row['blind_response'] is None
+        assert row['status'] == 'failed' and row['failure_reason'] == 'analysis_unavailable'
+        assert row['native_calls_attempted'] == 2 and row['thesis_response'] is None
+        return
+    blind = validate_recognition(json.dumps(json.loads(row['blind_response'])['recognition']),request)
+    scope = {'required_claim_ids':[probe['id'] for probe in row['source_identity']['probes']]}
+    assert set(_blind_agreement(primary,blind,row['source_identity'],scope)) == set(scope['required_claim_ids'])
+    assert row['native_calls_attempted'] == 3
+    if sample == '18':
+        assert row['status'] == 'failed' and row['failure_reason'] == 'invalid_document_decision_claim'
+        with pytest.raises(ValueError,match='^invalid_document_decision_claim$'):
+            validate_thesis(row['thesis_response'],decision_eligibility=row['decision_eligibility'])
+    else:
+        assert row['status'] == 'passed'
+        assert validate_thesis(row['thesis_response'],decision_eligibility=row['decision_eligibility'])['analysis_status'] == 'validated'
+
+
+def test_native_v5_unsupported_ordinal_digits_stay_refused_and_constructed_bullets_pass():
+    from tradingagents.strategies.bounded_document_research import validate_thesis, _THESIS_NUMERIC, _canonical
+    row = CAMPAIGN['v5_samples']['18'];eligibility=row['decision_eligibility']
+    native = json.loads(row['thesis_response'])
+    context = {key:eligibility.get(key) for key in ('purpose','economic_date','context_limitations')}
+    allowed = set(_THESIS_NUMERIC.findall(_canonical({'claims':eligibility['verified_claims'],'context':context})))
+    assert set(_THESIS_NUMERIC.findall(native['evidence_claim'])) - allowed == {'(1)','(2)','(3)'}
+    with pytest.raises(ValueError,match='^invalid_document_decision_claim$'):
+        validate_thesis(row['thesis_response'],decision_eligibility=eligibility)
+    # Constructed schema control only; this is not a repaired native response.
+    controlled = deepcopy(native)
+    for marker in ('(1)','(2)','(3)'):
+        controlled['evidence_claim'] = controlled['evidence_claim'].replace(marker,'•')
+    result = validate_thesis(json.dumps(controlled),decision_eligibility=eligibility)
+    assert result['direction'] == 'neutral' and result['journal_only'] is True
+    assert result['context_sufficient'] is False
+    assert set(result['used_claim_ids']) == set(native['used_claim_ids'])
+    assert result['full_document_quality_accepted'] is False
+    assert controlled['evidence_claim'] != native['evidence_claim']
+
+
+@pytest.mark.parametrize('status,metadata,expected', [
+    (429, {'error_code':'rate_limit_exceeded','retry_after_seconds':10,'authorization':'PRIVATE'},
+     {'status_code':429,'error_metadata':{'error_code':'rate_limit_exceeded','retry_after_seconds':10}}),
+    (True, {'error_code':'PRIVATE','rate_limit_remaining_tokens':-1,'retry_after_seconds':float('inf')},
+     {'status_code':None,'error_metadata':{}}),
+])
+def test_bounded_stage_keeps_only_sanitized_transport_failure(analyzer, monkeypatch, status, metadata, expected):
+    import hashlib
+    from test_bounded_document_research import evidence
+    from tradingagents.strategies import llm_utils
+    from tradingagents.strategies.runtime_deadline import ModelTransportError
+    worker,_,_ = analyzer
+    error = ModelTransportError('PRIVATE arbitrary reason',status,error_metadata=metadata)
+    # A mutated exception must not bypass revalidation at the durable boundary.
+    error.error_metadata['authorization'] = 'PRIVATE injected credential'
+    calls = []
+    def external_transport(*args, **kwargs):
+        calls.append(True)
+        raise error
+    monkeypatch.setattr(llm_utils,'bounded_transport',external_transport)
+    with pytest.raises(ValueError,match='invalid_bounded_document'):
+        worker.analyze_bounded_document_evidence(evidence(),session_as_of='2026-10-12')
+    attempt = worker.last_bounded_document_attempt
+    assert attempt['failure_reason'] == 'analysis_unavailable'
+    assert attempt['recognition_attempt']['transport_failure'] == expected
+    assert attempt['recognition_attempt']['response_received'] is False
+    assert attempt['thesis_attempt'] is None and len(calls) == 1
+    assert 'PRIVATE' not in json.dumps(attempt)
+    compact = {key:value for key,value in attempt.items() if key!='receipt_sha256'}
+    assert attempt['receipt_sha256'] == hashlib.sha256(json.dumps(compact,sort_keys=True,
+        separators=(',',':'),ensure_ascii=True,allow_nan=False).encode()).hexdigest()
+
+
+def test_unknown_transport_exception_and_next_call_do_not_inherit_typed_failure(analyzer, monkeypatch):
+    from test_bounded_document_research import evidence
+    from tradingagents.strategies import llm_utils
+    from tradingagents.strategies.runtime_deadline import ModelTransportError
+    worker,_,_ = analyzer
+    errors = iter((ModelTransportError('private',503,error_metadata={'error_code':'stream_interrupted'}),
+                   RuntimeError('PRIVATE arbitrary exception details')))
+    def external_transport(*args, **kwargs):
+        raise next(errors)
+    monkeypatch.setattr(llm_utils,'bounded_transport',external_transport)
+    for typed in (True,False):
+        with pytest.raises(ValueError,match='invalid_bounded_document'):
+            worker.analyze_bounded_document_evidence(evidence(),session_as_of='2026-10-12')
+        attempt = worker.last_bounded_document_attempt
+        assert attempt['failure_reason'] == 'analysis_unavailable'
+        assert ('transport_failure' in attempt['recognition_attempt']) is typed
+        assert 'PRIVATE' not in json.dumps(attempt)

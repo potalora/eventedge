@@ -159,6 +159,45 @@ review replay. A separate review found no blocking implementation issue. The
 226-test focused result establishes isolated contracts, not a new native campaign
 or extraction-accuracy guarantee.
 
+## Native request-v3 campaign and bounded diagnostics
+
+The fixed campaign 16–19 on commit
+`99916171ef10eac1ce3af18213a9c223234f9407` finished **2/4**. Its original plan,
+source hashes, request-v3 identities and every response/outcome are retained in
+the campaign fixture. Primary recognition validated in all four samples. Three
+blind responses arrived and all three validated; sample 19's blind response did
+not arrive. This is three completed recognition/verification pairs, not four
+complete analyses.
+
+Samples 16 and 17 completed all three stages. Sample 18's recognition and blind
+verification both passed; its neutral Sol response failed the existing numeric
+claim gate because numbered list markers `(1)`, `(2)` and `(3)` were absent from
+the exact allowed numeric tokens. Its substantive counts, date and declared
+context do not waive that rule. The original response remains refused. A clearly
+constructed unnumbered-bullet control passes while preserving its neutral,
+journal-only and insufficient-present-context assessment.
+
+Only the Sol decision-evidence prompt now states this existing constraint:
+numeric literals in `evidence_claim` must come exactly from the selected verified
+claims or declared purpose/economic date/context limitations; ordinal digits,
+numbered list markers and unsupported numbers are excluded. The numeric validator
+and Luna request-v3 prompts remain unchanged.
+
+Sample 19 reached the selected ChatGPT-plan transport boundary but yielded no
+blind response and no Sol call. Its `analysis_unavailable` evidence cannot
+distinguish authorization, provider, stream or subprocess causes: the analyzer
+discarded the sanitized `ModelTransportError` metadata. The exact historical
+cause is unrecoverable; no specific cause or recovery is inferred.
+
+Future bounded stage evidence retains only revalidated fixed error enums and
+bounded numeric metadata from `ModelTransportError`, plus an integer HTTP status
+in 100–599 or null. Unknown exception text, arbitrary reason strings, headers,
+credentials and injected fields are excluded. Current `analysis_unavailable`
+classification, stop behavior and retry policy remain unchanged. Each call and
+parallel fork clears prior diagnostics. Regression tests prove metadata injection
+exclusion, state isolation and sealed failure evidence; validated v3 automatic
+review and production v2 replay continue to pass.
+
 ## EDGAR and verification boundary
 
 `filing_research_policy=disabled_v1` intentionally stops bulk SEC research before

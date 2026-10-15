@@ -43,6 +43,15 @@ replay with their original blind prompt bytes, and failed responses are never
 converted into v3 evidence. This removes a redundant copying failure; it does
 not prove visual accuracy, semantic association or whole-document completeness.
 
+The first fixed v3 campaign passed recognition in all four samples and blind
+verification in all three returned responses, but only two complete analyses
+passed. One neutral Sol response used numbered list markers that violated the
+existing numeric-claim rule; its prompt now states that rule explicitly. The
+other blind call returned no response. Its exact historical transport cause is
+unrecoverable because the analyzer discarded sanitized transport metadata.
+Future failed document stages retain only revalidated fixed error codes and
+bounded numeric status/capacity fields. This adds diagnostics, not retry authority.
+
 EDGAR bulk research remains deliberately disabled by the approved rollback. Its
 coverage loss must remain visible. A document containing unavailable graphics or
 an inaccessible, unbound PDF remains unusable even if its title and some text are
