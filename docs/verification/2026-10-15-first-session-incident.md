@@ -76,6 +76,14 @@ and connectivity checks as stronger operational evidence than it was. Stating th
 the first daily run was unproven did not replace testing the known host and failure
 boundaries before enabling unattended repair.
 
+The full repair CI run also caught a date-dependent CourtListener test after New
+York midnight on October 15. Its September 30 docket fixture had aged outside the
+default fourteen-day query window. The production adapter correctly refused it;
+the partial-failure test had omitted its intended trading date. The test now uses
+an explicit historical session, preserving the production date-window refusal.
+Both failed CI jobs remain failed evidence, and release requires a fresh full run
+at the corrected test commit.
+
 ## Required evidence before and after this release
 
 - The named scheduled acceptance gate includes the retained native refusals,

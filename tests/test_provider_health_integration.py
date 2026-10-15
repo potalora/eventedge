@@ -199,9 +199,27 @@ def test_courtlistener_partial_failure_retains_other_query_results(
 
     monkeypatch.setattr("requests.get", request)
     _, engine = _engine(tmp_path, CourtListenerSource(token="offline"))
-    data = engine._fetch_courtlistener_data()
+    data = engine._fetch_courtlistener_data("2026-10-14")
     assert data.get("error")
     assert [item["docket_id"] for item in data["dockets"]] == [123, 123]
+
+
+@pytest.mark.parametrize("filed_date", ["2026-09-30", "2026-10-16"])
+def test_courtlistener_out_of_window_results_remain_failure(
+    tmp_path, monkeypatch, filed_date
+):
+    monkeypatch.setattr(
+        "requests.get",
+        lambda *args, **kwargs: _response(
+            {"results": [{"docket_id": 123, "caseName": "Fixture litigation",
+                          "dateFiled": filed_date, "court": "cacd"}],
+             "count": 1, "next": None}
+        ),
+    )
+    _, engine = _engine(tmp_path, CourtListenerSource(token="offline"))
+    data = engine._fetch_courtlistener_data("2026-10-15")
+    assert "CourtListener docket invalid [invalid_response]" in data["error"]
+    assert data["dockets"] == []
 
 
 @pytest.mark.parametrize("method", ["search_dockets", "search_opinions"])
