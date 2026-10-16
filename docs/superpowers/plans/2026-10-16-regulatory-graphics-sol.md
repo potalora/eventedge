@@ -13,7 +13,7 @@
 - Recognition and independent graphics review use `gpt-6.1-sol`, `high`, bounded role, logical max tokens 4096 and temperature 0.0. Base autoresearch remains `gpt-6-luna` high; thesis/committee routing is unchanged.
 - No paid API fallback, new dependency, source truncation, relaxed fidelity validation, relabelled failure, or old-receipt migration.
 - Preserve one correction, at most four native stages per target, 240 seconds per call, four target workers per document, eight global stages and the same absolute 9000-second phase deadline.
-- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V5/request V11; retain exact replay of the failed V4/V10 attempt. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
+- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V6/request V12 under the successor literal-witness design; retain exact replay of V4/V10 and V5/V11 attempts. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
 - Keep old generations and pending paper intents unchanged. Deploy behavior changes only into a fresh generation after exact-candidate CI and native evidence pass.
 
 ## Shared interfaces
@@ -82,6 +82,14 @@ recognition changed a printed period to a comma and review approved it. The
 unchanged positive runtime receipt and the negative independent source
 assessment are both retained. Representative acceptance remains incomplete,
 and deployment is blocked. The model decision remains Sol high for both stages.
+
+Following Pedro's direct instruction to continue resolving this blocker, the
+bounded V12 successor adds exact source-read literal witnesses while retaining
+the Sol route and V11 recognition instructions. See
+`2026-10-16-sol-literal-witness.md` for its design, residual limitations and finite
+acceptance sequence. The separate fixture repair in `409b1e5` passed both CI
+jobs in run `38935591882`; the actual CI checkout tree matches that candidate.
+The V12 successor requires its own exact CI and native acceptance.
 
 The approved Friday successor extends only the historical-document expiry by
 one second to `2026-10-17T04:00:00Z`; it admits the October 16 session and no later

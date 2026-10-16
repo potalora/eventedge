@@ -1,10 +1,10 @@
-# Prospective V11 Sol compact original-image contract
+# Prospective V12 Sol compact original-image contract
 
 This successor changes the model wire, image presentation and bounded correction policy. It requires a new explicit profile/generation. Legacy V1–V5 requests, wire and replay remain unchanged. Failed private V6/V7/compact attempts retain their original bytes and verdicts. Acquisition, full supplied material, every original target, independent original-image review and the 9000-second absolute model phase remain mandatory. Constructed tests and a labelled context-visibility diagnostic do not establish native workflow acceptance.
 
 ## Identity, originals and public boundary
 
-The pure contract remains `data_sources.regulation_graphics_grid` and runtime remains `learning.regulation_graphics_grid_runtime`. Prospective policy is `single_target_compact_v1` with the explicit `autoresearch.regulation_graphics_model_policy=sol_high_v1`, request V11, plan V5 and outer `regulation-model-attempt-v5`. Route-free compact requests retain V9/V3 and Luna; retained Sol V10/V4 requests retain their original prompt bytes and replay. The same APIs prepare plans/recognition/review, validate each raw stage and replay targets/documents/attempts. Recognition correction is an explicit prospective request parameter; it never changes a historical receipt.
+The pure contract remains `data_sources.regulation_graphics_grid` and runtime remains `learning.regulation_graphics_grid_runtime`. Prospective policy is `single_target_compact_v1` with the explicit `autoresearch.regulation_graphics_model_policy=sol_high_v1`, request V12, plan V6 and outer `regulation-model-attempt-v5`. Route-free compact requests retain V9/V3 and Luna; retained Sol V10/V4 and V11/V5 requests retain their original prompt bytes and replay. The same APIs prepare plans/recognition/review, validate each raw stage and replay targets/documents/attempts. Recognition correction is an explicit prospective request parameter; it never changes a historical receipt.
 
 The approved Sol route applies to regulatory graphics recognition and independent review only. Both use `gpt-6.1-sol` with high effort, bounded role, logical max tokens 4096, zero logical temperature and a 240-second call cap through ChatGPT-plan billing. Base autoresearch and other bounded document stages remain Luna high; thesis and committee routing remain unchanged. The full profile, plan, request, native provenance, cache identity and retained replay bind the finite opt-in. Analyzer and transport boundaries independently reject incompatible model/input/limit tuples before dispatch. The actual returned model and response identity are required. Local routing fields never enter the provider API request.
 
@@ -30,7 +30,9 @@ All non-table or mixed material remains required: standalone prose/titles/captio
 
 ## Independent review, correction and replay
 
-The reviewer sees the entire original target and exact context originals plus the current unmodified recognition. It checks every positional component and relation, all actual printing, blank/span/header/unit/note/cell/context associations and non-table geometry, together with a whole-original omissions check. An aggregate complete boolean alone is insufficient. Any uncertainty, missing material, wrong relation or meaningful literal defect fails; review cannot silently repair recognition or upgrade partial content.
+The V12 reviewer sees the entire original target and exact context originals plus the current recognition structure, with every direct literal field withheld behind a uniform placeholder. A host-generated ordered inventory identifies each literal field and source image. The reviewer returns one exact string or null per slot. Runtime compares every value against recognition without punctuation, Unicode, linebreak, whitespace or blank normalization. An all-positive verdict cannot override a disagreement. Witness values remain in the review receipt; they are not another downstream material transcript or an automatic correction.
+
+The review still checks every positional component and relation, all actual printing, blank/span/header/unit/note/cell/context associations and non-table geometry, together with a whole-original omissions check. Descriptions and association prose remain visible so their claims can be checked; they may repeat literals. This is partial withholding, not complete blindness or a guarantee against correlated Sol errors. Both native source inspection and all existing semantic checks remain required. Any uncertainty, missing material, wrong relation or meaningful literal defect fails; review cannot silently repair recognition or upgrade partial content. Historical reviews retain their original complete-candidate payloads and verdicts.
 
 The prospective target-level allowance is at most one bounded correction cycle, with at most two recognitions and two reviews. Eligible returned content/schema/structure/literal/coverage/context failures remain retained as failed stages. A corrected recognition must independently pass the unchanged content validator and a fresh image-backed review. A structurally malformed review may be replaced only against the unchanged valid recognition. A well-formed rejecting review may drive a replacement recognition and fresh review. The reviewer never receives prior review verdicts or repair hints; recognition feedback is bounded untrusted data. No third round, hidden transport retry, response normalization or historical failed-output conversion is permitted.
 
@@ -62,6 +64,16 @@ historical structural result; the independent source assessment and release
 acceptance are negative. Remaining representative probes and deployment are
 blocked. Sol high remains selected for both graphics stages. This result does
 not establish the cause or statistical independence of the two-stage error.
+
+Pedro subsequently instructed us to continue resolving the blocker while
+retaining Sol for both stages. V12 keeps the V11 recognition instructions
+unchanged and adds source-read literal evidence to review, with a new V5 review
+receipt and exact deterministic comparison. A well-formed disagreement rejects
+the review; a missing or malformed witness uses the existing malformed-review
+path. Feedback identifies mismatching fields without supplying replacement
+answers. All original models, calls, budgets, source requirements and correction
+limits remain. The implementation and finite native acceptance plan are in
+`docs/superpowers/plans/2026-10-16-sol-literal-witness.md`.
 
 The final successor still requires complete recognition/review of every current source original, full supplied regulatory material, actual assembled-prompt planning proof, every regulatory document across four horizons and the full 16-book native workflow. The retained October 15 corpus contained 98 targets and 12 documents; a fresh acquisition must establish its own exact coverage. No source/image exemption or valid-uncertainty-to-sufficient conversion is introduced by this wire.
 
