@@ -1,0 +1,19 @@
+{
+  "version": "retained-production-environment-v1",
+  "environment": {
+    "BLOCKED_TICKERS": "GOOGL,GOOG"
+  },
+  "source": {
+    "local_evidence_path": "data/forward-readiness/deployment-20261014/preflight-failure-20261014.json",
+    "local_evidence_sha256": "31b5659d96b90768058ffef7d251b3247361dd18318266dea72cecc210ec2c84",
+    "remote_attempt_sha256": "cc27b29574f8d3961fef2ef5b7e7a686361cc5cf7fc01961e712de5e83188094",
+    "observed_at_utc": "2026-10-14T16:05:08.199465+00:00",
+    "attempt_started_at": "2026-10-14T15:45:02.425392+00:00",
+    "generation_id": "gen_020",
+    "generation_commit": "c52a62fed94b7971b143e8e30256fcdfa182d589",
+    "requested_session": "2026-10-14",
+    "action": "preflight",
+    "preflight_mode": "screen",
+    "stderr_excerpt": "2026-10-14 15:45:04,492 run_cohorts INFO Blocked tickers: ['GOOGL', 'GOOG']"
+  }
+}

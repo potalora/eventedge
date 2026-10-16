@@ -33,7 +33,7 @@ def state_with_health(*, failed=False, missing=False):
     owner = SimpleNamespace(
         _active_strategy_names=strategies, cohorts=cohorts,
         _policy_id_for_horizon=lambda horizon: f'foundation-{horizon}',
-        _metric_store=SimpleNamespace(read_strategy_health=read_health, read_candidate_input_issues=lambda *args: []),
+        _metric_store=SimpleNamespace(read_strategy_health=read_health, read_session_candidate_input_issues=lambda *args: []),
     )
     state = DailyRunState(owner, SESSION.isoformat(), SESSION, datetime(2026, 10, 6, 22, tzinfo=timezone.utc), epoch_id=EPOCH)
     results = {cohort['config'].name: {'error': False, 'execution_valid': True, 'staging_valid': True} for cohort in cohorts}
@@ -125,3 +125,22 @@ def test_generation_rejects_missing_or_contradictory_coverage():
     assert not _valid_daily_cohort_results(results, '2026-08-10')
     first['input_coverage_valid'] = False
     assert not _valid_daily_cohort_results(results, '2026-08-10')
+
+
+def test_policy_disabled_strategy_is_explicitly_excluded_not_empty_or_failed():
+    from dataclasses import replace
+    state, results = state_with_health()
+    original = state.owner._metric_store.read_strategy_health
+    state.owner._disabled_strategies = {'weather_ag': 'unsupported_test_proxy'}
+    state.owner._metric_store.read_strategy_health = lambda *args, **kwargs: [
+        replace(row, status='disabled_by_policy', evidence={'reason': 'unsupported_test_proxy'})
+        if row.strategy == 'weather_ag' else row
+        for row in original(*args, **kwargs)
+    ]
+    result = state.finalize(results)
+    assert all(row['input_coverage_valid'] for row in result.values())
+    assert all(row['disabled_strategies'] == {'weather_ag': 'unsupported_test_proxy'} for row in result.values())
+    # A disabled assertion not bound to the configured policy must fail closed.
+    state.owner._disabled_strategies = {}
+    with pytest.raises(ValueError, match='disabled'):
+        state.finalize(results)

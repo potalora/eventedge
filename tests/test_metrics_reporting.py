@@ -331,7 +331,7 @@ def test_matrix_uses_exact_governed_labels_and_unavailable_copy() -> None:
     for required in (
         "Annualized daily net Sharpe",
         "Annualized matched-benchmark information ratio",
-        "Insufficient history (<30 valid sessions)",
+        "ratio_display",
         "concentration stress tests",
         "Dependent scenario portfolios",
     ):

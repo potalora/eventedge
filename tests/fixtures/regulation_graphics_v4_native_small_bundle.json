@@ -1,0 +1,377 @@
+{
+  "source_sha256": "dc96561228fb662ad5a841daa69a6caf01745cc1af13532868bffd65691ff234",
+  "summary": {
+    "candidate_source_manifest_sha256": "caec1f5a55dd5f738508cab2160ce8c9d21ad9ce783872f8d8f1eab8a5f5c205",
+    "completed_at": "2026-10-16T00:19:47.510021+00:00",
+    "elapsed_seconds": 63.231862178014126,
+    "error_class": null,
+    "failure_reason": "",
+    "full_generation_accepted": false,
+    "production_mutated": false,
+    "profile_sha256": "e0bd0ebc1087e82a533e2d33968ab1984c1a5b584257818df4f32d4e674556cc",
+    "status": "passed"
+  },
+  "bundle": {
+    "recognition": {
+      "correlated_model_risk": true,
+      "guarantees_accuracy": false,
+      "machine_assessed": true,
+      "model_provenance": {
+        "billing_mode": "chatgpt_plan",
+        "configured_model": "gpt-6-luna",
+        "document_inputs": [
+          {
+            "filename": "EP05OC26.007.png",
+            "media_type": "image/png",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "size_bytes": 8799
+          }
+        ],
+        "effective_output_limit": null,
+        "identity_status": "unpinned",
+        "reasoning_effort": "high",
+        "response_id": "resp_079742d4a5282b91016ad16d6aa34487d28c2377a678bcd55f",
+        "returned_model": "gpt-6-luna",
+        "returned_revision": null,
+        "role": "bounded"
+      },
+      "model_request": {
+        "effort": "high",
+        "max_tokens": 4096,
+        "model": "gpt-6-luna",
+        "prompt_bytes": 1454,
+        "prompt_sha256": "c757b7ca01a8522c42544b36a93bbaaa9dd7bca2e1a3ac96b0f5f35205928bb4",
+        "request_sha256": "a51c358c9ebf039f019011918b8f683e919e2f595e6220dfea3b7ed474bde2f9",
+        "role": "bounded",
+        "system_bytes": 6885,
+        "system_sha256": "8097e6d1c54b71ff58ac2e3eb1e8ec0235524f526c82ae6bfecfa6a0d7199ec6",
+        "temperature": 0.0,
+        "version": "research-model-request-v1"
+      },
+      "receipt_sha256": "3008cce7897cb5ed20ff046065664128a573d10e612f72601ad8652305e2094c",
+      "request_identity": {
+        "assets": [
+          {
+            "context": "tiple share \nclasses as of the December 2025. Table 3 provides further detail on \ncounts and net assets of registered closed-end funds by type.\n---------------------------------------------------------------------------\n\n    \\257\\ Proposed rule 23c-3(c).\n    \\258\\ These percent changes are calculated relative to 2016 net \nasset levels of $311 billion ($262 billion in registered closed-end \nfunds plus $49 billion in BDCs) across 608 regulated closed-end \nfunds (530 registered closed-end funds plus 78 BDCs).\n\n[graphic TP05OC26.007]\n\n\n\n[[Page 63427]]\n\n\n    The proposed amendments would also modify several items on Form N-2 \nfor regulated closed-end funds to provide disclosures regarding their \nmulti-share class and master-feeder structures. Table 4 provides \ndetails on counts and net assets for registered closed-end feeder funds \nin master-feeder structures.\n[GRAPHIC] [TIFF OMITTED] TP05OC26.008\n\n    Advisers to Regulated Closed-End Funds. The proposed amendments \nwould affect registered investment advisers to regulated closed-end \nfun",
+            "filename": "EP05OC26.007.png",
+            "id": "EP05OC26.007",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "size_bytes": 8799
+          }
+        ],
+        "recognition_receipt_sha256": null,
+        "request_identity_sha256": "ab31ac25f225fc93bd7c6b8630c9cbfd82b519f3ecfb9e70d4a1a30ac0864a98",
+        "stage": "recognition",
+        "version": "regulation-graphics-request-v4"
+      },
+      "response_sha256": "3528d82f82d78e23bdef77a217649382116eac3904c6b9d1b2e66a5f4fc1bc4a",
+      "response_text": "{\"version\":\"regulation-graphics-recognition-v1\",\"request_identity_sha256\":\"ab31ac25f225fc93bd7c6b8630c9cbfd82b519f3ecfb9e70d4a1a30ac0864a98\",\"graphics\":[{\"id\":\"EP05OC26.007\",\"sha256\":\"ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7\",\"status\":\"complete\",\"kind\":\"table\",\"transcript\":\"Table 3: Counts and Net Assets of Registered Closed-end Funds\\n\\nAll Registered\\nClosed-end\\nFunds\\n\\nInterval\\nFunds\\n\\nTender\\nOffer Funds\\n\\nTraded\\nClosed-end\\nFunds\\n\\nCount\\n\\n706\\n\\n139\\n\\n174\\n\\n393\\n\\nNet Assets\\n($ billions)\\n\\n428\\n\\n101\\n\\n100\\n\\n227\",\"elements\":[{\"id\":\"title\",\"kind\":\"heading\",\"text\":\"Table 3: Counts and Net Assets of Registered Closed-end Funds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col-label\",\"kind\":\"column\",\"text\":null,\"source\":\"image\",\"references\":[],\"precision\":\"not_numeric\"},{\"id\":\"col-all\",\"kind\":\"column\",\"text\":\"All Registered\\nClosed-end\\nFunds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col-interval\",\"kind\":\"column\",\"text\":\"Interval\\nFunds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col-tender\",\"kind\":\"column\",\"text\":\"Tender\\nOffer Funds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col-traded\",\"kind\":\"column\",\"text\":\"Traded\\nClosed-end\\nFunds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"row-count\",\"kind\":\"row\",\"text\":\"Count\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"row-assets\",\"kind\":\"row\",\"text\":\"Net Assets\\n($ billions)\",\"source\":\"image\",\"references\":[\"unit-billions\"],\"precision\":\"printed\"},{\"id\":\"unit-billions\",\"kind\":\"unit\",\"text\":\"$ billions\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"cell-count-label\",\"kind\":\"cell\",\"text\":\"Count\",\"source\":\"image\",\"references\":[\"row-count\",\"col-label\"],\"precision\":\"printed\"},{\"id\":\"cell-count-all\",\"kind\":\"cell\",\"text\":\"706\",\"source\":\"image\",\"references\":[\"row-count\",\"col-all\"],\"precision\":\"printed\"},{\"id\":\"cell-count-interval\",\"kind\":\"cell\",\"text\":\"139\",\"source\":\"image\",\"references\":[\"row-count\",\"col-interval\"],\"precision\":\"printed\"},{\"id\":\"cell-count-tender\",\"kind\":\"cell\",\"text\":\"174\",\"source\":\"image\",\"references\":[\"row-count\",\"col-tender\"],\"precision\":\"printed\"},{\"id\":\"cell-count-traded\",\"kind\":\"cell\",\"text\":\"393\",\"source\":\"image\",\"references\":[\"row-count\",\"col-traded\"],\"precision\":\"printed\"},{\"id\":\"cell-assets-label\",\"kind\":\"cell\",\"text\":\"Net Assets\\n($ billions)\",\"source\":\"image\",\"references\":[\"row-assets\",\"col-label\",\"unit-billions\"],\"precision\":\"printed\"},{\"id\":\"cell-assets-all\",\"kind\":\"cell\",\"text\":\"428\",\"source\":\"image\",\"references\":[\"row-assets\",\"col-all\",\"unit-billions\"],\"precision\":\"printed\"},{\"id\":\"cell-assets-interval\",\"kind\":\"cell\",\"text\":\"101\",\"source\":\"image\",\"references\":[\"row-assets\",\"col-interval\",\"unit-billions\"],\"precision\":\"printed\"},{\"id\":\"cell-assets-tender\",\"kind\":\"cell\",\"text\":\"100\",\"source\":\"image\",\"references\":[\"row-assets\",\"col-tender\",\"unit-billions\"],\"precision\":\"printed\"},{\"id\":\"cell-assets-traded\",\"kind\":\"cell\",\"text\":\"227\",\"source\":\"image\",\"references\":[\"row-assets\",\"col-traded\",\"unit-billions\"],\"precision\":\"printed\"}],\"unresolved\":[]}]}",
+      "result": {
+        "graphics": [
+          {
+            "elements": [
+              {
+                "id": "title",
+                "kind": "heading",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "Table 3: Counts and Net Assets of Registered Closed-end Funds"
+              },
+              {
+                "id": "col-label",
+                "kind": "column",
+                "precision": "not_numeric",
+                "references": [],
+                "source": "image",
+                "text": null
+              },
+              {
+                "id": "col-all",
+                "kind": "column",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "All Registered\nClosed-end\nFunds"
+              },
+              {
+                "id": "col-interval",
+                "kind": "column",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "Interval\nFunds"
+              },
+              {
+                "id": "col-tender",
+                "kind": "column",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "Tender\nOffer Funds"
+              },
+              {
+                "id": "col-traded",
+                "kind": "column",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "Traded\nClosed-end\nFunds"
+              },
+              {
+                "id": "row-count",
+                "kind": "row",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "Count"
+              },
+              {
+                "id": "row-assets",
+                "kind": "row",
+                "precision": "printed",
+                "references": [
+                  "unit-billions"
+                ],
+                "source": "image",
+                "text": "Net Assets\n($ billions)"
+              },
+              {
+                "id": "unit-billions",
+                "kind": "unit",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "$ billions"
+              },
+              {
+                "id": "cell-count-label",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-count",
+                  "col-label"
+                ],
+                "source": "image",
+                "text": "Count"
+              },
+              {
+                "id": "cell-count-all",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-count",
+                  "col-all"
+                ],
+                "source": "image",
+                "text": "706"
+              },
+              {
+                "id": "cell-count-interval",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-count",
+                  "col-interval"
+                ],
+                "source": "image",
+                "text": "139"
+              },
+              {
+                "id": "cell-count-tender",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-count",
+                  "col-tender"
+                ],
+                "source": "image",
+                "text": "174"
+              },
+              {
+                "id": "cell-count-traded",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-count",
+                  "col-traded"
+                ],
+                "source": "image",
+                "text": "393"
+              },
+              {
+                "id": "cell-assets-label",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-assets",
+                  "col-label",
+                  "unit-billions"
+                ],
+                "source": "image",
+                "text": "Net Assets\n($ billions)"
+              },
+              {
+                "id": "cell-assets-all",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-assets",
+                  "col-all",
+                  "unit-billions"
+                ],
+                "source": "image",
+                "text": "428"
+              },
+              {
+                "id": "cell-assets-interval",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-assets",
+                  "col-interval",
+                  "unit-billions"
+                ],
+                "source": "image",
+                "text": "101"
+              },
+              {
+                "id": "cell-assets-tender",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-assets",
+                  "col-tender",
+                  "unit-billions"
+                ],
+                "source": "image",
+                "text": "100"
+              },
+              {
+                "id": "cell-assets-traded",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row-assets",
+                  "col-traded",
+                  "unit-billions"
+                ],
+                "source": "image",
+                "text": "227"
+              }
+            ],
+            "id": "EP05OC26.007",
+            "kind": "table",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "status": "complete",
+            "transcript": "Table 3: Counts and Net Assets of Registered Closed-end Funds\n\nAll Registered\nClosed-end\nFunds\n\nInterval\nFunds\n\nTender\nOffer Funds\n\nTraded\nClosed-end\nFunds\n\nCount\n\n706\n\n139\n\n174\n\n393\n\nNet Assets\n($ billions)\n\n428\n\n101\n\n100\n\n227",
+            "unresolved": []
+          }
+        ],
+        "request_identity_sha256": "ab31ac25f225fc93bd7c6b8630c9cbfd82b519f3ecfb9e70d4a1a30ac0864a98",
+        "version": "regulation-graphics-recognition-v1"
+      },
+      "trading_authority": false,
+      "version": "regulation-graphics-recognition-receipt-v1"
+    },
+    "review": {
+      "correlated_model_risk": true,
+      "guarantees_accuracy": false,
+      "machine_assessed": true,
+      "model_provenance": {
+        "billing_mode": "chatgpt_plan",
+        "configured_model": "gpt-6-luna",
+        "document_inputs": [
+          {
+            "filename": "EP05OC26.007.png",
+            "media_type": "image/png",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "size_bytes": 8799
+          }
+        ],
+        "effective_output_limit": null,
+        "identity_status": "unpinned",
+        "reasoning_effort": "high",
+        "response_id": "resp_005050b475ac4dc6016ad16d95292487d299aa79ce7de6d8fd",
+        "returned_model": "gpt-6-luna",
+        "returned_revision": null,
+        "role": "bounded"
+      },
+      "model_request": {
+        "effort": "high",
+        "max_tokens": 4096,
+        "model": "gpt-6-luna",
+        "prompt_bytes": 4665,
+        "prompt_sha256": "be98ffe4448ad13d09570373b874410d7a7fb43615849b602c9a986aed093101",
+        "request_sha256": "20338f21debcdfd7d8e5f259cfd3469941e98533d4cd93db8cb158b03e287142",
+        "role": "bounded",
+        "system_bytes": 5422,
+        "system_sha256": "bdf027459c790533b26ce6f654f3355a3a4de0410e3e36dae964e8878d44d4ee",
+        "temperature": 0.0,
+        "version": "research-model-request-v1"
+      },
+      "receipt_sha256": "a255abb3e163353860e9b8c82b5ef468aa831f3340581ca75245cde1a57727e0",
+      "request_identity": {
+        "assets": [
+          {
+            "context": "tiple share \nclasses as of the December 2025. Table 3 provides further detail on \ncounts and net assets of registered closed-end funds by type.\n---------------------------------------------------------------------------\n\n    \\257\\ Proposed rule 23c-3(c).\n    \\258\\ These percent changes are calculated relative to 2016 net \nasset levels of $311 billion ($262 billion in registered closed-end \nfunds plus $49 billion in BDCs) across 608 regulated closed-end \nfunds (530 registered closed-end funds plus 78 BDCs).\n\n[graphic TP05OC26.007]\n\n\n\n[[Page 63427]]\n\n\n    The proposed amendments would also modify several items on Form N-2 \nfor regulated closed-end funds to provide disclosures regarding their \nmulti-share class and master-feeder structures. Table 4 provides \ndetails on counts and net assets for registered closed-end feeder funds \nin master-feeder structures.\n[GRAPHIC] [TIFF OMITTED] TP05OC26.008\n\n    Advisers to Regulated Closed-End Funds. The proposed amendments \nwould affect registered investment advisers to regulated closed-end \nfun",
+            "filename": "EP05OC26.007.png",
+            "id": "EP05OC26.007",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "size_bytes": 8799
+          }
+        ],
+        "recognition_receipt_sha256": "3008cce7897cb5ed20ff046065664128a573d10e612f72601ad8652305e2094c",
+        "request_identity_sha256": "a647f31d6c1b25b7739613d2975c2650d671a1c0a35e46e6423a2ee8583e44a0",
+        "stage": "review",
+        "version": "regulation-graphics-request-v4"
+      },
+      "response_sha256": "cdc5de39ceaad735aa3bb3f4f9bc381458d2fe8c17f7faf4270d5a4f9796b73b",
+      "response_text": "{\"version\":\"regulation-graphics-review-v1\",\"request_identity_sha256\":\"a647f31d6c1b25b7739613d2975c2650d671a1c0a35e46e6423a2ee8583e44a0\",\"recognition_receipt_sha256\":\"3008cce7897cb5ed20ff046065664128a573d10e612f72601ad8652305e2094c\",\"graphics\":[{\"id\":\"EP05OC26.007\",\"sha256\":\"ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7\",\"material_complete\":true,\"checked_element_ids\":[\"title\",\"col-label\",\"col-all\",\"col-interval\",\"col-tender\",\"col-traded\",\"row-count\",\"row-assets\",\"unit-billions\",\"cell-count-label\",\"cell-count-all\",\"cell-count-interval\",\"cell-count-tender\",\"cell-count-traded\",\"cell-assets-label\",\"cell-assets-all\",\"cell-assets-interval\",\"cell-assets-tender\",\"cell-assets-traded\"],\"checks\":{\"printed_text\":true,\"tables\":true,\"charts\":true,\"units_and_footnotes\":true,\"other_visual\":true},\"errors\":[]}]}",
+      "result": {
+        "graphics": [
+          {
+            "checked_element_ids": [
+              "title",
+              "col-label",
+              "col-all",
+              "col-interval",
+              "col-tender",
+              "col-traded",
+              "row-count",
+              "row-assets",
+              "unit-billions",
+              "cell-count-label",
+              "cell-count-all",
+              "cell-count-interval",
+              "cell-count-tender",
+              "cell-count-traded",
+              "cell-assets-label",
+              "cell-assets-all",
+              "cell-assets-interval",
+              "cell-assets-tender",
+              "cell-assets-traded"
+            ],
+            "checks": {
+              "charts": true,
+              "other_visual": true,
+              "printed_text": true,
+              "tables": true,
+              "units_and_footnotes": true
+            },
+            "errors": [],
+            "id": "EP05OC26.007",
+            "material_complete": true,
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7"
+          }
+        ],
+        "recognition_receipt_sha256": "3008cce7897cb5ed20ff046065664128a573d10e612f72601ad8652305e2094c",
+        "request_identity_sha256": "a647f31d6c1b25b7739613d2975c2650d671a1c0a35e46e6423a2ee8583e44a0",
+        "version": "regulation-graphics-review-v1"
+      },
+      "trading_authority": false,
+      "version": "regulation-graphics-review-receipt-v1"
+    }
+  },
+  "scope": "Actual native V4 small-image recognition/review bundle, not full corpus acceptance."
+}

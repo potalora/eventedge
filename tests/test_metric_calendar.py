@@ -38,3 +38,18 @@ def test_session_open_covers_regular_and_early_close_sessions() -> None:
 def test_held_session_rejects_nonpositive_window() -> None:
     with pytest.raises(ValueError, match="holding_sessions must be positive"):
         XNYSCalendar().held_session(date(2026, 1, 16), 0)
+
+
+@pytest.mark.parametrize(
+    ("instant", "expected"),
+    [
+        ("2026-10-10T00:30:00+00:00", "2026-10-09"),
+        ("2026-01-10T01:30:00+00:00", "2026-01-09"),
+        ("2026-07-03T15:00:00+00:00", "2026-07-03"),
+        ("2026-11-27T18:01:00+00:00", "2026-11-27"),
+    ],
+)
+def test_exchange_date_uses_new_york_without_silent_catchup(instant, expected):
+    from tradingagents.strategies.orchestration import trading_calendar
+
+    assert trading_calendar.exchange_date(datetime.fromisoformat(instant)).isoformat() == expected

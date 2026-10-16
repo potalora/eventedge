@@ -139,7 +139,7 @@ def _ledger_signal(ticker: str, reference_session: date) -> SignalRecord:
     )
 
 
-def test_untraded_entry_and_exit_due_signals_join_session_raw_request(tmp_path) -> None:
+def test_untraded_outcome_dependencies_are_separate_from_portfolio_prices(tmp_path) -> None:
     ledger = PortfolioLedger(tmp_path / "portfolio.db", "cohort", Decimal("1000"))
     try:
         ledger.record_signal(_ledger_signal("AAPL", date(2026, 8, 3)))
@@ -149,14 +149,13 @@ def test_untraded_entry_and_exit_due_signals_join_session_raw_request(tmp_path) 
             {"execution": {"mode": "paper"}, "autoresearch": {}},
         )
 
-        assert executor.required_tickers(date(2026, 8, 4), "epoch-1") == (
-            "AAPL",
-            "MSFT",
-        )
-        assert executor.required_tickers(date(2026, 8, 10), "epoch-1") == (
-            "AAPL",
-            "MSFT",
-        )
+        for day, needs_price in ((4, True), (5, False), (10, True)):
+            session = date(2026, 8, day)
+            assert executor.required_tickers(session, "epoch-1") == ()
+            assert executor.outcome_dependency_plan(session) == {
+                ticker: {"price": needs_price, "actions": day > 4}
+                for ticker in ("AAPL", "MSFT")
+            }
     finally:
         ledger.close()
 

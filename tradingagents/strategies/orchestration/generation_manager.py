@@ -7,17 +7,21 @@ trading performance across code versions side-by-side.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
+from functools import wraps
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.run_evidence import (
@@ -37,6 +41,87 @@ from tradingagents.strategies.orchestration.runtime_lock import (
 logger = logging.getLogger(__name__)
 
 _MAX_RUN_HISTORY = 100
+_PREFLIGHT_REAP_TIMEOUT_S = 5
+
+
+def _run_preflight_worker(command, *, cwd, env, timeout, pass_fds):
+    """Own the diagnostic process group, including native source transports.
+
+    A killed screen cannot reap its own transports. Keep stdout/stderr separate
+    and retain subprocess.run's completed/timeout evidence contract while
+    terminating the whole owned session on every exit.
+    """
+    process = None
+    pending_signal = None
+    previous_handlers = {}
+
+    def kill_group():
+        if process is None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def propagate_signal(signum, frame):
+        previous = previous_handlers[signum]
+        if callable(previous):
+            previous(signum, frame)
+        elif previous != signal.SIG_IGN:
+            # Preserve the original signal exit status, rather than turning
+            # controller termination into an ordinary failed preflight.
+            signal.signal(signum, previous)
+            os.kill(os.getpid(), signum)
+
+    def forward_signal(signum, frame):
+        nonlocal pending_signal
+        if previous_handlers[signum] == signal.SIG_IGN:
+            return
+        if process is None:
+            # A signal during Popen must not strand a newly detached child.
+            # Defer termination until its PID is available, without changing
+            # the child's inherited signal mask or using unsafe preexec code.
+            pending_signal = (signum, frame)
+            return
+        kill_group()
+        process.wait(timeout=_PREFLIGHT_REAP_TIMEOUT_S)
+        propagate_signal(signum, frame)
+
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, forward_signal)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True,
+                                   start_new_session=True, pass_fds=pass_fds)
+        if pending_signal is not None:
+            signum, frame = pending_signal
+            pending_signal = None
+            forward_signal(signum, frame)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_group()
+            stdout, stderr = process.communicate(timeout=_PREFLIGHT_REAP_TIMEOUT_S)
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from None
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        # A native child can remain even when the screen itself already exited.
+        try:
+            kill_group()
+            if process is not None and process.poll() is None:
+                process.wait(timeout=_PREFLIGHT_REAP_TIMEOUT_S)
+        finally:
+            try:
+                if process is not None:
+                    for stream in (process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
+            finally:
+                for signum, previous in previous_handlers.items():
+                    signal.signal(signum, previous)
+                if pending_signal is not None:
+                    propagate_signal(*pending_signal)
 
 # Wall-clock ceiling for a single generation's cohort run. This is an outer
 # backstop: if a run gets suspended (e.g. the laptop sleeps on battery) or a
@@ -137,6 +222,7 @@ def _daily_history_entry(result: dict, trading_date: str) -> dict:
         "execution_valid",
         "input_coverage_valid",
         "source_health_failures",
+        "source_scope_limits",
         "candidate_bar_quarantines",
         "error",
         "evidence_path",
@@ -198,7 +284,7 @@ def _valid_daily_cohort_results(
     from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
     )
-    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures
+    from tradingagents.strategies.orchestration.source_coverage import aggregate_source_health_failures, aggregate_source_scope_limits
     from tradingagents.strategies.orchestration.cohort_orchestrator import (
         build_default_cohorts,
     )
@@ -211,6 +297,7 @@ def _valid_daily_cohort_results(
             cohort_results, trading_date
         )
         aggregate_source_health_failures(cohort_results, trading_date, require_coverage=True)
+        aggregate_source_scope_limits(cohort_results)
     except ValueError:
         return False
     affected_by_issue = {
@@ -392,6 +479,8 @@ def normalize_preflight_report(
     wire_keys = {"ok", "preflight_mode"}
     if mode in {"screen", "all"}:
         wire_keys.update({"screen_ok", "screen_failure_count", "screen_source_failures"})
+        if "screen_runtime_failures" in report:
+            wire_keys.add("screen_runtime_failures")
     if mode in {"governed", "all"}:
         wire_keys.update(
             {
@@ -437,6 +526,7 @@ def normalize_preflight_report(
                 return None
         from tradingagents.strategies.orchestration.preflight import (
             canonical_screen_source_failures,
+            canonical_screen_runtime_failures,
         )
         source_failures = canonical_screen_source_failures(
             report.get("screen_source_failures")
@@ -454,6 +544,11 @@ def normalize_preflight_report(
         normalized["screen_ok"] = screen_ok
         normalized["screen_failure_count"] = failure_count
         normalized["screen_source_failures"] = source_failures
+        if "screen_runtime_failures" in report:
+            runtime_failures = canonical_screen_runtime_failures(report["screen_runtime_failures"])
+            if runtime_failures is None or len(runtime_failures) + len(source_failures) > failure_count:
+                return None
+            normalized["screen_runtime_failures"] = runtime_failures
     if mode in {"governed", "all"}:
         state_status = report.get("state_status")
         probe_status = report.get("governed_probe_status")
@@ -563,7 +658,9 @@ def _preflight_subprocess_result(
     result["success"] = bool(returncode == 0 and normalized["ok"] is True and ready)
     if not result["success"]:
         status = result.get("governed_probe_status", "failed")
-        result["error"] = f"preflight {mode} status: {status}"
+        runtime = result.get("screen_runtime_failures", [])
+        result["error"] = (f"preflight {mode} runtime: " + ', '.join(row['reason_code'] for row in runtime)
+                           if runtime else f"preflight {mode} status: {status}")
     return result
 
 
@@ -580,6 +677,24 @@ class GenerationInfo:
     status: str  # "active", "paused", "retired"
     description: str  # User-provided description
     run_history: list[dict] = field(default_factory=list)
+    config_file: str | None = None
+    config_sha256: str | None = None
+
+
+class GenerationManifestError(ValueError):
+    """An existing generation roster cannot be safely interpreted."""
+
+
+def _lifecycle_locked(operation):
+    """Serialize the complete read/modify/write operation with daily workers."""
+    @wraps(operation)
+    def locked(self, *args, **kwargs):
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        with runtime_lock(self._runtime_lock_path, exclusive=True):
+            return operation(self, *args, **kwargs)
+
+    return locked
 
 
 class GenerationManager:
@@ -594,6 +709,7 @@ class GenerationManager:
         self._generations_dir = (self._repo_root / generations_dir).resolve()
         self._worktrees_dir = (self._repo_root / ".worktrees").resolve()
         self._manifest_path = self._generations_dir / "manifest.json"
+        self._start_intent_path = self._generations_dir / ".pending-start.json"
         self._runtime_lock_path = canonical_runtime_lock_path(self._repo_root)
 
         # Use the venv python WITHOUT resolving symlinks — resolve() follows
@@ -613,15 +729,38 @@ class GenerationManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def start_generation(self, description: str) -> GenerationInfo:
+    @_lifecycle_locked
+    def start_generation(self, description: str, *, config_file=None) -> GenerationInfo:
         """Create a new generation from current HEAD.
 
         1. Capture current commit and branch.
         2. Allocate next gen_id.
-        3. Create a detached git worktree at the commit.
-        4. Create an isolated state directory.
-        5. Persist to manifest.
+        Record a durable intent before creating the frozen worktree and state.
+        Retrying an interrupted request resumes its original snapshot.
         """
+        from .generation_config import read_generation_config, FROZEN_CONFIG_NAME
+
+        profile = read_generation_config(config_file) if config_file is not None else None
+        manifest = self._load_manifest()
+        pending = self._load_start_intent()
+        if pending is not None:
+            record = pending["record"]
+            existing = self._find_gen(manifest, record["gen_id"])
+            same_request = (
+                record["description"] == description
+                and record.get("config_sha256") == (profile[2] if profile is not None else None)
+            )
+            if existing is not None:
+                immutable = record.keys() - {"status", "run_history"}
+                if any(existing.get(key) != record[key] for key in immutable):
+                    raise GenerationManifestError("pending generation conflicts with manifest; requires operator review")
+                self._clear_start_intent()
+                if same_request:
+                    return GenerationInfo(**existing)
+            else:
+                if not same_request:
+                    raise GenerationManifestError("different generation start is pending; requires operator review")
+                return self._finish_generation_start(pending, manifest)
         # 0. Warn about uncommitted changes (worktree won't include them)
         status_result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -656,20 +795,14 @@ class GenerationManager:
         # 2. Allocate gen_id
         gen_id = self._next_gen_id()
 
-        # 3. Create worktree
+        # Reject unknown historical or foreign data before recording ownership.
         worktree_path = self._worktrees_dir / gen_id
-        subprocess.run(
-            ["git", "worktree", "add", str(worktree_path), commit, "--detach"],
-            cwd=self._repo_root,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        logger.info("Created worktree %s at %s", gen_id, commit[:12])
-
-        # 4. Create state directory
         state_dir = self._generations_dir / gen_id
-        state_dir.mkdir(parents=True, exist_ok=True)
+        for path in (worktree_path, state_dir):
+            self._reject_lifecycle_symlinks(path)
+            if path.exists():
+                raise GenerationManifestError("generation target already exists; requires operator review")
+        frozen_config = state_dir / FROZEN_CONFIG_NAME if profile is not None else None
 
         # 5. Build info and persist
         info = GenerationInfo(
@@ -682,19 +815,160 @@ class GenerationManager:
             status="active",
             description=description,
             run_history=[],
+            config_file=str(frozen_config) if frozen_config is not None else None,
+            config_sha256=profile[2] if profile is not None else None,
         )
 
-        manifest = self._load_manifest()
-        manifest["generations"].append(asdict(info))
+        record = asdict(info)
+        if profile is None:
+            record.pop('config_file')
+            record.pop('config_sha256')
+        pending = {"version": 1, "record": record, "config_text": profile[0].decode("utf-8") if profile is not None else None}
+        self._write_atomic(self._start_intent_path, json.dumps(pending).encode("utf-8"))
+        return self._finish_generation_start(pending, manifest)
+
+    @staticmethod
+    def _reject_lifecycle_symlinks(path: Path) -> None:
+        if any(item.is_symlink() for item in (path, *path.parents)):
+            raise GenerationManifestError("generation path contains a symlink; requires operator review")
+
+    def _load_start_intent(self) -> dict | None:
+        """Only a validated, manager-owned intent authorizes resuming side effects."""
+        self._reject_lifecycle_symlinks(self._start_intent_path)
+        try:
+            fd = os.open(self._start_intent_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ValueError("intent is not a regular file")
+                body = handle.read(2 * 1024 * 1024 + 1)
+            if len(body) > 2 * 1024 * 1024:
+                raise ValueError("intent is too large")
+            pending = json.loads(body)
+            if (not isinstance(pending, dict) or set(pending) != {"version", "record", "config_text"}
+                    or type(pending["version"]) is not int or pending["version"] != 1):
+                raise ValueError("invalid intent")
+            record = pending["record"]
+            self._validate_manifest({"generations": [record]})
+            if (set(record) - {item.name for item in fields(GenerationInfo)}
+                    or record["status"] != "active" or record["run_history"] != []
+                    or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["git_commit"])
+                    or record["worktree_path"] != str(self._worktrees_dir / record["gen_id"])
+                    or record["state_dir"] != str(self._generations_dir / record["gen_id"])):
+                raise ValueError("invalid intent identity")
+            config_text = pending["config_text"]
+            if record.get("config_file") is None:
+                if config_text is not None:
+                    raise ValueError("unexpected configuration")
+            elif (not isinstance(config_text, str)
+                    or hashlib.sha256(config_text.encode("utf-8")).hexdigest() != record["config_sha256"]):
+                raise ValueError("invalid configuration digest")
+            return pending
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            raise GenerationManifestError("pending generation start is invalid; requires operator review") from error
+
+    def _clear_start_intent(self) -> None:
+        self._start_intent_path.unlink()
+        self._sync_directory(self._generations_dir)
+
+    def _finish_generation_start(self, pending: dict, manifest: dict) -> GenerationInfo:
+        """Complete known interrupted creation without deleting any existing data."""
+        record = pending["record"]
+        worktree = Path(record["worktree_path"])
+        state = Path(record["state_dir"])
+        for path in (worktree, state):
+            self._reject_lifecycle_symlinks(path)
+        registered = subprocess.run(
+            ["git", "worktree", "list", "--porcelain", "-z"], cwd=self._repo_root,
+            capture_output=True, text=True, check=True,
+        ).stdout.split("\0")
+        owned = f"worktree {worktree}" in registered
+        if not worktree.exists() and not owned:
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree), record["git_commit"], "--detach"],
+                cwd=self._repo_root, capture_output=True, text=True, check=True,
+            )
+        elif not worktree.is_dir() or not owned:
+            raise GenerationManifestError("pending worktree is ambiguous; requires operator review")
+        self._verify_pending_worktree(worktree, record["git_commit"])
+        if state.exists() and not state.is_dir():
+            raise GenerationManifestError("pending state is not a directory; requires operator review")
+        state.mkdir(exist_ok=True)
+        expected = {Path(record["config_file"]).name} if record.get("config_file") else set()
+        if not state.is_dir() or any(item.name not in expected or item.is_symlink() or not item.is_file() for item in state.iterdir()):
+            raise GenerationManifestError("pending state contains unknown data; requires operator review")
+        if expected:
+            config = Path(record["config_file"])
+            body = pending["config_text"].encode("utf-8")
+            if config.exists() and config.read_bytes() != body:
+                raise GenerationManifestError("pending configuration is modified; requires operator review")
+            if not config.exists():
+                self._write_atomic(config, body)
+        manifest["generations"].append(record)
         self._save_manifest(manifest)
+        self._clear_start_intent()
+        logger.info("Started generation %s at %s", record["gen_id"], record["git_commit"][:12])
+        return GenerationInfo(**record)
 
-        logger.info(
-            "Started generation %s: branch=%s commit=%s",
-            gen_id,
-            branch,
-            commit[:12],
+    def _verify_pending_worktree(self, worktree: Path, commit: str) -> None:
+        try:
+            # A foreign/modified checkout is never reset or discarded automatically.
+            self._reject_lifecycle_symlinks(worktree / ".git")
+            if not (worktree / ".git").is_file():
+                raise GenerationManifestError("pending worktree Git pointer is invalid; requires operator review")
+            common_args = ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            expected_common = subprocess.run(
+                common_args, cwd=self._repo_root, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            actual_common = subprocess.run(
+                common_args, cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if Path(actual_common).resolve() != Path(expected_common).resolve():
+                raise GenerationManifestError("pending worktree belongs to another repository; requires operator review")
+            admin = Path(subprocess.run(
+                ["git", "rev-parse", "--absolute-git-dir"],
+                cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout.strip())
+            backlink = admin / "gitdir"
+            self._reject_lifecycle_symlinks(backlink)
+            if (admin.parent != Path(expected_common) / "worktrees"
+                    or not backlink.is_file()
+                    or backlink.read_text().strip() != str(worktree / ".git")):
+                raise GenerationManifestError("pending worktree Git identity conflicts; requires operator review")
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all", "--ignored"],
+                cwd=worktree, capture_output=True, text=True, check=True,
+            ).stdout
+            if head != commit or status.strip():
+                raise GenerationManifestError("pending worktree is modified; requires operator review")
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise GenerationManifestError("pending worktree Git identity is invalid; requires operator review") from error
+
+    def _runtime_guard(self, *, exclusive: bool):
+        """Retain a verified controller lease across the complete daily wrapper.
+
+        Standalone commands still acquire their normal shared/exclusive locks.
+        Only a verified inherited exclusive lease can pin the whole roster;
+        preflight must not downgrade that parent's lease to a shared lock.
+        """
+        from .runtime_lock import RuntimeLockInvalid, runtime_lock
+
+        fd_value = os.environ.get("EVENTEDGE_RUNTIME_LOCK_FD")
+        mode_value = os.environ.get("EVENTEDGE_RUNTIME_LOCK_MODE")
+        if fd_value is None and mode_value is None:
+            return runtime_lock(self._runtime_lock_path, exclusive=exclusive)
+        if (mode_value != "exclusive" or fd_value is None
+                or not re.fullmatch(r"[0-9]{1,10}", fd_value)):
+            raise RuntimeLockInvalid("inherited controller runtime lock is invalid")
+        return runtime_lock(
+            self._runtime_lock_path, exclusive=True,
+            inherited_fd=int(fd_value), inherited_exclusive=True,
         )
-        return info
 
     def run_daily(self, trading_date: str | None = None) -> dict[str, dict]:
         """Run daily trading for all active generations.
@@ -707,12 +981,12 @@ class GenerationManager:
                       "success": bool, "elapsed_s": float, "error"?: str}}
         """
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
 
-        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+            trading_date = exchange_date().isoformat()
 
         results: dict[str, dict] = {}
-        with runtime_lock(self._runtime_lock_path, exclusive=True) as lock:
+        with self._runtime_guard(exclusive=True) as lock:
             manifest = self._load_manifest()
 
             for gen_data in manifest["generations"]:
@@ -761,12 +1035,12 @@ class GenerationManager:
         if mode not in _PREFLIGHT_MODES:
             raise ValueError(f"invalid preflight mode {mode!r}")
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
 
-        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+            trading_date = exchange_date().isoformat()
 
         results: dict[str, dict] = {}
-        with runtime_lock(self._runtime_lock_path, exclusive=False) as lock:
+        with self._runtime_guard(exclusive=False) as lock:
             manifest = self._load_manifest()
 
             for gen_data in manifest["generations"]:
@@ -801,6 +1075,7 @@ class GenerationManager:
 
         return results
 
+    @_lifecycle_locked
     def pause_generation(self, gen_id: str) -> None:
         """Set a generation's status to 'paused'."""
         manifest = self._load_manifest()
@@ -813,6 +1088,7 @@ class GenerationManager:
         self._save_manifest(manifest)
         logger.info("Paused generation %s", gen_id)
 
+    @_lifecycle_locked
     def resume_generation(self, gen_id: str) -> None:
         """Resume a paused generation back to 'active'."""
         manifest = self._load_manifest()
@@ -827,6 +1103,7 @@ class GenerationManager:
         self._save_manifest(manifest)
         logger.info("Resumed generation %s", gen_id)
 
+    @_lifecycle_locked
     def retire_generation(
         self,
         gen_id: str,
@@ -841,10 +1118,19 @@ class GenerationManager:
         if gen_data is None:
             raise ValueError(f"Generation {gen_id} not found")
 
-        gen_data["status"] = "retired"
+        # Publication precedes cleanup: an interrupted cleanup leaves a retired
+        # record and preserved state, never an active record with missing code.
+        if gen_data["status"] != "retired":
+            gen_data["status"] = "retired"
+            self._save_manifest(manifest)
+        else:
+            # A prior rename may have succeeded before directory fsync failed.
+            # Establish durability on retry before deleting the frozen code.
+            self._sync_directory(self._manifest_path.parent)
 
         if delete_worktree:
             worktree_path = gen_data["worktree_path"]
+            self._reject_lifecycle_symlinks(Path(worktree_path))
             if Path(worktree_path).exists():
                 try:
                     subprocess.run(
@@ -862,7 +1148,6 @@ class GenerationManager:
                         e.stderr.strip(),
                     )
 
-        self._save_manifest(manifest)
         logger.info("Retired generation %s", gen_id)
 
     def list_generations(self) -> list[GenerationInfo]:
@@ -914,6 +1199,8 @@ class GenerationManager:
             inherited_lock=inherited_lock,
             capture=capture,
         )
+        if preflight_mode is not None and "config_sha256" in capture:
+            result = {**result, "config_sha256": capture["config_sha256"]}
         finished_at = datetime.now(timezone.utc)
         try:
             date_index = extra_args.index("--date") + 1
@@ -964,6 +1251,25 @@ class GenerationManager:
     ) -> dict:
         """Produce the existing worker result and collect process diagnostics."""
         env = os.environ.copy()
+        from .generation_config import CONFIG_FILE_ENV, CONFIG_SHA_ENV, read_generation_config
+
+        env.pop(CONFIG_FILE_ENV, None)
+        env.pop(CONFIG_SHA_ENV, None)
+        if gen_data.get('config_file') is not None or gen_data.get('config_sha256') is not None:
+            try:
+                if not gen_data.get('config_file') or not gen_data.get('config_sha256'):
+                    raise ValueError('generation_config_invalid')
+                _, _, validated_config_sha256 = read_generation_config(
+                    gen_data['config_file'], gen_data['config_sha256']
+                )
+            except ValueError:
+                failure = {'success': False, 'elapsed_s': 0.0, 'error': 'generation_config_invalid'}
+                if preflight_mode is None:
+                    failure['outcome'] = RunOutcome.FAILED.value
+                return failure
+            capture['config_sha256'] = validated_config_sha256
+            env[CONFIG_FILE_ENV] = gen_data['config_file']
+            env[CONFIG_SHA_ENV] = gen_data['config_sha256']
         env["AUTORESEARCH_STATE_DIR"] = str(Path(gen_data["state_dir"]).resolve())
         env["PYTHONPATH"] = str(Path(gen_data["worktree_path"]).resolve())
         env["EVENTEDGE_GENERATION_ID"] = gen_data["gen_id"]
@@ -987,15 +1293,21 @@ class GenerationManager:
 
         start = time.monotonic()
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=gen_data["worktree_path"],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_GENERATION_TIMEOUT_S,
-                pass_fds=pass_fds,
-            )
+            if preflight_mode is not None:
+                proc = _run_preflight_worker(
+                    cmd, cwd=gen_data["worktree_path"], env=env,
+                    timeout=_GENERATION_TIMEOUT_S, pass_fds=pass_fds,
+                )
+            else:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=gen_data["worktree_path"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=_GENERATION_TIMEOUT_S,
+                    pass_fds=pass_fds,
+                )
             elapsed = time.monotonic() - start
             capture.update(
                 {
@@ -1103,6 +1415,9 @@ class GenerationManager:
                         failure["candidate_input_issues"] = candidate_issues
                     failure["input_coverage_valid"] = summary.input_coverage_valid
                     failure["source_health_failures"] = list(summary.source_health_failures)
+                    from .source_coverage import aggregate_source_scope_limits
+                    if limits := aggregate_source_scope_limits(cohort_results):
+                        failure['source_scope_limits'] = limits
                     return failure
 
                 if n_degraded:
@@ -1136,6 +1451,9 @@ class GenerationManager:
                         degraded_result["candidate_input_issues"] = candidate_issues
                     degraded_result["input_coverage_valid"] = summary.input_coverage_valid
                     degraded_result["source_health_failures"] = list(summary.source_health_failures)
+                    from .source_coverage import aggregate_source_scope_limits
+                    if limits := aggregate_source_scope_limits(cohort_results):
+                        degraded_result['source_scope_limits'] = limits
                     return degraded_result
 
             if proc.returncode != 0:
@@ -1161,12 +1479,15 @@ class GenerationManager:
                 gen_data["gen_id"],
                 elapsed,
             )
+            from .source_coverage import aggregate_source_scope_limits
+            scope_limits = aggregate_source_scope_limits(cohort_results)
             return {
                 "outcome": RunOutcome.CLEAN.value,
                 "success": True,
                 "execution_valid": summary.execution_valid,
                 "input_coverage_valid": summary.input_coverage_valid,
                 "source_health_failures": list(summary.source_health_failures),
+                **({'source_scope_limits': scope_limits} if scope_limits else {}),
                 "elapsed_s": round(elapsed, 2),
             }
 
@@ -1258,31 +1579,74 @@ class GenerationManager:
         return None
 
     def _load_manifest(self) -> dict:
-        """Load manifest.json. Returns empty structure if not found."""
-        if not self._manifest_path.exists():
-            return {"generations": []}
+        """An absent roster is initial state; corrupt existing state fails closed."""
         try:
-            with open(self._manifest_path) as f:
-                data = json.load(f)
-            if "generations" not in data:
-                data["generations"] = []
-            return data
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load manifest: %s", e)
+            with self._manifest_path.open() as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
             return {"generations": []}
+        except (ValueError, OSError) as error:
+            raise GenerationManifestError("generation manifest is unreadable or malformed") from error
+        self._validate_manifest(data)
+        return data
+
+    @staticmethod
+    def _validate_manifest(data: dict) -> None:
+        if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
+            raise GenerationManifestError("generation manifest requires a generations list")
+        optional_config = {'config_file', 'config_sha256'}
+        required = {item.name for item in fields(GenerationInfo)} - optional_config
+        seen = set()
+        for row in data["generations"]:
+            if not isinstance(row, dict) or not required.issubset(row):
+                raise GenerationManifestError("generation manifest has an incomplete record")
+            if any(not isinstance(row[key], str) for key in required - {"run_history"}):
+                raise GenerationManifestError("generation manifest has invalid field types")
+            identity = row["gen_id"]
+            if not re.fullmatch(r"gen_[0-9]{3,}", identity) or identity in seen:
+                raise GenerationManifestError("generation manifest has invalid or duplicate identities")
+            if row["status"] not in {"active", "paused", "retired"}:
+                raise GenerationManifestError("generation manifest has an invalid status")
+            if not isinstance(row["run_history"], list) or any(
+                not isinstance(entry, dict) for entry in row["run_history"]
+            ):
+                raise GenerationManifestError("generation manifest has an invalid run history")
+            if optional_config & row.keys():
+                from .generation_config import FROZEN_CONFIG_NAME
+
+                if (type(row.get('config_file')) is not str
+                        or row['config_file'] != str(Path(row['state_dir']) / FROZEN_CONFIG_NAME)
+                        or type(row.get('config_sha256')) is not str
+                        or not re.fullmatch(r'[0-9a-f]{64}', row['config_sha256'])):
+                    raise GenerationManifestError('generation manifest has invalid configuration identity')
+            seen.add(identity)
 
     def _save_manifest(self, data: dict) -> None:
         """Atomic write of manifest.json."""
         self._manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(self._manifest_path, (json.dumps(data, indent=2, default=str) + "\n").encode("utf-8"))
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _write_atomic(self, path: Path, body: bytes) -> None:
+        """Flush payload and directory entry before dependent lifecycle effects."""
         fd, tmp = tempfile.mkstemp(
-            dir=self._manifest_path.parent,
+            dir=self._generations_dir,
             suffix=".tmp",
         )
         try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2, default=str)
-                f.write("\n")
-            os.replace(tmp, self._manifest_path)
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            self._sync_directory(path.parent)
         except BaseException:
             try:
                 os.unlink(tmp)

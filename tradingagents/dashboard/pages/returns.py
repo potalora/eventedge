@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard.charts import make_equity_curves_facet
+from tradingagents.dashboard.benchmark_tables import (
+    ETF_COMPARISON_TITLE, ETF_COMPARISON_DISCLOSURE, ETF_COMPARISON_COLUMNS, etf_comparison_rows,
+)
 from tradingagents.dashboard.data_loaders import (
     get_active_generations,
     load_generation_metrics,
@@ -18,7 +22,7 @@ STRESS_TEST_LABEL = "$5k/$10k/$50k concentration stress tests"
 SHARPE_LABEL = "Annualized daily net Sharpe"
 INFORMATION_RATIO_LABEL = "Annualized matched-benchmark information ratio"
 ACCURACY_LABEL = "Directional accuracy (5 XNYS sessions)"
-INSUFFICIENT_HISTORY = "Insufficient history (<30 valid sessions)"
+INSUFFICIENT_HISTORY = RATIO_REQUIREMENTS
 
 
 def _rows(books: dict[str, dict]) -> list[dict[str, object]]:
@@ -26,12 +30,8 @@ def _rows(books: dict[str, dict]) -> list[dict[str, object]]:
         {
             "Book": name,
             "Net return": book.get("total_return"),
-            SHARPE_LABEL: book.get("annualized_daily_net_sharpe")
-            if book.get("annualized_daily_net_sharpe") is not None
-            else INSUFFICIENT_HISTORY,
-            INFORMATION_RATIO_LABEL: book.get("annualized_matched_information_ratio")
-            if book.get("annualized_matched_information_ratio") is not None
-            else INSUFFICIENT_HISTORY,
+            SHARPE_LABEL: ratio_display(book, "annualized_daily_net_sharpe"),
+            INFORMATION_RATIO_LABEL: ratio_display(book, "annualized_matched_information_ratio"),
             ACCURACY_LABEL: book.get("directional_accuracy_5d"),
             "Valid sessions": book.get("valid_sessions"),
         }
@@ -77,6 +77,10 @@ def render() -> None:
         hide_index=True,
         use_container_width=True,
     )
+    st.subheader(ETF_COMPARISON_TITLE)
+    st.caption(ETF_COMPARISON_DISCLOSURE)
+    st.dataframe(pd.DataFrame(etf_comparison_rows(report), columns=ETF_COMPARISON_COLUMNS),
+                 hide_index=True, use_container_width=True)
     st.subheader(STRESS_TEST_LABEL)
     st.dataframe(
         pd.DataFrame(_rows(dict(report.get("stress_tests", {}) or {}))),

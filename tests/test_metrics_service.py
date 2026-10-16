@@ -314,7 +314,7 @@ def _record_window(
                     session=session,
                     symbol=symbol,
                     close=Decimal(str(close)),
-                    return_basis="total_return_adjusted",
+                    return_basis="paired_total_return_index_v2",
                     source="fixture",
                     observed_at=observed_at,
                     valid=True,
@@ -459,6 +459,8 @@ def test_cohort_report_reads_once_bounds_fills_and_aggregates_once(
                 direction=signal.direction,
                 decision_at=signal.decision_at,
                 reference_session=signal.reference_session,
+                analysis_status="legacy_unknown", analysis_valid=False,
+                analysis_admitted=False, non_actionable_reason="missing_eligibility_evidence",
             ),
         )
         kwargs["signals"] = rows
@@ -541,6 +543,12 @@ def test_generation_report_empty_current_historical_and_panel_rules(
     assert empty.generation_report() == {
         "metric_schema_version": 2,
         "epoch": None,
+        "retained_obligation_diagnostics": {
+            "aggregation_prohibited": True,
+            "aggregate": None,
+            "scope": "original signal epochs; diagnostic obligations only; no portfolio performance",
+            "per_cohort": {empty_ledger.cohort_id: {"as_of_session": None, "epochs": {}}},
+        },
         "headline_books": {},
         "scenario_panel": None,
         "scenario_panel_available": False,
@@ -1259,7 +1267,9 @@ def test_generation_report_projects_matching_persisted_five_session_accuracy(
     ledger = ledger_factory("horizon_30d_size_100k")
     _record_window(ledger, "epoch-1", SESSIONS)
     matching_signal = _signal("matching")
-    ledger.record_signal(matching_signal)
+    retained = {"signal": {"journal_only": False, "metadata": {
+        "needs_llm_analysis": True, "analysis_status": "validated", "analysis_admitted": True}}}
+    ledger.record_signal_with_journal(matching_signal, retained, NOW, retained)
     service = MetricsService(tmp_path, {ledger.cohort_id: ledger})
     service.store.save_epoch(_epoch())
 
@@ -1461,7 +1471,7 @@ def _seed_clean_generation_book(
                     session=session,
                     symbol=symbol,
                     close=Decimal(str(close)),
-                    return_basis="total_return_adjusted",
+                    return_basis="paired_total_return_index_v2",
                     source="fixture",
                     observed_at=observed_at,
                     valid=True,

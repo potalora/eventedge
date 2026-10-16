@@ -29,7 +29,8 @@ class TestRegimeVixThreshold:
 
     def test_build_regime_model_reflects_threshold(self, tmp_path):
         eng = _engine(tmp_path, stressed=20.0)
-        data = {"yfinance": {"vix": pd.DataFrame({"Close": [21.5]})}, "fred": {}}
+        data = {"yfinance": {"vix": pd.DataFrame({"Close": [21.5]})},
+                "fred": {"BAMLH0A0HYM2": pd.Series([2.72]), "T10Y2Y": pd.Series([0.0])}}
         regime = eng._build_regime_model(data)
         assert regime["overall_regime"] == "stressed"
         assert regime["vix_regime"] == "elevated"

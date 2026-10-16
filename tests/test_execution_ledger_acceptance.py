@@ -21,7 +21,7 @@ from tradingagents.strategies.execution import (
 )
 from tradingagents.strategies.execution.cost_model import PaperCostModel
 from tradingagents.strategies.execution.price_source import AdjustedClose
-from tradingagents.strategies.orchestration.session_executor import SessionExecutor
+from tradingagents.strategies.orchestration.session_executor import PHASES, SessionExecutor
 from tradingagents.strategies.orchestration.trading_calendar import (
     next_session,
     session_close,
@@ -216,22 +216,10 @@ class _PriceSource:
         del tickers, session
         return []
 
-    def get_total_return_closes(
-        self,
-        symbols: list[str],
-        start_session: date,
-        end_session_inclusive: date,
-    ) -> dict[tuple[str, date], AdjustedClose]:
-        assert start_session == end_session_inclusive
+    def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
         return {
-            (symbol, start_session): AdjustedClose(
-                symbol,
-                start_session,
-                Decimal("100"),
-                "acceptance-adjusted",
-                _at_close(start_session),
-            )
-            for symbol in symbols
+            (symbol, session): AdjustedClose(symbol, session, Decimal("100"), "acceptance-adjusted", _at_close(end_session_inclusive))
+            for symbol in symbols for session in (start_session, end_session_inclusive)
         }
 
 
@@ -743,6 +731,8 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
             assert ledger.read_snapshots(MONDAY, MONDAY) == []
             assert ledger.read_fills(MONDAY, MONDAY) == []
             assert ledger.intent(due.intent_id).status == "cancelled"
+            # Closed WIN retains its realized P&L but is only an outcome obligation.
+            # Held inventory and the due entry still require exact execution bars.
             assert source.raw_requests == [
                 (("HELD", "NEW"), MONDAY, MONDAY, False)
             ]
@@ -837,7 +827,7 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 "marks": 1,
                 "account_snapshots": 1,
                 "benchmark_observations": 2,
-                "session_phases": 9,
+                "session_phases": len(PHASES),
             }
             assert ledger.account_state() == before_state
             assert ledger.intent(due.intent_id).status == "filled"
@@ -955,11 +945,15 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 True,
             )
             actions = [split, dividend]
+            cash_before = ledger.account_state().cash
             events = ledger.apply_corporate_actions(
                 MONDAY, actions, _at_close(MONDAY)
             )
             assert len(events) == 3
             state_after_first = ledger.account_state()
+            assert dividend.payment_date is None
+            assert state_after_first.cash == cash_before
+            assert state_after_first.dividend_receivable == Decimal("2.5000")
             ledger_path = ledger.path
             ledger.close()
             ledger = PortfolioLedger(ledger_path, COHORT, Decimal("5000"))
@@ -991,7 +985,16 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 ledger.connection.execute(
                     "SELECT dividend_cash FROM accounting_state"
                 ).fetchone()[0]
-            ) == Decimal("2.5000")
+            ) == Decimal("0")
+            assert ledger.connection.execute(
+                "SELECT COUNT(*) FROM cash_events WHERE event_type='dividend'"
+            ).fetchone()[0] == 0
+            # Unknown payment dates retain the signed entitlement in equity,
+            # while neither first application nor restart turns it into cash.
+            marked = ledger.account_state({"AAPL": Decimal("50")})
+            assert marked.cash == cash_before
+            assert marked.dividend_receivable == Decimal("2.5000")
+            assert marked.net_equity == cash_before + Decimal("200") - Decimal("100") + Decimal("2.5000")
         elif case == "compatibility_json_matches_ledger":
             long_order = _intent(
                 ledger,

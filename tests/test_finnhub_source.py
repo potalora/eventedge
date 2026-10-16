@@ -160,6 +160,21 @@ def test_fetch_company_news_recovers_after_transient_429():
     assert len(session.calls) == 2
 
 
+def test_news_observation_clock_is_real_acquisition_and_survives_cache():
+    from datetime import datetime, timezone
+    session = _FakeSession([[{'headline': 'Observed news', 'summary': 'Complete summary',
+                             'datetime': 1, 'url': 'https://example.test/story'}]])
+    src = FinnhubSource(api_key='k', reliability_config=_reliability_config(), http_session=session)
+    before = datetime.now(timezone.utc)
+    first = src.fetch_company_news('AAPL', '2026-05-01', '2026-05-08')
+    after = datetime.now(timezone.utc)
+    observed = datetime.fromisoformat(first[0]['observed_at'])
+    assert before <= observed <= after
+    assert first[0]['observed_at'] != first[0]['published_at']
+    assert src.fetch_company_news('AAPL', '2026-05-01', '2026-05-08') == first
+    assert len(session.calls) == 1
+
+
 def test_malformed_earnings_date_degrades_without_starting_request(caplog):
     session = _FakeSession([])
     src = FinnhubSource(

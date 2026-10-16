@@ -241,7 +241,7 @@ def test_july_16_noise_cannot_crowd_out_public_company_cases(
         {"max_positions": 3},
     )
 
-    assert [candidate.ticker for candidate in candidates] == ["REGN", "FIVE", "AAPL"]
+    assert [candidate.ticker for candidate in candidates] == ["REGN", "AAPL", "FIVE"]
 
 
 def test_duplicate_dockets_are_selected_once(

@@ -26,6 +26,10 @@ ALLOWED_MODEL_KEYS = frozenset(
         "autoresearch_model",
         "llm_effort",
         "portfolio_committee_model",
+        "portfolio_committee_effort",
+        "thesis_model",
+        "thesis_effort",
+        "llm_billing_mode",
     }
 )
 
@@ -46,9 +50,17 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "risk_gate",
         "short_selling",
         "portfolio_policy",
+        "risk_discipline",
+        "carrying_cost_clock",
+        "corporate_action_terms",
+        "daily_loss_basis",
+        "signal_return_basis",
+        "benchmark_return_basis",
+        "research_resilience_policy",
     }
 )
 _NESTED_POLICY_KEYS = {
+    "risk_discipline": frozenset({"reentry_cooldown_days"}),
     "execution": frozenset({"mode", "price_rules"}),
     "calendar": frozenset({"name", "provider", "provider_version"}),
     "cost_model": frozenset(
@@ -154,19 +166,27 @@ def _validate_execution_policy_schema(policy: object) -> None:
         )
     # Explicitly injected fixture documents may omit runtime provider policy.
     optional = {
-        "portfolio_policy", "price_source_policy", "benchmark_price_source_policy"
+        "portfolio_policy", "price_source_policy", "benchmark_price_source_policy",
+        "risk_discipline", "carrying_cost_clock", "corporate_action_terms", "daily_loss_basis",
+        "signal_return_basis", "benchmark_return_basis", "research_resilience_policy"
     }
     missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
         )
+    if "research_resilience_policy" in policy:
+        from .research_resilience import configured
+        if not configured(policy):
+            raise ValueError("invalid_research_resilience_policy")
     source_keys = {"price_source_policy", "benchmark_price_source_policy"}
     if actual & source_keys and not source_keys.issubset(actual):
         raise ValueError("execution_policy price source policy pair is incomplete")
     for key in actual & source_keys:
         _required_text(f"execution_policy.{key}", policy[key])
     for container, allowed in _NESTED_POLICY_KEYS.items():
+        if container == "risk_discipline" and container not in policy:
+            continue
         nested = policy[container]
         if not isinstance(nested, dict):
             raise TypeError(f"execution_policy.{container} must be a dict")
@@ -246,6 +266,7 @@ def build_epoch_context(
     models: Mapping[str, str | None],
     strategies: tuple[str, ...],
     cohort_policies: tuple[CohortSemanticPolicy, ...],
+    disabled_strategies: Mapping[str, str] | None = None,
 ) -> EpochContext:
     """Return a deterministic context from explicit, secret-free semantics."""
     generation_id = _required_text("generation_id", generation_id)
@@ -257,17 +278,23 @@ def build_epoch_context(
             f"unexpected model key {sorted(unexpected_model_keys)[0]!r}"
         )
     # Earlier frozen generations did not bind these settings explicitly.
-    legacy_model_keys = ALLOWED_MODEL_KEYS - {"llm_effort", "portfolio_committee_model"}
+    legacy_model_keys = ALLOWED_MODEL_KEYS - {
+        "llm_effort", "portfolio_committee_model", "portfolio_committee_effort",
+        "thesis_model", "thesis_effort", "llm_billing_mode",
+    }
     missing_model_keys = legacy_model_keys - actual_model_keys
     if missing_model_keys:
         raise ValueError(
             f"model key set is missing {sorted(missing_model_keys)[0]!r}"
         )
+    if "llm_billing_mode" in models and models["llm_billing_mode"] not in {"api", "chatgpt_plan"}:
+        raise ValueError("invalid llm billing mode")
     model_document = {
         _required_text("model key", key): (
             _required_text(f"model {key}", value) if value is not None else None
         )
         for key, value in sorted(models.items())
+        if key != "llm_billing_mode" or value == "chatgpt_plan"
     }
     strategy_document = tuple(
         _required_text("strategy", strategy) for strategy in strategies
@@ -304,7 +331,16 @@ def build_epoch_context(
         tuple(sorted(strategy_document)),
         tuple((row.name, row.use_llm) for row in sorted_policies),
     )
-    config_hash = stable_id("metric_configuration", policy_document)
+    disabled = dict(disabled_strategies or {})
+    if not set(disabled).issubset(strategy_document) or any(
+        not isinstance(reason, str) or not reason.strip() for reason in disabled.values()
+    ):
+        raise ValueError("invalid disabled strategy policy")
+    # Preserve legacy document hashes when no exclusion was specified.
+    config_hash = (
+        stable_id("metric_configuration", policy_document, {"disabled_strategies": dict(sorted(disabled.items()))})
+        if disabled else stable_id("metric_configuration", policy_document)
+    )
     return EpochContext(
         generation_id=generation_id,
         generation_commit=generation_commit,

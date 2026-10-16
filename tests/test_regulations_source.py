@@ -7,6 +7,7 @@ client-side instead. These tests pin that behavior (all mocked, no network).
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +36,9 @@ def _mock_response(docs):
             for d in docs
         ]
     }
+    resp.headers = {}
+    resp.iter_content.side_effect = lambda chunk_size: iter([json.dumps(resp.json.return_value).encode()])
+    resp.json.return_value["meta"] = {"totalPages": 1, "totalElements": len(docs)}
     return resp
 
 
@@ -78,7 +82,7 @@ def test_get_recent_proposed_rules_filters_each_agency_by_date():
         {"id": "new", "posted": recent, "agency": "EPA"},
         {"id": "old", "posted": old, "agency": "EPA"},
     ]
-    with patch("time.sleep"), patch("requests.get", return_value=_mock_response(docs)):
+    with patch("time.sleep"), patch("requests.get", side_effect=lambda *a, **kw: _mock_response([dict(d, agency=kw["params"]["filter[agencyId]"]) for d in docs])):
         rules = src.get_recent_proposed_rules(agencies=["EPA", "SEC"], days_back=14)
     # Only the recent rule survives the client-side date filter (returned for each agency call).
     assert all(r["document_id"] == "new" for r in rules)

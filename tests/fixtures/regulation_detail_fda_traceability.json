@@ -1,0 +1,105 @@
+{
+  "data" : {
+    "id" : "FDA-2025-D-6952-0001",
+    "type" : "documents",
+    "links" : {
+      "self" : "https://api.regulations.gov/v4/documents/FDA-2025-D-6952-0001"
+    },
+    "attributes" : {
+      "additionalRins" : null,
+      "allowLateComments" : false,
+      "authorDate" : null,
+      "authors" : null,
+      "cfrPart" : "21 CFR Part 1",
+      "commentEndDate" : null,
+      "commentStartDate" : "2026-10-09T04:00:00Z",
+      "effectiveDate" : "2026-10-09T04:00:00Z",
+      "exhibitLocation" : null,
+      "exhibitType" : null,
+      "frDocNum" : "2026-20721",
+      "frVolNum" : "91 FR 64629",
+      "implementationDate" : null,
+      "media" : null,
+      "ombApproval" : null,
+      "paperLength" : 0,
+      "paperWidth" : 0,
+      "regWriterInstruction" : null,
+      "sourceCitation" : null,
+      "startEndPage" : "64629 - 64631",
+      "subject" : null,
+      "topics" : null,
+      "address1" : null,
+      "address2" : null,
+      "agencyId" : "FDA",
+      "city" : null,
+      "category" : null,
+      "comment" : null,
+      "country" : null,
+      "displayProperties" : [ {
+        "name" : "effectiveDate",
+        "label" : "Document Date",
+        "tooltip" : "The date the document is effective"
+      }, {
+        "name" : "pageCount",
+        "label" : "Page Count",
+        "tooltip" : "Number of pages In the content file"
+      } ],
+      "docAbstract" : null,
+      "docketId" : "FDA-2025-D-6952",
+      "documentType" : "Proposed Rule",
+      "email" : null,
+      "fax" : null,
+      "field1" : null,
+      "field2" : null,
+      "fileFormats" : [ {
+        "fileUrl" : "https://downloads.regulations.gov/FDA-2025-D-6952-0001/content.pdf",
+        "format" : "pdf",
+        "size" : 224185
+      }, {
+        "fileUrl" : "https://downloads.regulations.gov/FDA-2025-D-6952-0001/content.html",
+        "format" : "html",
+        "size" : 11266
+      } ],
+      "firstName" : null,
+      "govAgency" : null,
+      "govAgencyType" : null,
+      "objectId" : "09000064b96577e1",
+      "lastName" : null,
+      "legacyId" : null,
+      "modifyDate" : "2026-10-09T17:58:29Z",
+      "organization" : null,
+      "originalDocumentId" : "FDA_FRDOC_0001-14545",
+      "pageCount" : 3,
+      "phone" : null,
+      "postedDate" : "2026-10-09T04:00:00Z",
+      "postmarkDate" : null,
+      "reasonWithdrawn" : null,
+      "receiveDate" : "2026-10-09T04:00:00Z",
+      "restrictReason" : null,
+      "restrictReasonType" : null,
+      "stateProvinceRegion" : null,
+      "submitterRep" : null,
+      "submitterRepAddress" : null,
+      "submitterRepCityState" : null,
+      "subtype" : "Notice of Proposed Rulemaking (NPRM)",
+      "title" : "Requirements for Additional Traceability Records for Certain Foods: Enforcement Policy for Certain Retail Food Establishments and Restaurants; Draft Guidance for Industry; Availability",
+      "trackingNbr" : null,
+      "withdrawn" : false,
+      "zip" : null,
+      "openForComment" : false,
+      "withinCommentPeriod" : false
+    },
+    "relationships" : {
+      "attachments" : {
+        "data" : [ ],
+        "links" : {
+          "self" : "https://api.regulations.gov/v4/documents/FDA-2025-D-6952-0001/relationships/attachments",
+          "related" : "https://api.regulations.gov/v4/documents/FDA-2025-D-6952-0001/attachments"
+        }
+      }
+    }
+  },
+  "links" : {
+    "self" : "https://regulations.gov/v4/documents/FDA-2025-D-6952-0001?include=attachments"
+  }
+}

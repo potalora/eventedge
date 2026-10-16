@@ -13,8 +13,10 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tradingagents.strategies.orchestration.operational_report import (
-    build_operational_report, write_operational_report,
+    build_operational_report, write_operational_report, report_runtime_guard,
 )
+from tradingagents.strategies.orchestration.source_repair import publish_repair_proposal
+from tradingagents.strategies.orchestration.source_repair_intervention import publish_intervention_proposal
 from tradingagents.strategies.orchestration.runtime_lock import (
     RuntimeLockBusy, RuntimeLockInvalid, canonical_runtime_lock_path, runtime_lock,
 )
@@ -34,9 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     repo = arguments.repo_root.resolve()
     output = arguments.output_dir or repo / 'docs/reports'
     try:
-        guard = nullcontext() if arguments.snapshot_guaranteed else runtime_lock(
-            canonical_runtime_lock_path(repo), exclusive=False
-        )
+        guard = report_runtime_guard(repo, snapshot_guaranteed=arguments.snapshot_guaranteed)
         with guard:
             if arguments.generation:
                 generations = [arguments.generation]
@@ -51,9 +51,21 @@ def main(argv: list[str] | None = None) -> int:
                 # manifest, attempts and all databases for this report batch.
                 report = build_operational_report(repo,generation,arguments.session,snapshot_guaranteed=True)
                 paths = write_operational_report(report,output)
+                proposal = publish_repair_proposal(report, paths)
+                try:
+                    intervention = publish_intervention_proposal(report, paths)
+                except PermissionError:
+                    intervention = {'path':None,'status':'unavailable','cases_count':0,
+                                    'diagnostics':['publication_denied']}
+                except (ValueError,OSError,TypeError,KeyError):
+                    intervention = {'path':None,'status':'unavailable','cases_count':0,
+                                    'diagnostics':['publication_unavailable']}
                 reports.append({'generation':generation,'outcome':report['outcome'],
                                 'evidence_complete':report['evidence_complete'],
-                                'json':str(paths['json']),'markdown':str(paths['markdown'])})
+                                'source_incidents':report['source_incidents'],
+                                'json':str(paths['json']),'markdown':str(paths['markdown']),
+                                'source_repair_proposal':str(proposal),
+                                'source_intervention':intervention})
         print(json.dumps({'reports':reports},sort_keys=True))
         return 0 if all(row['evidence_complete'] and row['outcome'] in {'clean','degraded'} for row in reports) else 2
     except (OSError, ValueError, TypeError, KeyError, RuntimeLockBusy, RuntimeLockInvalid):

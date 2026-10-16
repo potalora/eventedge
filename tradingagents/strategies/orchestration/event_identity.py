@@ -1,4 +1,4 @@
-"""Source-native event identities for the 12 active paper strategies."""
+"""Source-native event identities for configured paper research strategies."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ ACTIVE_STRATEGY_NAMES = frozenset(
         "weather_ag",
         "commodity_macro",
         "quantum_readiness",
+        "bounded_document_research",
     }
 )
 
@@ -43,8 +44,8 @@ _AVAILABILITY_FIELDS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("observation_date", True),
     ),
     "state_economics": (("window_end", True),),
-    "weather_ag": (("window_end", True),),
-    "commodity_macro": (("window_end", True),),
+    "weather_ag": (("available_at", False), ("window_end", True)),
+    "commodity_macro": (("available_at", False), ("window_end", True)),
     "quantum_readiness": (("published_at", False), ("window_end", True)),
 }
 
@@ -77,6 +78,8 @@ def _availability_timestamp(value: object, *, date_only: bool, field: str) -> da
 
 def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
     """Resolve when source evidence became available without using economic dates."""
+    if strategy == 'state_economics' and metadata.get('state_economics_policy') == 'state_unemployment_v1':
+        return _availability_timestamp(_required(metadata, 'available_at', strategy), date_only=False, field='available_at')
     values: list[datetime] = []
     if metadata.get("observed_at") not in (None, ""):
         values.append(
@@ -110,7 +113,7 @@ def _required(metadata: dict[str, Any], key: str, strategy: str) -> object:
 def _insider_filing_key(filing: dict[str, Any]) -> object:
     for key in ("accession_number", "accession_no", "filing_id", "id"):
         if _present(filing.get(key)):
-            return (key, filing[key])
+            return (key, filing[key], filing.get("owner_cik") or filing.get("owner_name"), filing.get("transaction_id") or (filing.get("transaction_date"), filing.get("transaction_code"), filing.get("acquired_disposed"), filing.get("shares"), filing.get("price_per_share")))
     identity = {
         key: filing.get(key)
         for key in (
@@ -141,7 +144,26 @@ def canonical_event_key(
     family: str
     payload: object
 
-    if strategy == "earnings_call":
+    if strategy == 'bounded_document_research':
+        import re
+        source = metadata.get('bounded_document_source')
+        if not isinstance(source, dict):
+            raise ValueError('bounded document candidate lacks retained source identity')
+        document_id = _required(source, 'document_id', strategy)
+        original_sha = _required(source, 'original_sha256', strategy)
+        pages = _required(source, 'selected_pages', strategy)
+        if (not isinstance(document_id, str) or not document_id.strip()
+                or not isinstance(original_sha, str) or re.fullmatch('[0-9a-f]{64}', original_sha) is None
+                or type(pages) is not list or not 1 <= len(pages) <= 8
+                or any(type(page) is not int or page < 1 for page in pages)
+                or len(set(pages)) != len(pages)):
+            raise ValueError('bounded document candidate source identity invalid')
+        available = _availability_timestamp(_required(source, 'as_of', strategy),
+            date_only=False, field='as_of')
+        family = 'retained_document_pages'
+        payload = {'document_id': document_id, 'original_sha256': original_sha,
+                   'selected_pages': pages, 'as_of': available.isoformat()}
+    elif strategy == "earnings_call":
         family = "fiscal_period"
         payload = {
             "year": _required(metadata, "year", strategy),
@@ -216,7 +238,7 @@ def canonical_event_key(
         source = _required(metadata, "source", strategy)
         if source == "usaspending":
             family = "federal_award"
-            payload = _required(metadata, "award_id", strategy)
+            payload = metadata.get("award_key") or _required(metadata, "award_id", strategy)
         elif source == "momentum_fallback":
             family = "daily_contract_proxy_state"
             payload = {
@@ -226,15 +248,26 @@ def canonical_event_key(
         else:
             raise ValueError("govt_contracts candidate lacks source identity")
     elif strategy == "state_economics":
-        family = "state_economics_observation_window"
-        payload = {
-            "source_observation_ids": sorted(
-                str(item)
-                for item in _required(metadata, "source_observation_ids", strategy)
-            ),
-            "window_end": _required(metadata, "window_end", strategy),
-            "regional_sector": _required(metadata, "regional_sector", strategy),
-        }
+        if metadata.get('state_economics_policy') == 'state_unemployment_v1':
+            from ..data_sources.state_economics_policy import SERIES, day
+            event = _required(metadata, 'state_event', strategy)
+            if not isinstance(event, dict) or event.get('series_id') != SERIES.get(event.get('state')):
+                raise ValueError('invalid state source event identity')
+            period, vintage = day(event.get('observation_date')), day(event.get('vintage_date'))
+            native = f'fred:{event["series_id"]}:{period.isoformat()}:{vintage.isoformat()}'
+            if period.day != 1 or event.get('source_observation_id') != native:
+                raise ValueError('invalid state source event identity')
+            family, payload = 'fred_state_unemployment_vintage', native
+        else:
+            family = "state_economics_observation_window"
+            payload = {
+                "source_observation_ids": sorted(
+                    str(item)
+                    for item in _required(metadata, "source_observation_ids", strategy)
+                ),
+                "window_end": _required(metadata, "window_end", strategy),
+                "regional_sector": _required(metadata, "regional_sector", strategy),
+            }
     elif strategy == "weather_ag":
         family = "weather_observation_window"
         payload = {

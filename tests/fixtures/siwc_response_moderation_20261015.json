@@ -1,0 +1,63 @@
+{
+  "version": "siwc-moderation-semantic-fixture-v1",
+  "source_sha256": "b58a29db5ea4513d0d0bfb7665204252e1cedac5a705178715dca9d7181f7ed1",
+  "native_event": {
+    "record": "event",
+    "ordinal": 872,
+    "protocol_type": "response.metadata",
+    "sequence_shape": "integer",
+    "sequence_number": 871,
+    "moderation_observation": {
+      "exact_observed_container_structure": true,
+      "protection_type": "omnimod",
+      "outputs_count": 1,
+      "outputs": [
+        {
+          "is_blocked_shape": "boolean",
+          "is_blocked": false,
+          "results_count": 1,
+          "category_summaries": [
+            {
+              "category_count": 42,
+              "category_flags_shape": "object",
+              "all_boolean": true,
+              "any_true": false
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "native_failure": {
+    "record": "failure",
+    "code": "stream_invalid",
+    "function": "_informational_metadata",
+    "line": 185,
+    "delta_count": 863,
+    "ordinal": 872,
+    "protocol_type": "response.metadata",
+    "sequence_shape": "integer",
+    "sequence_number": 871,
+    "moderation_observation": {
+      "exact_observed_container_structure": true,
+      "protection_type": "omnimod",
+      "outputs_count": 1,
+      "outputs": [
+        {
+          "is_blocked_shape": "boolean",
+          "is_blocked": false,
+          "results_count": 1,
+          "category_summaries": [
+            {
+              "category_count": 42,
+              "category_flags_shape": "object",
+              "all_boolean": true,
+              "any_true": false
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "scope": "Retained authorized protocol enum and boolean summary only. Category names/individual values, contents and identities not retained. Native attempt remains failed."
+}

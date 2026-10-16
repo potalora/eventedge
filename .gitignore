@@ -2,7 +2,6 @@
 .claude/
 
 # Lock files
-uv.lock
 
 # Scratch files
 test.py

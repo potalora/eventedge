@@ -11,7 +11,8 @@ import logging
 import math
 import os
 import json
-from dataclasses import asdict
+import re
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Iterable, Mapping
@@ -35,6 +36,8 @@ from tradingagents.strategies.state.portfolio_ledger import (
     PortfolioLedger,
 )
 
+from tradingagents.strategies.runtime_deadline import bounded_model_phase
+
 logger = logging.getLogger(__name__)
 
 _FINNHUB_FETCH_SAFETY_MARGIN_S = 30.0
@@ -44,6 +47,29 @@ _DIAGNOSTIC_HOLDING_SESSIONS = 5
 # Shared fetch uses OpenBB only for optional enrichment/expansion, not for
 # required screen inputs. Keep this distinction consistent with preflight.
 OPTIONAL_ENRICHMENT_SOURCES = frozenset({"openbb"})
+
+
+def _enrichment_failures(enrichment: Mapping[str, Any]) -> list[dict]:
+    """Retain optional failure identities without provider messages or URLs."""
+    errors = enrichment.get("errors", {})
+    if not isinstance(errors, Mapping):
+        return []
+    reasons = {"timeout", "transport_error", "http_error", "invalid_response",
+               "provider_error", "batch_failure"}
+    failures = []
+    for operation in ("commodity_futures_curves", "factors", "profiles", "short_interest"):
+        entries = errors.get(operation)
+        if not isinstance(entries, Mapping):
+            continue
+        items = [(None, entries)] if operation == "factors" else entries.items()
+        for symbol, details in items:
+            safe_symbol = (symbol if isinstance(symbol, str) and
+                           re.fullmatch(r"[A-Za-z0-9.^=_-]{1,32}", symbol) else "unknown")
+            reason = details.get("reason_code") if isinstance(details, Mapping) else None
+            failures.append({"operation": operation,
+                             "symbol": None if operation == "factors" else safe_symbol,
+                             "reason_code": reason if isinstance(reason, str) and reason in reasons else "provider_error"})
+    return sorted(failures, key=lambda item: (item["operation"], item["symbol"] or "", item["reason_code"]))
 
 
 def _provider_errors(
@@ -104,6 +130,9 @@ def _positions_to_price(
 
 _MUTABLE_EVIDENCE_KEYS = {
     "llm_analysis",
+    "document_assessment",
+    "filing_assessment",
+    "model_provenance",
     "llm_conviction",
     "needs_llm_analysis",
 }
@@ -231,6 +260,34 @@ def _gather_with_timeout(
     return results
 
 
+def model_sample_incomplete(signals, health=()):
+    """Coverage survives removal of unresolved/blocked candidates from signals."""
+    return any((s.get("metadata") or {}).get("analysis_failure_reason") == "model_deadline_exhausted" for s in signals) or any(
+        isinstance(record.evidence.get("model_coverage"), dict)
+        and record.evidence["model_coverage"].get("complete") is False for record in health)
+
+
+def hold_incomplete_model_sample(signals, health, *, incomplete=False):
+    """Keep admitted evidence but prohibit selection of a timeout-biased sample."""
+    if not incomplete and not model_sample_incomplete(signals, health):
+        return signals, health
+    for signal in signals:
+        signal["journal_only"] = True
+        signal.setdefault("metadata", {}).update(analysis_status="failed",
+            analysis_failure_reason="model_deadline_exhausted", non_actionable_reason="model_sample_incomplete")
+    from .research_resilience import hold_signals
+    hold_signals(signals, 'model_sample_incomplete')
+    for record in health:
+        for event in record.evidence.get('state_economic_events', []):
+            event.update(journal_only=True, analysis_status='failed',
+                analysis_failure_reason='model_deadline_exhausted', non_actionable_reason='model_sample_incomplete')
+    health = [replace(record, status="data_failure", evidence={**record.evidence,
+        "provider_errors": {**record.evidence.get("provider_errors", {}), "analysis": "model_deadline_exhausted"},
+        "model_coverage": {"complete": False, "reason": "model_deadline_exhausted"},
+        "actionable_candidate_count": 0}) if record.status != "disabled_by_policy" else record for record in health]
+    return signals, health
+
+
 class MultiStrategyEngine:
     """Paper-trading-first strategy engine.
 
@@ -258,9 +315,31 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from ..data_sources.regulation_graphics_grid import configured as graphics_execution_configured
+        graphics_execution_configured(self.config)
+        from ..data_sources.regulation_assessment import configured as regulation_assessment_configured
+        regulation_assessment_configured(self.ar_config)
+        from .filing_research_policy import configured as filing_research_disabled
+        filing_research_disabled(self.ar_config)
+        from .research_resilience import configured as research_resilience_configured
+        research_resilience_configured(self.ar_config)
+        from .congress_policy import configured
+        configured(self.ar_config)
+        from tradingagents.strategies.data_sources.filing_attribution_policy import configured as filing_attribution_configured
+        filing_attribution_configured(self.ar_config)
+        from .filing_acquisition_validation import configured as filing_acquisition_configured
+        filing_acquisition_configured(self.ar_config)
+        from tradingagents.strategies.data_sources.filing_material_policy import configured as filing_material_configured
+        filing_material_configured(self.ar_config)
 
         # Load strategies (paper-trade only)
-        self.paper_trade_strategies = strategies or get_paper_trade_strategies()
+        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
+        self.paper_trade_strategies = configure_strategies(strategies or get_paper_trade_strategies(), self.ar_config)
+        from .bounded_document_inputs import configure_strategies as configure_document_strategies
+        self.paper_trade_strategies = configure_document_strategies(self.paper_trade_strategies, self.ar_config)
+
+        from .source_lifecycle_policy import configured as lifecycle_configured
+        lifecycle_configured(self.ar_config, self.paper_trade_strategies)
 
         # Data source registry
         self.registry = registry or build_default_registry(self.ar_config)
@@ -337,6 +416,7 @@ class MultiStrategyEngine:
                 best[st] = signal
         return [s for s in best.values() if s.get("ticker", "").strip()]
 
+    @bounded_model_phase
     def screen_and_enrich(
         self,
         trading_date: str,
@@ -351,38 +431,369 @@ class MultiStrategyEngine:
         Returns enriched, deduped signals, regime model, and health records. These can be
         shared across cohorts so LLM non-determinism doesn't confound results.
         """
-        regime_model = self._build_regime_model(data)
+        from .congress_policy import configured, audit_scope, DECLARATION_KEY, POLICY as CONGRESS_POLICY
+        from .research_resilience import configured as resilience_configured, project_sources
+        resilience = resilience_configured(self.ar_config)
+        research_scope = None
+        research_hold_reasons = []
+        from .source_lifecycle_policy import declared_scope, DECLARATION_KEY as LIFECYCLE_KEY, health_evidence
+        retirement_scope = declared_scope(data, self.ar_config, self.paper_trade_strategies)
+        congress_audit_scope = audit_scope(data, self.ar_config, trading_date)
+        signal_data = ({key: value for key, value in data.items() if key not in ('congress', DECLARATION_KEY)}
+                       if configured(self.ar_config) else data)
+        if retirement_scope is not None:
+            signal_data = {key: value for key, value in signal_data.items() if key != LIFECYCLE_KEY}
+        if resilience:
+            from .source_inputs import source_codec_limits
+            names = set(data) | {'fred', 'yfinance'}
+            if self.ar_config.get('equity_universe_policy'):
+                names.add('equity_universe')
+            names.update(source for strategy in self.paper_trade_strategies
+                         for source in strategy.data_sources)
+            _, research_scope = project_sources(data, names,
+                codec_limits=source_codec_limits(self.config))
+            signal_data = {key: value for key, value in signal_data.items()
+                           if key in research_scope['usable_sources']}
+        from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
+        scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
+        if resilience and any(not isinstance(data.get(source), dict)
+                or not isinstance(data[source].get('error'), str) or not data[source]['error'].strip()
+                for source in scope_errors):
+            raise ValueError('invalid_scoped_source_evidence')
+        from .regulation_inputs import validate_regulation_policy
+        regulation_source_scope = None
+        try:
+            regulation_source_scope = validate_regulation_policy(data, self.ar_config)
+        except ValueError:
+            if resilience:
+                raise
+            scope_errors['regulations'] = 'invalid_regulation_evidence_policy'
+        from .filing_policy_validation import validate_filing_comparison_policy
+        filing_comparison_scope = None
+        try:
+            filing_comparison_scope = validate_filing_comparison_policy(data, self.ar_config)
+        except ValueError:
+            if resilience:
+                raise
+            scope_errors['edgar'] = 'invalid_filing_comparison_policy'
+        from .filing_attribution_validation import validate_filing_attribution_policy
+        from tradingagents.strategies.data_sources.filing_attribution_policy import (
+            configured as filing_attribution_configured, signal_edgar,
+        )
+        filing_attribution_scope = None
+        try:
+            filing_attribution_scope = validate_filing_attribution_policy(data, self.ar_config)
+            if filing_attribution_configured(self.ar_config) and not resilience:
+                signal_data = dict(signal_data, edgar=(signal_edgar(data['edgar'], filing_attribution_scope)
+                    if filing_attribution_scope is not None else {}))
+        except ValueError:
+            if resilience:
+                raise
+            scope_errors['edgar'] = 'invalid_filing_attribution_policy'
+            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        from .filing_acquisition_validation import validate_filing_acquisition_policy
+        filing_acquisition_scope = None
+        try:
+            filing_acquisition_scope = validate_filing_acquisition_policy(data, self.ar_config)
+        except ValueError:
+            if resilience:
+                raise
+            scope_errors['edgar'] = 'invalid_filing_acquisition_policy'
+            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        from .filing_material_validation import validate_filing_material_policy, signal_edgar as material_signal_edgar
+        from tradingagents.strategies.data_sources.filing_material_policy import configured as filing_material_configured
+        filing_material_scope = None
+        try:
+            filing_material_scope = validate_filing_material_policy(data, self.ar_config)
+            if filing_material_configured(self.ar_config) and not resilience and 'edgar' not in scope_errors:
+                signal_data = dict(signal_data, edgar=(material_signal_edgar(data['edgar'],
+                    filing_material_scope, projected_edgar=signal_data.get('edgar'))
+                    if filing_material_scope is not None else {}))
+        except ValueError:
+            if resilience:
+                raise
+            scope_errors['edgar'] = 'invalid_filing_material_policy'
+            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        filing_isolation = None
+        if resilience and filing_material_configured(self.ar_config):
+            from .filing_research_isolation import isolate_filing_research
+            projected_edgar, filing_isolation = isolate_filing_research(data.get('edgar', {}),
+                self.ar_config, strict_material_scope=filing_material_scope,
+                acquisition_scope=filing_acquisition_scope)
+            if filing_isolation['discovery_scope']['outcome'] == 'complete':
+                signal_data = dict(signal_data, edgar=projected_edgar)
+            else:
+                signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
+        regime_model = self._build_regime_model(signal_data)
+        if resilience:
+            # Every analyzer and committee consumes the shared regime. Unknown
+            # dependencies therefore hold all new entries, including unrelated
+            # otherwise healthy source candidates.
+            if any(regime_model[key] is None for key in
+                   ('vix_level', 'credit_spread_bps', 'yield_curve_slope')):
+                research_hold_reasons.append('shared_regime_unavailable')
+            regime_model['research_source_scope'] = research_scope
+            regime_model['filing_research_isolation'] = filing_isolation
+            regime_model['research_hold_reasons'] = research_hold_reasons
         regime_model.setdefault("timestamp", datetime.now().isoformat())
+        if 'courtlistener' in scope_proofs and (not resilience or 'courtlistener' in signal_data):
+            from .scoped_sources import litigation_context
+            regime_model['litigation_context'] = litigation_context(data, scope_proofs['courtlistener'])
 
+        if resilience:
+            from .research_resilience import digest as research_digest
+            codec_limits = source_codec_limits(self.config)
+            regime_model['research_projection_sha256'] = research_digest(signal_data, codec_limits=codec_limits)
+
+        universe = None
+        universe_failure = False
+        if self.ar_config.get("equity_universe_policy"):
+            from tradingagents.strategies.data_sources.equity_universe import EquityUniverse, POLICY
+            if resilience and self.ar_config['equity_universe_policy'] != POLICY:
+                raise ValueError('invalid_research_universe_policy')
+            if resilience and 'equity_universe' not in signal_data:
+                universe_failure = True
+            else:
+                try:
+                    if self.ar_config["equity_universe_policy"] != POLICY:
+                        raise ValueError("unsupported equity universe policy")
+                    selected = signal_data if resilience else data
+                    universe_data = selected.get("equity_universe", {})
+                    if universe_data.get("error"):
+                        raise ValueError("equity universe acquisition failed")
+                    universe = EquityUniverse(universe_data.get("snapshot"),
+                        company_map=selected.get("edgar", {}).get("company_tickers"))
+                except (ValueError, TypeError, AttributeError):
+                    if resilience and universe_data.get('snapshot') is not None:
+                        raise
+                    universe_failure = True
+        if resilience and universe_failure:
+            research_hold_reasons.append('required_universe_unavailable')
+        from tradingagents.strategies.data_sources.state_economics_policy import configured as state_configured
+        state_enabled = state_configured(self.ar_config)
+        state_failure = None
+        state_coverage = None
+        state_scope = None
+        if state_enabled:
+            signal_data = dict(signal_data, _state_economics_universe=universe)
+            try:
+                from .state_inputs import state_policy_scope
+                state_scope = state_policy_scope(data, self.ar_config, trading_date, universe=universe)
+                state_coverage = state_scope['source_coverage']
+                if state_scope['exposure_registry_error']:
+                    if resilience:
+                        raise ValueError('invalid_state_exposure_registry')
+                    state_failure = state_scope['exposure_registry_error']
+                elif not state_coverage['complete']:
+                    state_failure = 'incomplete_state_unemployment_coverage'
+            except (ValueError, TypeError, KeyError):
+                if resilience and (not isinstance(data.get('fred'), dict)
+                        or not data['fred'].get('error') or data['fred'].get('state_unemployment') is not None):
+                    raise
+                state_failure = 'invalid_state_unemployment_evidence'
+        analysis_inputs = {}
         all_signals: list[dict] = []
         health: list[StrategyHealthRecord] = []
         for strategy in self.paper_trade_strategies:
             self._emit("strategy_start", name=strategy.name, track="paper_trade")
+            disabled_reason = self.ar_config.get("disabled_strategies", {}).get(strategy.name) or getattr(strategy, "retirement_reason", None)
+            if disabled_reason:
+                from tradingagents.strategies.metrics.identity import _stable_id
+                disabled_evidence = {"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}
+                disabled_evidence.update(health_evidence(retirement_scope, strategy.name))
+                if strategy.name == 'congressional_trades' and disabled_reason == CONGRESS_POLICY:
+                    disabled_evidence['disclosure_policy'] = CONGRESS_POLICY
+                    if congress_audit_scope is not None:
+                        disabled_evidence['source_scope_limits'] = {'congress': congress_audit_scope}
+                health.append(StrategyHealthRecord(
+                    health_id=_stable_id("health", epoch_id, date.fromisoformat(trading_date), policy_id, strategy.name),
+                    epoch_id=epoch_id, session=date.fromisoformat(trading_date), policy_id=policy_id,
+                    strategy=strategy.name, status="disabled_by_policy", signal_count=0,
+                    evidence=disabled_evidence))
+                continue
             try:
                 params = strategy.get_default_params(horizon=horizon)
-                candidates = strategy.screen(data, trading_date, params)
+                from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
+                with candidate_universe(universe):
+                    candidates = (admit_candidates(strategy.name, [], budget=None)
+                        if any(source in scope_errors or (resilience and source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES)
+                               for source in strategy.data_sources) or (resilience and filing_isolation is not None
+                                   and strategy.name == 'quantum_readiness'
+                                   and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete') or (strategy.name == 'state_economics' and state_failure == 'invalid_state_unemployment_evidence')
+                        else strategy.screen(signal_data, trading_date, params))
+                    if not hasattr(candidates, "admission_manifest"):
+                        candidates = admit_candidates(strategy.name, candidates, budget=None)
+                admission_manifest = candidates.admission_manifest
                 error = None
             except Exception as exc:
                 candidates = []
+                admission_manifest = None
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
-            health.append(
-                classify_strategy_run(
-                    epoch_id=epoch_id,
-                    session=date.fromisoformat(trading_date),
-                    policy_id=policy_id,
-                    strategy=strategy.name,
-                    data_sources=tuple(strategy.data_sources),
-                    candidates=candidates,
-                    provider_errors=_provider_errors(data, strategy.data_sources),
-                    exception=error,
-                )
-            )
-            if candidates:
-                candidates = self._enrich_with_llm(
-                    candidates, strategy.name, regime_context=regime_model
-                )
+            if resilience:
+                for candidate in candidates:
+                    analysis_inputs[id(candidate)] = research_digest({
+                        'candidate': asdict(candidate), 'strategy': strategy.name,
+                        'regime': regime_model, 'projection_sha256': regime_model['research_projection_sha256']},
+                        codec_limits=codec_limits)
+            if research_hold_reasons:
+                for candidate in candidates:
+                    candidate.journal_only = True
+                    candidate.metadata['non_actionable_reason'] = research_hold_reasons[0]
+            if candidates and not research_hold_reasons:
+                filing_options = ({'filing_data': signal_data, 'universe': universe}
+                    if (self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
+                        or self.ar_config.get('regulation_evidence_policy') is not None) else {})
+                candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model, **filing_options)
+            from .bounded_document_inputs import release_candidate_bytes
+            for candidate in candidates:
+                release_candidate_bytes(candidate)
+            universe_assessments = []
+            from ..data_sources.regulation_assessment import completed_abstention
+            if universe is not None:
+                for candidate in candidates:
+                    if (candidate.metadata.get('state_economics_policy') == 'state_unemployment_v1' and not candidate.ticker):
+                        continue
+                    if (candidate.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1'
+                            and candidate.metadata.get('analysis_status') == 'validated'
+                            and ((candidate.metadata.get('document_assessment') == 'assessed_no_directional_thesis'
+                                  and candidate.metadata.get('regulation_evidence_status') == 'sufficient')
+                                 or (self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
+                                     and completed_abstention(candidate.metadata.get('llm_analysis'))))
+                            and candidate.journal_only and not candidate.ticker):
+                        continue
+                    decision = universe.decision(candidate.ticker)
+                    assessment = {"discovery_id": candidate.metadata.get("discovery_id"),
+                        "symbol": candidate.ticker, "decision": decision,
+                        "policy": universe.evidence["policy"],
+                        "assets_sha256": universe.evidence["assets_sha256"]}
+                    universe_assessments.append(assessment)
+                    candidate.metadata["equity_universe_post_analysis"] = assessment
+                    if decision in {"outside_sip_exchange_universe", "inactive_asset", "absent_from_asset_master"}:
+                        candidate.metadata["equity_universe_excluded"] = True
+                    elif decision != "eligible":
+                        candidate.metadata.setdefault("non_actionable_reason", "equity_universe_unresolved")
+                        candidate.journal_only = True
+            provider_errors = _provider_errors(data, strategy.data_sources)
+            if resilience:
+                for source in strategy.data_sources:
+                    if source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES:
+                        provider_errors.setdefault(source, research_scope['sources'][source]['reason'])
+                if filing_isolation is not None and strategy.name == 'quantum_readiness' and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete':
+                    provider_errors['edgar'] = 'aggregate_dependency_gap'
+                if research_hold_reasons:
+                    provider_errors['shared_regime'] = research_hold_reasons[0]
+            provider_errors.update({source: reason for source, reason in scope_errors.items()
+                                    if source in strategy.data_sources})
+            if strategy.name == 'state_economics' and state_enabled and state_failure:
+                provider_errors['fred_state_unemployment'] = state_failure
+            if universe_failure:
+                provider_errors = dict(provider_errors, equity_universe="universe_evidence_unavailable")
+            non_actionable = sorted({c.metadata["non_actionable_reason"] for c in candidates if c.metadata.get("non_actionable_reason")})
+            if any(c.metadata.get('non_actionable_reason') and not
+                   (accepted_attribution_limitation(c, strategy.name, scope_proofs) or
+                    (c.metadata.get('state_economics_policy') == 'state_unemployment_v1' and
+                     c.metadata.get('non_actionable_reason') == 'no_verified_state_exposure')) for c in candidates):
+                provider_errors = dict(provider_errors, analysis="required_evidence_unavailable")
+            if error is None and any(str(c.metadata.get("analysis_failure_reason", "")).startswith("unsupported_required_analysis:") for c in candidates):
+                error = ValueError("unsupported_required_analysis")
+            health_record = classify_strategy_run(
+                epoch_id=epoch_id, session=date.fromisoformat(trading_date),
+                policy_id=policy_id, strategy=strategy.name,
+                data_sources=tuple(strategy.data_sources), candidates=candidates,
+                provider_errors=provider_errors, exception=error, admission_manifest=admission_manifest)
+            if strategy.name == 'state_economics' and state_enabled:
+                health_record.evidence['state_source_scope'] = state_scope
+                health_record.evidence['state_source_coverage'] = state_coverage
+                health_record.evidence['state_economic_events'] = [dict(c.metadata, ticker=c.ticker,
+                    journal_only=c.journal_only, direction=c.direction, score=c.score) for c in candidates]
+            if universe is not None:
+                health_record.evidence["universe_assessments"] = universe_assessments
+                health_record.evidence["universe_policy"] = universe.evidence["policy"]
+            if non_actionable:
+                health_record.evidence["non_actionable_reasons"] = non_actionable
+                health_record.evidence["actionable_candidate_count"] = sum(not c.journal_only for c in candidates)
+            source_coverage = {source: data[source]["coverage"] for source in strategy.data_sources if isinstance(data.get(source), dict) and "coverage" in data[source]}
+            if source_coverage:
+                health_record.evidence["source_coverage"] = source_coverage
+            selected_limits = {source: value for source, value in scope_limits.items()
+                               if source in strategy.data_sources}
+            if selected_limits:
+                health_record.evidence['source_scope_limits'] = selected_limits
+            if 'courtlistener' in selected_limits:
+                health_record.evidence['litigation_context'] = {
+                    **selected_limits['courtlistener'],
+                    'docket_ids': sorted(row['docket_id'] for row in data['courtlistener']['dockets']),
+                    'actionable_from_docket_metadata': False}
+            full_filing_candidates = [c for c in candidates
+                if c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1']
+            regulation_candidates = [c for c in candidates
+                if c.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1']
+            if regulation_candidates:
+                from copy import deepcopy
+                regulation_graph = data.get('regulations', {}).get('regulation_evidence', {})
+                health_record.evidence['regulation_assessments'] = [deepcopy({
+                    'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
+                    'document_id': c.metadata.get('document_id'),
+                    'regulation_evidence_ref': c.metadata.get('regulation_evidence_ref'),
+                    'source_manifest_sha256': regulation_graph.get('manifest_sha256'),
+                    'evidence_sha256': regulation_graph.get('corpus', {}).get(
+                        c.metadata.get('regulation_evidence_ref'), {}).get('manifest_sha256'),
+                    'source_rows': [row for row in regulation_graph.get('rows', [])
+                                    if row['document_id'] == c.metadata.get('document_id')],
+                    'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
+                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason'),
+                    'document_assessment': c.metadata.get('document_assessment'),
+                    'regulation_evidence_status': c.metadata.get('regulation_evidence_status'),
+                    'journal_only': c.journal_only,
+                    'assessment': c.metadata.get('llm_analysis') or c.metadata.get('regulation_assessment'),
+                    'model_provenance': c.metadata.get('model_provenance'),
+                    'model_attempt': c.metadata.get('regulation_model_attempt'),
+                }) for c in regulation_candidates]
+            if 'regulations' in strategy.data_sources and (
+                    regulation_source_scope is not None or self.ar_config.get('regulation_evidence_policy') is not None
+                    or 'regulations' in scope_errors):
+                from copy import deepcopy
+                health_record.evidence['regulation_source_coverage'] = deepcopy(regulation_source_scope)
+                health_record.evidence.setdefault('regulation_assessments', [])
+            if full_filing_candidates:
+                from copy import deepcopy
+                # Blank/unresolved securities do not become priceable signals,
+                # but their completed or failed document assessments are still
+                # authoritative evidence for every admitted discovery.
+                health_record.evidence['filing_assessments'] = [deepcopy({
+                    'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
+                    'analysis_type': c.metadata.get('analysis_type'),
+                    'filing_assessment_scope': c.metadata.get('filing_assessment_scope'),
+                    'prior_status': c.metadata.get('prior_status'),
+                    'comparison_binding': c.metadata.get('comparison_binding'),
+                    'filing_evidence_ref': c.metadata.get('filing_evidence_ref'),
+                    'filing_evidence_refs': c.metadata.get('filing_evidence_refs'),
+                    'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
+                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason'),
+                    'document_assessment': c.metadata.get('document_assessment'),
+                    'journal_only': c.journal_only,
+                    'assessment': c.metadata.get('llm_analysis') or c.metadata.get('filing_assessment'),
+                    'model_provenance': c.metadata.get('model_provenance'),
+                }) for c in full_filing_candidates]
+            if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' and 'edgar' in strategy.data_sources:
+                health_record.evidence['filing_source_coverage'] = data.get('edgar', {}).get('filing_evidence', {}).get('coverage', {})
+                if filing_comparison_scope is not None:
+                    health_record.evidence['filing_comparison_scope'] = dict(filing_comparison_scope)
+                if filing_attribution_scope is not None:
+                    from copy import deepcopy
+                    health_record.evidence['filing_attribution_scope'] = deepcopy(filing_attribution_scope)
+                if filing_material_scope is not None:
+                    from copy import deepcopy
+                    health_record.evidence['filing_material_scope'] = deepcopy(filing_material_scope)
+            if resilience:
+                health_record.evidence['research_source_scope'] = research_scope
+                health_record.evidence['filing_research_isolation'] = filing_isolation
+                health_record.evidence['research_hold_reasons'] = list(research_hold_reasons)
+            health.append(health_record)
             for c in candidates:
+                if c.metadata.get("equity_universe_excluded"):
+                    continue
                 all_signals.append(
                     {
                         "ticker": c.ticker,
@@ -397,8 +808,17 @@ class MultiStrategyEngine:
                         "journal_only": c.journal_only,
                     }
                 )
+            if resilience:
+                from .research_resilience import bind_signal
+                for candidate in candidates:
+                    if candidate.metadata.get('equity_universe_excluded'):
+                        continue
+                    signal = next(row for row in reversed(all_signals) if row['metadata'] is candidate.metadata)
+                    bind_signal(signal, regime_model, strategy.data_sources, analysis_inputs[id(candidate)],
+                                codec_limits=codec_limits)
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))
 
+        all_signals, health = hold_incomplete_model_sample(all_signals, health)
         # Preserve every event identity. Committee synthesis may aggregate a
         # decision view, but the authoritative ledger must retain each catalyst.
         deduped_signals = [
@@ -420,6 +840,67 @@ class MultiStrategyEngine:
 
         return deduped_signals, regime_model, health
 
+    def pending_late_signals(self, session: date, epoch_id: str, *, information_cutoff: datetime | None = None) -> list[dict]:
+        """Return frozen actionable observations awaiting their first timely offer.
+
+        Callers include these candidates before pricing and quarantine filtering.
+        Today's rows cannot consume the queue: replay must reconstruct the same
+        initial candidate set, even after staging today's timely observation.
+        """
+        from tradingagents.strategies.orchestration.trading_calendar import session_close
+        from tradingagents.strategies.orchestration.decision_clock import policy, PROSPECTIVE, require_reference
+
+        if policy(self.config) == PROSPECTIVE:
+            if information_cutoff is None:
+                raise ValueError('prospective retained-signal cutoff required')
+            require_reference(session, information_cutoff)
+        else:
+            information_cutoff = session_close(session)
+
+        if self.ledger is None:
+            raise ValueError("pending_late_signals requires an authoritative ledger")
+        horizon = str(self.ar_config.get("horizon", "30d"))
+        policy_id = str(self.ar_config.get("paper_ledger", {}).get("policy_id", f"foundation-{horizon}"))
+        disabled = set(self.ar_config.get("disabled_strategies", {}))
+        disabled.update(strategy.name for strategy in self.paper_trade_strategies
+                        if getattr(strategy, "retirement_reason", None))
+        consumed = set()
+        pending = {}
+        for record in self.ledger.read_signals(end_session=session, epoch_id=epoch_id, policy_id=policy_id):
+            if record.reference_session >= session:
+                continue
+            identity = (record.event_key, record.strategy)
+            observation = self.ledger.signal_observation(record.signal_id)
+            if observation is None:
+                # Lower-level accounting/outcome callers may record a bare
+                # signal. It cannot prove a deferred actionable thesis.
+                consumed.add(identity)
+                continue
+            _, context, journal = observation
+            if journal.get("status", "timely") != "cutoff-late":
+                consumed.add(identity)
+                continue
+            signal = context.get("signal")
+            if not isinstance(signal, dict):
+                raise ValueError(f"signal {record.signal_id} lacks canonical committee context")
+            metadata = signal.get("metadata", {})
+            if (record.strategy in disabled or signal.get("journal_only")
+                    or record.direction not in {"long", "short"}
+                    or not isinstance(metadata, dict) or metadata.get("non_actionable_reason")
+                    or (metadata.get("needs_llm_analysis")
+                        and metadata.get("analysis_status") != "validated"
+                        and not metadata.get("deterministic_evidence_complete"))
+                    or record.observed_at > information_cutoff):
+                continue
+            # read_signals is session ordered; retain the first accepted thesis,
+            # rather than substituting a newly acquired source or model analysis.
+            if identity not in pending:
+                retained = dict(signal)
+                retained["metadata"] = {**metadata, "retained_from_signal_id": record.signal_id}
+                pending[identity] = retained
+        return [pending[key] for key in sorted(pending) if key not in consumed]
+
+    @bounded_model_phase
     def screen_and_stage(
         self,
         trading_date: str,
@@ -430,6 +911,7 @@ class MultiStrategyEngine:
         size_profile: Any,
         marked_account: Any,
         annualized_volatility_evidence: Mapping[str, float] | None = None,
+        model_coverage: Mapping[str, Any] | None = None,
     ) -> dict:
         """Persist cutoff-safe signals and next-session intents without economics."""
         from tradingagents.strategies.execution import (
@@ -488,12 +970,51 @@ class MultiStrategyEngine:
             )
         )
         epoch_id = marked_account.epoch_id
-        cutoff = session_close(session)
+        from .research_resilience import configured as resilience_configured
+        resilience = resilience_configured(self.ar_config)
+        exit_data = data
+        original_enrichment = enrichment
+        enrichment_scope = None
+        if resilience:
+            from .research_resilience import validate_projection, validate_signal, validate_retained_signal, project_enrichment
+            from .source_inputs import source_codec_limits
+            exit_data = validate_projection(self, data, shared_regime)
+            enrichment, enrichment_scope = project_enrichment(enrichment, codec_limits=source_codec_limits(self.config))
+            strategy_sources = {strategy.name: strategy.data_sources for strategy in self.paper_trade_strategies}
+            for signal in shared_signals:
+                if signal.get('journal_only') or signal.get('metadata', {}).get('non_actionable_reason'):
+                    continue
+                if shared_regime['research_hold_reasons']:
+                    raise ValueError('invalid_research_candidate_during_hold')
+                if signal.get('metadata', {}).get('retained_from_signal_id'):
+                    validate_retained_signal(signal, self.ledger, session, epoch_id, policy_id)
+                else:
+                    validate_signal(signal, shared_regime, strategy_sources.get(signal.get('strategy'), ()),
+                                    codec_limits=source_codec_limits(self.config))
+        from tradingagents.strategies.orchestration.decision_clock import resolve_cutoff, policy, PROSPECTIVE, require_live_staging
+        decision_context = data.get('_decision_context')
+        cutoff = resolve_cutoff(self.config, session, decision_context)
+        from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY, validate_final_signals, validate_stage_binding
+        if self.ar_config.get('bounded_document_decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
+            validate_stage_binding(self, session, decision_context, epoch_id, shared_regime, original_enrichment)
+            validate_final_signals(self.config, session, data, shared_signals, shared_regime, horizon,
+                decision_context.get('document_review_binding') if isinstance(decision_context, dict) else None)
+        if self.ar_config.get('state_economics_policy') and any(
+                row.get('strategy') == 'state_economics' and not row.get('journal_only')
+                and row.get('direction') in {'long', 'short'} for row in shared_signals):
+            from .state_inputs import state_policy_scope
+            state_scope = state_policy_scope(data, self.ar_config, trading_date)
+            if (not state_scope['source_coverage']['complete'] or state_scope['exposure_registry_error']
+                    or any(row.get('metadata', {}).get('state_registry_sha256') != state_scope['exposure_registry_sha256']
+                        for row in shared_signals if row.get('strategy') == 'state_economics' and not row.get('journal_only'))):
+                raise ValueError('invalid_state_exposure_at_staging_cutoff')
         eligible_session = next_session(session)
         expected_staging_state_digest = self.ledger.verify_session_phase_chain(
             session, PHASES
         )
         replaying = self.ledger.staging_completed(session, epoch_id, policy_id)
+        if decision_context is not None and not replaying:
+            require_live_staging(self.config, session, decision_context)
 
         raw_bars = data.get("_execution_reference_bars", {})
         if not isinstance(raw_bars, dict):
@@ -508,6 +1029,8 @@ class MultiStrategyEngine:
             if policy_enabled
             else None
         )
+        if policy(self.config) == PROSPECTIVE and policy_config is None:
+            raise ValueError('prospective decision clock requires governed staging policy')
         if replaying and policy_config is None:
             persisted_binding = self.ledger.read_policy_session_context(
                 session, binding_kind="staging"
@@ -546,6 +1069,8 @@ class MultiStrategyEngine:
                     raise LedgerConflictError(
                         "staging policy binding mismatch on replay"
                     )
+                if policy_binding['context'].get('decision_clock') != decision_context:
+                    raise LedgerConflictError('staging decision clock binding mismatch on replay')
                 risk_context = portfolio_risk_context_from_document(
                     policy_binding["context"], policy_config
                 )
@@ -647,10 +1172,18 @@ class MultiStrategyEngine:
                     epoch_id=epoch_id,
                     policy_version=policy_config.version,
                     policy_config=portfolio_policy_config_document(policy_config),
-                    context=portfolio_risk_context_document(risk_context),
+                    context={**portfolio_risk_context_document(risk_context),
+                             **({'decision_clock': decision_context} if decision_context is not None else {})},
                     bound_at=cutoff,
                 )
         if replaying:
+            if resilience:
+                from .research_resilience import validate_book_source_scope
+                accepted_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
+                status = accepted_decision.get('status', {}) if isinstance(accepted_decision, dict) else {}
+                validate_book_source_scope(status, shared_regime, codec_limits=source_codec_limits(self.config))
+                if status.get('research_enrichment_scope') != enrichment_scope:
+                    raise ValueError('research_enrichment_scope_conflict')
             records = self.ledger.read_signals(
                 session, session, epoch_id=epoch_id, policy_id=policy_id
             )
@@ -697,6 +1230,7 @@ class MultiStrategyEngine:
                 "regime": shared_regime,
                 "account": marked_account.__dict__,
                 "replayed": True,
+                "committee_decision_status": (self.ledger.committee_decision(session, epoch_id, policy_id) or {}).get("status", {"status": "legacy_unknown", "degraded": True}),
             }
 
         records: list[SignalRecord] = []
@@ -705,6 +1239,10 @@ class MultiStrategyEngine:
         policy_provenance_specs: dict[str, dict[str, object]] = {}
         late_ids: list[str] = []
         seen_signal_ids: set[str] = set()
+        prior_by_event = {}
+        for row in self.ledger.read_signals(end_session=session, epoch_id=epoch_id, policy_id=policy_id):
+            if row.reference_session < session:
+                prior_by_event.setdefault((row.event_key, row.strategy), []).append(row)
         for signal in shared_signals:
             ticker = str(signal.get("ticker", "")).strip().upper()
             strategy = str(signal.get("strategy", "")).strip()
@@ -721,7 +1259,8 @@ class MultiStrategyEngine:
                 or bar.ticker != ticker
                 or bar.session != session
                 or bar.adjusted
-                or bar.fetched_at < cutoff
+                or bar.fetched_at < session_close(session)
+                or (decision_context is not None and bar.fetched_at > cutoff)
             ):
                 raise ValueError(
                     f"missing exact raw reference bar for {ticker}/{session}"
@@ -745,6 +1284,17 @@ class MultiStrategyEngine:
             signal_id = metric_signal_id(
                 epoch_id, strategy, policy_id, direction, event_key
             )
+            # A late observation is immutable. Offer the same event once at its
+            # first eligible session, irrespective of a later direction flip.
+            prior_events = prior_by_event.get((event_key, strategy), [])
+            prior_timely = [row for row in prior_events
+                            if (prior_observation := self.ledger.signal_observation(row.signal_id)) is None
+                            or prior_observation[2].get("status", "timely") != "cutoff-late"]
+            if prior_timely:
+                continue
+            if prior_events:
+                signal_id = metric_signal_id(epoch_id, strategy, policy_id, direction,
+                                             stable_id("eligible_event", event_key, session))
             if signal_id in seen_signal_ids:
                 continue
             seen_signal_ids.add(signal_id)
@@ -956,16 +1506,91 @@ class MultiStrategyEngine:
             for _, record in timely
         }
         committee_signals = [signal for signal, _ in timely]
+        # Policy eligibility may remove every timeout-held candidate. Phase
+        # coverage remains independent of the surviving selection input.
+        incomplete_model_phase = model_sample_incomplete(shared_signals) or (
+            model_coverage is not None and model_coverage.get("complete") is False)
+        if resilience and 'model_deadline_exhausted' in enrichment_scope['hold_reasons']:
+            incomplete_model_phase = True
+        phase_model_coverage = {"complete": not incomplete_model_phase}
+        if incomplete_model_phase:
+            phase_model_coverage["reason"] = "model_deadline_exhausted"
+        research_authority = None
+        if resilience:
+            from .research_resilience import digest as research_digest, POLICY as RESEARCH_POLICY
+            research_authority = {'version': 'research-book-authority-v1', 'policy': RESEARCH_POLICY,
+                'source_bundle_sha256': shared_regime['research_source_scope']['source_bundle_sha256'],
+                'source_scope_sha256': research_digest(shared_regime['research_source_scope'], codec_limits=source_codec_limits(self.config)),
+                'filing_isolation_sha256': research_digest(shared_regime.get('filing_research_isolation'), codec_limits=source_codec_limits(self.config)),
+                'projection_sha256': shared_regime['research_projection_sha256'],
+                'shared_context_sha256': research_digest(shared_regime, codec_limits=source_codec_limits(self.config)),
+                'entry_hold': bool(incomplete_model_phase or shared_regime['research_hold_reasons']),
+                'hold_reasons': (['model_deadline_exhausted'] if incomplete_model_phase else list(shared_regime['research_hold_reasons'])),
+                'eligible_signal_ids': sorted(record.signal_id for _, record in timely),
+                'candidate_receipts': {record.signal_id: signal['metadata']['research_admission'] for signal, record in timely},
+                'retained_origins': {record.signal_id: signal['metadata']['retained_from_signal_id']
+                    for signal, record in timely if signal['metadata'].get('retained_from_signal_id')}}
         committee = PortfolioCommittee(self.config, size_profile=size_profile)
-        recommendations = committee.synthesize(
-            signals=committee_signals,
-            regime_context=shared_regime or {},
-            strategy_confidence=strategy_confidence,
-            current_positions=self.ledger.open_positions(),
-            total_capital=float(marked_account.net_equity),
-            enrichment=enrichment or {},
-            risk_context=risk_context,
-        )
+        frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
+        if frozen_decision is None:
+            from .runtime_recovery import require_acquisition_allowed
+            require_acquisition_allowed('committee_decision')
+            positions = []
+            for position in self.ledger.open_positions():
+                item = dict(position)
+                ticker = str(item["ticker"])
+                mark = raw_bars[ticker].close
+                value = Decimal(str(item["quantity"])) * mark
+                direction = str(item.get("side", "long"))
+                signed_value = -value if direction == "short" else value
+                item.update(direction=direction, mark_price=str(mark), market_value=str(value),
+                            signed_market_value=str(signed_value),
+                            weight=float(value / marked_account.net_equity) if marked_account.net_equity else 0.0)
+                positions.append(item)
+            recommendations = committee.synthesize(
+                signals=committee_signals, regime_context=shared_regime or {},
+                strategy_confidence=strategy_confidence, current_positions=positions,
+                total_capital=float(marked_account.net_equity), enrichment=enrichment or {}, risk_context=risk_context,
+                model_coverage=phase_model_coverage,
+            )
+            decision_status = dict(committee.last_decision_status)
+            if research_authority is not None:
+                decision_status['research_authority'] = research_authority
+                decision_status['research_enrichment_scope'] = enrichment_scope
+                if not enrichment_scope['research_coverage_complete']:
+                    decision_status['degraded'] = True
+            failures = _enrichment_failures(original_enrichment or {})
+            if failures:
+                decision_status["enrichment_failures"] = failures
+            if "short_interest_acquisition" in (original_enrichment or {}):
+                from tradingagents.strategies.data_sources.finra_bulk import validated_acquisition
+                decision_status["short_interest_acquisition"] = validated_acquisition(
+                    original_enrichment["short_interest_acquisition"])
+            decision_status["selected_signal_ids"] = sorted({
+                record.signal_id for _, record in timely for rec in recommendations
+                if record.ticker == rec.ticker and record.direction == rec.direction
+                and record.strategy in rec.contributing_strategies
+            })
+            frozen_decision = {"status": decision_status,
+                "recommendations": [asdict(rec) for rec in recommendations],
+                "policy_decisions": [asdict(row) for row in committee.last_policy_decisions]}
+            self.ledger.record_committee_decision(session, epoch_id, policy_id, frozen_decision)
+        else:
+            if resilience and frozen_decision['status'].get('research_authority') != research_authority:
+                raise ValueError('research_book_authority_conflict')
+            if resilience and frozen_decision['status'].get('research_enrichment_scope') != enrichment_scope:
+                raise ValueError('research_enrichment_scope_conflict')
+            from tradingagents.strategies.modules.base import OptionSpec
+            from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
+            from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicyDecision
+            recommendations = []
+            for row in frozen_decision["recommendations"]:
+                values = dict(row)
+                if values.get("option_spec"):
+                    values["option_spec"] = OptionSpec(**values["option_spec"])
+                recommendations.append(TradeRecommendation(**values))
+            committee.last_policy_decisions = tuple(PortfolioPolicyDecision(**row) for row in frozen_decision["policy_decisions"])
+        decision_status = frozen_decision["status"]
         if policy_config is not None:
             policy_decisions = tuple(
                 getattr(committee, "last_policy_decisions", ())
@@ -1046,18 +1671,24 @@ class MultiStrategyEngine:
             )
             rec_specs.append((recommendation, contributor_records))
 
-        exit_specs, cancellations = self._build_exit_specs(
-            session, cutoff, eligible_session, raw_bars, data, horizon
-        )
+        exit_specs, cancellations = (self._build_exit_specs(
+            session, cutoff, eligible_session, raw_bars, exit_data, horizon
+        ) if decision_context is None else ([], []))
         staged_ids: list[str] = []
 
         def persist_staging() -> None:
+            publication_at = cutoff
+            current_exit_specs, current_cancellations = exit_specs, cancellations
+            if decision_context is not None:
+                publication_at = require_live_staging(self.config, session, decision_context)
+                current_exit_specs, current_cancellations = self._build_exit_specs(
+                    session, publication_at, eligible_session, raw_bars, exit_data, horizon)
             zero_share_candidates: set[tuple[str, str]] = set()
-            for intent in cancellations:
+            for intent in current_cancellations:
                 self.ledger.cancel_intent(
-                    intent.intent_id, cutoff, "strategy exit superseded resting stop"
+                    intent.intent_id, publication_at, "strategy exit superseded resting stop"
                 )
-            for intent, lot_quantities in exit_specs:
+            for intent, lot_quantities in current_exit_specs:
                 self.ledger.stage_exit_intent(intent, lot_quantities)
                 staged_ids.append(intent.intent_id)
             held = {
@@ -1073,7 +1704,7 @@ class MultiStrategyEngine:
                         recommendation,
                         contributor_records,
                         self.ledger.account_state(),
-                        cutoff,
+                        publication_at,
                         eligible_session,
                     )
                 except ZeroShareIntentError:
@@ -1162,6 +1793,8 @@ class MultiStrategyEngine:
                     committee_not_selected_ids=nonselected_ids,
                     recorded_at=cutoff,
                 )
+            if decision_context is not None:
+                require_live_staging(self.config, session, decision_context)
 
         executed, _ = self.ledger.complete_staging(
             session,
@@ -1183,6 +1816,7 @@ class MultiStrategyEngine:
             "regime": shared_regime,
             "account": marked_account.__dict__,
             "replayed": not executed,
+            "committee_decision_status": decision_status,
         }
 
     def _build_exit_specs(
@@ -1229,6 +1863,7 @@ class MultiStrategyEngine:
                     holding_days=(session - position["opened_session"]).days,
                     params=strategy.get_default_params(horizon=horizon),
                     data=data,
+                    direction=position["direction"],
                 )
                 if should_exit:
                     break
@@ -1323,33 +1958,20 @@ class MultiStrategyEngine:
     def _build_regime_model(self, data: dict) -> dict:
         """Build regime model from available data (VIX, credit spreads, yield curve)."""
         vix_data = data.get("yfinance", {}).get("vix")
-        vix_level = 0.0
+        vix_level = None
         if vix_data is not None and not vix_data.empty:
             vix_level = float(vix_data["Close"].iloc[-1])
 
         fred = data.get("fred", {})
-        hy_spread = fred.get("hy_spread")
-        credit_bps = 0.0
-        if hy_spread is not None and hasattr(hy_spread, "iloc") and len(hy_spread) > 0:
-            credit_bps = (
-                float(hy_spread.iloc[-1]) * 100
-                if not pd.isna(hy_spread.iloc[-1])
-                else 0.0
-            )
+        from tradingagents.strategies.modules.commodity_macro import _latest_value
+        hy_level = _latest_value(fred.get("hy_spread", fred.get("BAMLH0A0HYM2")))
+        credit_bps = None if hy_level is None else hy_level * 100
+        yc_slope = _latest_value(fred.get("yield_curve", fred.get("T10Y2Y")))
 
-        yield_curve = fred.get("yield_curve")
-        yc_slope = 0.0
-        if (
-            yield_curve is not None
-            and hasattr(yield_curve, "iloc")
-            and len(yield_curve) > 0
-        ):
-            yc_slope = (
-                float(yield_curve.iloc[-1])
-                if not pd.isna(yield_curve.iloc[-1])
-                else 0.0
-            )
-
+        if vix_level is None:
+            vix_level = _latest_value(fred.get("VIXCLS"))
+        if vix_level is not None and not math.isfinite(vix_level):
+            vix_level = None
         overall = self._classify_regime(vix_level, credit_bps, yc_slope)
         stressed_vix = self.ar_config.get("risk_discipline", {}).get(
             "regime_vix_stressed", 25.0
@@ -1357,7 +1979,7 @@ class MultiStrategyEngine:
 
         return {
             "vix_level": vix_level,
-            "vix_regime": "crisis"
+            "vix_regime": "unknown" if vix_level is None else "crisis"
             if vix_level > 35
             else "elevated"
             if vix_level > stressed_vix
@@ -1365,13 +1987,13 @@ class MultiStrategyEngine:
             if vix_level > 15
             else "low",
             "credit_spread_bps": credit_bps,
-            "credit_regime": "crisis"
+            "credit_regime": "unknown" if credit_bps is None else "crisis"
             if credit_bps > 600
             else "stressed"
             if credit_bps > 400
             else "normal",
             "yield_curve_slope": yc_slope,
-            "yield_regime": "inverted"
+            "yield_regime": "unknown" if yc_slope is None else "inverted"
             if yc_slope < -0.2
             else "flat"
             if yc_slope < 0.5
@@ -1392,6 +2014,8 @@ class MultiStrategyEngine:
         stressed_vix = self.ar_config.get("risk_discipline", {}).get(
             "regime_vix_stressed", 25.0
         )
+        if any(value is None for value in (vix, credit_bps, yc_slope)):
+            return "unknown"
         crisis_signals = 0
         if vix > 35:
             crisis_signals += 1
@@ -1482,23 +2106,44 @@ class MultiStrategyEngine:
     # Data fetching
     # ------------------------------------------------------------------
 
-    def _fetch_all_data(self, start_date: str, end_date: str) -> dict[str, Any]:
+    def _fetch_all_data(self, start_date: str, end_date: str, *,
+                        acquisition_deadline: float | None = None,
+                        litigation_target_owner=None,
+                        acquisition_purpose: str = 'decision') -> dict[str, Any]:
         """Fetch all data needed by active strategies.
 
-        Returns nested dict: {source_name: {data_type: data}}.
+        Returns nested dict: {source_name: {data_type: data}}. The explicit
+        screen diagnostic has no decision-clock authority and cannot supply a
+        decision acquisition receipt. Ordinary acquisition keeps its clock gate.
         """
         import time
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         from tradingagents.strategies.data_sources.request_policy import provider_budget
         from tradingagents.strategies.orchestration.source_inputs import (
             SourceInputError, SourceInputStore, cache_identity,
-            source_configuration_fingerprint, registered_source_fingerprint,
+            source_configuration_fingerprint, registered_source_fingerprint, source_codec_limits,
         )
 
         acquisition_start = time.monotonic()
         acquisition_cutoff = datetime.now(timezone.utc)
+        from tradingagents.strategies.orchestration.decision_clock import mutable_vintage, policy, PROSPECTIVE
+        decision_policy = policy(self.config)
+        if not isinstance(acquisition_purpose, str) or acquisition_purpose not in {'decision', 'screen_diagnostic'}:
+            raise ValueError('invalid source acquisition purpose')
+        diagnostic = acquisition_purpose == 'screen_diagnostic'
+        if diagnostic:
+            from .trading_calendar import exchange_date
+            vintage = exchange_date(acquisition_cutoff).isoformat()
+        else:
+            vintage = mutable_vintage(self.config, date.fromisoformat(end_date), now=acquisition_cutoff)
         fetch_timeout_s = max(0.0, _fetch_timeout_s())
-        acquisition_deadline = acquisition_start + fetch_timeout_s
+        outer_deadline = acquisition_deadline
+        if outer_deadline is not None:
+            if (isinstance(outer_deadline, bool) or not isinstance(outer_deadline, (int, float))
+                    or not math.isfinite(outer_deadline)):
+                raise SourceInputError("invalid source acquisition deadline")
+        acquisition_deadline = min(acquisition_start + fetch_timeout_s,
+                                   outer_deadline if outer_deadline is not None else float('inf'))
         cache_dir = self.ar_config.get("source_cache_dir") or os.environ.get("EVENTEDGE_SOURCE_CACHE_DIR")
         cache_store = None
         config_fingerprint = ""
@@ -1507,6 +2152,8 @@ class MultiStrategyEngine:
                 cache_dir, ttl_s=self.ar_config.get("source_cache_ttl_s", 300)
             )
             config_fingerprint = source_configuration_fingerprint(self.config, exclude_horizon=True)
+            if diagnostic:
+                config_fingerprint += ':screen-diagnostic-v1'
 
         def acquire(name, fetcher, args):
             diagnostics = []
@@ -1536,13 +2183,28 @@ class MultiStrategyEngine:
 
         self._emit("phase", phase="data_fetch", status="starting")
         data: dict[str, Any] = {}
+        from .congress_policy import declaration
+        data.update(declaration(self.ar_config))
+        from .source_lifecycle_policy import declaration as lifecycle_declaration
+        data.update(lifecycle_declaration(self.ar_config, self.paper_trade_strategies))
+        if decision_policy == PROSPECTIVE and not diagnostic:
+            data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
+                                            'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
+        universe_policy = self.ar_config.get("equity_universe_policy")
+        if universe_policy:
+            from tradingagents.strategies.data_sources.equity_universe import fetch_equity_universe, POLICY
+            data["equity_universe"] = (acquire("alpaca", fetch_equity_universe, ())
+                if universe_policy == POLICY else {"error": "unsupported equity universe policy"})
 
         # Collect which sources are needed
         needed_sources: set[str] = set()
         for s in self.paper_trade_strategies:
             needed_sources.update(s.data_sources)
+        needed_sources.difference_update(self.ar_config.get("retired_sources", {}))
 
         available = set(self.registry.available_sources())
+        if self.ar_config.get('bounded_document_research_policy') is not None:
+            available.add('bounded_documents')
         logger.info("Needed sources: %s, available: %s", needed_sources, available)
         for source in sorted(needed_sources - available):
             data[source] = {"error": "source unavailable or skipped"}
@@ -1555,6 +2217,9 @@ class MultiStrategyEngine:
 
         # Fetch API-key sources in parallel (I/O bound, no dependency on each other)
         api_fetches: dict[str, tuple] = {}
+        if 'bounded_documents' in needed_sources:
+            from .bounded_document_inputs import load_retained_documents
+            api_fetches['bounded_documents'] = (load_retained_documents, (self.ar_config, end_date))
         if "finnhub" in needed_sources and "finnhub" in available:
             finnhub_budget_cap_s = max(
                 fetch_timeout_s - _FINNHUB_FETCH_SAFETY_MARGIN_S,
@@ -1567,35 +2232,77 @@ class MultiStrategyEngine:
         if "regulations" in needed_sources and "regulations" in available:
             api_fetches["regulations"] = (self._fetch_regulations_data, (end_date,))
         if "courtlistener" in needed_sources and "courtlistener" in available:
-            api_fetches["courtlistener"] = (self._fetch_courtlistener_data, ())
+            if self.ar_config.get('courtlistener_scope_policy') is not None:
+                from .scoped_sources import litigation_settings
+                from .litigation_targets import build_litigation_targets
+                def focused_targets():
+                    company_source = self.registry.get('edgar')
+                    if company_source is None:
+                        raise ValueError('Court issuer verification unavailable')
+                    company_map = company_source.company_ticker_map()
+                    targets = build_litigation_targets(litigation_target_owner,
+                        date.fromisoformat(end_date), cutoff=acquisition_cutoff,
+                        company_map=company_map, settings=litigation_settings(self.ar_config))
+                    return dict(targets, company_map=company_map)
+                targets = acquire('edgar', focused_targets, ())
+                data['_courtlistener_targets'] = targets
+                if targets.get('error'):
+                    data['courtlistener'] = {'error': 'Court issuer scope unavailable'}
+                else:
+                    api_fetches['courtlistener'] = (self._fetch_courtlistener_data,
+                        (end_date, targets['scope'], acquisition_deadline))
+            else:
+                api_fetches["courtlistener"] = (self._fetch_courtlistener_data, (end_date,))
         if "fred" in needed_sources and "fred" in available:
-            api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date))
+            api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date, vintage)
+                if self.ar_config.get('state_economics_policy') else (start_date, end_date))
         if "congress" in needed_sources and "congress" in available:
-            api_fetches["congress"] = (self._fetch_congress_data, (end_date,))
+            api_fetches["congress"] = (self._fetch_congress_data,
+                (end_date, acquisition_deadline) if self.ar_config.get('congress_disclosure_policy') else (end_date,))
         if "noaa" in needed_sources and "noaa" in available:
-            api_fetches["noaa"] = (self._fetch_noaa_data, (end_date,))
+            api_fetches["noaa"] = (self._fetch_noaa_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
         if "usda" in needed_sources and "usda" in available:
-            api_fetches["usda"] = (self._fetch_usda_data, (end_date,))
+            api_fetches["usda"] = (self._fetch_usda_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
         if "drought_monitor" in needed_sources and "drought_monitor" in available:
-            api_fetches["drought_monitor"] = (self._fetch_drought_data, (end_date,))
+            api_fetches["drought_monitor"] = (self._fetch_drought_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
 
         # Also fetch EDGAR events for paper-trade strategies
         if "edgar" in needed_sources and "edgar" in available:
-            api_fetches["edgar"] = (self._fetch_edgar_events, (end_date,))
+            api_fetches["edgar"] = (self._fetch_edgar_events,
+                (end_date, data["equity_universe"]) if universe_policy else (end_date,))
         if "usaspending" in needed_sources and "usaspending" in available:
             api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
         if "cftc" in needed_sources and "cftc" in available:
-            api_fetches["cftc"] = (self._fetch_cftc_data, ())
+            api_fetches["cftc"] = (self._fetch_cftc_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
 
         pending_fetches = {}
         cache_keys = {}
+        cache_stores = {}
         for name, (fetcher, args) in api_fetches.items():
+            source_fingerprint = config_fingerprint
+            if name == 'courtlistener' and '_courtlistener_targets' in data:
+                from tradingagents.strategies.data_sources.courtlistener_scope import digest
+                source_fingerprint += ':court-scope:' + digest(data['_courtlistener_targets']['scope'])
+            if decision_policy == PROSPECTIVE and name in {'noaa', 'usda', 'drought_monitor', 'cftc'}:
+                source_fingerprint += ':current-vintage:' + vintage
+            if name == 'fred' and self.ar_config.get('state_economics_policy'):
+                source_fingerprint += ':current-vintage:' + vintage
+            if name == "edgar" and universe_policy:
+                snapshot = data["equity_universe"].get("snapshot", {})
+                # A changed asset master may admit previously excluded filings.
+                # Such a source set cannot reuse text selected by the old scope.
+                source_fingerprint += ":" + snapshot.get("assets_sha256", "universe_unavailable")
             identity = cache_identity(
                 name, start_date, end_date,
-                registered_source_fingerprint(config_fingerprint, self.registry.get(name)),
+                registered_source_fingerprint(source_fingerprint, self.registry.get(name)),
             )
             cache_keys[name] = identity
-            cached = cache_store.load_cached(identity, cutoff=acquisition_cutoff) if cache_store else None
+            store = cache_store
+            limits = source_codec_limits(self.config, source=name)
+            if store and limits:
+                store = SourceInputStore(cache_dir, ttl_s=store.ttl_s, **limits)
+            cache_stores[name] = store
+            cached = store.load_cached(identity, cutoff=acquisition_cutoff) if store else None
             if cached is not None:
                 data[name] = cached
             else:
@@ -1608,10 +2315,12 @@ class MultiStrategyEngine:
             if cache_store:
                 for name, payload in fetched.items():
                     try:
-                        cache_store.save_cached(cache_keys[name], payload)
+                        cache_stores[name].save_cached(cache_keys[name], payload)
                     except (OSError, SourceInputError):
                         logger.warning("Successful source %s could not be cached", name)
 
+        if outer_deadline is not None and time.monotonic() >= acquisition_deadline:
+            raise SourceInputError("source acquisition deadline exhausted before acceptance")
         self._emit("phase", phase="data_fetch", status="done")
         return data
 
@@ -1627,6 +2336,83 @@ class MultiStrategyEngine:
 
         result: dict[str, Any] = {}
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        import hashlib
+        settings = getattr(self, "ar_config", {}).get("finnhub_acquisition", {})
+        if not isinstance(settings, dict):
+            raise ValueError("finnhub_acquisition must be a mapping")
+        budgets = {key: settings.get(key, default) for key, default in (
+            ("earnings_news_budget", 10), ("pqc_symbol_budget", 6),
+            ("earnings_article_budget", 5))}
+        if any(type(value) is not int or value < 0 for value in budgets.values()):
+            raise ValueError("Finnhub acquisition budgets must be nonnegative integers")
+        pqc_tickers = settings.get("pqc_universe", [
+            "CRWD", "PANW", "ZS", "FTNT", "IBM", "CSCO", "MSFT", "IONQ", "RGTI", "COIN"])
+        if (not isinstance(pqc_tickers, list)
+                or any(not isinstance(symbol, str) or not symbol.strip() for symbol in pqc_tickers)):
+            raise ValueError("Finnhub PQC universe must be a list of nonempty symbols")
+        pqc_tickers = sorted({symbol.strip().upper() for symbol in pqc_tickers})
+
+        def admit(records, budget, population, identity_fn, rank_fn):
+            """Retain every fetched/query row before a deterministic request cap."""
+            entries = []
+            for record in records:
+                raw = json.dumps(record, sort_keys=True, default=str)
+                evidence_hash = hashlib.sha256(raw.encode()).hexdigest()
+                identity = identity_fn(record)
+                valid = identity is not None
+                identity = identity or {"invalid_source_payload_hash": evidence_hash}
+                encoded = json.dumps([population, identity], sort_keys=True, default=str)
+                discovery_id = "finnhub-discovery:" + hashlib.sha256(encoded.encode()).hexdigest()[:24]
+                row = {"discovery_id": discovery_id, "identity": identity, "evidence_hash": evidence_hash}
+                entries.append(((0 if valid else 1, *(rank_fn(record) if valid else ()),
+                                 discovery_id, evidence_hash), record, row, valid))
+            selected, discovered, admitted, excluded, seen = [], [], [], [], set()
+            for _, record, row, valid in sorted(entries, key=lambda item: item[0]):
+                reason = ("invalid_source_identity" if not valid else
+                          "duplicate_source_identity" if row["discovery_id"] in seen else
+                          "acquisition_budget" if budget is not None and len(selected) >= budget else "admitted")
+                seen.add(row["discovery_id"])
+                row = dict(row, reason=reason)
+                discovered.append(row)
+                if reason == "admitted":
+                    selected.append((record, row))
+                    admitted.append(row)
+                else:
+                    excluded.append(row)
+            return selected, {"version": 1, "population": population,
+                "budget": budget, "discovered_count": len(discovered),
+                "admitted_count": len(admitted), "excluded_count": len(excluded),
+                "discovered": discovered, "admitted": admitted, "excluded": excluded}
+
+        def earnings_identity(record):
+            if not isinstance(record, dict) or not isinstance(record.get("symbol"), str) or not record["symbol"].strip():
+                return None
+            try:
+                report_date = date.fromisoformat(record.get("date", "")).isoformat()
+            except (TypeError, ValueError):
+                return None
+            return {"symbol": record["symbol"].strip().upper(), "date": report_date,
+                    "year": record.get("year"), "quarter": record.get("quarter")}
+
+        def article_identity(article):
+            if not isinstance(article, dict):
+                return None
+            locator = article.get("id") or article.get("article_id") or article.get("url")
+            return {"locator": str(locator)} if locator else {
+                "source": article.get("source", ""), "headline": article.get("headline", ""),
+                "published_at": article.get("published_at", article.get("datetime", ""))}
+
+        def article_rank(article):
+            stamp = article.get("published_at", article.get("datetime", ""))
+            try:
+                timestamp = float(stamp) if isinstance(stamp, (int, float)) else datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+                if not math.isfinite(timestamp):
+                    timestamp = 0.
+            except (TypeError, ValueError):
+                timestamp = 0.
+            return (-timestamp, json.dumps(article_identity(article), sort_keys=True, default=str))
+
+        manifests: dict[str, Any] = {"earnings_articles": []}
         failures = []
         def acquire(operation, fn, *args, **kwargs):
             try:
@@ -1651,33 +2437,44 @@ class MultiStrategyEngine:
             date_to,
             deadline=deadline,
         )
-        if earnings:
-            # Collect news around earnings dates for top reporters (proxy for transcripts)
+        earnings_selected, manifests["earnings_news"] = admit(
+            earnings, budgets["earnings_news_budget"], "reported_earnings_calendar",
+            earnings_identity, lambda record: (-date.fromisoformat(record["date"]).toordinal(),
+                record["symbol"].strip().upper(), str(record.get("year", "")), str(record.get("quarter", ""))))
+        manifests["earnings_news"]["policy"] = "report_date_desc_symbol_fiscal_identity_v1"
+        if earnings_selected:
+            # News around explicitly admitted earnings events proxies transcripts.
             transcripts = []
-            for e in earnings[:10]:  # Top 10 to limit API calls
-                symbol = e.get("symbol", "")
+            for e, discovery in earnings_selected:
+                symbol = e.get("symbol", "").strip().upper()
                 edate = e.get("date", "")
-                if not symbol or not edate:
-                    continue
+                prior_failures = len(failures)
                 news = acquire("earnings_news", source.fetch_earnings_news,
                     symbol,
                     edate,
                     deadline=deadline,
                 )
-                if news:
+                discovery.update(request_status="failed" if len(failures) > prior_failures else "succeeded", result_count=len(news))
+                selected_articles, article_manifest = admit(news, budgets["earnings_article_budget"],
+                    "earnings_news_articles", article_identity, article_rank)
+                article_manifest.update(policy="publication_desc_source_identity_v1", parent_discovery_id=discovery["discovery_id"])
+                manifests["earnings_articles"].append(article_manifest)
+                if selected_articles:
                     # Build a pseudo-transcript from earnings news
                     news_text = "\n".join(
                         f"[{n.get('source', 'Unknown')}]: {n.get('headline', '')} — {n.get('summary', '')}"
-                        for n in news[:5]
+                        for n, _row in selected_articles
                     )
                     publication_times = [
                         str(article["published_at"])
-                        for article in news[:5]
+                        for article, _row in selected_articles
                         if article.get("published_at")
                     ]
                     transcripts.append(
                         {
                             "symbol": symbol,
+                            "acquisition_discovery_id": discovery["discovery_id"],
+                            "article_discovery_ids": [row["discovery_id"] for _article, row in selected_articles],
                             "year": e.get("year"),
                             "quarter": e.get("quarter"),
                             "transcript_text": news_text,
@@ -1728,34 +2525,41 @@ class MultiStrategyEngine:
             result["supply_chains"] = chains
 
         # PQC migration news for quantum_readiness strategy
-        pqc_tickers = [
-            "CRWD",
-            "PANW",
-            "ZS",
-            "FTNT",
-            "IBM",
-            "CSCO",
-            "MSFT",
-            "IONQ",
-            "RGTI",
-            "COIN",
-        ]
         pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
         pqc_news = []
-        for symbol in pqc_tickers[:6]:  # Rate limit: 6 tickers max
+        queries = [{"symbol": symbol, "from": date_from, "to": date_to} for symbol in pqc_tickers]
+        pqc_selected, manifests["pqc_news"] = admit(queries, budgets["pqc_symbol_budget"],
+            "declared_pqc_query_universe", lambda query: query, lambda query: (query["symbol"],))
+        manifests["pqc_news"].update(policy="symbol_ascending_v1", keyword_filter=pqc_kw)
+        manifests["pqc_articles"] = []
+        for query, discovery in pqc_selected:
+            symbol = query["symbol"]
+            prior_failures = len(failures)
             news = acquire("company_news", source.fetch_company_news,
                 symbol,
                 date_from,
                 date_to,
                 deadline=deadline,
             )
-            for article in news:
+            discovery.update(request_status="failed" if len(failures) > prior_failures else "succeeded", result_count=len(news))
+            observed, article_manifest = admit(news, None, "pqc_news_articles", article_identity, article_rank)
+            article_manifest.update(policy="all_returned_articles_publication_identity_v1", parent_discovery_id=discovery["discovery_id"])
+            manifests["pqc_articles"].append(article_manifest)
+            for article, article_discovery in observed:
                 text = (
                     article.get("headline", "") + " " + article.get("summary", "")
                 ).lower()
                 if any(kw in text for kw in pqc_kw):
-                    article["symbol"] = symbol
-                    pqc_news.append(article)
+                    pqc_news.append(dict(article, symbol=symbol,
+                        acquisition_discovery_id=article_discovery["discovery_id"],
+                        acquisition_query_id=discovery["discovery_id"]))
+                else:
+                    article_discovery["reason"] = "pqc_keyword_absent"
+                    article_manifest["admitted"].remove(article_discovery)
+                    article_manifest["excluded"].append(article_discovery)
+            article_manifest["admitted_count"] = len(article_manifest["admitted"])
+            article_manifest["excluded_count"] = len(article_manifest["excluded"])
+            discovery["qualifying_count"] = article_manifest["admitted_count"]
         if pqc_news:
             result["pqc_news"] = pqc_news
 
@@ -1770,6 +2574,11 @@ class MultiStrategyEngine:
         )
         if failures:
             result["error"] = "; ".join(failures)
+        result["coverage"] = {"contract": "finnhub-acquisition-admission-v1",
+            "status": "partial" if failures else "complete_within_declared_admission",
+            "request_window": {"from": date_from, "to": date_to},
+            "supply_chain_query_universe": sc_symbols,
+            "acquisition_admission": manifests}
         return result
 
     def _fetch_regulations_data(self, trading_date: str | None = None) -> dict[str, Any]:
@@ -1783,44 +2592,134 @@ class MultiStrategyEngine:
         rules = monitor.poll_proposed_rules(
             agencies=["SEC", "EPA", "FDA", "FTC", "DOL", "CFPB"],
             days_back=14,
+            **({'evidence_policy': self.ar_config['regulation_evidence_policy']}
+               if self.ar_config.get('regulation_evidence_policy') is not None else {}),
+            **({'retrieval_policy': self.ar_config['regulation_retrieval_policy']}
+               if self.ar_config.get('regulation_retrieval_policy') is not None else {}),
         )
-        if rules:
-            result["proposed_rules"] = rules
+        result["proposed_rules"] = list(rules)
+        if hasattr(rules, "coverage"):
+            result["coverage"] = rules.coverage
+        if hasattr(rules, 'regulation_evidence'):
+            result['regulation_evidence'] = rules.regulation_evidence
 
         logger.info("Regulations.gov fetch: %d proposed rules", len(rules))
         return result
 
-    def _fetch_edgar_events(self, trading_date: str | None = None) -> dict[str, Any]:
+    def _fetch_edgar_events(self, trading_date: str | None = None,
+                            universe_data: dict | None = None) -> dict[str, Any]:
         """Preserve valid EDGAR categories while exposing every failed operation."""
+        from .filing_research_policy import configured as filing_research_disabled
+        if filing_research_disabled(self.ar_config):
+            return {'error': 'filing_research_disabled',
+                    'coverage': {'complete': False, 'reason': 'filing_research_disabled',
+                                 'filing_research_policy': 'disabled_v1'}}
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        monitor = EventMonitor(self.registry)
+        filing_policy = self.ar_config.get('filing_evidence_policy')
+        comparator_policy = self.ar_config.get('filing_comparison_policy')
+        parser_policy = self.ar_config.get('filing_parser_policy')
+        attribution_policy = self.ar_config.get('filing_attribution_policy')
+        monitor_options = {'filing_policy': filing_policy} if filing_policy else {}
+        if comparator_policy is not None:
+            monitor_options['comparator_policy'] = comparator_policy
+        if parser_policy is not None:
+            monitor_options['parser_policy'] = parser_policy
+        if attribution_policy is not None:
+            monitor_options['attribution_policy'] = attribution_policy
+        if self.ar_config.get('filing_material_policy') is not None:
+            monitor_options['material_policy'] = self.ar_config['filing_material_policy']
+        if self.ar_config.get('filing_acquisition_policy') is not None:
+            monitor_options.update(acquisition_policy=self.ar_config['filing_acquisition_policy'],
+                                   spool_root=self.ar_config.get('filing_spool_dir'))
+        monitor = EventMonitor(self.registry, **monitor_options)
         monitor.as_of = trading_date
         result, failures = {}, []
+        company_map = None
+        collections = {}
+        if universe_data is not None:
+            from tradingagents.strategies.data_sources.equity_universe import EquityUniverse
+            if universe_data.get("error"):
+                return {"error": "equity universe evidence unavailable"}
+            source = self.registry.get("edgar")
+            company_map = source.company_ticker_map()
+            monitor.equity_universe = EquityUniverse(universe_data.get("snapshot"), company_map=company_map)
+            result["company_tickers"] = company_map
+            if self.ar_config.get('state_economics_policy'):
+                from datetime import timezone
+                from tradingagents.strategies.data_sources.state_economics_policy import digest
+                result['company_tickers_available_at'] = datetime.now(timezone.utc).isoformat()
+                result['company_tickers_sha256'] = digest(company_map)
+        text_options = {'fetch_text': False} if filing_policy else {}
         operations = {
-            "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14),
+            "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14, **text_options),
             "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
-            "activist_13d": lambda: monitor.poll_13d_filings(days_back=14),
+            "activist_13d": lambda: monitor.poll_edgar_filings(["SCHEDULE 13D"], days_back=14, **text_options),
+            "passive_13g": lambda: monitor.poll_edgar_filings(["SCHEDULE 13G"], days_back=14, **text_options),
             "pqc_filings": lambda: monitor.poll_keyword_filings(["8-K", "10-K", "10-Q"],
-                ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30),
+                ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30, **text_options),
         }
         for name, operation in operations.items():
             try:
                 result[name] = operation()
+                if name != 'form4':
+                    collections[name] = result[name]
+                if hasattr(result[name], "coverage"):
+                    result.setdefault("coverage", {})[name] = result[name].coverage
+                    result[name] = dict(result[name]) if isinstance(result[name], dict) else list(result[name])
             except Exception as exc:
                 error = source_fetch_error("EDGAR acquisition incomplete", exc)
                 partial = error.partial_data.get(name)
-                if partial is None and name == "activist_13d":
+                if partial is None and name in {"activist_13d", "passive_13g"}:
                     partial = error.partial_data.get("filings")
                 if partial is not None:
-                    result[name] = partial
+                    if name != 'form4':
+                        collections[name] = partial
+                    result[name] = list(partial) if isinstance(partial, list) else partial
+                    if hasattr(partial, "coverage"):
+                        result.setdefault("coverage", {})[name] = partial.coverage
                 failures.append(f"{name}: {error}")
+        if filing_policy:
+            try:
+                graph = monitor.hydrate_collections(
+                    {name: collections.get(name, []) for name in operations if name != 'form4'},
+                    company_map=company_map)
+                result.update(graph['collections'])
+                result['filing_evidence'] = {key: value for key, value in graph.items() if key != 'collections'}
+                complete = graph.get('coverage', {}).get('complete') is True
+                if self.ar_config.get('filing_material_policy') is not None:
+                    from .filing_material_validation import validate_filing_material_policy
+                    # A temporary failure label permits validating incomplete graphs;
+                    # it is never persisted or used to erase other operation errors.
+                    material = validate_filing_material_policy(
+                        {'edgar': dict(result, error='full filing evidence incomplete')}, self.ar_config)
+                    complete = material is not None and material['scoped_complete'] is True
+                if not complete:
+                    failures.append('full filing evidence incomplete')
+            except Exception as exc:
+                error = source_fetch_error('Full filing evidence acquisition incomplete', exc)
+                failures.append(str(error))
         if failures:
             result["error"] = "; ".join(failures)
         return result
 
-    def _fetch_courtlistener_data(self) -> dict[str, Any]:
+    def _fetch_courtlistener_data(self, trading_date: str | None = None,
+                                focused_scope: dict | None = None,
+                                acquisition_deadline: float | None = None) -> dict[str, Any]:
         """Fetch CourtListener data for litigation strategy."""
+        if self.ar_config.get('courtlistener_scope_policy') is not None:
+            from .scoped_sources import litigation_settings
+            litigation_settings(self.ar_config)
+            if focused_scope is None or acquisition_deadline is None or trading_date is None:
+                raise ValueError('focused Court scope and parent deadline required')
+            source = self.registry.get('courtlistener')
+            if source is None:
+                return {'error': 'CourtListener unavailable'}
+            result = source.fetch_focused_litigation(focused_scope,
+                date_filed_after=(date.fromisoformat(trading_date) - timedelta(days=14)).isoformat(),
+                date_filed_before=trading_date, absolute_deadline=acquisition_deadline,
+                request_cap=10, subbudget_seconds=120)
+            return dict(result, courtlistener_scope_policy='focused_litigation_v1')
         from tradingagents.strategies.learning.event_monitor import EventMonitor
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
 
@@ -1828,6 +2727,7 @@ class MultiStrategyEngine:
         result: dict[str, Any] = {}
         failures: list[str] = []
 
+        monitor.as_of = trading_date
         # Search for securities-related cases
         for query in ["securities class action", "SEC enforcement", "antitrust"]:
             try:
@@ -1838,6 +2738,8 @@ class MultiStrategyEngine:
                 failures.append(f"{query.lower().replace(' ', '_')}: {safe_error}")
                 logger.error("%s", safe_error)
                 continue
+            if hasattr(dockets, "coverage"):
+                result.setdefault("coverage", {})[query] = dockets.coverage
             existing = result.get("dockets", [])
             existing.extend(dockets)
             result["dockets"] = existing
@@ -1850,11 +2752,12 @@ class MultiStrategyEngine:
         )
         return result
 
-    def _fetch_fred_data(self, start_date: str, end_date: str) -> dict[str, Any]:
+    def _fetch_fred_data(self, start_date: str, end_date: str, state_vintage: str | None = None) -> dict[str, Any]:
         """Fetch FRED credit spreads and economic indicators."""
         from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
         source = self.registry.get("fred")
+        start_date = min(start_date, (pd.Timestamp(end_date) - pd.DateOffset(months=18)).date().isoformat())
         if source is None:
             return {}
 
@@ -1888,6 +2791,17 @@ class MultiStrategyEngine:
         if failures:
             result["error"] = "; ".join(failures)
 
+        if self.ar_config.get('state_economics_policy'):
+            from copy import deepcopy
+            from tradingagents.strategies.data_sources.state_economics_policy import acquire_states
+            result['state_unemployment'] = acquire_states(source, start_date, state_vintage or end_date)
+            result['state_exposure_registry'] = deepcopy(self.ar_config['state_exposure_manifest'])
+            result['state_policy_settings'] = {'policy': self.ar_config['state_economics_policy'],
+                'release_lookback_days': self.ar_config.get('state_release_lookback_days', 7)}
+            result['coverage'] = {'state_unemployment': result['state_unemployment']['coverage']}
+
+        # Both Series.attrs and this convenience metadata survive the bundle codec.
+        result["vintage"] = {"as_of": end_date, "realtime_start": end_date, "realtime_end": end_date}
         # Map friendly names for strategies that use them
         from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
 
@@ -1895,19 +2809,49 @@ class MultiStrategyEngine:
             if series_id in result:
                 result[friendly_name] = result[series_id]
 
+        if self.ar_config.get('state_economics_policy'):
+            from .source_inputs import SourceInputStore, SourceInputError
+            try:
+                SourceInputStore.encode(result)
+            except SourceInputError:
+                # State acceptance cannot discard independently valid macro inputs.
+                from tradingagents.strategies.data_sources.state_economics_policy import STATES
+                state = result['state_unemployment']
+                state['states'] = {}
+                state['coverage'] = {'expected_states': 51, 'accepted_states': 0,
+                    'failed_states': {code: 'invalid_response' for code in STATES}, 'complete': False}
+                result['coverage'] = {'state_unemployment': state['coverage']}
+                result['state_evidence_error'] = 'state_source_codec_limit'
+                try:
+                    SourceInputStore.encode(result)
+                except SourceInputError:
+                    result.pop('state_exposure_registry', None)
+                    SourceInputStore.encode(result)
         logger.info("FRED fetch: %d series loaded", len(result))
         return result
 
-    def _fetch_congress_data(self, trading_date: str) -> dict[str, Any]:
-        """Fetch recent congressional stock trades."""
+    def _fetch_congress_data(self, trading_date: str, acquisition_deadline: float | None = None) -> dict[str, Any]:
+        """Fetch the declared display snapshot or the legacy trading input."""
         source = self.registry.get("congress")
         if source is None:
             return {}
+        from .congress_policy import configured
+        if configured(self.ar_config):
+            import time
+            from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
+            deadline = acquisition_deadline if acquisition_deadline is not None else current_provider_deadline('congress')
+            if deadline is None:
+                deadline = time.monotonic() + 90
+            return source.get_audit_snapshot(
+                date_filed_after=(date.fromisoformat(trading_date) - timedelta(days=30)).isoformat(),
+                date_filed_before=trading_date, absolute_deadline=deadline)
 
         result: dict[str, Any] = {}
         try:
-            trades = source.get_recent_trades(days_back=30, as_of=trading_date)
-            result["recent_trades"] = trades
+            trades = source.get_recent_trades(days_back=30, as_of=trading_date, complete_window=True)
+            result["recent_trades"] = list(trades)
+            if hasattr(trades, "coverage"):
+                result["coverage"] = trades.coverage
             logger.info("Congress fetch: %d recent trades", len(trades))
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
@@ -1925,75 +2869,113 @@ class MultiStrategyEngine:
         if source is None:
             return {}
 
+        payload = {}
         try:
             contracts = source.get_recent_large_contracts(
                 min_amount=50_000_000,
                 days_back=30,
                 as_of=trading_date,
             )
-            result = {"contracts": contracts}
+            result = {"contracts": list(contracts)}
+            if hasattr(contracts, "coverage"):
+                result["coverage"] = contracts.coverage
             logger.info("USASpending fetch: %d large contracts", len(contracts))
-            return {"data": result}
+            payload = {"data": result, **({"coverage": contracts.coverage} if hasattr(contracts, "coverage") else {})}
+            policy = self.ar_config.get('award_attribution_policy')
+            if policy is not None:
+                from tradingagents.strategies.data_sources.award_attribution_policy import (
+                    POLICY, apply_attribution_policy,
+                )
+                if policy != POLICY:
+                    raise ValueError('unsupported award attribution policy')
+                scoped = apply_attribution_policy(list(contracts), getattr(contracts, 'coverage', None), session=trading_date)
+                payload.update(scoped)
+                result['coverage'] = scoped['coverage']
+            elif (hasattr(contracts, "coverage")
+                    and contracts.coverage.get('issuer_attribution', {}).get('complete') is False):
+                payload['error'] = 'USASpending issuer attribution incomplete'
+            return payload
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.error("%s", safe_error)
-            return {**safe_error.partial_data, "error": str(safe_error)}
+            return {**payload, **safe_error.partial_data, "error": str(safe_error)}
 
-    def _fetch_noaa_data(self, trading_date: str) -> dict[str, Any]:
+    def _fetch_noaa_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
         source = self.registry.get("noaa")
         if source is None:
             return {}
 
         try:
-            return source.fetch_ag_weather_summary(trading_date, lookback_days=30)
+            options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+            return source.fetch_ag_weather_summary(trading_date, lookback_days=30, **options)
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
             error = source_fetch_error("Source acquisition failed", exc)
             return {**error.partial_data, "error": str(error)}
 
-    def _fetch_usda_data(self, trading_date: str) -> dict[str, Any]:
+    def _fetch_usda_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Preserve crops fetched before any required crop failure."""
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
+        from tradingagents.strategies.data_sources.usda_source import condition_scope
         source = self.registry.get("usda")
         if source is None:
             return {}
-        crop_progress, failures = {}, []
-        year = datetime.strptime(trading_date, "%Y-%m-%d").year
+        crop_progress, failures, crop_coverage = {}, [], {}
         for commodity in ("CORN", "SOYBEANS", "WHEAT"):
+            scope = condition_scope(commodity, trading_date)
+            year = scope["reporting_year"]
             try:
-                crop_progress[commodity] = source.fetch_crop_progress(commodity, year)
+                options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+                observations = source.fetch_crop_progress(commodity, year, as_of=trading_date, **options)
+                crop_progress[commodity] = list(observations)
+                crop_coverage[commodity] = getattr(observations, "coverage", {**scope, "complete": False, "reason": "missing_survey_coverage"})
+                if crop_coverage[commodity].get("complete") is not True:
+                    failures.append(f"{commodity}: incomplete declared survey coverage")
             except Exception as exc:
                 error = source_fetch_error("USDA crop acquisition incomplete", exc)
                 crop_progress.update(error.partial_data.get("crop_progress", {}))
+                crop_coverage[commodity] = error.partial_data.get("coverage", {**scope, "complete": False})
                 failures.append(f"{commodity}: {error}")
-        result = {"crop_progress": crop_progress}
+        acquisition_times = [str(row["available_at"]) for weeks in crop_progress.values() for row in weeks if isinstance(row, dict) and row.get("available_at")]
+        result = {"crop_progress": crop_progress, "coverage": {
+            "complete": not failures and all(row.get("complete") is True for row in crop_coverage.values()),
+            "crops": crop_coverage,
+        }}
+        if acquisition_times:
+            acquired = max(acquisition_times)
+            result.update(available_at=acquired, acquired_at=acquired)
         if failures:
             result["error"] = "; ".join(failures)
         return result
 
-    def _fetch_drought_data(self, trading_date: str) -> dict[str, Any]:
+    def _fetch_drought_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch Drought Monitor severity and composite score."""
         source = self.registry.get("drought_monitor")
         if source is None:
             return {}
 
         try:
-            from datetime import datetime, timedelta
-
             end = trading_date
-            start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=7)).strftime(
-                "%Y-%m-%d"
-            )
-            severity = source.fetch_drought_severity(start=start, end=end)
-            composite = source.fetch_composite_score(date=trading_date)
-            return {"composite_score": composite, "states": severity}
+            options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
+            severity = source.fetch_drought_severity(end=end, **options)
+            composite = source.fetch_composite_score(date=trading_date, **options)
+            result = {"composite_score": composite, "states": severity}
+            acquisition_times = [str(row["available_at"]) for row in severity.values() if isinstance(row, dict) and row.get("available_at")]
+            if acquisition_times:
+                acquired = max(acquisition_times)
+                result.update(available_at=acquired, acquired_at=acquired)
+            return result
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
             error = source_fetch_error("Source acquisition failed", exc)
-            return {**error.partial_data, "error": str(error)}
+            return {**error.partial_data, "error": str(error), "_coverage": {
+                "status": "partial" if error.partial_data else "failed",
+                "reason_code": error.reason_code, "http_status": error.http_status,
+                "attempts": error.attempts,
+            }}
 
-    def _fetch_cftc_data(self) -> dict[str, Any]:
+    def _fetch_cftc_data(self, trading_date: str | None = None, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Fetch CFTC COT positioning data for commodity strategy."""
         source = self.registry.get("cftc")
         if source is None:
@@ -2004,6 +2986,8 @@ class MultiStrategyEngine:
                 "method": "cot_positioning",
                 "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
                 "lookback_weeks": 52,
+                "as_of": trading_date,
+                **({'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}),
             }
         )
 
@@ -2113,145 +3097,414 @@ class MultiStrategyEngine:
         candidates: list[Candidate],
         strategy_name: str,
         regime_context: dict | None = None,
+        *, filing_data: dict | None = None, universe=None,
     ) -> list[Candidate]:
         """Run LLM analysis on candidates that have needs_llm_analysis=True."""
-        enriched = []
-        for c in candidates:
-            if not c.metadata.get("needs_llm_analysis"):
-                enriched.append(c)
+        from tradingagents.strategies.runtime_deadline import (
+            model_phase_budget_seconds, current_model_deadline, model_budget,
+        )
+        from tradingagents.strategies.candidate_parallel import analyze_candidates
+        allowance = model_phase_budget_seconds(self.config)
+        if current_model_deadline() is None:
+            import time
+            with model_budget(time.monotonic() + allowance):
+                return self._enrich_with_llm(candidates, strategy_name, regime_context,
+                                             filing_data=filing_data, universe=universe)
+        enriched = list(candidates)
+        required = [c for c in enriched if c.metadata.get("needs_llm_analysis")]
+        try:
+            outcomes = analyze_candidates(required, analyzer=self._analyzer,
+                analyze_one=lambda c, worker: self._analyze_candidate(c, strategy_name, regime_context, worker,
+                    filing_data=filing_data, universe=universe),
+                max_workers=self.ar_config.get("candidate_analysis_workers", 1))
+        except ValueError:
+            # A configuration/client refusal retains every discovered input and
+            # fails required coverage. Never silently change the transport.
+            from tradingagents.strategies.candidate_parallel import CandidateAnalysisOutcome
+            outcomes = [CandidateAnalysisOutcome(c, "analysis_unavailable") for c in required]
+        for outcome in outcomes:
+            if not outcome.failure:
                 continue
+            c = outcome.candidate
+            c.metadata.update(analysis_status="failed", analysis_failure_reason=outcome.failure)
+            optional = c.metadata.get("analysis_type") in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
+            if not optional or outcome.failure == "model_deadline_exhausted":
+                c.journal_only = True
+                c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
 
-            analysis_type = c.metadata.get("analysis_type", "")
-            llm_result = {}
-
-            try:
-                if analysis_type == "earnings_call":
-                    llm_result = self._analyzer.analyze_earnings_call(
-                        c.metadata.get(
-                            "analysis_text", c.metadata.get("transcript_text", "")
-                        ),
-                        c.ticker,
-                        regime_context=regime_context,
-                        text_source=c.metadata.get("text_source", "earnings_news"),
-                    )
-                elif analysis_type == "regulation":
-                    llm_result = self._analyzer.analyze_regulation(
-                        c.metadata.get("title", ""),
-                        c.metadata.get("summary", ""),
-                        c.metadata.get("agency_id", ""),
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "supply_chain":
-                    llm_result = self._analyzer.analyze_supply_chain(
-                        c.metadata.get("headline", ""),
-                        c.metadata.get("summary", ""),
-                        c.ticker,
-                        c.metadata.get("affected_peers", []),
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "litigation":
-                    llm_result = self._analyzer.analyze_litigation(
-                        c.metadata.get("case_name", ""),
-                        c.metadata.get("nature_of_suit", ""),
-                        c.metadata.get("cause", ""),
-                        c.metadata.get("court", ""),
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "insider_activity":
-                    cluster_type = c.metadata.get("cluster_type", "")
-                    if cluster_type == "buy_cluster":
-                        llm_result = self._analyzer.analyze_insider_context(
-                            c.metadata.get("filings", []),
-                            c.ticker,
-                            regime_context=regime_context,
-                        )
-                    elif cluster_type == "sell_pattern":
-                        llm_result = self._analyzer.analyze_10b5_1_plan(
-                            c.metadata.get("filings", []),
-                            c.ticker,
-                            regime_context=regime_context,
-                        )
-                elif analysis_type == "filing_change":
-                    llm_result = self._analyzer.analyze_filing_change(
-                        c.metadata.get("current_text", ""),
-                        c.metadata.get("prior_text", ""),
-                        c.ticker,
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "exec_comp":
-                    llm_result = self._analyzer.analyze_exec_comp(
-                        c.metadata.get("proxy_text", ""),
-                        c.ticker,
-                        regime_context=regime_context,
-                    )
-                elif analysis_type == "ag_weather":
-                    llm_result = self._analyzer.analyze_ag_weather(
-                        ticker=c.ticker,
-                        commodity_name=c.metadata.get("commodity", c.ticker),
-                        ag_context={
-                            "drought_score": c.metadata.get("drought_score", 0),
-                            "drought_states": c.metadata.get("drought_states", {}),
-                            "noaa_data": c.metadata.get("noaa_data", {}),
-                            "usda_data": c.metadata.get("usda_data", {}),
-                        },
-                        trailing_return=c.metadata.get("trailing_return", 0),
-                        hold_days=21,
-                        regime_context=regime_context,
-                    )
-                # A parsed JSON response can still violate the numeric score
-                # contract. Validate before changing any candidate fields, so
-                # malformed analysis uses the same rule-based fallback as an
-                # unavailable analyzer rather than poisoning every cohort.
-                if llm_result:
-                    if not isinstance(llm_result, dict):
-                        raise ValueError("LLM analysis must be an object")
-                    llm_result = dict(llm_result)
-                    score_key = (
-                        "conviction" if "conviction" in llm_result else "score"
-                    )
-                    if score_key in llm_result:
-                        value = llm_result[score_key]
-                        if isinstance(value, bool):
-                            raise ValueError("LLM score must be numeric")
-                        score = float(value)
-                        if not math.isfinite(score) or not 0 <= score <= 1:
-                            raise ValueError("LLM score must be between zero and one")
-                        llm_result[score_key] = score
-            except Exception:
-                llm_result = {}
-                logger.error(
-                    "LLM analysis failed for %s/%s",
-                    strategy_name,
-                    c.ticker,
-                    exc_info=True,
-                )
-
-            if llm_result:
-                # Update candidate with LLM results
-                c.direction = llm_result.get("direction", c.direction)
-                c.score = llm_result.get("conviction", llm_result.get("score", c.score))
-                c.metadata["llm_analysis"] = llm_result
-                # SEC's company list validates newly inferred companies. It
-                # does not cover the strategy's configured ETF universe.
-                resolved_by_llm = False
-                if not c.ticker and llm_result.get("defendant_ticker"):
-                    c.ticker = llm_result["defendant_ticker"]
-                    resolved_by_llm = True
-                if not c.ticker and llm_result.get("affected_tickers"):
-                    c.ticker = llm_result["affected_tickers"][0]
-                    resolved_by_llm = True
-
-                if resolved_by_llm and c.ticker:
-                    edgar = self.registry.get("edgar")
-                    if edgar and hasattr(edgar, "validate_ticker"):
-                        if not edgar.validate_ticker(c.ticker):
-                            logger.warning(
-                                "LLM returned invalid ticker %s for %s, dropping",
-                                c.ticker,
-                                strategy_name,
-                            )
-                            c.ticker = ""
-
-            enriched.append(c)
-
+        if any(c.metadata.get("analysis_failure_reason") == "model_deadline_exhausted" for c in enriched):
+            # A timeout must not select a prefix of the admitted sample or route
+            # optional assessments back into deterministic selection.
+            for c in enriched:
+                c.journal_only = True
+                c.metadata.update(analysis_status="failed", analysis_failure_reason="model_deadline_exhausted",
+                                  non_actionable_reason="model_sample_incomplete")
         return enriched
+
+    def _analyze_candidate(self, c: Candidate, strategy_name: str, regime_context: dict | None, analyzer, *,
+                           filing_data: dict | None = None, universe=None) -> None:
+        """Validate one assessment using this worker's independent analyzer state."""
+        from copy import deepcopy
+        import hashlib
+        from .research_resilience import configured as resilience_configured
+        from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, model_timeout
+        from tradingagents.strategies.candidate_response_reuse import begin_candidate_response, commit_candidate_response, end_candidate_response
+        resilience = resilience_configured(self.ar_config)
+        if resilience:
+            # A refusal before the call boundary must not inherit the preceding
+            # candidate's request, returned text, or transport provenance.
+            analyzer.last_research_request = None
+            analyzer.last_call_response = {'received': False, 'text': None}
+            analyzer.last_call_provenance = {}
+            analyzer.last_call_failure = ''
+        analysis_type = c.metadata.get("analysis_type", "")
+        if analysis_type == 'bounded_document_research':
+            analyzer.last_bounded_document_attempt = None
+        llm_result = {}
+        full_filing = c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1'
+        full_regulation = analysis_type == 'regulation' and (
+            self.ar_config.get('regulation_evidence_policy') is not None
+            or c.metadata.get('regulation_evidence_policy') is not None)
+        regulation_call_started = False
+        optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
+
+        reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
+
+        try:
+            if not c.ticker and 'edgar' in self.ar_config.get('retired_sources', {}):
+                raise ValueError('invalid_retired_source_identity_dependency')
+            model_timeout()
+            required_text_fields = {
+                "earnings_call": ("analysis_text", "transcript_text"),
+                "filing_change": ("current_text",), "exec_comp": ("proxy_text",),
+                "material_event": ("current_text",), "activist_stake": ("current_text",),
+                "passive_stake": ("current_text",), "quantum_readiness": ("analysis_text",),
+                "supply_chain": ("headline", "summary"), "regulation": ("title", "summary"),
+                "litigation": ("case_name", "nature_of_suit", "cause"),
+            }
+            fields = required_text_fields.get(analysis_type)
+            if not full_filing and not full_regulation and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
+                raise ValueError("missing_source_text")
+            if analysis_type == 'bounded_document_research':
+                # Held until independent claim/context verification and scoped
+                # thesis validation. Ordinary committee/risk still own orders.
+                c.journal_only = True
+                decision_policy = self.ar_config.get('bounded_document_decision_policy')
+                decision_options = ({'decision_scope':c.metadata.get('bounded_document_decision_scope'),
+                                     'ticker':c.ticker} if decision_policy is not None else {})
+                scope = decision_options.get('decision_scope')
+                if isinstance(scope,dict) and 'independent_review' not in scope:
+                    decision_options['verification_clock'] = lambda:datetime.now(timezone.utc).isoformat()
+                llm_result = analyzer.analyze_bounded_document_evidence(
+                    c.metadata['bounded_document_evidence'], session_as_of=c.date,
+                    regime_context=regime_context, **decision_options)
+                if decision_policy is not None:
+                    eligibility = llm_result.get('decision_eligibility', {})
+                    from tradingagents.strategies.document_review_clock import POLICY as NEXT_OPEN_POLICY
+                    expected_authority = ('requires_final_decision_clock' if decision_policy == NEXT_OPEN_POLICY
+                        else 'ordinary_committee_and_risk_gates')
+                    if (decision_policy not in ('verified_scoped_claims_v1', NEXT_OPEN_POLICY)
+                            or eligibility.get('eligible') is not True
+                            or eligibility.get('policy') != decision_policy
+                            or eligibility.get('execution_authority') != expected_authority
+                            or llm_result.get('assessment_scope') != 'selected_pages'
+                            or llm_result.get('journal_only') is not (llm_result.get('direction') == 'neutral')):
+                        raise ValueError('invalid_bounded_document_eligibility')
+                    c.journal_only = llm_result['journal_only']
+                elif (llm_result.get('journal_only') is not True
+                        or llm_result.get('trading_authority') is not False
+                        or llm_result.get('assessment_scope') != 'selected_pages'):
+                    raise ValueError('invalid_bounded_document_authority')
+            elif full_filing:
+                from tradingagents.strategies.orchestration.filing_inputs import filing_analysis_inputs
+                filing_arguments = filing_analysis_inputs(c, filing_data, universe)
+                llm_result = analyzer.analyze_filing_evidence(
+                    analysis_type, regime_context=regime_context, **filing_arguments)
+                c.metadata['document_assessment'] = llm_result['document_assessment']
+                if llm_result['filing_evidence_status'] != 'sufficient':
+                    c.metadata['filing_assessment'] = llm_result
+                    raise ValueError('missing_required_filing_analysis')
+            elif full_regulation:
+                from tradingagents.strategies.orchestration.regulation_inputs import (
+                    regulation_analysis_inputs, validate_regulation_policy,
+                )
+                if self.ar_config.get('regulation_evidence_policy') not in (None, 'complete_document_text_v1'):
+                    raise ValueError('invalid_regulation_evidence_policy')
+                source_graph = (filing_data or {}).get('regulations', {}).get('regulation_evidence', {})
+                if (self.ar_config.get('regulation_retrieval_policy') is not None
+                        or self.ar_config.get('regulation_assessment_policy') is not None
+                        or source_graph.get('retrieval_policy') is not None):
+                    validate_regulation_policy(filing_data, self.ar_config)
+                regulation_arguments = regulation_analysis_inputs(c, filing_data, universe)
+                regulation_call_started = True
+                llm_result = analyzer.analyze_regulation_evidence(
+                    regime_context=regime_context, **regulation_arguments,
+                    **({'assessment_policy': self.ar_config['regulation_assessment_policy']}
+                       if self.ar_config.get('regulation_assessment_policy') is not None else {}))
+                c.metadata['document_assessment'] = llm_result['document_assessment']
+                c.metadata['regulation_evidence_status'] = llm_result['regulation_evidence_status']
+                from ..data_sources.regulation_assessment import completed_abstention
+                if llm_result['regulation_evidence_status'] != 'sufficient' and not (
+                        self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
+                        and completed_abstention(llm_result)):
+                    c.metadata['regulation_assessment'] = llm_result
+                    provenance = getattr(analyzer, 'last_call_provenance', None)
+                    if isinstance(provenance, dict) and provenance:
+                        c.metadata['model_provenance'] = dict(provenance)
+                    raise ValueError('missing_required_regulation_analysis')
+            elif analysis_type == 'state_economics':
+                from tradingagents.strategies.data_sources.state_economics_policy import validate_assessment
+                event, exposure = c.metadata['state_event'], c.metadata['state_exposure']
+                llm_result = analyzer.analyze_state_economics(ticker=c.ticker, state_event=event,
+                    state_exposure=exposure, regime_context=regime_context)
+                llm_result = validate_assessment(llm_result, ticker=c.ticker, event=event, exposure=exposure)
+            elif analysis_type == "earnings_call":
+                llm_result = analyzer.analyze_earnings_call(
+                    c.metadata.get(
+                        "analysis_text", c.metadata.get("transcript_text", "")
+                    ),
+                    c.ticker,
+                    regime_context=regime_context,
+                    text_source=c.metadata.get("text_source", "earnings_news"),
+                )
+            elif analysis_type == "regulation":
+                llm_result = analyzer.analyze_regulation(
+                    c.metadata.get("title", ""),
+                    c.metadata.get("summary", ""),
+                    c.metadata.get("agency_id", ""),
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "supply_chain":
+                llm_result = analyzer.analyze_supply_chain(
+                    c.metadata.get("headline", ""),
+                    c.metadata.get("summary", ""),
+                    c.ticker,
+                    c.metadata.get("affected_peers", []),
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "litigation":
+                llm_result = analyzer.analyze_litigation(
+                    c.metadata.get("case_name", ""),
+                    c.metadata.get("nature_of_suit", ""),
+                    c.metadata.get("cause", ""),
+                    c.metadata.get("court", ""),
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "insider_activity":
+                cluster_type = c.metadata.get("cluster_type", "")
+                if cluster_type == "buy_cluster":
+                    llm_result = analyzer.analyze_insider_context(
+                        c.metadata.get("filings", []),
+                        c.ticker,
+                        regime_context=regime_context,
+                    )
+                elif cluster_type == "sell_pattern":
+                    llm_result = analyzer.analyze_10b5_1_plan(
+                        c.metadata.get("filings", []),
+                        c.ticker,
+                        regime_context=regime_context,
+                    )
+            elif analysis_type == "filing_change":
+                llm_result = analyzer.analyze_filing_change(
+                    c.metadata.get("current_text", ""),
+                    c.metadata.get("prior_text", ""),
+                    c.ticker,
+                    regime_context=regime_context,
+                )
+            elif analysis_type in {"material_event", "activist_stake", "passive_stake"}:
+                text = c.metadata.get("current_text", "")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("missing_source_text")
+                llm_result = analyzer.analyze_filing_change(text, "", c.ticker, regime_context=regime_context)
+            elif analysis_type == "quantum_readiness":
+                text = c.metadata.get("analysis_text", "")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("missing_source_text")
+                llm_result = analyzer.analyze_quantum_readiness(text, c.ticker, text_source="news", regime_context=regime_context)
+            elif analysis_type == "commodity_macro":
+                llm_result = analyzer.analyze_commodity_macro(
+                    ticker=c.ticker, commodity_name=c.metadata.get("commodity", ""),
+                    cot_context=c.metadata.get("cot_evidence", {}),
+                    macro_context=c.metadata.get("macro_evidence", {}),
+                    regime_context=regime_context)
+            elif analysis_type == "exec_comp":
+                llm_result = analyzer.analyze_exec_comp(
+                    c.metadata.get("proxy_text", ""),
+                    c.ticker,
+                    regime_context=regime_context,
+                )
+            elif analysis_type == "ag_weather":
+                llm_result = analyzer.analyze_ag_weather(
+                    ticker=c.ticker,
+                    commodity_name=c.metadata.get("commodity", c.ticker),
+                    ag_context={
+                        "drought_score": c.metadata.get("drought_score", 0),
+                        "drought_states": c.metadata.get("drought_states", {}),
+                        "noaa_data": c.metadata.get("noaa_data", {}),
+                        "usda_data": c.metadata.get("usda_data", {}),
+                    },
+                    trailing_return=c.metadata.get("trailing_return", 0),
+                    hold_days=c.metadata.get("hold_days", 21),
+                    regime_context=regime_context,
+                )
+            else:
+                raise ValueError(f"unsupported_required_analysis:{analysis_type}")
+            model_timeout()
+            if resilience:
+                observed = getattr(analyzer, 'last_call_response', None)
+                if isinstance(observed, dict) and observed.get('received') is True and type(observed.get('text')) is str:
+                    try:
+                        observed['text'].encode('utf-8')
+                    except UnicodeEncodeError as error:
+                        raise ValueError('invalid_response_encoding') from error
+            provenance = getattr(analyzer, "last_call_provenance", None)
+            if isinstance(provenance, dict) and provenance:
+                c.metadata["model_provenance"] = dict(provenance)
+            if getattr(analyzer, "last_call_failure", "") == "model_deadline_exhausted":
+                raise ModelDeadlineExceeded("model_deadline_exhausted")
+            if not isinstance(llm_result, dict) or not llm_result:
+                raise ValueError("analysis_unavailable")
+            llm_result = dict(llm_result)
+            from ..data_sources.regulation_assessment import completed_abstention
+            abstained = full_regulation and completed_abstention(llm_result)
+            if not abstained and llm_result.get("direction") not in {"long", "short", "neutral"}:
+                raise ValueError("invalid_direction")
+            score_key = "conviction" if "conviction" in llm_result else "score"
+            value = 0.0 if abstained else llm_result.get(score_key)
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError("invalid_score")
+            score = float(value)
+            if not math.isfinite(score) or not 0 <= score <= 1:
+                raise ValueError("invalid_score")
+            if not abstained:
+                llm_result[score_key] = score
+            for key in ("defendant_ticker", "primary_ticker"):
+                if key in llm_result and (not isinstance(llm_result[key], str) or len(llm_result[key]) > 16):
+                    raise ValueError(f"invalid_{key}")
+            for key in ("affected_tickers", "secondary_tickers"):
+                if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(t, str) or not t.strip() or len(t) > 16 for t in llm_result[key])):
+                    raise ValueError(f"invalid_{key}")
+            if not optional and not any(isinstance(llm_result.get(key), str) and llm_result[key].strip() for key in ("rationale", "reasoning", "evidence_claim")):
+                raise ValueError("missing_analysis_explanation")
+            for key in ("rationale", "reasoning", "evidence_claim"):
+                if key in llm_result and not isinstance(llm_result[key], str):
+                    raise ValueError(f"invalid_{key}")
+            for key in ("tone_assessment", "primary_impact", "duration_estimate", "impact_assessment", "case_type", "pqc_readiness", "crypto_dependency"):
+                if key in llm_result and not isinstance(llm_result[key], str):
+                    raise ValueError(f"invalid_{key}")
+            for key in ("changes", "red_flags", "comp_changes", "guidance_changes", "notable_insiders", "affected_sectors"):
+                if key in llm_result and (not isinstance(llm_result[key], list) or len(llm_result[key]) > 50 or any(not isinstance(item, str) for item in llm_result[key])):
+                    raise ValueError(f"invalid_{key}")
+            if "severity" in llm_result and llm_result["severity"] not in {"low", "medium", "high", "critical"}:
+                raise ValueError("invalid_severity")
+            if "regime_signal" in llm_result and llm_result["regime_signal"] not in {"bull", "bear", "neutral", "accelerating", "stalling"}:
+                raise ValueError("invalid_regime_signal")
+            if "regime_confidence" in llm_result:
+                value = llm_result["regime_confidence"]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError("invalid_regime_confidence")
+            if "cluster_size" in llm_result and (type(llm_result["cluster_size"]) is not int or llm_result["cluster_size"] < 0):
+                raise ValueError("invalid_cluster_size")
+            if "secondary_impacts" in llm_result:
+                impacts = llm_result["secondary_impacts"]
+                if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
+                    raise ValueError("invalid_secondary_impacts")
+            ticker = c.ticker
+            if full_regulation:
+                if llm_result.get('document_assessment') == 'assessed_no_directional_thesis' or abstained:
+                    if llm_result.get('target_ticker') is not None:
+                        raise ValueError('invalid_regulation_target')
+                    ticker = ''
+                    c.journal_only = True
+                elif llm_result.get('document_assessment') == 'assessed_directional':
+                    ticker = llm_result.get('target_ticker')
+                    if not ticker or ticker not in {item['ticker'] for item in regulation_arguments['target_bindings']}:
+                        raise ValueError('invalid_regulation_target')
+                else:
+                    raise ValueError('missing_required_regulation_analysis')
+            elif full_filing and not ticker:
+                if llm_result.get('document_assessment') != 'assessed_no_directional_thesis':
+                    raise ValueError('unresolved_issuer')
+                c.journal_only = True
+                c.metadata['non_actionable_reason'] = 'equity_universe_unresolved'
+            elif not ticker:
+                ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
+                ticker = ticker.strip().upper()
+                if 'edgar' in self.ar_config.get('retired_sources', {}):
+                    raise ValueError('invalid_retired_source_identity_dependency')
+                edgar = self.registry.get("edgar")
+                if not ticker or edgar is None or not edgar.validate_ticker(ticker):
+                    raise ValueError("unresolved_issuer")
+            # Commit fields only after full schema and entity validation.
+            reuse = commit_candidate_response()
+            if reuse is not None:
+                analyzer.last_call_provenance["request_reuse"] = reuse
+                c.metadata["model_provenance"] = dict(analyzer.last_call_provenance)
+            c.ticker, c.direction, c.score = ticker, 'neutral' if abstained else llm_result["direction"], score
+            c.metadata["llm_analysis"] = llm_result
+            c.metadata["analysis_status"] = "validated"
+            if c.metadata.get("non_actionable_reason") == "missing_source_text":
+                c.metadata.pop("non_actionable_reason", None)
+                c.journal_only = False
+        except Exception as exc:
+            c.metadata["analysis_status"] = "failed"
+            reason = str(exc)
+            if isinstance(exc, ModelDeadlineExceeded):
+                reason = "model_deadline_exhausted"
+            elif not isinstance(exc, ValueError) or not reason.startswith(("invalid_", "missing_", "unsupported_required_analysis:", "analysis_unavailable", "unresolved_issuer")):
+                reason = "analysis_unavailable"
+            c.metadata["analysis_failure_reason"] = reason[:160]
+            if not optional or isinstance(exc, ModelDeadlineExceeded):
+                c.journal_only = True
+                c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
+            logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
+        finally:
+            if analysis_type == 'bounded_document_research':
+                # Exact bytes already live in the immutable daily source bundle.
+                # Retain compact identity in each horizon/book checkpoint.
+                from .bounded_document_inputs import release_candidate_bytes
+                release_candidate_bytes(c)
+                attempt = getattr(analyzer, 'last_bounded_document_attempt', None)
+                if isinstance(attempt, dict) and c.metadata.get('analysis_status') != 'validated':
+                    c.metadata['bounded_document_attempt'] = deepcopy(attempt)
+            if resilience:
+                observed = getattr(analyzer, 'last_call_response', None)
+                text = observed.get('text') if isinstance(observed, dict) and observed.get('received') is True else None
+                raw, encoding = None, None
+                if type(text) is str:
+                    encoding = 'utf-8'
+                    try:
+                        raw = text.encode('utf-8')
+                    except UnicodeEncodeError:
+                        # Keep invalid scalars losslessly and explicitly. They
+                        # cannot become a validated assessment or memo entry.
+                        raw = text.encode('utf-8', errors='surrogatepass')
+                        encoding = 'utf-8-surrogatepass'
+                status = c.metadata.get('analysis_status', 'failed')
+                request = getattr(analyzer, 'last_research_request', None)
+                provenance = getattr(analyzer, 'last_call_provenance', None)
+                c.metadata['research_model_outcome'] = {
+                    'version': 'research-model-outcome-v1',
+                    'model_request': deepcopy(request) if isinstance(request, dict) else None,
+                    'response_received': raw is not None,
+                    'response_sha256': hashlib.sha256(raw).hexdigest() if raw is not None else None,
+                    'response_bytes': len(raw) if raw is not None else None, 'response_encoding': encoding,
+                    # This records this assessment, before any later timeout
+                    # holds the complete sample through final candidate flags.
+                    'analysis_status': status,
+                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason') if status == 'failed' else None,
+                    'model_provenance': deepcopy(provenance) if isinstance(provenance, dict) else {},
+                }
+            if regulation_call_started:
+                attempt = getattr(analyzer, 'last_regulation_attempt', None)
+                provenance = getattr(analyzer, 'last_call_provenance', None)
+                if isinstance(attempt, dict):
+                    c.metadata['regulation_model_attempt'] = deepcopy(attempt)
+                    # A successful candidate commit can append its reuse
+                    # receipt after analyzer validation. Keep both retained
+                    # copies bound to the same final transport provenance.
+                    if isinstance(provenance, dict):
+                        c.metadata['regulation_model_attempt']['model_provenance'] = deepcopy(provenance)
+                if isinstance(provenance, dict):
+                    c.metadata['model_provenance'] = deepcopy(provenance)
+            end_candidate_response(reuse_token)

@@ -64,7 +64,7 @@ def _oversized(**changes: object) -> TradeRecommendation:
         "position_size_pct": 0.50,
         "confidence": 0.9,
         "rationale": "test",
-        "contributing_strategies": ["untrusted"],
+        "contributing_strategies": ["earnings_call"],
         "event_key": "untrusted-event",
         "source_event_keys": ("untrusted-source",),
         "strategy_tags": ("untrusted-tag",),

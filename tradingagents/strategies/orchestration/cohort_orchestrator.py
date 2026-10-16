@@ -266,6 +266,16 @@ class CohortOrchestrator:
         models["portfolio_committee_model"] = ar_config.get("paper_trade", {}).get(
             "portfolio_committee_model", ar_config.get("autoresearch_model")
         )
+        models["portfolio_committee_effort"] = ar_config.get("paper_trade", {}).get(
+            "portfolio_committee_effort", models["llm_effort"]
+        )
+        models["thesis_model"] = ar_config.get("thesis_model", ar_config.get("autoresearch_model"))
+        models["thesis_effort"] = ar_config.get("thesis_effort", models["llm_effort"])
+        billing_mode = ar_config.get("llm_billing_mode", "api")
+        if billing_mode not in {"api", "chatgpt_plan"}:
+            raise ValueError("invalid llm billing mode")
+        if billing_mode == "chatgpt_plan":
+            models["llm_billing_mode"] = billing_mode
         for key, value in models.items():
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"model {key} must be non-empty text")
@@ -273,7 +283,12 @@ class CohortOrchestrator:
         self.cohorts: list[dict[str, Any]] = []
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
-        strategies = get_paper_trade_strategies()
+        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
+        strategies = configure_strategies(get_paper_trade_strategies(), ar_config)
+        from .bounded_document_inputs import configure_strategies as configure_document_strategies
+        strategies = configure_document_strategies(strategies, ar_config)
+        from .source_lifecycle_policy import configured as lifecycle_configured
+        lifecycle_configured(ar_config, strategies)
         strategy_names = tuple(
             getattr(strategy, "name", None) for strategy in strategies
         )
@@ -284,6 +299,15 @@ class CohortOrchestrator:
         if len(set(strategy_names)) != len(strategy_names):
             raise ValueError("duplicate strategy name")
         self._active_strategy_names = frozenset(strategy_names)
+        self._disabled_strategies = {
+            strategy.name: strategy.retirement_reason
+            for strategy in strategies if getattr(strategy, "retirement_reason", None)
+        }
+        self._disabled_strategies.update(ar_config.get("disabled_strategies", {}))
+        if not set(self._disabled_strategies).issubset(self._active_strategy_names) or any(
+            not isinstance(reason, str) or not reason for reason in self._disabled_strategies.values()
+        ):
+            raise ValueError("invalid disabled strategy policy")
         cohort_names = [cfg.name for cfg in cohort_configs]
         if any(not isinstance(name, str) or not name.strip() for name in cohort_names):
             raise ValueError("cohort names must be non-empty text")
@@ -398,6 +422,7 @@ class CohortOrchestrator:
             models=models,
             strategies=strategy_names,
             cohort_policies=cohort_policies,
+            disabled_strategies=self._disabled_strategies,
         )
 
         self._base_config = base_config
@@ -458,7 +483,7 @@ class CohortOrchestrator:
     ) -> bool:
         """Persist one shared horizon's evidence and enforce full coverage."""
         valid = (
-            len(health) == len(self._active_strategy_names) == 12
+            len(health) == len(self._active_strategy_names)
             and {record.strategy for record in health} == self._active_strategy_names
             and all(record.epoch_id == self._epoch_id for record in health)
             and all(record.session == session for record in health)
@@ -856,7 +881,9 @@ class CohortOrchestrator:
         )
 
         if not trading_date:
-            trading_date = datetime.now().strftime("%Y-%m-%d")
+            from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+
+            trading_date = exchange_date().isoformat()
         session = date.fromisoformat(trading_date)
         processed_at = datetime.now(timezone.utc)
         if not is_session(session):
@@ -938,7 +965,7 @@ class CohortOrchestrator:
         """
         enrichment: dict[str, Any] = {}
 
-        tickers = list({s.get("ticker", "") for s in signals if s.get("ticker")})
+        tickers = sorted({s.get("ticker", "") for s in signals if s.get("ticker")})
         if not tickers:
             return enrichment
 
@@ -951,30 +978,29 @@ class CohortOrchestrator:
         if openbb_source is None or not openbb_source.is_available():
             return enrichment
 
-        # Fetch profiles for all tickers
-        profiles = {}
-        for ticker in tickers:
-            result = openbb_source.fetch({"method": "equity_profile", "ticker": ticker})
-            if "error" not in result:
-                profiles[ticker] = result
+        # Native profile batches preserve every ticker and explicit failures.
+        errors = {}
+        profile_batch = openbb_source.fetch_profiles(tickers)
+        profiles = profile_batch["profiles"]
+        if profile_batch["errors"]:
+            errors["profiles"] = profile_batch["errors"]
         if profiles:
             enrichment["profiles"] = profiles
 
-        # Fetch short interest for all tickers
-        short_interest = {}
-        for ticker in tickers:
-            result = openbb_source.fetch(
-                {"method": "equity_short_interest", "ticker": ticker}
-            )
-            if "error" not in result:
-                short_interest[ticker] = result
-        if short_interest:
-            enrichment["short_interest"] = short_interest
+        # Native preparation and a complete read snapshot serve every exact symbol.
+        short_batch = openbb_source.fetch_short_interest(tickers)
+        if short_batch["short_interest"]:
+            enrichment["short_interest"] = short_batch["short_interest"]
+        if short_batch["errors"]:
+            errors["short_interest"] = short_batch["errors"]
+        enrichment["short_interest_acquisition"] = short_batch["acquisition"]
 
         # Fetch Fama-French factors (once, not per ticker)
         factors = openbb_source.fetch({"method": "factors_fama_french"})
         if "error" not in factors:
             enrichment["factors"] = factors.get("factors", {})
+        else:
+            errors["factors"] = factors
 
         # Fetch commodity futures curves for commodity signals
         from tradingagents.strategies.modules.commodity_macro import (
@@ -996,9 +1022,13 @@ class CohortOrchestrator:
                 )
                 if "error" not in result:
                     curves[underlying] = result
+                else:
+                    errors.setdefault("commodity_futures_curves", {})[underlying] = result
             if curves:
                 enrichment["commodity_futures_curves"] = curves
 
+        if errors:
+            enrichment["errors"] = errors
         return enrichment
 
     def reset(self) -> None:

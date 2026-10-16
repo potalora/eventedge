@@ -211,11 +211,11 @@ def test_candidate_issue_hydration_rejects_mismatched_durable_scope(
         affected_cohorts=("cohort-a",),
     )
 
-    def read_candidate_input_issues(exact_epoch, exact_session):
+    def read_session_candidate_input_issues(exact_epoch, exact_session):
         assert (exact_epoch, exact_session) == (state_epoch_id, state_session)
         return [issue]
 
-    store = SimpleNamespace(read_candidate_input_issues=read_candidate_input_issues)
+    store = SimpleNamespace(read_session_candidate_input_issues=read_session_candidate_input_issues)
     state = DailyRunState(
         owner=SimpleNamespace(_metric_store=store),
         trading_date=state_session.isoformat(),
@@ -409,7 +409,21 @@ def test_candidate_issue_reporting_rejects_invalid_carrier_lifecycle(carrier):
         aggregate_candidate_input_issues({"cohort-a": carrier})
 
 
-def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
+@pytest.mark.parametrize(
+    ("ar_config", "expected_policy_id", "committee_status"),
+    (
+        ({}, "foundation-30d", None),
+        ({"paper_ledger": {}}, "foundation-30d", {"degraded": False}),
+        (
+            {"paper_ledger": {"policy_id": "custom-30d"}},
+            "custom-30d",
+            {"degraded": True},
+        ),
+    ),
+)
+def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue(
+    ar_config, expected_policy_id, committee_status
+):
     session = date(2026, 8, 10)
     issue = CandidateInputIssue.create(
         issue_id="candidate_input_issue_" + "a" * 32,
@@ -433,15 +447,19 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
         def pending_critical_gap(self):
             return None
 
-        def read_candidate_bar_recoveries(self, epoch_id, exact_session):
+        def read_session_candidate_bar_recoveries(self, epoch_id, exact_session):
             assert (epoch_id, exact_session) == (issue.epoch_id, session)
             return []
 
-        def read_candidate_input_issues(self, epoch_id, exact_session):
+        def read_session_candidate_input_issues(self, epoch_id, exact_session):
             assert (epoch_id, exact_session) == (issue.epoch_id, session)
             return [issue]
 
     class Executor:
+        def outcome_dependency_plan(self, exact_session):
+            assert exact_session == session
+            return {}
+
         def ensure_metric_epoch(self, context, exact_session):
             assert exact_session == session
             return SimpleNamespace(
@@ -451,17 +469,25 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
             )
 
     class Ledger:
+        def committee_decision(self, exact_session, epoch_id, policy_id):
+            assert (exact_session, epoch_id, policy_id) == (
+                session, issue.epoch_id, expected_policy_id
+            )
+            return None if committee_status is None else {"status": committee_status}
+
         def session_invalid_reason(self, exact_session):
             assert exact_session == session
             return "metric epoch conflict"
 
     orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
+    orchestrator._base_config = {}
     orchestrator._metric_store = Store()
     orchestrator._metric_epoch_context = object()
     orchestrator._epoch_id = None
     orchestrator.cohorts = [
         {
-            "config": SimpleNamespace(name="cohort-a"),
+            "config": SimpleNamespace(name="cohort-a", horizon="30d"),
+            "engine": SimpleNamespace(ar_config=ar_config),
             "executor": Executor(),
             "ledger": Ledger(),
         }
@@ -476,6 +502,12 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
     assert result["staging_valid"] is False
     assert result["candidate_bar_quarantines"] == ["UI"]
     assert result["candidate_input_issues"] == [issue.reference()]
+    assert result["outcome_coverage_valid"] is True
+    assert result["outcome_evidence_failures"] == {}
+    if committee_status is None:
+        assert "committee_decision_status" not in result
+    else:
+        assert result["committee_decision_status"] == committee_status
 
 
 def test_pending_gap_exact_session_exit_lazily_hydrates_persisted_candidate_issue():
@@ -503,14 +535,14 @@ def test_pending_gap_exact_session_exit_lazily_hydrates_persisted_candidate_issu
         def pending_critical_gap(self):
             return marker
 
-        def read_candidate_input_issues(self, epoch_id, exact_session):
+        def read_session_candidate_input_issues(self, epoch_id, exact_session):
             assert (epoch_id, exact_session) == (issue.epoch_id, session)
             return [issue]
 
     orchestrator = CohortOrchestrator.__new__(CohortOrchestrator)
     orchestrator._metric_store = Store()
     orchestrator._epoch_id = None
-    orchestrator.cohorts = [object()]
+    orchestrator.cohorts = [{"config": SimpleNamespace(name="cohort-a")}]
     orchestrator._complete_pending_critical_gap = lambda marker, processed, results: {
         "cohort-a": {
             "error": True,

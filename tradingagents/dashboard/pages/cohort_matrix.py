@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from tradingagents.strategies.metrics.availability import ratio_display, RATIO_REQUIREMENTS
 
 from tradingagents.dashboard.charts import make_cohort_heatmap
 from tradingagents.dashboard.data_loaders import (
@@ -13,7 +14,7 @@ from tradingagents.dashboard.data_loaders import (
     load_cohort_metrics,
 )
 
-# Metrics that have data now vs ones requiring closed trades
+# Portfolio metrics use daily governed marks, independently of closed trades.
 AVAILABLE_METRICS = {
     "fills": "Fills",
     "strategy_decisions": "Strategy Decisions",
@@ -22,7 +23,7 @@ AVAILABLE_METRICS = {
     "gross_weight": "Gross Weight",
     "cash_weight": "Cash Weight",
 }
-CLOSED_TRADE_METRICS = {
+DAILY_MARK_METRICS = {
     "annualized_daily_net_sharpe": "Annualized daily net Sharpe",
     "annualized_matched_information_ratio": "Annualized matched-benchmark information ratio",
     "max_drawdown": "Net Max Drawdown",
@@ -51,11 +52,11 @@ def render() -> None:
     gen = gen_options[selected_gen_id]
 
     with col2:
-        all_metrics = {**AVAILABLE_METRICS, **CLOSED_TRADE_METRICS}
+        all_metrics = {**AVAILABLE_METRICS, **DAILY_MARK_METRICS}
         metric_labels = (
             list(AVAILABLE_METRICS.values())
             + ["---"]
-            + [f"{v} (requires closed trades)" for v in CLOSED_TRADE_METRICS.values()]
+            + list(DAILY_MARK_METRICS.values())
         )
         selected_label = st.selectbox(
             "Metric", [m for m in metric_labels if m != "---"], key="matrix_metric"
@@ -77,10 +78,9 @@ def render() -> None:
         for s in ["5k", "10k", "50k", "100k"]
     )
 
-    if all_none and selected_metric in CLOSED_TRADE_METRICS:
+    if all_none and selected_metric in DAILY_MARK_METRICS:
         st.info(
-            "This metric is unavailable until its governed v2 sample "
-            "requirements are met."
+            "Drawdown requires two valid snapshots. " + RATIO_REQUIREMENTS
         )
 
     metric_display = all_metrics.get(selected_metric, selected_metric)
@@ -99,7 +99,6 @@ def render() -> None:
         total_return = m.get("total_return")
         sharpe = m.get("annualized_daily_net_sharpe")
         information_ratio = m.get("annualized_matched_information_ratio")
-        unavailable = "Insufficient history (<30 valid sessions)"
         rows.append(
             {
                 "Horizon": horizon,
@@ -113,12 +112,8 @@ def render() -> None:
                 "Book role": "Headline $100k horizon book"
                 if size == "100k"
                 else "Concentration stress test",
-                "Annualized daily net Sharpe": f"{sharpe:.2f}"
-                if sharpe is not None
-                else unavailable,
-                "Annualized matched-benchmark information ratio": f"{information_ratio:.2f}"
-                if information_ratio is not None
-                else unavailable,
+                "Annualized daily net Sharpe": ratio_display(m, "annualized_daily_net_sharpe"),
+                "Annualized matched-benchmark information ratio": ratio_display(m, "annualized_matched_information_ratio"),
             }
         )
 

@@ -28,6 +28,8 @@ PROVIDER_LIMITS = {
     "edgar": ((1, 0.1),),
     "noaa": ((5, 1), (10000, 86400)),
     "finnhub": ((60, 60),),
+    # Official FRED API errors policy: 120 requests per minute.
+    "fred": ((120, 60),),
     "regulations": ((1, 0.5),),
     "usaspending": ((1, 0.5),),
 }
@@ -66,10 +68,40 @@ def provider_budget(provider, deadline, *, clock=None, sleep=None,
         _CURRENT.reset(token)
 
 
+@contextmanager
+def provider_subbudget(provider, *, maximum_seconds, absolute_deadline,
+                       max_attempts=None):
+    """Narrow a deadline/retry scope without consuming a physical request slot."""
+    if (type(maximum_seconds) not in (int, float) or not math.isfinite(maximum_seconds)
+            or maximum_seconds <= 0 or type(absolute_deadline) not in (int, float)
+            or not math.isfinite(absolute_deadline)):
+        raise ValueError("invalid provider subbudget")
+    if max_attempts is not None and (type(max_attempts) is not int or not 1 <= max_attempts <= 5):
+        raise ValueError("invalid provider subbudget attempts")
+    parent = _CURRENT.get()
+    if parent is not None and parent.provider == provider:
+        deadline = min(parent.deadline, absolute_deadline, parent.clock() + maximum_seconds)
+        options = dict(clock=parent.clock, sleep=parent.sleep, random_fn=parent.random_fn,
+                       max_attempts=min(parent.max_attempts, max_attempts) if max_attempts is not None else parent.max_attempts,
+                       limits=parent.limits,
+                       diagnostics=parent.diagnostics)
+    else:
+        deadline = min(absolute_deadline, time.monotonic() + maximum_seconds)
+        options = {} if max_attempts is None else {'max_attempts': max_attempts}
+    with provider_budget(provider, deadline, **options) as diagnostics:
+        yield diagnostics
+
+
 def current_provider_deadline(provider):
     """Return the active absolute deadline, for adapters with existing policies."""
     budget = _CURRENT.get()
     return budget.deadline if budget is not None and budget.provider == provider else None
+
+
+def provider_clock_time(provider):
+    """Read the matching acquisition clock without changing its absolute deadline."""
+    budget = _CURRENT.get()
+    return budget.clock() if budget is not None and budget.provider == provider else time.monotonic()
 
 
 def provider_timeout(provider, maximum=15):
@@ -79,6 +111,63 @@ def provider_timeout(provider, maximum=15):
     if remaining <= 0:
         raise SourceFetchError("Provider acquisition deadline exhausted", reason_code="timeout")
     return min(maximum, remaining)
+
+
+def read_bounded_response(response, *, provider: str, max_bytes: int,
+                          chunk_size: int = 65536) -> bytes:
+    """Read streamed, decompressed bytes within the caller's active budget.
+
+    The request must use stream=True. The caller owns response.close in a
+    finally block. Checks surround every read; an existing socket inactivity
+    timeout remains cooperative, but a late chunk is never accepted.
+    """
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("invalid response byte limit")
+    if type(chunk_size) is not int or not 1 <= chunk_size <= 65536:
+        raise ValueError("invalid response chunk size")
+    provider_timeout(provider)
+    length = response.headers.get("Content-Length")
+    if isinstance(length, str) and length.isascii() and length.isdigit():
+        # A declared over-limit wire body can be rejected before acquisition.
+        # Never trust a smaller declaration: the decompressed count is final.
+        if len(length) > 20 or int(length) > max_bytes:
+            raise SourceFetchError("Provider response exceeds byte limit", reason_code="invalid_response")
+    content = bytearray()
+    try:
+        chunks = iter(response.iter_content(chunk_size=chunk_size))
+        while True:
+            provider_timeout(provider)
+            try:
+                chunk = next(chunks)
+            except StopIteration:
+                provider_timeout(provider)
+                break
+            provider_timeout(provider)
+            if not isinstance(chunk, bytes):
+                raise SourceFetchError("Provider response chunk invalid", reason_code="invalid_response")
+            if len(content) + len(chunk) > max_bytes:
+                raise SourceFetchError("Provider response exceeds byte limit", reason_code="invalid_response")
+            content.extend(chunk)
+        provider_timeout(provider)
+        result = bytes(content)
+        provider_timeout(provider)
+        return result
+    except Exception as error:
+        # requests wraps urllib3 body-read timeouts in ConnectionError or
+        # ChunkedEncodingError. Preserve a typed timeout in that bounded chain,
+        # without inspecting messages, URLs or provider bodies.
+        failure = source_fetch_error("Provider response acquisition failed", error)
+        current, seen = error, set()
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            classified = source_fetch_error("Provider response acquisition failed", current)
+            if classified.reason_code == "timeout":
+                failure = classified
+                break
+            current = current.__cause__ or current.__context__
+        raise failure from None
 
 
 def _safe_identity(value):
@@ -132,22 +221,37 @@ def _retry_after(response):
     return max(0.0, delay) if math.isfinite(delay) else 0.0
 
 
-def _run(provider, operation, attempt):
+def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=()):
     budget = _CURRENT.get()
     if budget is None or budget.provider != provider:
         with provider_budget(provider, time.monotonic() + 60):
-            return _run(provider, operation, attempt)
+            return _run(provider, operation, attempt, before_attempt=before_attempt,
+                        return_statuses=return_statuses)
     error = None
     attempts = 0
     response = None
     for index in range(budget.max_attempts):
         try:
+            if before_attempt is not None:
+                before_attempt()
             _slot(budget)
+            remaining = budget.deadline - budget.clock()
+            if remaining <= 0:
+                raise SourceFetchError("Provider acquisition deadline exhausted", reason_code="timeout")
             attempts += 1
             response = None
-            response = attempt(budget.deadline - budget.clock())
+            response = attempt(remaining)
             status = getattr(response, "status_code", None)
             if isinstance(status, int) and not 200 <= status < 300:
+                if status in return_statuses:
+                    # Explicitly transfer this non-retryable HTTP error to a
+                    # bounded body owner. The status remains an error in the
+                    # diagnostics; returning it does not certify acquisition.
+                    provider_timeout(provider)
+                    budget.diagnostics.append({"provider": _safe_identity(provider),
+                        "operation": _safe_identity(operation), "reason_code": "http_error",
+                        "http_status": status, "attempts": attempts, "recovered": False})
+                    return response
                 raise SourceFetchError("Provider HTTP request failed", reason_code="http_error", http_status=status)
             budget.diagnostics.append({"provider": _safe_identity(provider), "operation": _safe_identity(operation),
                                        "reason_code": None, "http_status": status if isinstance(status, int) else None,
@@ -180,12 +284,23 @@ def _run(provider, operation, attempt):
     raise error from None
 
 
-def provider_request(provider, method, url, *, operation=None, transport=None, **kwargs):
+def provider_request(provider, method, url, *, operation=None, transport=None,
+                     before_attempt=None, return_statuses=(), **kwargs):
     """Request with bounded retries, retaining requests.get/post monkeypatches.
 
     transport optionally supplies a session's bound get/post for providers with
     required transport adapters. It has the same (url, **kwargs) protocol.
+    before_attempt can reject a capped acquisition before any rate slot is
+    reserved. It runs for every retry and must not acquire or count requests.
+    return_statuses explicitly transfers selected non-retryable HTTP errors to
+    the caller, which must bound the body read and close the response. It cannot
+    disable transient retries or create a fresh deadline.
     """
+    if (type(return_statuses) is not tuple or len(return_statuses) > 16
+            or any(type(status) is not int or not 300 <= status <= 599
+                   or status in _RETRY_STATUS for status in return_statuses)
+            or len(set(return_statuses)) != len(return_statuses)):
+        raise ValueError("invalid returned HTTP status policy")
     method = method.lower()
     request = transport or getattr(requests, method)
     def attempt(remaining):
@@ -198,9 +313,31 @@ def provider_request(provider, method, url, *, operation=None, transport=None, *
         else:
             options["timeout"] = max(0.001, min(timeout or 15, remaining))
         return request(url, **options)
-    return _run(provider, operation or method, attempt)
+    options = {'return_statuses': return_statuses} if return_statuses else {}
+    if before_attempt is not None:
+        options['before_attempt'] = before_attempt
+    return _run(provider, operation or method, attempt, **options)
 
 
-def provider_call(provider, operation, callable):
-    """Retry one SDK operation; do not wrap an adapter's retry loop."""
-    return _run(provider, operation, lambda remaining: callable())
+def provider_call(provider, operation, callable, *, maximum_seconds=None):
+    """Retry one SDK operation within its cap and any inherited deadline.
+
+    SDK callbacks remain cooperative. The operation cap limits subsequent
+    retries; it does not forcibly interrupt an already running SDK call.
+    """
+    if maximum_seconds is None:
+        return _run(provider, operation, lambda remaining: callable())
+    if (isinstance(maximum_seconds, bool) or not isinstance(maximum_seconds, (int, float))
+            or not math.isfinite(maximum_seconds) or maximum_seconds <= 0):
+        raise ValueError("invalid SDK operation budget")
+    parent = _CURRENT.get()
+    if parent is not None and parent.provider == provider:
+        deadline = min(parent.deadline, parent.clock() + maximum_seconds)
+        options = dict(clock=parent.clock, sleep=parent.sleep, random_fn=parent.random_fn,
+                       max_attempts=parent.max_attempts, limits=parent.limits,
+                       diagnostics=parent.diagnostics)
+    else:
+        deadline = time.monotonic() + min(60, maximum_seconds)
+        options = {}
+    with provider_budget(provider, deadline, **options):
+        return _run(provider, operation, lambda remaining: callable())

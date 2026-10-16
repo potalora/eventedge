@@ -28,7 +28,7 @@ def response(payload=None, status=200):
 def inputs(n=1):
     signals = [{"event_key": f"docket-{i:02d}", "ticker": "NVDA", "strategy": "litigation",
         "direction": "short", "metadata": {"docket_id": i + 1,
-            "llm_analysis": {"rationale": "Company faces a patent suit."},
+            "llm_analysis": {"rationale": "Company faces a patent suit.", "evidence_claim": "Company faces a patent suit."},
             "cash_balance": "PRIVATE"}} for i in range(n)]
     data = {"courtlistener": {"dockets": [{"docket_id": i+1,
         "case_name": "Patent holder v NVDA", "date_filed": "2026-10-01",

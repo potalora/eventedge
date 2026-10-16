@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,8 @@ class RegulatoryPipelineStrategy:
 
     name = "regulatory_pipeline"
     track = "paper_trade"
+    # Legacy issuer resolution can acquire the SEC company identity map.
+    source_identity_dependencies = ["edgar"]
     data_sources = ["regulations", "yfinance", "openbb"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
@@ -33,9 +36,7 @@ class RegulatoryPipelineStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 5),
-            "days_lookback": (7, 30),
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
@@ -46,9 +47,7 @@ class RegulatoryPipelineStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
             "max_positions": 3,
-            "days_lookback": 14,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -64,6 +63,9 @@ class RegulatoryPipelineStrategy:
             return []
 
         candidates = []
+        evidence_policy = reg_data.get('regulation_evidence', {}).get('policy')
+        if evidence_policy is not None and evidence_policy != 'complete_document_text_v1':
+            raise ValueError('invalid_regulation_evidence_policy')
 
         for rule in rules:
             if not rule.get("document_id"):
@@ -81,10 +83,15 @@ class RegulatoryPipelineStrategy:
                         "document_id": rule.get("document_id", ""),
                         "title": rule.get("title", ""),
                         "agency_id": agency,
-                        "summary": rule.get("summary", "")[:2000],
+                        "summary": '' if evidence_policy else rule.get("summary", "")[:2000],
                         "posted_date": rule.get("posted_date", ""),
                         "needs_llm_analysis": True,
                         "analysis_type": "regulation",
+                        **({'regulation_evidence_policy': evidence_policy,
+                            'regulation_evidence_ref': rule.get('regulation_evidence_ref'),
+                            'regulation_evidence_status': rule.get('regulation_evidence_status'),
+                            'regulation_failure': rule.get('regulation_failure')}
+                           if evidence_policy else {}),
                     },
                 )
             )
@@ -103,7 +110,9 @@ class RegulatoryPipelineStrategy:
                         "industry", ""
                     )
 
-        return candidates[: params.get("max_positions", 3)]
+        budget = (params.get('analysis_budget') if evidence_policy
+                  else params.get('analysis_budget', params.get('max_positions', 3)))
+        return admit_candidates(self.name, candidates, budget)
 
     def check_exit(
         self,
@@ -113,6 +122,7 @@ class RegulatoryPipelineStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         hold_days = params.get("hold_days", 30)
         if holding_days >= hold_days:
@@ -131,8 +141,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (target ~30 days)
-- min_conviction: 0.3-0.8
 - max_positions: 2-5
-- days_lookback: 7-30
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

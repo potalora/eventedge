@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from datetime import date as calendar_date, datetime, timedelta
+import math
 
 from .base import Candidate
+from .admission import admit_candidates
+from ..data_sources.award_identity import resolve_award_issuer
 
 logger = logging.getLogger(__name__)
 
 # Known government contractor tickers for backtesting
-# Maps common recipient keywords → tickers
+# Historical research universe only. Never used for award attribution.
 CONTRACTOR_TICKERS = {
     "lockheed": "LMT",
     "raytheon": "RTX",
@@ -46,8 +50,8 @@ class GovtContractsStrategy:
     4-6 day lag, giving retail investors a window.
 
     Signal logic:
-    1. Screen USAspending for recent large contracts.
-    2. Resolve recipient names to tickers (using keyword matching).
+    1. Screen new awards by base obligation date, using cumulative obligations at acquisition.
+    2. Verify native recipient/parent UEI against reviewed issuer evidence.
     3. Filter by contract materiality (amount > threshold).
     4. Go long, hold 30-60 days for market to price in the revenue impact.
 
@@ -89,14 +93,17 @@ class GovtContractsStrategy:
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
         """Screen for government contractor opportunities.
 
-        Uses USASpending contract data when available, falls back to
-        defense contractor momentum. Enriches with OpenBB profile/estimates.
+        Requires a source-native USASpending award; no momentum substitute. Enriches with OpenBB profile/estimates.
         """
         candidates = []
 
         # Try USASpending contract data first
         usaspending = data.get("usaspending", {})
         contracts = usaspending.get("data", {}).get("contracts", [])
+        scope = None
+        if usaspending.get('award_attribution_policy') is not None:
+            from ..data_sources.award_attribution_policy import validate_attribution_scope
+            scope = validate_attribution_scope(usaspending, session=date)
 
         if contracts:
             for contract in contracts:
@@ -107,75 +114,64 @@ class GovtContractsStrategy:
                 ).lower()
                 amount = contract.get("amount", 0) or 0
                 award_id = contract.get("award_id", "")
-
-                # Resolve recipient to ticker
-                ticker = None
-                for keyword, t in CONTRACTOR_TICKERS.items():
-                    if keyword in recipient:
-                        ticker = t
-                        break
-
-                if not ticker or not award_id or amount < 10_000_000:  # $10M minimum
+                base_date = contract.get("base_obligation_date", "")
+                # Only the adapter's declared new-award contract supports this
+                # thesis. An old award modification is not a fresh contract win.
+                try:
+                    recent = (calendar_date.fromisoformat(date) - timedelta(days=params.get("award_days_back", 30))).isoformat()
+                    observed = datetime.fromisoformat(contract.get("observed_at", ""))
+                    valid = (
+                        contract.get("award_scope") == "new_awards_only"
+                        and contract.get("amount_basis") == "cumulative_award_obligations"
+                        and bool(contract.get("award_key"))
+                        and recent <= calendar_date.fromisoformat(base_date).isoformat() <= date
+                        and observed.tzinfo is not None and observed.utcoffset() is not None
+                        and not isinstance(amount, bool) and math.isfinite(amount)
+                    )
+                except (ValueError, TypeError):
+                    valid = False
+                if not valid:
                     continue
 
-                score = min(amount / 1_000_000_000, 1.0)  # Scale by $1B
+                attribution = resolve_award_issuer(contract)
+                ticker = attribution.get("ticker", "")
+                if not award_id or amount < 10_000_000:  # $10M minimum
+                    continue
+
+                score = min(amount / 1_000_000_000, 1.0)  # Observed cumulative obligations on the new award.
                 candidates.append(
                     Candidate(
                         ticker=ticker,
                         date=date,
                         direction="long",
                         score=score,
+                        journal_only=not attribution["verified"],
                         metadata={
                             "contractor": recipient,
                             "contract_amount": amount,
                             "source": "usaspending",
                             "award_id": award_id,
-                            **(
-                                {
-                                    "last_modified_date": contract.get(
-                                        "last_modified_date"
-                                    )
-                                }
-                                if contract.get("last_modified_date")
-                                else {}
-                            ),
+                            "award_key": contract["award_key"],
+                            "base_obligation_date": base_date,
+                            "amount_basis": contract["amount_basis"],
+                            "award_scope": contract["award_scope"],
+                            "observed_at": contract["observed_at"],
+                            "recipient_uei": contract.get("recipient_uei", ""),
+                            "recipient_id": contract.get("recipient_id", ""),
+                            "parent_recipient_uei": contract.get("parent_recipient_uei", ""),
+                            "recipient_identity_status": contract.get("recipient_identity_status", "missing_native_recipient"),
+                            "recipient_identity_source": contract.get("recipient_identity_source", ""),
+                            "issuer_attribution": attribution,
+                            **({"award_attribution_policy": scope['policy'],
+                                "award_attribution_scope_sha256": scope['scope_sha256'],
+                                **({"attribution_coverage_gap": "unresolved_recipient_issuer"}
+                                   if attribution['status'] == 'unresolved' else {})}
+                               if scope is not None else {}),
+                            **({"non_actionable_reason": attribution["reason"]} if not attribution["verified"] else {}),
+                            "thesis": "Newly originated award; amount is cumulative obligations observed at acquisition, not initial obligation or incremental modification.",
                         },
                     )
                 )
-        else:
-            # Fallback: all defense contractors with available price data
-            prices = data.get("yfinance", {}).get("prices", {})
-            if prices:
-                for name, ticker in CONTRACTOR_TICKERS.items():
-                    df = prices.get(ticker)
-                    if df is None or df.empty:
-                        continue
-                    df = df.loc[:date]
-                    if len(df) < 30:
-                        continue
-                    close = df["Close"]
-                    momentum = (close.iloc[-1] / close.iloc[-30]) - 1.0
-                    observation = df.index[-1]
-                    observation_date = (
-                        observation.date().isoformat()
-                        if hasattr(observation, "date")
-                        else str(observation)
-                    )
-                    candidates.append(
-                        Candidate(
-                            ticker=ticker,
-                            date=date,
-                            direction="long",
-                            score=max(momentum, 0.01),  # Floor score at 1%
-                            metadata={
-                                "contractor": name,
-                                "momentum_30d": momentum,
-                                "source": "momentum_fallback",
-                                "observation_date": observation_date,
-                            },
-                        )
-                    )
-
         # Enrich with OpenBB data
         openbb_data = data.get("openbb", {})
         profile = openbb_data.get("profile", {})
@@ -188,8 +184,17 @@ class GovtContractsStrategy:
                     "price_target_mean"
                 )
 
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[: params.get("max_positions", 3)]
+        # Unknown issuers stay in discovery and may use remaining journal slots,
+        # but must not crowd verified issuers out of the bounded admission set.
+        population = admit_candidates(
+            self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)),
+            rank_key=lambda candidate: (candidate.journal_only, -float(candidate.score), candidate.ticker),
+            policy="verified_issuer_first_score_desc_ticker_source_identity_v1",
+        )
+        if scope is not None:
+            from copy import deepcopy
+            population.admission_manifest['award_attribution_scope'] = deepcopy(scope)
+        return population
 
     def check_exit(
         self,
@@ -199,6 +204,7 @@ class GovtContractsStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period, profit target, or stop loss."""
         hold_days = params.get("hold_days", 30)
@@ -206,7 +212,7 @@ class GovtContractsStrategy:
         profit_target = params.get("profit_target_pct", 0.15)
 
         if entry_price > 0:
-            pnl_pct = (current_price - entry_price) / entry_price
+            pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
             if pnl_pct >= profit_target:
                 return True, "profit_target"
             if pnl_pct <= -stop_loss:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +43,7 @@ from tradingagents.strategies.trading.portfolio_committee import TradeRecommenda
 from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicyDecision
 from tradingagents.strategies.orchestration.trading_calendar import (
     next_session,
+    previous_session,
     session_close,
 )
 from tradingagents.strategies.state.portfolio_ledger import (
@@ -63,7 +65,7 @@ class FakePriceSource:
     def __init__(self, bars=None, actions=None, adjusted=None):
         self.bars = bars or {}
         self.actions = actions or []
-        values = adjusted or {"SPY": "650.25", "BIL": "91.10"}
+        values = adjusted or {"SPY": "650.25", "BIL": "91.10", "VTI": "300", "VT": "130"}
         self.adjusted = {
             (symbol, session): (
                 value
@@ -80,6 +82,10 @@ class FakePriceSource:
             )
             for key, value in values.items()
             for symbol, session in [key if isinstance(key, tuple) else (key, MONDAY)]
+        }
+        self.adjusted = {
+            key: replace(value, previous_session=previous_session(value.session), previous_close=value.close)
+            for key, value in self.adjusted.items()
         }
         self.raw_requests: list[tuple[tuple[str, ...], date, date, bool]] = []
 
@@ -103,11 +109,13 @@ class FakePriceSource:
         ]
 
     def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
-        return {
-            key: value
-            for key, value in self.adjusted.items()
-            if key[0] in symbols and start_session <= key[1] <= end_session_inclusive
-        }
+        result = {}
+        for symbol in symbols:
+            current = self.adjusted.get((symbol, end_session_inclusive))
+            if current is not None:
+                result[(symbol, end_session_inclusive)] = current
+                result[(symbol, start_session)] = replace(current, session=start_session, close=current.previous_close)
+        return result
 
 
 def _config(**risk_overrides):
@@ -2002,11 +2010,11 @@ def test_benchmarks_are_adjusted_separate_from_raw_marks_and_phases_are_exact(tm
         assert snapshot.valid
         assert snapshot.snapshot is not None
         assert [(item.symbol, item.close) for item in observations] == [
-            ("BIL", Decimal("91.10")),
-            ("SPY", Decimal("650.25")),
+            ("BIL", Decimal("100")),
+            ("SPY", Decimal("100")),
         ]
         assert all(
-            item.return_basis == "total_return_adjusted" for item in observations
+            item.return_basis == "paired_total_return_index_v2" for item in observations
         )
         assert observations[1].close != Decimal("601")
         assert tuple(row["phase"] for row in phase_rows) == PHASES
@@ -2264,6 +2272,7 @@ def test_shared_action_batch_isolates_malformed_member_to_affected_cohort(tmp_pa
             },
             actions,
             FakePriceSource().adjusted,
+            action_coverage={FRIDAY: ("AAPL", "MSFT")},
         )
         SessionExecutor.validate_shared_action_response(
             shared.actions, shared.tickers, MONDAY
@@ -2278,7 +2287,8 @@ def test_shared_action_batch_isolates_malformed_member_to_affected_cohort(tmp_pa
 
         assert aapl.valid
         assert aapl.snapshot is not None
-        assert aapl.snapshot.dividend_cash == Decimal("1.0000")
+        assert aapl.snapshot.dividend_cash == 0
+        assert aapl.snapshot.dividend_receivable == Decimal("1.0000")
         assert not msft.valid
         assert "unverified" in msft.invalid_reason
         assert not aapl_ledger.session_invalid_reason(MONDAY)
@@ -2983,10 +2993,14 @@ def test_production_usaspending_availability_stages_real_candidate(tmp_path):
     response = MagicMock()
     response.status_code = 200
     response.json.return_value = {
+        "page_metadata": {"page": 1, "hasNext": False},
         "results": [
             {
                 "Award ID": "AWARD-1",
+                "generated_internal_id": "CONT_AWARD_1",
+                "Base Obligation Date": "2026-07-30",
                 "Recipient Name": "Lockheed Martin",
+                "Recipient UEI": "H7PNSVNN5827",
                 "Award Amount": 50_000_000,
                 "Awarding Agency": "DOD",
                 "Start Date": "2026-07-01",
@@ -3210,6 +3224,8 @@ def _policy_enabled_staging_fixture(tmp_path):
             adjusted={
                 ("SPY", FRIDAY): Decimal("649"),
                 ("BIL", FRIDAY): Decimal("91"),
+                ("VTI", FRIDAY): Decimal("299"),
+                ("VT", FRIDAY): Decimal("129"),
             }
         ),
         {},
@@ -3427,6 +3443,8 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
                 adjusted={
                     ("SPY", FRIDAY): Decimal("649"),
                     ("BIL", FRIDAY): Decimal("91"),
+                    ("VTI", FRIDAY): Decimal("299"),
+                    ("VT", FRIDAY): Decimal("129"),
                 }
             ),
             {},
@@ -3527,7 +3545,8 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
         assert len(result["intents_staged"]) == 1
         decisions = ledger.read_policy_candidate_decisions()
         assert len(decisions) == 1
-        assert decisions[0]["approved_weight"] == pytest.approx(0.03)
+        # The first committee decision survives a later staging crash.
+        assert decisions[0]["approved_weight"] == pytest.approx(0.04)
         assert (
             ledger.read_policy_session_context(FRIDAY, binding_kind="staging")
             is not None
@@ -3603,6 +3622,8 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
                 adjusted={
                     ("SPY", MONDAY): Decimal("650"),
                     ("BIL", MONDAY): Decimal("91.1"),
+                    ("VTI", MONDAY): Decimal("300"),
+                    ("VT", MONDAY): Decimal("130"),
                 },
             ),
             {},
@@ -3657,6 +3678,8 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
                 adjusted={
                     ("SPY", FRIDAY): Decimal("649"),
                     ("BIL", FRIDAY): Decimal("91"),
+                    ("VTI", FRIDAY): Decimal("299"),
+                    ("VT", FRIDAY): Decimal("129"),
                 }
             ),
             {},
@@ -3708,6 +3731,8 @@ def test_short_stages_without_borrow_but_fill_requires_bound_availability(
                 adjusted={
                     ("SPY", MONDAY): Decimal("650"),
                     ("BIL", MONDAY): Decimal("91.1"),
+                    ("VTI", MONDAY): Decimal("300"),
+                    ("VT", MONDAY): Decimal("130"),
                 },
             ),
             {"MSFT": borrow_rate},
@@ -4062,6 +4087,42 @@ def test_date_only_event_uses_end_of_date_and_is_same_session_cutoff_late(tmp_pa
         record = ledger.read_signals(FRIDAY, FRIDAY)[0]
         assert result["cutoff_late"] == [record.signal_id]
         assert record.event_at == datetime(2026, 7, 31, 23, 59, 59, 999999, UTC)
+        assert ledger.pending_intents(MONDAY) == []
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize("empty_signals", [False, True])
+def test_timeout_held_policy_stage_persists_failed_committee_coverage_and_replay(tmp_path, monkeypatch, empty_signals):
+    """Policy eligibility must not erase failed analysis when it removes every signal."""
+    from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    engine.config["autoresearch"]["paper_trade"]["portfolio_committee_enabled"] = True
+    call["annualized_volatility_evidence"] = {"AAPL":.31}
+    signal = call["shared_signals"][0]
+    signal["journal_only"] = True
+    signal["metadata"].update(analysis_status="failed", analysis_failure_reason="model_deadline_exhausted",non_actionable_reason="model_sample_incomplete")
+    if empty_signals:
+        call["shared_signals"] = []
+        call["model_coverage"] = {"complete":False,"reason":"model_deadline_exhausted"}
+    def forbidden(*args, **kwargs):
+        pytest.fail("Timeout-held policy staging must not call a model")
+    monkeypatch.setattr(PortfolioCommittee,"_get_client",forbidden)
+    try:
+        result = engine.screen_and_stage(**call)
+        status = result["committee_decision_status"]
+        assert status["status"] == "failed"
+        assert status["degraded"] is True
+        assert status["reason"] == "model_deadline_exhausted"
+        assert status["eligible_count"] == 0
+        assert status["model_coverage"] == {"complete":False,"reason":"model_deadline_exhausted"}
+        assert result["intents_staged"] == []
+        accepted = ledger.committee_decision(FRIDAY,"epoch","foundation-30d")
+        assert accepted["status"] == status
+        replay = engine.screen_and_stage(**call)
+        assert replay["replayed"] is True
+        assert replay["committee_decision_status"] == status
+        assert ledger.committee_decision(FRIDAY,"epoch","foundation-30d") == accepted
         assert ledger.pending_intents(MONDAY) == []
     finally:
         ledger.close()

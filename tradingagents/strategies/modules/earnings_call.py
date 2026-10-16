@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,7 @@ class EarningsCallStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 6),
-            "analyze_qa_only": (True, False),
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
@@ -49,9 +48,7 @@ class EarningsCallStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
             "max_positions": 4,
-            "analyze_qa_only": False,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -147,7 +144,7 @@ class EarningsCallStrategy:
                     if num_analysts >= 10:
                         candidate.score = min(candidate.score * 1.15, 1.0)
 
-        return candidates[: params.get("max_positions", 4)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
 
     def check_exit(
         self,
@@ -157,12 +154,13 @@ class EarningsCallStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         hold_days = params.get("hold_days", 20)
         if holding_days >= hold_days:
             return True, "hold_period"
         # Stop loss at 5%
-        pnl_pct = (current_price - entry_price) / entry_price
+        pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
         if pnl_pct < -0.05:
             return True, "stop_loss"
         return False, ""
@@ -180,8 +178,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (post-earnings drift window, target ~20 days)
-- min_conviction: 0.3-0.8
 - max_positions: 2-6
-- analyze_qa_only: true/false (Q&A section is more informative per research)
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

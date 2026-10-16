@@ -17,12 +17,20 @@ def classify_strategy_run(
     candidates: Collection[object],
     provider_errors: Mapping[str, str],
     exception: Exception | None,
+    admission_manifest: dict | None = None,
 ) -> StrategyHealthRecord:
     """Classify one completed strategy screen with durable diagnostic evidence."""
     evidence: dict[str, object] = {
         "data_sources": sorted(data_sources),
         "candidate_count": len(candidates),
     }
+    manifest = admission_manifest if admission_manifest is not None else getattr(candidates, "admission_manifest", None)
+    if manifest is not None:
+        from copy import deepcopy
+        evidence["admission_manifest"] = deepcopy(manifest)
+        evidence.update(discovered_count=len(manifest["discovered"]),
+                        admitted_count=len(manifest["admitted"]),
+                        excluded_count=len(manifest["excluded"]))
     if exception is not None:
         status = "strategy_defect"
         evidence.update(error_type=type(exception).__name__, error=str(exception))

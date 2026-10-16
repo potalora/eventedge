@@ -19,6 +19,41 @@ class Clock:
         self.now += delay
 
 
+@pytest.mark.parametrize("aggregate,expected", [(300, 60), (20, 20)])
+def test_sdk_operation_cap_preserves_absolute_parent_clock_and_diagnostics(aggregate, expected):
+    p, clock, seen, diagnostics = policy(), Clock(), [], []
+    with p.provider_budget("openbb", aggregate, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), max_attempts=1, diagnostics=diagnostics):
+        def sdk():
+            seen.append(p.current_provider_deadline("openbb"))
+            clock.now = expected
+            raise requests.Timeout("PRIVATE")
+        with pytest.raises(SourceFetchError):
+            p.provider_call("openbb", "profile", sdk, maximum_seconds=60)
+        assert p.current_provider_deadline("openbb") == aggregate
+        if aggregate == expected:
+            with pytest.raises(SourceFetchError):
+                p.provider_call("openbb", "shorts", lambda: seen.append("late"), maximum_seconds=60)
+    assert seen == [expected]
+    assert diagnostics[0]["reason_code"] == "timeout"
+    assert diagnostics[0]["attempts"] == 1
+    assert "PRIVATE" not in str(diagnostics)
+
+
+def test_sdk_operation_retries_do_not_restart_per_operation_clock():
+    p, clock, seen = policy(), Clock(), []
+    with p.provider_budget("openbb", 300, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), max_attempts=3):
+        def sdk():
+            seen.append(p.current_provider_deadline("openbb"))
+            clock.now += 40
+            raise requests.Timeout()
+        with pytest.raises(SourceFetchError):
+            p.provider_call("openbb", "profile", sdk, maximum_seconds=60)
+    assert seen == [60, 60]
+    assert clock.waits == [.5]
+
+
 def response(status=200, headers=None):
     return SimpleNamespace(status_code=status, headers=headers or {})
 
@@ -84,6 +119,47 @@ def test_exhausted_deadline_never_starts_late_retry(monkeypatch):
     assert len(calls)==1
     assert exc.value.reason_code=='timeout'
     assert 'secret' not in str(exc.value)
+
+
+@pytest.mark.parametrize('elapsed', [1.0, 2.0])
+@pytest.mark.parametrize('kind', ['http', 'sdk'])
+def test_expiry_after_rate_admission_prevents_dispatch(monkeypatch, elapsed, kind):
+    p, clock, calls, events = policy(), Clock(), [], []
+    original_slot = p._slot
+
+    def admitted_then_delayed(budget):
+        original_slot(budget)
+        clock.now = elapsed
+
+    monkeypatch.setattr(p, '_slot', admitted_then_delayed)
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: calls.append(kw) or response())
+    with p.provider_budget('test', 1.0, clock=clock, sleep=clock.sleep,
+                           limits=(), max_attempts=1, diagnostics=events):
+        with pytest.raises(SourceFetchError) as caught:
+            if kind == 'http':
+                p.provider_request('test', 'GET', 'https://offline.test')
+            else:
+                p.provider_call('test', 'operation', lambda: calls.append(True))
+        assert p.current_provider_deadline('test') == 1.0
+    assert calls == []
+    assert caught.value.reason_code == 'timeout' and caught.value.attempts == 0
+    assert events[-1]['reason_code'] == 'timeout' and events[-1]['attempts'] == 0
+
+
+def test_positive_budget_after_rate_admission_keeps_remaining_timeout(monkeypatch):
+    p, clock, calls = policy(), Clock(), []
+    original_slot = p._slot
+
+    def admitted_then_delayed(budget):
+        original_slot(budget)
+        clock.now = .25
+
+    monkeypatch.setattr(p, '_slot', admitted_then_delayed)
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: calls.append(kw) or response())
+    with p.provider_budget('test', 1.0, clock=clock, sleep=clock.sleep, limits=(), max_attempts=1):
+        assert p.provider_request('test', 'GET', 'https://offline.test').status_code == 200
+        assert p.current_provider_deadline('test') == 1.0
+    assert calls == [{'timeout': .75}]
 
 
 def test_sdk_retries_typed_transient_only_and_preserves_partial():

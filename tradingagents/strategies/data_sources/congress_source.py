@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .request_policy import provider_request
+from .evidence import current_session_date, CoverageRecords, bounded_coverage
+from .request_policy import provider_request, provider_timeout, read_bounded_response, provider_budget, current_provider_deadline
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 logger = logging.getLogger(__name__)
@@ -196,19 +199,40 @@ def _normalize_fmp_trade(raw: dict[str, Any], chamber: str) -> dict[str, Any]:
     }
 
 
+def _page_json(raw: bytes):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+    def invalid_constant(value):
+        raise ValueError("nonfinite JSON")
+    try:
+        return json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise SourceFetchError("Provider page JSON invalid", reason_code="invalid_response") from None
+
+
 class CongressSource:
     """Data source for congressional stock trading disclosures.
 
-    Uses FMP's authenticated latest House and Senate disclosure endpoints when
-    a key is configured. Missing access is an explicit coverage failure.
-    Results are cached in-memory only after both chambers succeed.
+    Legacy trading methods use authenticated FMP disclosure endpoints. The
+    explicit display/audit policy exposes a separate anonymous snapshot method;
+    it never adapts those rows into trading input.
     """
 
     name: str = "congress"
     requires_api_key: bool = True
 
-    def __init__(self, fmp_api_key: str | None = None) -> None:
-        self._fmp_api_key = fmp_api_key or os.environ.get("FMP_API_KEY", "")
+    def __init__(self, fmp_api_key: str | None = None, *, disclosure_policy: str | None = None) -> None:
+        from .congress_disclosure_audit import POLICY
+        if disclosure_policy not in (None, POLICY):
+            raise ValueError('invalid_congress_disclosure_policy')
+        self._disclosure_policy = disclosure_policy
+        self.requires_api_key = disclosure_policy is None
+        self._fmp_api_key = (fmp_api_key or os.environ.get("FMP_API_KEY", "")) if disclosure_policy is None else ""
         self._cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -239,7 +263,10 @@ class CongressSource:
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
-        """Congress requires a configured stable FMP feed."""
+        """Check dependencies for the selected public-audit or legacy FMP route."""
+        if self._disclosure_policy is not None:
+            from importlib.util import find_spec
+            return find_spec('pyarrow') is not None and find_spec('requests') is not None
         if not self._fmp_api_key:
             return False
         try:
@@ -253,12 +280,20 @@ class CongressSource:
     # Public data methods
     # ------------------------------------------------------------------
 
-    def _fetch_fmp_latest(self) -> list[dict[str, Any]]:
-        """Fetch the latest free-tier page for both congressional chambers.
+    def get_audit_snapshot(self, *, date_filed_after: str, date_filed_before: str,
+                           absolute_deadline: float) -> dict[str, Any]:
+        """Separate free display/audit route; never returns strategy trade input."""
+        from .congress_disclosure_audit import POLICY, fetch_audit_snapshot
+        if self._disclosure_policy != POLICY:
+            raise ValueError('congress_audit_policy_not_enabled')
+        return fetch_audit_snapshot(date_filed_after=date_filed_after,
+            date_filed_before=date_filed_before, absolute_deadline=absolute_deadline)
 
-        FMP's Basic plan allows at most 25 records and page zero for these
-        endpoints. Two calls per daily run stay well inside the 250-call daily
-        allowance while covering the most recent disclosures.
+    def _fetch_fmp_latest(self) -> list[dict[str, Any]]:
+        """Legacy latest-page API, explicitly bounded to 25 rows per chamber.
+
+        This does not establish the account's access to subsequent pages.
+        Complete required windows use the separate checked pagination path.
         """
         if not self._fmp_api_key:
             raise SourceFetchError("FMP congressional access missing", reason_code="provider_error")
@@ -287,12 +322,17 @@ class CongressSource:
                         invalid_rows = True
                         continue
                     if not source_text(item.get("symbol")):
-                        # These valid disclosures have no exchange-traded asset.
+                        # Valid symbol-free bond/private-asset disclosures are
+                        # outside the stock-trading scope of this adapter.
                         # Missing/ill-typed symbols on other assets remain errors.
                         if (isinstance(item.get("symbol"), str)
                                 and not item["symbol"].strip()
                                 and isinstance(item.get("assetType"), str)
-                                and item.get("assetType") in {"Other", "Non-Public Stock"}
+                                and item.get("assetType") in {
+                                    "Other", "Non-Public Stock",
+                                    "Government Securities", "Other Securities",
+                                    "Corporate Bond",
+                                }
                                 and source_text(item.get("assetDescription"))):
                             continue
                         invalid_rows = True
@@ -308,9 +348,103 @@ class CongressSource:
         if failures:
             raise SourceFetchError("FMP congressional coverage incomplete", reason_code="batch_failure",
                 failed_operations=failures, failed_http_statuses=statuses,
-                partial_data={"recent_trades": trades})
+                partial_data={"recent_trades": trades, "coverage":bounded_coverage(returned=len(trades),limit=2*FMP_FREE_LIMIT)})
+        trades = CoverageRecords(trades, coverage=bounded_coverage(returned=len(trades), limit=2 * FMP_FREE_LIMIT,
+            chambers=["House", "Senate"], pages_per_chamber=1, ordering="latest_disclosures", has_next=None))
         self._cache["fmp_latest"] = trades
         return trades
+
+    def _fetch_fmp_window(self, cutoff: str, as_of: str) -> CoverageRecords:
+        """Exhaust both publication windows, retaining transaction multiplicity.
+
+        Page order is proved from raw disclosure dates, including non-equity
+        disclosures. A short page is not terminal; only [] or an older day is.
+        """
+        if current_provider_deadline("congress") is None:
+            with provider_budget("congress", time.monotonic()+60):
+                return self._fetch_fmp_window(cutoff, as_of)
+        if not self._fmp_api_key:
+            raise SourceFetchError("FMP congressional access missing", reason_code="provider_error")
+        trades, failures, statuses, chambers = [], {}, {}, {}
+        used_bytes = 0
+        for chamber in ("House", "Senate"):
+            endpoint = chamber.lower()+"-latest"
+            info = {"complete": False, "pages": 0, "raw_rows": 0}
+            chambers[chamber] = info
+            previous, page_hashes = None, set()
+            try:
+                for page in range(101):
+                    response = None
+                    try:
+                        response = provider_request("congress", "GET", f"{FMP_BASE_URL}/{endpoint}",
+                            operation=endpoint, params={"page": page, "limit": FMP_FREE_LIMIT,
+                                                       "apikey": self._fmp_api_key},
+                            timeout=provider_timeout("congress", 20), stream=True, allow_redirects=False)
+                        if response.status_code != 200:
+                            raise SourceFetchError("FMP disclosures request failed", reason_code="http_error", http_status=response.status_code)
+                        raw = read_bounded_response(response, provider="congress", max_bytes=32*1024*1024-used_bytes)
+                        used_bytes += len(raw)
+                        payload = _page_json(raw)
+                        provider_timeout("congress")
+                    finally:
+                        if response is not None:
+                            response.close()
+                    info["pages"] += 1
+                    if not isinstance(payload, list) or not all(isinstance(row, dict) for row in payload):
+                        raise SourceFetchError("FMP disclosures invalid", reason_code="invalid_response")
+                    if not payload:
+                        info.update(complete=True, termination="empty_page")
+                        break
+                    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+                    if digest in page_hashes:
+                        raise SourceFetchError("FMP repeated page", reason_code="invalid_response")
+                    page_hashes.add(digest)
+                    older, invalid_rows = False, False
+                    for item in payload:
+                        info["raw_rows"] += 1
+                        try:
+                            representative = item.get("office") or " ".join(str(item.get(k) or "") for k in ("firstName", "lastName"))
+                            if (not all(source_text(item.get(k)) for k in ("type", "amount"))
+                                    or not source_text(representative)
+                                    or not all(source_date(item.get(k)) for k in ("transactionDate", "disclosureDate"))):
+                                raise SourceFetchError("FMP disclosure invalid", reason_code="invalid_response")
+                            day, txn = item["disclosureDate"][:10], item["transactionDate"][:10]
+                            if txn > day or (previous is not None and day > previous):
+                                raise SourceFetchError("FMP disclosure ordering invalid", reason_code="invalid_response")
+                            previous = day
+                            older |= day < cutoff
+                            if not source_text(item.get("symbol")):
+                                if (isinstance(item.get("symbol"), str) and not item["symbol"].strip()
+                                        and isinstance(item.get("assetType"), str) and item.get("assetType") in {"Other", "Non-Public Stock", "Government Securities", "Other Securities", "Corporate Bond"}
+                                        and source_text(item.get("assetDescription"))):
+                                    continue
+                                raise SourceFetchError("FMP disclosure symbol invalid", reason_code="invalid_response")
+                            if cutoff <= txn <= as_of and day <= as_of:
+                                trades.append(_normalize_fmp_trade(item, chamber))
+                        except SourceFetchError:
+                            invalid_rows = True
+                    if invalid_rows:
+                        raise SourceFetchError("FMP disclosure records invalid", reason_code="invalid_response")
+                    if older:
+                        info.update(complete=True, termination="older_than_window")
+                        break
+                if not info["complete"]:
+                    raise SourceFetchError("FMP disclosure page limit reached", reason_code="invalid_response")
+                provider_timeout("congress")
+            except Exception as exc:
+                error = source_fetch_error("FMP disclosures failed", exc)
+                failures[endpoint] = error.reason_code
+                if error.http_status is not None:
+                    statuses[endpoint] = error.http_status
+        coverage = {"mode": "exhaustive_window", "complete": not failures,
+                    "date_from": cutoff, "date_to": as_of, "chambers": chambers,
+                    "scope": "all_disclosures_in_publication_window_filtered_by_transaction_window"}
+        if failures:
+            raise SourceFetchError("FMP congressional coverage incomplete", reason_code="batch_failure",
+                failed_operations=failures, failed_http_statuses=statuses,
+                partial_data={"recent_trades": trades, "coverage": coverage})
+        provider_timeout("congress")
+        return CoverageRecords(trades, coverage=coverage)
 
     def fetch_all_trades(self, max_pages: int = 3) -> list[dict[str, Any]]:
         """Fetch the stable FMP House/Senate pages; max_pages is legacy-only."""
@@ -319,7 +453,7 @@ class CongressSource:
         return self._cache["all_trades"]
 
     def get_recent_trades(
-        self, days_back: int = 30, as_of: str | None = None
+        self, days_back: int = 30, as_of: str | None = None, *, complete_window: bool = False
     ) -> list[dict[str, Any]]:
         """Filter trades to only those within *days_back* days of *as_of* (or today).
 
@@ -330,11 +464,24 @@ class CongressSource:
         Returns:
             Filtered list of trade records.
         """
+        if complete_window:
+            if type(days_back) is not int or days_back < 0:
+                raise SourceFetchError("FMP disclosure window invalid", reason_code="invalid_response")
+            date_to = as_of or current_session_date()
+            if not source_date(date_to) or len(date_to) != 10:
+                raise SourceFetchError("FMP disclosure window invalid", reason_code="invalid_response")
+            provider_timeout("congress")
+            ref_date = datetime.strptime(date_to, "%Y-%m-%d")
+            date_from = (ref_date-timedelta(days=days_back)).strftime("%Y-%m-%d")
+            key = f"complete_window|{date_from}|{date_to}"
+            if key not in self._cache:
+                self._cache[key] = self._fetch_fmp_window(date_from, date_to)
+            return self._cache[key]
         cache_key = f"recent|{days_back}|{as_of}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.now()
+        ref_date = datetime.strptime(as_of, "%Y-%m-%d") if as_of else datetime.fromisoformat(current_session_date())
         cutoff = ref_date - timedelta(days=days_back)
         def in_window(trades):
             recent = []
@@ -347,9 +494,10 @@ class CongressSource:
         try:
             all_trades = self.fetch_all_trades()
         except SourceFetchError as exc:
-            exc.partial_data = {"recent_trades": in_window(exc.partial_data.get("recent_trades", []))}
+            exc.partial_data = {**exc.partial_data, "recent_trades": in_window(exc.partial_data.get("recent_trades", []))}
             raise
-        recent = in_window(all_trades)
+        recent = CoverageRecords(in_window(all_trades), coverage={**getattr(all_trades,"coverage",{}),
+            "as_of":as_of, "days_back":days_back, "scope":"latest_disclosure_sample_filtered_by_transaction_and_publication_dates"})
 
         self._cache[cache_key] = recent
         return recent
@@ -376,6 +524,7 @@ class CongressSource:
             if trade_ticker == ticker_upper:
                 matches.append(trade)
 
+        matches = CoverageRecords(matches, coverage={**getattr(all_trades,"coverage",{}), "ticker":ticker_upper})
         self._cache[cache_key] = matches
         return matches
 
@@ -413,14 +562,14 @@ class CongressSource:
 
     def _dispatch_all_trades(self, params: dict[str, Any]) -> dict[str, Any]:
         trades = self.fetch_all_trades()
-        return {"data": trades, "count": len(trades)}
+        return {"data": trades, "count": len(trades), "coverage":getattr(trades,"coverage",{})}
 
     def _dispatch_recent_trades(self, params: dict[str, Any]) -> dict[str, Any]:
         days_back = params.get("days_back", 30)
-        trades = self.get_recent_trades(days_back=days_back, as_of=params.get("as_of"))
-        return {"data": trades, "count": len(trades)}
+        trades = self.get_recent_trades(days_back=days_back, as_of=params.get("as_of"), complete_window=params.get("complete_window", False))
+        return {"data": trades, "count": len(trades), "coverage":getattr(trades,"coverage",{})}
 
     def _dispatch_trades_by_ticker(self, params: dict[str, Any]) -> dict[str, Any]:
         ticker = params.get("ticker", "")
         trades = self.get_trades_by_ticker(ticker)
-        return {"data": trades, "count": len(trades)}
+        return {"data": trades, "count": len(trades), "coverage":getattr(trades,"coverage",{})}

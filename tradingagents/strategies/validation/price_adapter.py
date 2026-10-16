@@ -25,9 +25,9 @@ def yfinance_price_fn(source: Any | None = None) -> Callable[[str, str, str], di
         if df is None or df.empty:
             return {}
         try:
-            close = df["Close"][ticker]
+            close = df["Adj Close"][ticker]
         except (KeyError, TypeError):
-            logger.warning("No Close column for %s", ticker)
+            logger.warning("No total-return Adj Close column for %s", ticker)
             return {}
         close = close.dropna()
         out: dict[str, float] = {}
@@ -36,4 +36,5 @@ def yfinance_price_fn(source: Any | None = None) -> Callable[[str, str, str], di
             out[key] = float(val)
         return out
 
+    price_fn.return_basis = "total_return_adjusted"
     return price_fn

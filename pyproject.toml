@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "eventedge"
 version = "0.4.0"
-description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 12 strategies, with LLM-powered portfolio committee."
+description = "EventEdge: Autonomous event-driven trading research — daily 16-cohort paper trading across 11 enabled strategies, with LLM-powered portfolio committee."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.86.0",
+    "beautifulsoup4>=4.13.4,<5",
     "openai>=1.66.0",
     "alpaca-py>=0.35.0",
     "exchange-calendars>=4.13.2,<5",
@@ -20,8 +21,10 @@ dependencies = [
     "numpy>=1.26.0",
     "scipy>=1.11",
     "pandas>=2.3.0",
+    "pyarrow>=24.0.0",
     "plotly>=6.0.0",
     "python-dotenv>=1.0.0",
+    "pypdf>=6.20.0,<7",
     "requests>=2.32.4",
     "streamlit>=1.45.0",
     "yfinance>=0.2.63",
@@ -29,6 +32,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+chatgpt-plan = [
+    "tiktoken==0.12.0",
+    "Authlib>=1.8.0,<2",
+    "joserfc>=1.7.5,<2",
+]
 openbb = [
     "openbb-core",
     "openbb-equity",
@@ -47,7 +55,11 @@ commodities = [
 [tool.pytest.ini_options]
 markers = [
     "live: marks tests that hit real APIs (deselect with '-m \"not live\"')",
+    "scheduled_acceptance: isolated scheduled-entrypoint rehearsal with external IO fixtures",
 ]
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*"]
+
+[tool.setuptools.package-data]
+"tradingagents.strategies.data_sources" = ["assets/*.tiktoken", "assets/*.txt", "assets/*.md"]

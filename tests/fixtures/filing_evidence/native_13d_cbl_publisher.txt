@@ -1,0 +1,259 @@
+<SEC-DOCUMENT>0001193125-26-418126.txt : 20261008
+<SEC-HEADER>0001193125-26-418126.hdr.sgml : 20261008
+<ACCEPTANCE-DATETIME>20261008180002
+ACCESSION NUMBER:		0001193125-26-418126
+CONFORMED SUBMISSION TYPE:	SCHEDULE 13D/A
+PUBLIC DOCUMENT COUNT:		1
+FILED AS OF DATE:		20261008
+DATE AS OF CHANGE:		20261008
+
+SUBJECT COMPANY:	
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			CBL & ASSOCIATES PROPERTIES INC
+		CENTRAL INDEX KEY:			0000910612
+		STANDARD INDUSTRIAL CLASSIFICATION:	REAL ESTATE INVESTMENT TRUSTS [6798]
+		ORGANIZATION NAME:           	05 Real Estate & Construction
+		EIN:				621545718
+		STATE OF INCORPORATION:			DE
+		FISCAL YEAR END:			1231
+
+	FILING VALUES:
+		FORM TYPE:		SCHEDULE 13D/A
+		SEC ACT:		1934 Act
+		SEC FILE NUMBER:	005-43723
+		FILM NUMBER:		261450702
+
+	BUSINESS ADDRESS:	
+		STREET 1:		2030 HAMILTON PLACE BVLD, SUITE 500
+		STREET 2:		CBL CENTER
+		CITY:			CHATTANOOGA
+		STATE:			TN
+		ZIP:			37421
+		BUSINESS PHONE:		4238550001
+
+	MAIL ADDRESS:	
+		STREET 1:		2030 HAMILTON PLACE BVLD, SUITE 500
+		STREET 2:		CBL CENTER
+		CITY:			CHATTANOOGA
+		STATE:			TN
+		ZIP:			37421
+
+FILED BY:		
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			CANYON CAPITAL ADVISORS LLC
+		CENTRAL INDEX KEY:			0001074034
+		ORGANIZATION NAME:           	
+		EIN:				000000000
+		STATE OF INCORPORATION:			DE
+
+	FILING VALUES:
+		FORM TYPE:		SCHEDULE 13D/A
+
+	BUSINESS ADDRESS:	
+		STREET 1:		2728 NORTH HARWOOD STREET, 2ND FLOOR
+		CITY:			DALLAS
+		STATE:			TX
+		ZIP:			75201
+		BUSINESS PHONE:		3102721000
+
+	MAIL ADDRESS:	
+		STREET 1:		2728 NORTH HARWOOD STREET, 2ND FLOOR
+		CITY:			DALLAS
+		STATE:			TX
+		ZIP:			75201
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>SCHEDULE 13D/A
+<SEQUENCE>1
+<FILENAME>primary_doc.xml
+<TEXT>
+<XML>
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13D/A</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001074034</cik>
+          <ccc>REDACTED</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <amendmentNo>6</amendmentNo>
+      <securitiesClassTitle>Common Stock, $0.001 par value</securitiesClassTitle>
+      <dateOfEvent>10/06/2026</dateOfEvent>
+      <previouslyFiledFlag>false</previouslyFiledFlag>
+      <issuerInfo>
+        <issuerCIK>0000910612</issuerCIK>
+        <issuerCusips>
+          <issuerCusipNumber>124830878</issuerCusipNumber>
+        </issuerCusips>
+        <issuerName>CBL &amp; Associates Properties, Inc.</issuerName>
+        <address>
+          <street1 xmlns="http://www.sec.gov/edgar/common">2030 Hamilton Place Blvd., Suite 500</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">Chattanooga</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">TN</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">37421-6000</zipCode>
+        </address>
+      </issuerInfo>
+      <authorizedPersons>
+        <notificationInfo>
+          <personName>Canyon Partners, LLC</personName>
+          <personPhoneNum>(214) 253-6000</personPhoneNum>
+          <personAddress>
+            <street1 xmlns="http://www.sec.gov/edgar/common">2728 North Harwood Street, 2nd Floor</street1>
+            <street2 xmlns="http://www.sec.gov/edgar/common">Attention: Jonthan M. Kaplan</street2>
+            <city xmlns="http://www.sec.gov/edgar/common">Dallas</city>
+            <stateOrCountry xmlns="http://www.sec.gov/edgar/common">TX</stateOrCountry>
+            <zipCode xmlns="http://www.sec.gov/edgar/common">75201</zipCode>
+          </personAddress>
+        </notificationInfo>
+        <notificationInfo>
+          <personName>Copy to: Robert W. Downes</personName>
+          <personPhoneNum>(212) 558-4312</personPhoneNum>
+          <personAddress>
+            <street1 xmlns="http://www.sec.gov/edgar/common">Sullivan &amp; Cromwell LLP</street1>
+            <street2 xmlns="http://www.sec.gov/edgar/common">125 Broad Street</street2>
+            <city xmlns="http://www.sec.gov/edgar/common">New York</city>
+            <stateOrCountry xmlns="http://www.sec.gov/edgar/common">NY</stateOrCountry>
+            <zipCode xmlns="http://www.sec.gov/edgar/common">10004</zipCode>
+          </personAddress>
+        </notificationInfo>
+      </authorizedPersons>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001074034</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Canyon Capital Advisors LLC</reportingPersonName>
+        <fundType>AF</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>6108794</soleVotingPower>
+        <sharedVotingPower>0</sharedVotingPower>
+        <soleDispositivePower>6108794</soleDispositivePower>
+        <sharedDispositivePower>0</sharedDispositivePower>
+        <aggregateAmountOwned>0</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>19.7</percentOfClass>
+        <typeOfReportingPerson>IA</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001766581</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Mitchell R. Julis</reportingPersonName>
+        <fundType>AF</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>X1</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>6108794</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>6108794</sharedDispositivePower>
+        <aggregateAmountOwned>0</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>19.7</percentOfClass>
+        <typeOfReportingPerson>IN</typeOfReportingPerson>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001766767</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>Joshua S. Friedman</reportingPersonName>
+        <fundType>AF</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>X1</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>6108794</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>6108794</sharedDispositivePower>
+        <aggregateAmountOwned>0</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>19.7</percentOfClass>
+        <typeOfReportingPerson>IN</typeOfReportingPerson>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <items1To7>
+      <item1>
+        <securityTitle>Common Stock, $0.001 par value</securityTitle>
+        <issuerName>CBL &amp; Associates Properties, Inc.</issuerName>
+        <issuerPrincipalAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">2030 Hamilton Place Blvd., Suite 500</street1>
+          <city xmlns="http://www.sec.gov/edgar/common">Chattanooga</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">TN</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">37421-6000</zipCode>
+        </issuerPrincipalAddress>
+        <commentText>This Amendment No. 6 (this "Amendment No. 6") supplements the information set forth in the Schedule 13D filed by Canyon Capital Advisors LLC ("CCA"), Mr. Mitchell R. Julis, Mr. Joshua S. Friedman and Mr. Jonathan M. Heller (collectively, the "Reporting Persons") with the United States Securities and Exchange Commission (the "SEC") on November 9, 2021, as amended by Amendment No. 1 thereto filed on February 7, 2022, by Amendment No. 2 thereto filed on March 2, 2022, by Amendment No. 3 thereto filed on August 10, 2022, by Amendment No. 4 thereto filed on October 16, 2024 and by Amendment No. 5 thereto filed on May 26, 2026 (the "Schedule 13D") relating to the shares of common stock, $0.001 par value per share (the "Common Stock"), of CBL &amp; Associates Properties, Inc., a Delaware corporation (the "Issuer").
+
+This Amendment No. 6 is being filed to reflect a sale of shares of Common Stock by the Reporting Persons on October 6, 2026 resulting in a decrease in the Reporting Persons' beneficial ownership by more than 1% of the outstanding Common Stock. The Reporting Persons' beneficial ownership percentage has been calculated based on 30,942,757 shares of Common Stock outstanding as of August 3, 2026, as reported in the Issuer's Quarterly Report on Form 10-Q filed with the SEC on August 7, 2026.
+
+The Issuer's principal executive offices are located at 2030 Hamilton Place Blvd., Suite 500, Chattanooga, TN 37421. All capitalized terms contained herein but not otherwise defined shall have the meanings ascribed to such terms in the Schedule 13D.
+
+The information set forth in response to each separate Item below shall be deemed to be a response to all Items where such information is relevant.
+
+The Schedule 13D is hereby supplementally amended as follows:
+</commentText>
+      </item1>
+      <item5>
+        <percentageOfClassSecurities>See rows (11) and (13) of the cover pages to this Schedule 13D for the aggregate number of shares of Common Stock.
+
+The percentage reported in this Schedule 13D is calculated based upon 30,942,757 shares of Common Stock outstanding as of August 3, 2026, as reported in the Issuer's Current Report on Form 10-Q filed with the SEC on August 7, 2026.
+</percentageOfClassSecurities>
+        <numberOfShares>See rows (7) through (10) of the cover pages to this Schedule 13D for the number of shares of Common Stock.</numberOfShares>
+        <transactionDesc>On October 6, 2026, CCA, with respect to the shares of Common Stock directly held by certain managed accounts ("Accounts") with respect to which it acts as investment advisor, sold an aggregate of 1,307,500 shares of Common Stock for the account of those Accounts at $52.19 per share through open market transaction.</transactionDesc>
+        <listOfShareholders>No person other than the Reporting Persons and the Accounts is known to have the right to participate in the receipt of dividends from, or proceeds from the sale of, the shares of Common Stock held by the Accounts.</listOfShareholders>
+        <date5PercentOwnership>Not applicable.</date5PercentOwnership>
+      </item5>
+      <item7>
+        <filedExhibits>Exhibit 99.1: Joint Filing Agreement as required by Rule 13d-1(k)(1) under the Act (incorporated by reference to Exhibit 99.1 to Schedule 13D filed by the Reporting Persons with the SEC on November 9, 2021).
+
+Exhibit 99.2: Commitment Letter, by and among the Issuer, the Operating Partnership, CCA and other commitment parties thereto, dated as of April 26, 2021 (incorporated by reference to Exhibit 99.2 to Schedule 13D filed by the Reporting Persons with the SEC on November 9, 2021).
+
+Exhibit 99.3: Registration Rights Agreement, by and among the Issuer and the other parties thereto and any additional parties identified on the signature pages of any joinder agreement executed and delivered pursuant thereto, dated as of November 1, 2021 (incorporated by reference to Exhibit 10.5 to Form 8-K filed by the Issuer with the SEC on November 2, 2021).
+
+Exhibit 99.4: Exchangeable Notes Indenture, by and among the New Notes Issuer, the guarantors thereto, the Issuer, Wilmington Savings Fund Society, FSB, as trustee and collateral agent, dated as of November 1, 2021 (incorporated by reference to Exhibit 10.3 to Form 8-K filed by the Issuer with the SEC on November 2, 2021).
+
+Exhibit 99.5: Director Resignation Agreement, between Canyon Partners LLC and Jeffrey Kivitz, dated as of August 9, 2022 (incorporated by reference to Exhibit 99.5 to Amendment No.3 to Schedule 13D filed by the Reporting Persons with the SEC on August 10, 2022).
+</filedExhibits>
+      </item7>
+    </items1To7>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureReportingPerson>Canyon Capital Advisors LLC</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Douglas Anderson</signature>
+          <title>Doug Anderson, Chief Compliance Officer</title>
+          <date>10/08/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Mitchell R. Julis</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Mitchell R. Julis</signature>
+          <title>Mitchell R. Julis</title>
+          <date>10/08/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>Joshua S. Friedman</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Joshua S. Friedman</signature>
+          <title>Joshua S. Friedman</title>
+          <date>10/08/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+</edgarSubmission>
+</XML>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>

@@ -196,6 +196,8 @@ class RiskGate:
         authoritative_account: AccountState | None = None,
         pending_entries: tuple[PendingRiskEntry, ...] = (),
         proposed_margin: float = 0.0,
+        daily_loss_equity: float | None = None,
+        session_realized_net: float | None = None,
         policy_enabled: bool = False,
         recommendation: TradeRecommendation | None = None,
         portfolio_context: PortfolioRiskContext | None = None,
@@ -301,8 +303,10 @@ class RiskGate:
             )
 
         # 5. Daily loss limit
-        if self._daily_losses >= portfolio_value * self.config.daily_loss_limit_pct:
-            return False, f"daily_loss_limit: ${self._daily_losses:.0f} losses today"
+        loss_base = portfolio_value if daily_loss_equity is None else daily_loss_equity
+        losses = self._daily_losses if session_realized_net is None else max(-session_realized_net, 0.0)
+        if losses > 0 and losses >= loss_base * self.config.daily_loss_limit_pct:
+            return False, f"daily_loss_limit: ${losses:.0f} losses today"
 
         # 6. Max drawdown
         if high_water_mark > 0:
@@ -343,7 +347,9 @@ class RiskGate:
         # Short-specific gates (10-12)
         if direction == "short":
             # 10. Earnings blackout — avoid shorting near earnings surprises
-            if self.config.earnings_blackout_days > 0 and earnings_dates:
+            if self.config.earnings_blackout_days > 0:
+                if not earnings_dates or earnings_dates.get(ticker) is None or not math.isfinite(earnings_dates[ticker]):
+                    return False, f"earnings_blackout: missing evidence for {ticker}"
                 days_to_earnings = earnings_dates.get(ticker)
                 if (
                     days_to_earnings is not None
@@ -355,7 +361,9 @@ class RiskGate:
                     )
 
             # 11. Borrow cost gate — avoid hard-to-borrow names
-            if self.config.max_borrow_cost_pct > 0 and short_interest:
+            if self.config.max_borrow_cost_pct > 0:
+                if not short_interest or short_interest.get(ticker) is None or not math.isfinite(short_interest[ticker]):
+                    return False, f"borrow_cost: missing short-interest evidence for {ticker}"
                 si = short_interest.get(ticker)
                 if si is not None:
                     estimated_cost = _estimate_borrow_cost(si)

@@ -96,12 +96,14 @@ class FakeStrategy:
         ]
 
     def check_exit(
-        self, ticker, entry_price, current_price, holding_days, params, data
+        self, ticker, entry_price, current_price, holding_days, params, data,
+        direction="long",
     ):
         hold = params.get("hold_days", self._hold_days)
         if holding_days >= hold:
             return True, "hold_period"
-        if entry_price > 0 and (current_price - entry_price) / entry_price <= -0.10:
+        signed_return = (current_price - entry_price) / entry_price if entry_price > 0 else 0
+        if (signed_return if direction == "long" else -signed_return) <= -0.10:
             return True, "stop_loss"
         return False, ""
 
@@ -913,7 +915,8 @@ class TestCandidateBarLifecycle:
 
         assert all(
             item["error"] is True
-            and item["degraded"] is False
+            and item["degraded"] is True
+            and item["outcome_coverage_valid"] is False
             and item["execution_valid"] is False
             and item["staging_valid"] is False
             and item["candidate_bar_quarantines"] == []
@@ -1470,7 +1473,7 @@ class TestCandidateBarLifecycle:
                         {"open": "200", "high": "203", "low": "199", "close": "202"}
                     )
                 else:
-                    final_attempt["fetched_at"] = "2026-03-31T19:00:00+00:00"
+                    final_attempt["fetched_at"] = "2026-03-31 19:00:00+00:00"
                 connection.execute(
                     "UPDATE candidate_bar_recoveries SET payload_json = ? "
                     "WHERE recovery_id = ?",

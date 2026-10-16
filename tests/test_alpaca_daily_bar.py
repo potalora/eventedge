@@ -17,7 +17,8 @@ from tradingagents.strategies.execution.alpaca_daily_bar import (
 
 SESSION = date(2026, 9, 22)
 NOW = datetime(2026, 9, 22, 22, tzinfo=timezone.utc)
-# Actual historical SIP/raw responses observed during the Sep 22 investigation.
+# OHLC values observed during the Sep 22 investigation; activity metadata
+# below is synthetic positive test evidence, not a recovered provider record.
 PRICES = {
     "BRC": ("84.51", "84.51", "83.0675", "83.39"),
     "ICE": ("155.92", "155.92", "152.505", "152.93"),
@@ -27,7 +28,7 @@ PRICES = {
 def payload(ticker="BRC"):
     return {
         "symbol": ticker,
-        "bars": [dict(t="2026-09-22T04:00:00Z", **dict(zip("ohlc", PRICES[ticker])))],
+        "bars": [dict(t="2026-09-22T04:00:00Z", v=1, n=1, **dict(zip("ohlc", PRICES[ticker])))],
         "next_page_token": None,
     }
 
@@ -47,7 +48,7 @@ def credentials(monkeypatch):
 
 
 @pytest.mark.parametrize("ticker", ["BRC", "ICE"])
-def test_sep22_exact_historical_sip_raw_fixture(ticker):
+def test_sep22_observed_ohlc_with_synthetic_positive_activity(ticker):
     source, get = source_for(payload(ticker))
     result = source.fetch_daily_bar(ticker, SESSION, now=NOW)
     assert result.failure is None

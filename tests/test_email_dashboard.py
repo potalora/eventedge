@@ -52,9 +52,10 @@ def test_email_uses_persisted_metric_report_only(_download) -> None:
     assert "Dependent scenario portfolios" in html
     assert "Equal-weighted scenario panel" in html
     assert "Fund AUM" not in html
-    assert "Insufficient history (<30 valid sessions)" in html
+    assert "Insufficient history (" in html
+    assert "/30 returns; 31 snapshots required)" in html
     for evidence in (
-        "Persisted SPY/BIL observations",
+        "Persisted benchmark observations (SPY/BIL/VTI/VT)",
         "2026-08-31T20:00:00+00:00",
         "2026-08-31T20:01:00+00:00",
         "Matched benchmark return",
