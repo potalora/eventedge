@@ -44,10 +44,7 @@ class Analyzer:
                 v=response(q,external=len(q.document_inputs)>1)
                 if index==self.state.get('fail')or fault=='partial':v.update(status='partial',unresolved=['Unreadable cell'])
             else:
-                # The V12 reader has its own constructed source fixture; it must
-                # not recover hidden answers from the redacted request.
-                source=response(q,external=len(q.document_inputs)>1) if 'literal_slots' in payload else payload['recognition']
-                v=review_response(q,{'result':source})
+                v=review_response(q,{'result':payload['recognition']})
                 if fault=='reject':v.update(complete=False,errors=[{'at':{'table':0,'row':1,'column':1},'issue':'Printed cell differs from original'}])
                 if fault=='malformed':v['checked_tables'][0]['cells'].pop()
             self.last_call_provenance=provenance(q);self.last_call_provenance['response_id']='constructed-call-'+str(serial)

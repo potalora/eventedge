@@ -1,3 +1,11 @@
+> Historical V12 experiment, superseded by `2026-10-16-sol-note-applicability.md`.
+> Source correction on October 16: the disputed mark is a comma, not a period.
+> The punctuation allegation below was our independent-assessment error; all 92
+> V11 literal fields and 45 numbers match the originals. Preserve this plan and
+> its original receipts as history, not current evidence. V12's actual runtime
+> failed because its final reviewer read AUM for RAUM. Sealed commit
+> `14da94c49502ee5650e08df9d0f20971b19cfcda` remains its replay implementation.
+
 # Sol graphics review with exact source-reading evidence
 
 Pedro instructed us to continue resolving the graphics blocker while retaining GPT-6.1 Sol high for both regulatory-graphics stages. Friday-only scope remains separately approved. This bounded contract change implements that instruction; it does not authorize bypassing native acceptance or changing models, deadlines or generation scope.

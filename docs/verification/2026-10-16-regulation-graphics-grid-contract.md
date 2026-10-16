@@ -1,10 +1,10 @@
-# Prospective V12 Sol compact original-image contract
+# Prospective V13 Sol compact original-image contract
 
-This successor changes the model wire, image presentation and bounded correction policy. It requires a new explicit profile/generation. Legacy V1–V5 requests, wire and replay remain unchanged. Failed private V6/V7/compact attempts retain their original bytes and verdicts. Acquisition, full supplied material, every original target, independent original-image review and the 9000-second absolute model phase remain mandatory. Constructed tests and a labelled context-visibility diagnostic do not establish native workflow acceptance.
+The compact family introduced the model wire, labelled original-image presentation and bounded correction policy described below. V13 retains those presentation/correction rules and the approved profile, restores ordinary V11 review, and adds only the note-applicability clarification. Its behavior change still requires a new generation. Legacy V1–V5 requests, wire and replay remain unchanged. Failed private V6/V7/compact attempts retain their original bytes and verdicts. Acquisition, full supplied material, every original target, independent original-image review and the 9000-second absolute model phase remain mandatory. Constructed tests and a labelled context-visibility diagnostic do not establish native workflow acceptance.
 
 ## Identity, originals and public boundary
 
-The pure contract remains `data_sources.regulation_graphics_grid` and runtime remains `learning.regulation_graphics_grid_runtime`. Prospective policy is `single_target_compact_v1` with the explicit `autoresearch.regulation_graphics_model_policy=sol_high_v1`, request V12, plan V6 and outer `regulation-model-attempt-v5`. Route-free compact requests retain V9/V3 and Luna; retained Sol V10/V4 and V11/V5 requests retain their original prompt bytes and replay. The same APIs prepare plans/recognition/review, validate each raw stage and replay targets/documents/attempts. Recognition correction is an explicit prospective request parameter; it never changes a historical receipt.
+The pure contract remains `data_sources.regulation_graphics_grid` and runtime remains `learning.regulation_graphics_grid_runtime`. Prospective policy is `single_target_compact_v1` with the explicit `autoresearch.regulation_graphics_model_policy=sol_high_v1`, request V13, plan V7 and outer `regulation-model-attempt-v5`. Route-free compact requests retain V9/V3 and Luna; retained Sol V10/V4 and V11/V5 requests retain their original prompt bytes and replay. The retired V6/V12 witness experiment uses its sealed 14da candidate for historical replay; this successor rejects that version rather than interpreting it as V13. The same APIs prepare plans/recognition/review, validate each raw stage and replay targets/documents/attempts. Recognition correction is an explicit prospective request parameter; it never changes a historical receipt.
 
 The approved Sol route applies to regulatory graphics recognition and independent review only. Both use `gpt-6.1-sol` with high effort, bounded role, logical max tokens 4096, zero logical temperature and a 240-second call cap through ChatGPT-plan billing. Base autoresearch and other bounded document stages remain Luna high; thesis and committee routing remain unchanged. The full profile, plan, request, native provenance, cache identity and retained replay bind the finite opt-in. Analyzer and transport boundaries independently reject incompatible model/input/limit tuples before dispatch. The actual returned model and response identity are required. Local routing fields never enter the provider API request.
 
@@ -22,7 +22,7 @@ Tables are physical rectangular string/null matrices, including header bands, st
 
 Headers identify real printing, axis, explicit applicability scopes and acyclic same-axis parent relationships. Inherited headers remain original-attributed context quotations with visible target association; they do not invent target rows or unnamed leaf labels. Unit scopes identify actual printing and explicit table/text/visual consumers; unitless counts, dates and identifiers cannot acquire a fabricated unit. Scopes and associations are explicit, never inferred from proximity.
 
-Notes retain complete bodies, line breaks, baseline markers, exact visible raised/printed consumer markers, named locations and applicability. External note bodies remain separately attributed to their supplied context original. Reverse association is also required: when note-only EP06OC26.002 is the target, its local e/f/g bodies must retain their actual consumers in context EP06OC26.001, without inventing a local table or demoting notes to prose. Missing or ambiguous consumer/body association fails. The same mechanism supports standalone continued headings.
+Notes retain complete bodies, line breaks, baseline markers, exact visible raised/printed consumer markers, named locations and applicability. External note bodies remain separately attributed to their supplied context original. Reverse association is also required: when note-only EP06OC26.002 is the target, its local e/f/g bodies must retain their actual consumers in context EP06OC26.001, without inventing a local table or demoting notes to prose. Printed anchors identify marker locations; applicability scopes must also include quantities explicitly qualified by the note body, even beyond the marker column. Scope boundaries must follow source meaning rather than marker proximity; unresolved applicability fails. Missing or ambiguous consumer/body association fails. The same mechanism supports standalone continued headings.
 
 Split body cells retain local matrix printing/null and ordered before/after context fragments separately. Each foreign fragment requires exact original attribution, visible target anchors and cell/column association. Foreign text is never stitched into a purported one-source quotation, and a local blank does not mean the whole continued logical cell is blank.
 
@@ -30,9 +30,22 @@ All non-table or mixed material remains required: standalone prose/titles/captio
 
 ## Independent review, correction and replay
 
-The V12 reviewer sees the entire original target and exact context originals plus the current recognition structure, with every direct literal field withheld behind a uniform placeholder. A host-generated ordered inventory identifies each literal field and source image. The reviewer returns one exact string or null per slot. Runtime compares every value against recognition without punctuation, Unicode, linebreak, whitespace or blank normalization. An all-positive verdict cannot override a disagreement. Witness values remain in the review receipt; they are not another downstream material transcript or an automatic correction.
+The V13 reviewer sees the entire original target and exact context originals
+plus the complete current recognition candidate. It checks every positional
+component and relation, all actual printing, blank/span/header/unit/note/cell/
+context associations and non-table geometry, together with a whole-original
+omissions check. It separately checks that note scopes cover all quantities
+qualified by the body, including qualifications beyond the printed marker's
+column. Uncertainty or incomplete applicability requires a negative review;
+review cannot silently repair recognition or upgrade partial content.
 
-The review still checks every positional component and relation, all actual printing, blank/span/header/unit/note/cell/context associations and non-table geometry, together with a whole-original omissions check. Descriptions and association prose remain visible so their claims can be checked; they may repeat literals. This is partial withholding, not complete blindness or a guarantee against correlated Sol errors. Both native source inspection and all existing semantic checks remain required. Any uncertainty, missing material, wrong relation or meaningful literal defect fails; review cannot silently repair recognition or upgrade partial content. Historical reviews retain their original complete-candidate payloads and verdicts.
+V13 restores ordinary V11 candidate-visible review and removes V12's extra
+literal transcription. This is not a claim of statistical independence or a
+source-fidelity guarantee: actual native results still need independent source
+comparison. No source-specific answer, row range, new schema, typography rule,
+normalization or additional call is introduced. Historical V11 requests retain
+their exact bytes and verdicts; the V12 experiment retains its own sealed replay
+implementation and original failed result.
 
 The prospective target-level allowance is at most one bounded correction cycle, with at most two recognitions and two reviews. Eligible returned content/schema/structure/literal/coverage/context failures remain retained as failed stages. A corrected recognition must independently pass the unchanged content validator and a fresh image-backed review. A structurally malformed review may be replaced only against the unchanged valid recognition. A well-formed rejecting review may drive a replacement recognition and fresh review. The reviewer never receives prior review verdicts or repair hints; recognition feedback is bounded untrusted data. No third round, hidden transport retry, response normalization or historical failed-output conversion is permitted.
 
@@ -48,32 +61,34 @@ The inspected originals require more than a numeric table: EP06OC26.000 has thre
 
 Gen22 remained failed. Its fully reviewed prefix covered only four distinct SEC6207 originals, not a whole graphical document. Private V6/V7 and the first compact native probes also remained failed. The compact probe copied all 45 table numbers correctly but returned malformed identity, out-of-range scopes, wrong note anchors, flattened header lines, one omitted printed word and a false statement that supplied e/f/g context notes were absent. These failures were not normalized. A separate explicitly labelled visibility probe reproduced the eight visible e/f/g note-body lines; it proves only that one directed context transcription, not full-reader correctness, associations, independent review or native production acceptance.
 
-The V9 Luna native probe remained failed: its corrected response copied the 45 numbers, but an invalid note anchor prevented review, and independent inspection found an incorrect header scope. Reinspection of the original PNGs corrected two earlier manual claims: the allegedly missing word was not printed, and the printed period was source-faithful. The historical comparison is retained with a separate correction record; its actual native failure remains unchanged.
+The V9 Luna native probe remained failed: its corrected response copied the 45 numbers, but an invalid note anchor prevented review, and independent inspection found an incorrect header scope. Reinspection confirmed that the allegedly missing word was not printed. The intermediate assessment then wrongly claimed a period was source-faithful; the later exact-pixel correction proves that the original prints a comma. Preserve both historical assessments with that explicit correction; the actual V9 native failure remains unchanged.
 
-The first approved V10 Sol probe also failed before review. Both responses copied all 45 numeric values and corrected the title anchor and hierarchy, but changed a printed period to a comma. Both failed a geometry relation cardinality rule that the prompt did not state; the correction fixed only its first occurrence. These are separate fidelity and contract-instruction defects. Original responses remain unchanged. Offline route and SDK tests do not establish native Sol accuracy.
+The first approved V10 Sol probe also failed before review. Both responses copied all 45 numeric values and corrected the title anchor and hierarchy, and both failed a geometry relation cardinality rule that the prompt did not state; the correction fixed only its first occurrence. The period allegation was later retracted: exact original pixels prove a comma. The actual geometry failure remains unchanged. Original responses remain unchanged. Offline route and SDK tests do not establish native Sol accuracy.
 
 V11 adds source-neutral instructions for the existing mechanical contract: relation cardinalities, local-only note pointers, valid anchors and spans, required source/consumer associations, typed visual references, exact list/aggregate limits and full-object rechecking after correction. It changes no content validator, model route, call budget or correction limit. Literal punctuation remains exactly as printed, including apparent source errors. The finite V5/V11 pair binds this prompt in new plans; old V4/V10 failures remain replayable and failed. This repair needs separate exact-candidate CI and native validation before deployment.
 
 The first actual V11 target completed two Sol calls and returned a structurally
-validated target with an all-positive native review. Independent inspection of
-the exact original PNGs found that the recognition changed a printed period to
-a comma in a context note, and the reviewer approved literal fidelity. All 45
-numeric values were correct, which does not discharge the other source
-obligations. The positive runtime receipt remains unchanged and replays as its
-historical structural result; the independent source assessment and release
-acceptance are negative. Remaining representative probes and deployment are
-blocked. Sol high remains selected for both graphics stages. This result does
-not establish the cause or statistical independence of the two-stage error.
+validated target with an all-positive native review. Our original independent
+assessment wrongly called a printed comma a period. Exact source-pixel masks
+and two independent reviews corrected that error: all 92 literal fields and 45
+numbers match. Preserve the original runtime receipt and erroneous assessments
+with explicit correction records. Missing incidental citation italics do not
+violate an invented all-font-style requirement.
 
-Pedro subsequently instructed us to continue resolving the blocker while
-retaining Sol for both stages. V12 keeps the V11 recognition instructions
-unchanged and adds source-read literal evidence to review, with a new V5 review
-receipt and exact deterministic comparison. A well-formed disagreement rejects
-the review; a missing or malformed witness uses the existing malformed-review
-path. Feedback identifies mismatching fields without supplying replacement
-answers. All original models, calls, budgets, source requirements and correction
-limits remain. The implementation and finite native acceptance plan are in
-`docs/superpowers/plans/2026-10-16-sol-literal-witness.md`.
+One substantive graph-completeness concern remains: the full note-b prose
+explicitly qualifies adviser counts, while its typed scopes cover only the
+asset-value column. This is incomplete applicability, not omitted prose or
+proven downstream misinterpretation. The source does not justify mechanically
+extending every note to every row/column. V13 clarifies the generic existing
+scope semantics in both stages; source evidence still determines each extent.
+
+The intervening V12 experiment added exact source-read literal witnesses. Its
+actual table001 challenge exhausted one correction and failed when the reviewer
+read AUM instead of source/recognition RAUM. It produced no accepted material.
+The later source correction removed its original rationale. V13 restores the
+ordinary candidate-visible review without relaxing source fidelity or any
+validator. See `docs/superpowers/plans/2026-10-16-sol-note-applicability.md` for
+its finite acceptance sequence. Sol high remains selected for both stages.
 
 The final successor still requires complete recognition/review of every current source original, full supplied regulatory material, actual assembled-prompt planning proof, every regulatory document across four horizons and the full 16-book native workflow. The retained October 15 corpus contained 98 targets and 12 documents; a fresh acquisition must establish its own exact coverage. No source/image exemption or valid-uncertainty-to-sufficient conversion is introduced by this wire.
 

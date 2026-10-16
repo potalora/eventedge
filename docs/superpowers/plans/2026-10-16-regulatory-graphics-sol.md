@@ -13,7 +13,7 @@
 - Recognition and independent graphics review use `gpt-6.1-sol`, `high`, bounded role, logical max tokens 4096 and temperature 0.0. Base autoresearch remains `gpt-6-luna` high; thesis/committee routing is unchanged.
 - No paid API fallback, new dependency, source truncation, relaxed fidelity validation, relabelled failure, or old-receipt migration.
 - Preserve one correction, at most four native stages per target, 240 seconds per call, four target workers per document, eight global stages and the same absolute 9000-second phase deadline.
-- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V6/request V12 under the successor literal-witness design; retain exact replay of V4/V10 and V5/V11 attempts. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
+- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V7/request V13 under the note-applicability clarification; retain exact replay of V4/V10 and V5/V11 attempts. Historical V6/V12 uses its retained sealed 14da implementation and is rejected by the new constructor. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
 - Keep old generations and pending paper intents unchanged. Deploy behavior changes only into a fresh generation after exact-candidate CI and native evidence pass.
 
 ## Shared interfaces
@@ -31,7 +31,7 @@ stream_plan_response(..., regulation_graphics_model_policy=None)
 
 The Sol plan and request context add `model_policy: sol_high_v1`. Transport payloads and native provenance use `regulation_graphics_model_policy: sol_high_v1`. No local route marker is sent as an unsupported provider API field. The marker is rejected when orphaned, unknown, or incompatible with the required profile, model, effort, originals, billing mode or limits.
 
-The first native V10 attempt failed on unstated geometry cardinality and retained a source punctuation error. A finite whole-contract audit also found implicit foreign-note pointer restrictions. V11 adds the existing mechanical requirements to the Sol prompts, preserving all validators and budgets. Historical V10 responses stay unchanged; their exact failed chain remains replayable. New tests cover the observed structural defects, fixed version/prompt pairing and cross-version reuse refusal before a new sealed native attempt.
+The first native V10 attempt failed on unstated geometry cardinality. The earlier allegation that its comma differed from a printed period was incorrect; the original prints a comma. A finite whole-contract audit also found implicit foreign-note pointer restrictions. V11 adds the existing mechanical requirements to the Sol prompts, preserving all validators and budgets. Historical V10 responses stay unchanged; their exact failed chain remains replayable. New tests cover the observed structural defects, fixed version/prompt pairing and cross-version reuse refusal before a new sealed native attempt.
 
 ## Task 1: Graphics contract and analyzer routing
 
@@ -77,19 +77,33 @@ The three implementation tasks own disjoint files and run concurrently; root res
 Offline integrated verification on October 16: 342 tests and 72 subtests passed, with three existing dependency deprecation warnings. The six earlier CI fixture failures were reproduced and corrected with an inert plan identity while preserving production authentication checks. Native acceptance and deployment remain pending.
 
 The V11 mechanical-contract update passed 408 local integration tests and 79
-subtests. Its first native target then exposed a false-positive Sol review:
-recognition changed a printed period to a comma and review approved it. The
-unchanged positive runtime receipt and the negative independent source
-assessment are both retained. Representative acceptance remains incomplete,
-and deployment is blocked. The model decision remains Sol high for both stages.
+subtests. Its actual first target completed recognition and review. A later
+pixel-level reassessment corrected our independent period allegation: the
+source mark is a comma. All 92 literal fields and 45 numeric values match. The
+original positive runtime receipt and original erroneous reports are preserved,
+with explicit correction records. A real remaining gap is typed applicability:
+a note body explicitly qualifies adviser counts, but its scopes reach only the
+asset-value column. Incidental citation italics are not a standalone blocker.
 
-Following Pedro's direct instruction to continue resolving this blocker, the
-bounded V12 successor adds exact source-read literal witnesses while retaining
-the Sol route and V11 recognition instructions. See
-`2026-10-16-sol-literal-witness.md` for its design, residual limitations and finite
-acceptance sequence. The separate fixture repair in `409b1e5` passed both CI
-jobs in run `38935591882`; the actual CI checkout tree matches that candidate.
-The V12 successor requires its own exact CI and native acceptance.
+The V12 literal-witness experiment was prompted by that erroneous punctuation
+assessment. It passed local checks but failed its actual native challenge when
+the final reviewer read AUM for RAUM. No accepted V12 material exists. Its sealed
+code and results remain available for exact historical replay.
+
+The V13 successor removes that unnecessary second transcription and restores
+ordinary complete-candidate review. A generic instruction requires both stages
+to distinguish printed marker anchors from all quantities qualified by the note
+body. It changes no validator, model, limit or correction budget. See
+`2026-10-16-sol-note-applicability.md`. Every successor still needs its own exact
+CI, fresh finite source acceptance, complete native run and release evidence.
+Parent `409b1e5` passed both CI jobs in run `38935591882`; this is not proof for a
+new candidate.
+
+Pedro also requested a full clean run before realistic daily-source perturbation
+and healing tests. Prepare their bounded plan now; execute them only against
+isolated copies after complete native baseline acceptance. Normal updates,
+actual repairs and correct safe refusals must be reported separately. A repair
+PR does not mean the patch was deployed or the workflow recovered.
 
 The approved Friday successor extends only the historical-document expiry by
 one second to `2026-10-17T04:00:00Z`; it admits the October 16 session and no later

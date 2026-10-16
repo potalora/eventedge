@@ -41,8 +41,6 @@ def review_response(request,recognition):
         'checked_visuals':[{'object':True,'relations':[True for _ in x['relations']]}for x in r['visuals']],
         'checked_reading_order':[True for _ in r['reading_order']],
         'checks':{name:True for name in g.REVIEW_CHECKS},'errors':[]}
-    if 'literal_slots' in json.loads(request.user):
-        result['literal_values']=[slot['value'] for slot in g._literal_slots(r)]
     return result
 
 
