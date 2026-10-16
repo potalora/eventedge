@@ -75,3 +75,17 @@ Root owns integration, independent final review, private profile/verifier update
 The three implementation tasks own disjoint files and run concurrently; root resolves shared interfaces and owns integration. This scales the workflow to the user's request for bounded work and concurrent delegation. A model choice alone is not evidence of native accuracy. Constructed tests, actual native probes, full generation acceptance and scheduled-run verification are reported separately.
 
 Offline integrated verification on October 16: 342 tests and 72 subtests passed, with three existing dependency deprecation warnings. The six earlier CI fixture failures were reproduced and corrected with an inert plan identity while preserving production authentication checks. Native acceptance and deployment remain pending.
+
+The V11 mechanical-contract update passed 408 local integration tests and 79
+subtests. Its first native target then exposed a false-positive Sol review:
+recognition changed a printed period to a comma and review approved it. The
+unchanged positive runtime receipt and the negative independent source
+assessment are both retained. Representative acceptance remains incomplete,
+and deployment is blocked. The model decision remains Sol high for both stages.
+
+The approved Friday successor extends only the historical-document expiry by
+one second to `2026-10-17T04:00:00Z`; it admits the October 16 session and no later
+session. New profile and helper preparation must preserve all old generation
+identities and evidence. The Thursday-session launch window has closed, and a
+Friday launch requires the completed session and actual governed source
+availability after the existing SIP delay.

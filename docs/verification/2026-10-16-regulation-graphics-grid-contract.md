@@ -52,6 +52,17 @@ The first approved V10 Sol probe also failed before review. Both responses copie
 
 V11 adds source-neutral instructions for the existing mechanical contract: relation cardinalities, local-only note pointers, valid anchors and spans, required source/consumer associations, typed visual references, exact list/aggregate limits and full-object rechecking after correction. It changes no content validator, model route, call budget or correction limit. Literal punctuation remains exactly as printed, including apparent source errors. The finite V5/V11 pair binds this prompt in new plans; old V4/V10 failures remain replayable and failed. This repair needs separate exact-candidate CI and native validation before deployment.
 
+The first actual V11 target completed two Sol calls and returned a structurally
+validated target with an all-positive native review. Independent inspection of
+the exact original PNGs found that the recognition changed a printed period to
+a comma in a context note, and the reviewer approved literal fidelity. All 45
+numeric values were correct, which does not discharge the other source
+obligations. The positive runtime receipt remains unchanged and replays as its
+historical structural result; the independent source assessment and release
+acceptance are negative. Remaining representative probes and deployment are
+blocked. Sol high remains selected for both graphics stages. This result does
+not establish the cause or statistical independence of the two-stage error.
+
 The final successor still requires complete recognition/review of every current source original, full supplied regulatory material, actual assembled-prompt planning proof, every regulatory document across four horizons and the full 16-book native workflow. The retained October 15 corpus contained 98 targets and 12 documents; a fresh acquisition must establish its own exact coverage. No source/image exemption or valid-uncertainty-to-sufficient conversion is introduced by this wire.
 
 The representative compact suite currently has 39 passing offline checks: reciprocal note consumers, inherited headings, separately retained prefix/suffix cell parts (including a locally blank continued cell), duplicate note letters in separate tables, dual-axis relationships, mixed expense/checkbox forms, grouped unnamed headers and physical merged cells. It exercises full image-backed-review masks and complete target receipt replay, rejects malformed or incomplete review separately, and proves mutated retained content fails as an integrity error rather than correction-eligible model content. Together with the focused compact core and legacy graphic suite, 118 checks passed. These use constructed demo pixels; expected text remains in test code and is never supplied by the recognition request. The schema's pixel-truth and full native workflow obligations remain unproven.

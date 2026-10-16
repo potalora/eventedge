@@ -88,9 +88,17 @@ acceptance failures.
   allowing a manager to forward termination after the shell leader exits.
 - The document's exact finite expiry, with no automatic renewal or broader
   authority. Date-only document eligibility uses New York end-of-day. For this
-  profile, October 16's final fractional second exceeds the declared
+  original profile, October 16's final fractional second exceeds the declared
   `2026-10-17T03:59:59Z` endpoint, so date-only October 16 is conservatively
   excluded; an explicit instant at the endpoint remains within the window.
+
+The separately approved Friday successor changes only that scope endpoint to
+`2026-10-17T04:00:00Z`, admitting the October 16 date-only reference. The original
+document, historical claims and safeguards remain unchanged; later sessions are
+still excluded. The original-expiry fixtures above retain their historical
+expectations. Actual review completion and the decision cutoff must also remain
+within the successor's finite scope. This profile preparation is not deployment
+or native workflow acceptance.
 
 The harness does not run systemd or prove live provider/model availability. Its
 expiry cases exercise the eligibility boundary directly. Calendar cases cover

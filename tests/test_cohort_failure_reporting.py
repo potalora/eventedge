@@ -409,7 +409,21 @@ def test_candidate_issue_reporting_rejects_invalid_carrier_lifecycle(carrier):
         aggregate_candidate_input_issues({"cohort-a": carrier})
 
 
-def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
+@pytest.mark.parametrize(
+    ("ar_config", "expected_policy_id", "committee_status"),
+    (
+        ({}, "foundation-30d", None),
+        ({"paper_ledger": {}}, "foundation-30d", {"degraded": False}),
+        (
+            {"paper_ledger": {"policy_id": "custom-30d"}},
+            "custom-30d",
+            {"degraded": True},
+        ),
+    ),
+)
+def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue(
+    ar_config, expected_policy_id, committee_status
+):
     session = date(2026, 8, 10)
     issue = CandidateInputIssue.create(
         issue_id="candidate_input_issue_" + "a" * 32,
@@ -443,6 +457,7 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
 
     class Executor:
         def outcome_dependency_plan(self, exact_session):
+            assert exact_session == session
             return {}
 
         def ensure_metric_epoch(self, context, exact_session):
@@ -454,8 +469,11 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
             )
 
     class Ledger:
-        def committee_decision(self, *args):
-            return None
+        def committee_decision(self, exact_session, epoch_id, policy_id):
+            assert (exact_session, epoch_id, policy_id) == (
+                session, issue.epoch_id, expected_policy_id
+            )
+            return None if committee_status is None else {"status": committee_status}
 
         def session_invalid_reason(self, exact_session):
             assert exact_session == session
@@ -469,6 +487,7 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
     orchestrator.cohorts = [
         {
             "config": SimpleNamespace(name="cohort-a", horizon="30d"),
+            "engine": SimpleNamespace(ar_config=ar_config),
             "executor": Executor(),
             "ledger": Ledger(),
         }
@@ -483,6 +502,12 @@ def test_invalid_metric_epoch_exit_lazily_hydrates_persisted_candidate_issue():
     assert result["staging_valid"] is False
     assert result["candidate_bar_quarantines"] == ["UI"]
     assert result["candidate_input_issues"] == [issue.reference()]
+    assert result["outcome_coverage_valid"] is True
+    assert result["outcome_evidence_failures"] == {}
+    if committee_status is None:
+        assert "committee_decision_status" not in result
+    else:
+        assert result["committee_decision_status"] == committee_status
 
 
 def test_pending_gap_exact_session_exit_lazily_hydrates_persisted_candidate_issue():
