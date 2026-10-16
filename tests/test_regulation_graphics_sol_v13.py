@@ -15,7 +15,7 @@ from tradingagents.strategies.data_sources import regulation_graphics_grid as g
 
 def prepared(*, external=False):
     rows = assets(2 if external else 1)
-    plan = g.prepare_execution_plan(rows, model_policy=POLICY)
+    plan = g._execution_plan(rows, POLICY, 'regulation-graphics-execution-plan-v7')
     q = g.prepare_recognition(rows, plan, 0)
     value = response(q, external=external)
     value['tables'][0]['matrix'].append(['Other item', '2'])

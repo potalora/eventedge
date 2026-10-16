@@ -13,7 +13,7 @@
 - Recognition and independent graphics review use `gpt-6.1-sol`, `high`, bounded role, logical max tokens 4096 and temperature 0.0. Base autoresearch remains `gpt-6-luna` high; thesis/committee routing is unchanged.
 - No paid API fallback, new dependency, source truncation, relaxed fidelity validation, relabelled failure, or old-receipt migration.
 - Preserve one correction, at most four native stages per target, 240 seconds per call, four target workers per document, eight global stages and the same absolute 9000-second phase deadline.
-- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V7/request V13 under the note-applicability clarification; retain exact replay of V4/V10 and V5/V11 attempts. Historical V6/V12 uses its retained sealed 14da implementation and is rejected by the new constructor. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
+- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V8/request V14 with individually attributed note fragments and the note-applicability clarification; retain exact replay of V4/V10, V5/V11 and V7/V13 attempts. Historical V6/V12 uses its retained sealed 14da implementation and is rejected by the new constructor. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
 - Keep old generations and pending paper intents unchanged. Deploy behavior changes only into a fresh generation after exact-candidate CI and native evidence pass.
 
 ## Shared interfaces

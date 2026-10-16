@@ -14,8 +14,10 @@ REQUEST_VERSION='regulation-graphics-request-v9'
 RECOGNITION_VERSION='regulation-graphics-content-v1'
 REVIEW_VERSION='regulation-graphics-content-review-v1'
 PLAN_VERSION='regulation-graphics-execution-plan-v3'
-SOL_PLAN_VERSION='regulation-graphics-execution-plan-v7'
-SOL_REQUEST_VERSION='regulation-graphics-request-v13'
+SOL_PLAN_VERSION='regulation-graphics-execution-plan-v8'
+SOL_REQUEST_VERSION='regulation-graphics-request-v14'
+_SOL_SCOPE_PLAN_VERSION='regulation-graphics-execution-plan-v7'
+_SOL_SCOPE_REQUEST_VERSION='regulation-graphics-request-v13'
 _SOL_MECHANICAL_PLAN_VERSION='regulation-graphics-execution-plan-v5'
 _SOL_MECHANICAL_REQUEST_VERSION='regulation-graphics-request-v11'
 _SOL_PRIOR_PLAN_VERSION='regulation-graphics-execution-plan-v4'
@@ -152,11 +154,77 @@ do not confine scopes to marker locations.
 '''
 
 
+# Derive only the new systems from frozen text; historical systems remain exact.
+_FRAGMENT_LOCATION_GUIDANCE=_LOCATION_GUIDANCE.replace('{"note":0}', '{"note":0,"fragment":0}')
+_FRAGMENT_NOTE_SCHEMA='''Each note has exactly marker,marker_image_position,body_fragments,anchors,scopes,consumer_sources.
+Its identity is the note list index; marker labels may repeat across different notes. marker is the exact
+baseline printed note label, separate from raised consumer glyphs. marker_image_position is the ONE-BASED
+original containing that printed label and MUST equal the FIRST body fragment's image_position.
+body_fragments is an ordered nonempty array of at most 64 objects with exactly image_position,body.
+Each body is the exact nonempty original-literal note fragment from its ONE-BASED image_position.
+Keep fragments in logical source reading order, never sort by labelled image_position: image1 may
+be a suffix with a foreign prefix. Preserve original linebreaks, fragment boundaries and attribution;
+never stitch bodies or invent a repeated baseline marker on an unmarked suffix.
+Each note anchor has at (local literal location),marker_text (exact raised/printed consumer glyph).
+Scope shapes are {"table":0,"region":{"from":{"row":0,"column":0},"through":{"row":"last","column":"last"}}},
+{"text":0} or {"visual":0}. Each consumer_source has image_position,quote,marker_text,association.
+A note is locally printed when ANY body fragment belongs to image1. Anchors AND scopes are required
+unless such a local note has explicit foreign consumer_sources proving reverse continuation.
+Foreign-only notes require nonempty local anchors/scopes and EMPTY consumer_sources.
+Only {"note":0,"fragment":0} with a fragment printed in image1 is a local literal pointer;
+bare {"note":0} is invalid. Foreign fragments earn zero target coverage, including in visual relations.
+Copy consumer markers separately from baseline note labels; never normalize either. Do not invent headings,
+captions or scaffolding: include target text ONLY if actually printed.
+'''
+_FRAGMENT_SCHEMA=_SCHEMA.replace(
+    _SCHEMA[_SCHEMA.index('Each note has marker,body,'): _SCHEMA.index('Each continuation has cell')],
+    _FRAGMENT_NOTE_SCHEMA).replace(
+    '''table or note, e.g. [{"text":0},{"table":0}]. It includes EVERY target text/table/local note exactly once;
+context notes earn no target credit.''',
+    '''table or LOCAL note fragment, e.g. [{"text":0},{"table":0},{"note":0,"fragment":0}]. It includes
+EVERY target text/table and EVERY image1 note fragment exactly once; no foreign fragment is allowed.'''
+    ).replace(_LOCATION_GUIDANCE,_FRAGMENT_LOCATION_GUIDANCE)
+_FRAGMENT_MECHANICAL_GUIDANCE=_SOL_MECHANICAL_GUIDANCE.replace(
+    '''Locations refer only to local material. A {"note":i} pointer is valid ONLY when that note's body is in image1,
+including visual literals/relations. Foreign-body notes stay foreign with their local anchors/scopes;
+link local relationships to genuine local consumers, never relabel or duplicate a foreign body.''',
+    '''Locations refer only to local material. A {"note":i,"fragment":j} pointer is valid ONLY when that
+fragment is in image1, including visual literals/relations. Bare note pointers are invalid.
+Link local relationships to genuine local consumers; never relabel or duplicate foreign fragments.''').replace(
+    '''Every note anchor marker is nonnull and occurs exactly in its local anchor literal. Foreign notes have
+nonempty local anchors/scopes and EMPTY consumer_sources. A local note may lack anchors/scopes only''',
+    '''Every note anchor marker is nonnull and occurs exactly in its local anchor literal. Foreign-only notes have
+nonempty local anchors/scopes and EMPTY consumer_sources. A note with a local fragment may lack anchors/scopes only''').replace(
+    'Aggregate structural objects 512 counts spans+headers+units+visuals+visual relations.',
+    'Aggregate structural objects 512 counts spans+headers+units+visuals+visual relations+ALL note body fragments.').replace(
+    'counts all notes plus foreign-body notes again plus header/continuation source objects plus consumer_sources.',
+    'counts all notes plus EACH foreign body fragment plus header/continuation source objects plus consumer_sources.').replace(
+    'Aggregate literal chars 64000 counts text+nonnull matrix strings+note bodies+source/consumer-source quotes.',
+    'Aggregate literal chars 64000 counts text+nonnull matrix strings+note markers+ALL fragment bodies+source/consumer-source quotes.')
+_FRAGMENT_RECOGNITION_SYSTEM=_RECOGNITION_SYSTEM.removesuffix(_SCHEMA)+_FRAGMENT_SCHEMA+_FRAGMENT_MECHANICAL_GUIDANCE+_SOL_NOTE_SCOPE_GUIDANCE
+_FRAGMENT_REVIEW_SYSTEM=_REVIEW_SYSTEM.replace(
+    'checked_text,checked_notes,checked_reading_order are boolean arrays.',
+    '''checked_text,checked_reading_order are boolean arrays.
+Each checked_notes item has object (boolean),body_fragments (boolean array matching EVERY fragment in order).
+object covers marker provenance, logical fragment order and continuation association, anchors, complete
+applicability scopes and consumer_sources. Each body_fragments boolean covers exact literal fidelity and
+original attribution of that fragment, including foreign fragments.''').replace(
+    _LOCATION_GUIDANCE,_FRAGMENT_LOCATION_GUIDANCE)+_FRAGMENT_NOTE_SCHEMA+_SOL_NOTE_SCOPE_GUIDANCE+'''
+Review EVERY local fragment's reading-order coverage exactly once and exclude all foreign fragments.
+For a foreign-fragment defect use an affected local consumer location or null and identify the foreign
+fragment precisely in issue text. Never use a foreign fragment or bare note as an error location.
+Cell error locations may address blank or covered slots. Error issues are nonempty/nonwhitespace strings
+of at most 4096 chars; error list at most 64. Recheck every whole original and the entire candidate,
+including punctuation, spelling, grammar and source typos, never only prior feedback.
+'''
+
+
 def _request_system(stage,version):
-    if stage not in ('recognition','review')or version not in (REQUEST_VERSION,_SOL_PRIOR_REQUEST_VERSION,_SOL_MECHANICAL_REQUEST_VERSION,SOL_REQUEST_VERSION):legacy._fail('request')
+    if stage not in ('recognition','review')or version not in (REQUEST_VERSION,_SOL_PRIOR_REQUEST_VERSION,_SOL_MECHANICAL_REQUEST_VERSION,_SOL_SCOPE_REQUEST_VERSION,SOL_REQUEST_VERSION):legacy._fail('request')
+    if version==SOL_REQUEST_VERSION:return _FRAGMENT_RECOGNITION_SYSTEM if stage=='recognition'else _FRAGMENT_REVIEW_SYSTEM
     base=_RECOGNITION_SYSTEM if stage=='recognition'else _REVIEW_SYSTEM
-    if version in (_SOL_MECHANICAL_REQUEST_VERSION,SOL_REQUEST_VERSION):base+=_SOL_MECHANICAL_GUIDANCE if stage=='recognition'else _SOL_REVIEW_GUIDANCE
-    if version==SOL_REQUEST_VERSION:base+=_SOL_NOTE_SCOPE_GUIDANCE
+    if version in (_SOL_MECHANICAL_REQUEST_VERSION,_SOL_SCOPE_REQUEST_VERSION):base+=_SOL_MECHANICAL_GUIDANCE if stage=='recognition'else _SOL_REVIEW_GUIDANCE
+    if version==_SOL_SCOPE_REQUEST_VERSION:base+=_SOL_NOTE_SCOPE_GUIDANCE
     return base
 
 
@@ -215,7 +283,7 @@ def prepare_execution_plan(assets,*,model_policy=None):
 
 
 def _execution_plan(assets,route,version):
-    if (route is None and version!=PLAN_VERSION)or(route is not None and(route!=SOL_MODEL_POLICY or version not in (_SOL_PRIOR_PLAN_VERSION,_SOL_MECHANICAL_PLAN_VERSION,SOL_PLAN_VERSION))):legacy._fail('model_policy')
+    if (route is None and version!=PLAN_VERSION)or(route is not None and(route!=SOL_MODEL_POLICY or version not in (_SOL_PRIOR_PLAN_VERSION,_SOL_MECHANICAL_PLAN_VERSION,_SOL_SCOPE_PLAN_VERSION,SOL_PLAN_VERSION))):legacy._fail('model_policy')
     meta=_metadata(assets)
     targets=[{'target_index':i,'target_id':a['id'],'context_ids':[b['id']for j,b in enumerate(meta)if j!=i and abs(i-j)<=RADIUS]}for i,a in enumerate(meta)]
     plan={'version':PLAN_VERSION,'policy':POLICY,'presentation_policy':ORIGINALS_LABEL_POLICY,'radius':RADIUS,'max_corrections':1,'assets':meta,'targets':targets}
@@ -236,7 +304,7 @@ def model_policy(plan):
         if route!=SOL_MODEL_POLICY:legacy._fail('model_policy')
         keys.add('model_policy')
     legacy._shape(plan,keys)
-    if (plan['version']not in ((_SOL_PRIOR_PLAN_VERSION,_SOL_MECHANICAL_PLAN_VERSION,SOL_PLAN_VERSION)if route else(PLAN_VERSION,))or plan['policy']!=POLICY
+    if (plan['version']not in ((_SOL_PRIOR_PLAN_VERSION,_SOL_MECHANICAL_PLAN_VERSION,_SOL_SCOPE_PLAN_VERSION,SOL_PLAN_VERSION)if route else(PLAN_VERSION,))or plan['policy']!=POLICY
         or plan['presentation_policy']!=ORIGINALS_LABEL_POLICY or type(plan['radius'])is not int or plan['radius']!=RADIUS
         or type(plan['max_corrections'])is not int or plan['max_corrections']!=1
         or plan['plan_sha256']!=legacy._digest({k:v for k,v in plan.items()if k!='plan_sha256'})):legacy._fail('plan')
@@ -262,13 +330,14 @@ def model_policy(plan):
 def _plan_request_version(plan):
     model_policy(plan)
     return {PLAN_VERSION:REQUEST_VERSION,_SOL_PRIOR_PLAN_VERSION:_SOL_PRIOR_REQUEST_VERSION,
-        _SOL_MECHANICAL_PLAN_VERSION:_SOL_MECHANICAL_REQUEST_VERSION,SOL_PLAN_VERSION:SOL_REQUEST_VERSION}[plan['version']]
+        _SOL_MECHANICAL_PLAN_VERSION:_SOL_MECHANICAL_REQUEST_VERSION,
+        _SOL_SCOPE_PLAN_VERSION:_SOL_SCOPE_REQUEST_VERSION,SOL_PLAN_VERSION:SOL_REQUEST_VERSION}[plan['version']]
 
 
 def _request_model_policy(c):
     route=c.get('model_policy')
     if 'model_policy'in c:
-        if route!=SOL_MODEL_POLICY or c.get('version')not in (_SOL_PRIOR_REQUEST_VERSION,_SOL_MECHANICAL_REQUEST_VERSION,SOL_REQUEST_VERSION):legacy._fail('model_policy')
+        if route!=SOL_MODEL_POLICY or c.get('version')not in (_SOL_PRIOR_REQUEST_VERSION,_SOL_MECHANICAL_REQUEST_VERSION,_SOL_SCOPE_REQUEST_VERSION,SOL_REQUEST_VERSION):legacy._fail('model_policy')
     elif c.get('version')!=REQUEST_VERSION:legacy._fail('request')
     return route
 
@@ -338,12 +407,17 @@ def _checked_request(q,recognition=None):
     return c
 
 
-def _location(at,r,path,literal=False):
+def _location(at,r,path,literal=False,*,fragment_notes=False):
     _require(type(at)is dict,path,detail='Expected a JSON object location, e.g. {"text":0} or {"table":0,"row":0,"column":0}; colon-delimited strings are invalid')
     keys=set(at)
     if keys=={'text'}:
         _index(at['text'],len(r['text']),path);return r['text'][at['text']]
-    if keys=={'note'}:
+    if fragment_notes and keys=={'note','fragment'}:
+        _index(at['note'],len(r['notes']),path+'.note')
+        fragments=r['notes'][at['note']]['body_fragments'];_index(at['fragment'],len(fragments),path+'.fragment')
+        fragment=fragments[at['fragment']];_require(fragment['image_position']==1,path,'content_source')
+        return fragment['body']
+    if not fragment_notes and keys=={'note'}:
         _index(at['note'],len(r['notes']),path)
         n=r['notes'][at['note']];_require(n['image_position']==1,path,'content_source');return n['body']
     if keys=={'visual'}and not literal:_index(at['visual'],len(r['visuals']),path);return None
@@ -369,7 +443,20 @@ def _region(v,m,path):
 def _contains(a,b):return a[0]<=b[0]and a[1]<=b[1]and a[2]>=b[2]and a[3]>=b[3]
 
 
+def _fragment_note(n,path,images):
+    _shape(n,{'marker','marker_image_position','body_fragments','anchors','scopes','consumer_sources'},path)
+    _text(n['marker'],path+'.marker',128)
+    position=n['marker_image_position'];_index(position-1 if type(position)is int else None,images,path+'.marker_image_position')
+    fragments=_items(n['body_fragments'],path+'.body_fragments',64,1)
+    for i,f in enumerate(fragments):
+        fp=path+f'.body_fragments[{i}]';_shape(f,{'image_position','body'},fp)
+        position=f['image_position'];_index(position-1 if type(position)is int else None,images,fp+'.image_position')
+        _text(f['body'],fp+'.body')
+    _require(n['marker_image_position']==fragments[0]['image_position'],path+'.marker_image_position','content_source','Printed marker must belong to the first body fragment original')
+
+
 def _content(r,c):
+    fragment_notes=c['version']==SOL_REQUEST_VERSION
     _shape(r,_CONTENT_KEYS,'$');_require(r['status']in ('complete','partial','unreadable'),'$.status')
     _require(r['context_closure']in ('resolved','unresolved'),'$.context_closure')
     for key,limit in (('text',512),('tables',128),('notes',128),('continuations',128),('visuals',512),('reading_order',768),('unresolved',64)):_items(r[key],'$.'+key,limit)
@@ -377,9 +464,12 @@ def _content(r,c):
     for i,s in enumerate(r['unresolved']):_text(s,f'$.unresolved[{i}]')
     # Validate forward-referenced note/visual containers before resolving pointers.
     for i,n in enumerate(r['notes']):
-        p=f'$.notes[{i}]';_shape(n,{'marker','body','image_position','anchors','scopes','consumer_sources'},p)
-        _text(n['marker'],p+'.marker',128);_text(n['body'],p+'.body')
-        _index(n['image_position']-1 if type(n['image_position'])is int else None,len(c['context_assets'])+1,p+'.image_position')
+        p=f'$.notes[{i}]'
+        if fragment_notes:_fragment_note(n,p,len(c['context_assets'])+1)
+        else:
+            _shape(n,{'marker','body','image_position','anchors','scopes','consumer_sources'},p)
+            _text(n['marker'],p+'.marker',128);_text(n['body'],p+'.body')
+            _index(n['image_position']-1 if type(n['image_position'])is int else None,len(c['context_assets'])+1,p+'.image_position')
     for i,v in enumerate(r['visuals']):
         p=f'$.visuals[{i}]';_shape(v,{'kind','description','precision','literals','relations'},p)
         _require(type(v['kind'])is str and v['kind']in {'axis','tick','legend','series','relation','form','unit','footnote','caption','heading','other'},p+'.kind')
@@ -405,8 +495,10 @@ def _content(r,c):
         objects+=len(t['spans'])+len(_items(t['headers'],p+'.headers',512))+len(_items(t['units'],p+'.units',512))
     r['_covered']=covered
     try:
+        def location(at,path,literal=False):
+            return _location(at,r,path,literal,fragment_notes=fragment_notes)
         def anchor(a,path):
-            _shape(a,{'at','marker_text'},path);literal=_location(a['at'],r,path+'.at',True)
+            _shape(a,{'at','marker_text'},path);literal=location(a['at'],path+'.at',True)
             if a['marker_text']is not None:
                 _text(a['marker_text'],path+'.marker_text',128);_require(a['marker_text']in literal,path,'content_anchor','Exact marker glyph absent from anchor literal')
         def source(s,path):
@@ -419,7 +511,7 @@ def _content(r,c):
             for hi,h in enumerate(t['headers']):
                 hp=p+f'.headers[{hi}]';_shape(h,{'at','source','axis','regions','parents'},hp);_require(h['axis']in ('row','column'),hp+'.axis')
                 _require((h['at']is None)!=(h['source']is None),hp,'content_header','Exactly one local at or foreign source required')
-                if h['at']is not None:_location(h['at'],r,hp+'.at',True)
+                if h['at']is not None:location(h['at'],hp+'.at',True)
                 else:source(h['source'],hp+'.source')
                 regs=[_region(v,m,hp+f'.regions[{i}]')for i,v in enumerate(_items(h['regions'],hp+'.regions',64,1))];regions.append(regs)
                 parents=_items(h['parents'],hp+'.parents');_require(all(type(x)is int for x in parents),hp+'.parents','content_index');_require(len(parents)==len(set(parents)),hp+'.parents')
@@ -434,29 +526,36 @@ def _content(r,c):
                 visiting.remove(i);visited.add(i)
             for i in range(len(t['headers'])):visit(i)
             for ui,u in enumerate(t['units']):
-                up=p+f'.units[{ui}]';_shape(u,{'at','quote','regions','consumers'},up);value=_location(u['at'],r,up+'.at',True);_text(u['quote'],up+'.quote');_require(u['quote']in value,up+'.quote','content_unit')
+                up=p+f'.units[{ui}]';_shape(u,{'at','quote','regions','consumers'},up);value=location(u['at'],up+'.at',True);_text(u['quote'],up+'.quote');_require(u['quote']in value,up+'.quote','content_unit')
                 regs=[_region(v,m,up+'.regions')for v in _items(u['regions'],up+'.regions')];cons=_items(u['consumers'],up+'.consumers');_require(regs or cons,up,'content_unit','Unit has no applicable consumer')
-                for j,loc in enumerate(cons):_location(loc,r,up+f'.consumers[{j}]')
+                for j,loc in enumerate(cons):location(loc,up+f'.consumers[{j}]')
         for ni,n in enumerate(r['notes']):
-            p=f'$.notes[{ni}]';_shape(n,{'marker','body','image_position','anchors','scopes','consumer_sources'},p);_text(n['marker'],p+'.marker',128);_text(n['body'],p+'.body');total_chars+=len(n['body'])
-            _index(n['image_position']-1 if type(n['image_position'])is int else None,len(c['context_assets'])+1,p+'.image_position')
+            p=f'$.notes[{ni}]'
+            if fragment_notes:
+                fragments=n['body_fragments'];local=any(f['image_position']==1 for f in fragments)
+                total_chars+=len(n['marker'])+sum(len(f['body'])for f in fragments)
+                objects+=len(fragments);foreign+=sum(f['image_position']!=1 for f in fragments)
+            else:
+                _shape(n,{'marker','body','image_position','anchors','scopes','consumer_sources'},p);_text(n['marker'],p+'.marker',128);_text(n['body'],p+'.body');total_chars+=len(n['body'])
+                _index(n['image_position']-1 if type(n['image_position'])is int else None,len(c['context_assets'])+1,p+'.image_position')
+                local=n['image_position']==1
+                if not local:foreign+=1
             aa=_items(n['anchors'],p+'.anchors');scopes=_items(n['scopes'],p+'.scopes');cons=_items(n['consumer_sources'],p+'.consumer_sources')
-            _require((bool(aa)and bool(scopes))or(n['image_position']==1 and bool(cons)),p,'content_note','Note must have complete local anchor/scope or explicit foreign consumer')
-            _require(n['image_position']==1 or(not cons and aa and scopes),p,'content_note')
-            if n['image_position']!=1:foreign+=1
+            _require((bool(aa)and bool(scopes))or(local and bool(cons)),p,'content_note','Note must have complete local anchor/scope or explicit foreign consumer')
+            _require(local or(not cons and aa and scopes),p,'content_note')
             for i,a in enumerate(aa):anchor(a,p+f'.anchors[{i}]');_require(a['marker_text']is not None,p+'.anchors')
             for i,scope in enumerate(scopes):
                 sp=p+f'.scopes[{i}]'
                 if type(scope)is dict and set(scope)=={'table','region'}:
                     _index(scope['table'],len(r['tables']),sp);_region(scope['region'],r['tables'][scope['table']]['matrix'],sp+'.region')
-                else:_require(type(scope)is dict and set(scope)in ({'text'},{'visual'}),sp);_location(scope,r,sp)
+                else:_require(type(scope)is dict and set(scope)in ({'text'},{'visual'}),sp);location(scope,sp)
             for i,s in enumerate(cons):
                 sp=p+f'.consumer_sources[{i}]';_shape(s,{'image_position','quote','marker_text','association'},sp);_index(s['image_position']-1 if type(s['image_position'])is int else None,len(c['context_assets'])+1,sp+'.image_position');_require(s['image_position']>1,sp,'content_source')
                 for key in ('quote','marker_text','association'):_text(s[key],sp+'.'+key)
                 _require(s['marker_text']in s['quote'],sp,'content_anchor');foreign+=1;total_chars+=len(s['quote'])
         seen_cells=set()
         for ci,x in enumerate(r['continuations']):
-            p=f'$.continuations[{ci}]';_shape(x,{'cell','before','after'},p);_shape(x['cell'],{'table','row','column'},p+'.cell');_location(x['cell'],r,p+'.cell')
+            p=f'$.continuations[{ci}]';_shape(x,{'cell','before','after'},p);_shape(x['cell'],{'table','row','column'},p+'.cell');location(x['cell'],p+'.cell')
             identity=legacy._canonical(x['cell']);_require(identity not in seen_cells,p,'content_continuation');seen_cells.add(identity)
             before=_items(x['before'],p+'.before');after=_items(x['after'],p+'.after');_require(before or after,p,'content_continuation')
             for side,parts in (('before',before),('after',after)):
@@ -464,18 +563,21 @@ def _content(r,c):
         for vi,v in enumerate(r['visuals']):
             p=f'$.visuals[{vi}]';_shape(v,{'kind','description','precision','literals','relations'},p)
             _require(v['kind']in {'axis','tick','legend','series','relation','form','unit','footnote','caption','heading','other'},p+'.kind');_text(v['description'],p+'.description');_require(v['precision']in ('qualitative','approximate'),p+'.precision')
-            for j,loc in enumerate(_items(v['literals'],p+'.literals')):_location(loc,r,p+f'.literals[{j}]',True)
+            for j,loc in enumerate(_items(v['literals'],p+'.literals')):location(loc,p+f'.literals[{j}]',True)
             relations=_items(v['relations'],p+'.relations');objects+=1+len(relations)
             for ri,rel in enumerate(relations):
                 rp=p+f'.relations[{ri}]';_shape(rel,{'kind','to'},rp);_require(type(rel['kind'])is str and rel['kind']in {'axis','unit','note','endpoint','field','caption','geometry','sequence'},rp+'.kind')
-                for j,loc in enumerate(_items(rel['to'],rp+'.to',64,2 if rel['kind']in ('endpoint','geometry')else 1)):_location(loc,r,rp+f'.to[{j}]')
+                for j,loc in enumerate(_items(rel['to'],rp+'.to',64,2 if rel['kind']in ('endpoint','geometry')else 1)):location(loc,rp+f'.to[{j}]')
             if v['kind']=='series':
                 _require(any(rel['kind']=='axis'and any(set(loc)=={'visual'}and r['visuals'][loc['visual']]['kind']=='axis'for loc in rel['to'])for rel in relations),p,'content_series','Series requires explicit axis relation')
             if v['kind']in ('unit','footnote','caption'):_require(bool(relations),p,'content_association','Typed material has no consumers')
-        wanted=[{'text':i}for i in range(len(r['text']))]+[{'table':i}for i in range(len(r['tables']))]+[{'note':i}for i,n in enumerate(r['notes'])if n['image_position']==1]
+        note_locations=([{'note':i,'fragment':j}for i,n in enumerate(r['notes'])for j,f in enumerate(n['body_fragments'])if f['image_position']==1]
+            if fragment_notes else[{'note':i}for i,n in enumerate(r['notes'])if n['image_position']==1])
+        wanted=[{'text':i}for i in range(len(r['text']))]+[{'table':i}for i in range(len(r['tables']))]+note_locations
         actual=[]
         for i,loc in enumerate(r['reading_order']):
-            _require(type(loc)is dict and set(loc)in ({'text'},{'table'},{'note'}),f'$.reading_order[{i}]',detail='Expected a JSON object reading-order location, e.g. {"text":0}, {"table":0} or {"note":0}; never a colon-delimited string');_location(loc,r,f'$.reading_order[{i}]');actual.append(legacy._canonical(loc))
+            detail=('Expected a JSON object reading-order location for local text, table or note fragment; never a colon-delimited string'if fragment_notes else'Expected a JSON object reading-order location, e.g. {"text":0}, {"table":0} or {"note":0}; never a colon-delimited string')
+            _require(type(loc)is dict and set(loc)in ({'text'},{'table'},{'note','fragment'}if fragment_notes else{'note'}),f'$.reading_order[{i}]',detail=detail);location(loc,f'$.reading_order[{i}]');actual.append(legacy._canonical(loc))
         _require(sorted(actual)==sorted(map(legacy._canonical,wanted)),'$.reading_order','content_reading_order','Every local printed text/table/note exactly once, no context credit')
         _require(total_chars<=64000 and objects<=512 and len(r['notes'])+foreign<=128,'$','content_limit')
         _require(wanted or r['visuals'],'$','content_empty')
@@ -544,10 +646,10 @@ def _mask(value,expected,path):
         _shape(value,set(expected),path)
         for key in expected:_mask(value[key],expected[key],path+'.'+key)
 
-def _review_shape(r,recognition):
+def _review_shape(r,recognition,*,fragment_notes=False):
     v=recognition['result'];expected={'complete':True,'context_resolved':True,'checked_text':[True for _ in v['text']],
        'checked_tables':[{'cells':[[True for _ in row]for row in t['matrix']],'spans':[True for _ in t['spans']],'headers':[True for _ in t['headers']],'units':[True for _ in t['units']]}for t in v['tables']],
-       'checked_notes':[True for _ in v['notes']], 'checked_continuations':[{'before':[True for _ in x['before']],'after':[True for _ in x['after']]}for x in v['continuations']],
+       'checked_notes':([{'object':True,'body_fragments':[True for _ in n['body_fragments']]}for n in v['notes']]if fragment_notes else[True for _ in v['notes']]), 'checked_continuations':[{'before':[True for _ in x['before']],'after':[True for _ in x['after']]}for x in v['continuations']],
        'checked_visuals':[{'object':True,'relations':[True for _ in x['relations']]}for x in v['visuals']],
        'checked_reading_order':[True for _ in v['reading_order']],'checks':{k:True for k in REVIEW_CHECKS}}
     _shape(r,set(expected)|{'errors'},'$')
@@ -556,7 +658,7 @@ def _review_shape(r,recognition):
     for i,e in enumerate(errors):
         _shape(e,{'at','issue'},f'$.errors[{i}]');_text(e['issue'],f'$.errors[{i}].issue')
         if e['at']is not None:
-            vv=deepcopy(v);vv['_covered']=[set()for _ in vv['tables']];_location(e['at'],vv,f'$.errors[{i}].at')
+            vv=deepcopy(v);vv['_covered']=[set()for _ in vv['tables']];_location(e['at'],vv,f'$.errors[{i}].at',fragment_notes=fragment_notes)
     return expected
 
 def validate_review(raw,request,recognition,model_provenance):
@@ -565,7 +667,7 @@ def validate_review(raw,request,recognition,model_provenance):
     # Current recognition receipt must itself be intact, not model-echo authority.
     if recognition.get('receipt_sha256')!=legacy._digest({k:v for k,v in recognition.items()if k!='receipt_sha256'}):legacy._fail('receipt')
     result=_parse_content(raw,ReviewMalformed)
-    try:expected=_review_shape(result,recognition)
+    try:expected=_review_shape(result,recognition,fragment_notes=c['version']==SOL_REQUEST_VERSION)
     except _ContentDefect as e:raise ReviewMalformed(str(e).removeprefix('invalid_regulation_graphics_'),e.issues[0]['path'],e.issues[0]['issue'])from None
     if result['errors']or any(result[k]!=v for k,v in expected.items()):
         error=ReviewRejected('review_rejected','$', 'Independent original review rejected current recognition')

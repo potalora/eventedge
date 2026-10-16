@@ -17,7 +17,7 @@ def assets(count=4):
 
 
 def response(request,*,external=True):
-    return {'status':'complete','context_closure':'resolved','text':['Example'],
+    value={'status':'complete','context_closure':'resolved','text':['Example'],
         'tables':[{'matrix':[['Label','Count'],['Itemᵃ','1']], 'spans':[],
           'headers':[{'at':{'table':0,'row':0,'column':1},'source':None,'axis':'column',
              'regions':[{'from':{'row':1,'column':1},'through':{'row':'last','column':1}}],'parents':[]}],
@@ -28,6 +28,13 @@ def response(request,*,external=True):
              'consumer_sources':[]}],
         'continuations':[],'visuals':[],
         'reading_order':[{'text':0},{'table':0}]+([]if external else[{'note':0}]),'unresolved':[]}
+    if 'marker_image_position' in request.system:
+        for note in value['notes']:
+            note['marker_image_position']=note.pop('image_position')
+            note['body_fragments']=[{'image_position':note['marker_image_position'],'body':note.pop('body')}]
+        for loc in value['reading_order']:
+            if 'note'in loc:loc['fragment']=0
+    return value
 
 
 def review_response(request,recognition):
@@ -36,7 +43,7 @@ def review_response(request,recognition):
         'checked_tables':[{'cells':[[True for _ in row]for row in t['matrix']],
            'spans':[True for _ in t['spans']],'headers':[True for _ in t['headers']],
            'units':[True for _ in t['units']]}for t in r['tables']],
-        'checked_notes':[True for _ in r['notes']],
+        'checked_notes':[{'object':True,'body_fragments':[True for _ in n['body_fragments']]}if'body_fragments'in n else True for n in r['notes']],
         'checked_continuations':[{'before':[True for _ in x['before']],'after':[True for _ in x['after']]}for x in r['continuations']],
         'checked_visuals':[{'object':True,'relations':[True for _ in x['relations']]}for x in r['visuals']],
         'checked_reading_order':[True for _ in r['reading_order']],

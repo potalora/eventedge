@@ -60,3 +60,7 @@ code review found no blocking issue. Root also replayed actual retained V11
 material with V13 and retained failed V12 with sealed14da under network/process/
 write denial, preserving all checked source/result bytes. These are local and
 historical proofs; fresh V13 native source acceptance and exact CI remain pending.
+
+## Native result and successor
+
+The five-target V13 challenge accepted table001, localnotes002 and custody072 against originals. Interval025 retained all substantive content/geometry but omitted a visible separator after its instruction number; strict literal acceptance was withheld despite a positive native review. Custody088 returned no content before its 240-second deadline. Original inspection separately confirmed split-note bodies that cannot retain exact source attribution in the single-body schema. These outcomes remain retained unchanged. The generic representation repair is in `2026-10-16-sol-note-fragments.md`; it does not claim to fix an established timeout cause. No full baseline or perturbation campaign is accepted.

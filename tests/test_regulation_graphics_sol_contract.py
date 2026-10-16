@@ -53,10 +53,10 @@ def test_sol_request_receipt_and_replay_are_bound_to_finite_route():
     assert g.legacy._digest(g._logical_request(oldq)) == 'a90c3344c62eb258eaf8ae9c82455cf8ba8b10a149b39ea06d4084e7a336f5e8'
     assert g.model_policy(old) is None and g.model_policy(plan) == POLICY
     q = g.prepare_recognition(rows, plan, 0)
-    assert plan['version'] == 'regulation-graphics-execution-plan-v7'
-    assert json.loads(q.context_json)['version'] == 'regulation-graphics-request-v13'
+    assert plan['version'] == 'regulation-graphics-execution-plan-v8'
+    assert json.loads(q.context_json)['version'] == 'regulation-graphics-request-v14'
     assert json.loads(q.context_json)['model_policy'] == POLICY
-    assert q.system.startswith(oldq.system) and q.system != oldq.system
+    assert 'body_fragments' in q.system and q.system != oldq.system
     assert (q.user, q.document_inputs) == (oldq.user, oldq.document_inputs)
     rec = g.validate_recognition(json.dumps(response(q, external=False)), q, sol_provenance(q))
     assert rec['model_request']['model'] == 'gpt-6.1-sol'
