@@ -28,7 +28,14 @@ _ATTACHMENT_KEYS = _FILE_KEYS | {'source_sha256', 'pages', 'render_identity'}
 
 
 def configured(ar_config):
-    if ar_config.get('bounded_document_decision_policy') not in (None, DECISION_POLICY):
+    from ..document_review_clock import POLICY as NEXT_OPEN_POLICY
+    if ar_config.get('bounded_document_decision_policy') == NEXT_OPEN_POLICY:
+        # Reject unsupported clock/checkpoint combinations before source/model IO.
+        from .decision_clock import policy, PROSPECTIVE
+        from .research_resilience import configured as research_configured
+        if policy({'autoresearch':ar_config}) != PROSPECTIVE or not research_configured(ar_config):
+            raise ValueError('invalid_document_decision_clock_policy')
+    if ar_config.get('bounded_document_decision_policy') not in (None, DECISION_POLICY, NEXT_OPEN_POLICY):
         raise ValueError('invalid_bounded_document_decision_policy')
     value = ar_config.get('bounded_document_research_policy')
     if value is None:
@@ -109,6 +116,14 @@ def load_retained_documents(ar_config, trading_date):
              'accepted_count': 0, 'complete': False, 'residual_failures': residuals}
     if ar_config.get('bounded_document_decision_policy') is not None:
         scope['decision_policy'] = ar_config['bounded_document_decision_policy']
+        from ..document_review_clock import POLICY as NEXT_OPEN_POLICY
+        if scope['decision_policy'] == NEXT_OPEN_POLICY:
+            from ..bounded_document_research import REQUEST_VERSION
+            scope['review_clock_config'] = {key:ar_config[key] for key in
+                ('bounded_document_decision_policy','decision_clock_policy','research_resilience_policy')}
+            scope['review_clock_config'].update(bounded_document_recognition_request_version=
+                ar_config.get('bounded_document_recognition_request_version',REQUEST_VERSION),
+                llm_temperature=ar_config.get('llm_temperature',0.0))
     failure = {'error': 'bounded_document_intake_invalid', 'reason_code': 'invalid_response',
                'bounded_documents': [], 'bounded_document_scope': scope, 'coverage': {'complete': False}}
     try:

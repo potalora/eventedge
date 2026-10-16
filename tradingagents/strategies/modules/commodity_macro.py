@@ -191,7 +191,14 @@ class CommodityMacroStrategy:
                         "needs_llm_analysis": True,
                         "deterministic_evidence_complete": True,
                         "cot_evidence": cot,
-                        "macro_evidence": {k: {str(when): float(value) for when, value in v.items()} if hasattr(v, "items") else v for k, v in fred_data.items() if k in {"FEDFUNDS", "CPIAUCSL", "VIXCLS"}},
+                        # FRED retains missing observations (including market
+                        # holidays). Preserve their dates and missingness in
+                        # signal evidence without inventing numeric values.
+                        "macro_evidence": {
+                            key: {when: None if pd.isna(value) else float(value)
+                                  for when, value in values.items()}
+                            for key, values in fred_data.items()
+                        },
                         **({"available_at": cot["available_at"]} if cot.get("available_at") else {}),
                         "analysis_type": "commodity_macro",
                         "report_id": report_id,

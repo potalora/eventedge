@@ -389,6 +389,9 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
                     if context['cohort_id']!=name or context['epoch_id']!=epoch or context['session']!=date.fromisoformat(session):
                         raise ValueError('staging context identity conflict')
                     result['staging_volatility']=_validated_volatility_evidence(context['context']['annualized_volatility'])
+                    clock = context['context'].get('decision_clock')
+                    if isinstance(clock,dict) and 'document_review_binding' in clock:
+                        result['document_review_clock'] = clock
                 except (LedgerConflictError,ValueError,TypeError,KeyError,AttributeError):
                     diagnose('staging_volatility_context_invalid',name)
             fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
@@ -658,6 +661,16 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                     or document_scope.get('population') != 'configured_retained_document_registry'):
                 raise ValueError('bounded document source scope invalid')
             document_config = {'bounded_document_research_policy': DOCUMENT_POLICY}
+            from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY, review_clock
+            if document_scope.get('decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
+                declared = document_scope.get('review_clock_config')
+                if type(declared) is not dict or set(declared) != {'bounded_document_decision_policy',
+                        'decision_clock_policy','research_resilience_policy','bounded_document_recognition_request_version','llm_temperature'}:
+                    raise ValueError('invalid_document_decision_clock_policy')
+                document_config.update(declared)
+                review_clock({'autoresearch':document_config},session)
+                if retained_sources is not None:
+                    retained_sources['_document_clock_source'] = envelope
             if retained_sources is not None:
                 retained_sources['_bounded_document_config'] = document_config
             result['bounded_document_scope'] = document_scope
@@ -832,6 +845,18 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['cohorts'] = {name:_book(state,name,generation,session,epoch,diagnose) for name in EXPECTED_COHORTS}
         report['accounting_valid'] = all(row['accounting_valid'] for row in report['cohorts'].values())
         report['staging_complete'] = all(row['staging_complete'] for row in report['cohorts'].values())
+        if '_document_clock_source' in retained_sources:
+            try:
+                from ..document_review_clock import validate_report_clock
+                from .generation_config import read_generation_config
+                _, frozen_profile, _ = read_generation_config(metadata['config_file'],metadata['config_sha256'])
+                report['document_review_clock'] = validate_report_clock(state,generation,session,commit,epoch,
+                    retained_sources['_document_clock_source'],frozen_profile,report['cohorts'])
+            except (OSError,ValueError,TypeError,KeyError,AttributeError):
+                report['document_review_clock'] = {'valid':False}
+                diagnose('document_review_clock_invalid')
+        elif any('document_review_clock' in book for book in report['cohorts'].values()):
+            diagnose('document_review_clock_invalid')
         report['candidate_input_issues'] = _candidate_issues(state,epoch,session,diagnose)
         for row in report['cohorts'].values():
             # The pipeline shares its quarantine set across all staging calls.
@@ -875,11 +900,30 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 strategy_sources = {strategy.name: strategy.data_sources for strategy in report_strategies
                     if 'regulations' in strategy.data_sources and strategy.name not in disabled
                     and not getattr(strategy, 'retirement_reason', None)}
+                assessment_config = {}
+                if metadata.get('config_file') is not None:
+                    from .generation_config import read_generation_config
+                    _, profile, _ = read_generation_config(metadata['config_file'], metadata['config_sha256'])
+                    profile_ar = profile.get('autoresearch', {})
+                    if (profile_ar.get('regulation_assessment_policy') is not None
+                            or 'graphics_execution_policy' in profile_ar
+                            or 'regulation_prompt_budget_policy' in profile_ar):
+                        from ..data_sources.regulation_assessment import configured as assessment_configured
+                        assessment_configured(profile_ar)
+                        if (profile_ar.get('regulation_evidence_policy') != expected_regulation['policy']
+                                or profile_ar.get('regulation_retrieval_policy') != expected_regulation.get('retrieval_policy')):
+                            raise ValueError('frozen regulation policy differs from source')
+                    if 'graphics_execution_policy' in profile_ar:
+                        from ..data_sources.regulation_graphics_grid import configured as graphics_configured
+                        graphics_configured(profile)
+                    for key in ('regulation_assessment_policy', 'graphics_execution_policy', 'regulation_prompt_budget_policy'):
+                        if profile_ar.get(key) is not None:
+                            assessment_config[key] = profile_ar[key]
                 report['sources']['regulation_analysis_coverage'] = validate_regulation_health(
                     retained_sources, health, {row['policy_id'] for row in health}, strategy_sources,
                     {'regulation_evidence_policy': expected_regulation['policy'],
                      **({'regulation_retrieval_policy': expected_regulation['retrieval_policy']}
-                        if 'retrieval_policy' in expected_regulation else {})})
+                        if 'retrieval_policy' in expected_regulation else {}), **assessment_config})
             elif any('regulation_source_coverage' in row['evidence'] for row in health):
                 raise ValueError('unbound regulation health')
         except (ValueError, TypeError, KeyError):
@@ -985,6 +1029,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         elif report['evidence_complete'] and report['accounting_valid'] and latest:
             report['outcome']=latest['outcome']
         report['performance_claims_withheld'] = not (report['evidence_complete'] and report['accounting_valid'] and report['outcome'] in {'clean','degraded'})
+        if (report['sources'].get('regulation_analysis_coverage') or {}).get('decision_evidence_complete') is False:
+            report['performance_claims_withheld'] = True
         diagnostics.sort(key=lambda row:(row['code'],row.get('scope','')))
         return report
 
@@ -1065,6 +1111,10 @@ def render_operational_report(report: dict) -> str:
         if analysis is not None:
             lines.append(f"Regulatory analysis complete across configured horizons: {str(analysis['analysis_complete']).lower()}. "
                 'Completed no-directional-thesis assessments carry no order authority; missing content remains a failure.')
+            if any('abstained_documents' in row for row in analysis['horizons']):
+                lines.append('Recorded issuer/exposure or external-support abstentions: ' + str(sum(
+                    row.get('abstained_documents', 0) for row in analysis['horizons'])) +
+                    ' document-horizon assessments; decision evidence and listed supporting gaps remain unresolved, and order authority is none.')
     if report['performance_claims_withheld']:
         lines.extend(['','Performance claims withheld because completed, consistent evidence is unavailable.'])
     if report['candidate_input_issues']:

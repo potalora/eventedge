@@ -111,6 +111,10 @@ def _replay_completed(assets, bundles):
 
 def recognize_graphics(analyzer, assets, attempt):
     """Bounded Luna-high recognition and fresh image-backed review per batch."""
+    from tradingagents.strategies.data_sources.regulation_graphics_grid import configured
+    if configured(analyzer.config) is not None:
+        from .regulation_graphics_grid_runtime import recognize_graphics as recognize_grid
+        return recognize_grid(analyzer,assets,attempt)
     ar=analyzer.config.get('autoresearch',{});execution=analyzer.config.get('execution',{})
     if (ar.get('llm_billing_mode')!='chatgpt_plan' or analyzer._model_name!='gpt-6-luna'
             or analyzer._effort!='high' or analyzer._thesis_model!='gpt-6.1-sol'
@@ -273,6 +277,15 @@ def replay_graphics_attempt(evidence, attempt):
     try:
         from tradingagents.strategies.data_sources.regulation_graphics_inputs import graphics_assets
         assets=graphics_assets(evidence)
+        if attempt['version']=='regulation-model-attempt-v5':
+            if not assets:
+                if attempt['graphics_plan'] is None and attempt['graphics_batches']==[] and attempt['graphics_failures']==[]:
+                    return []
+                raise ValueError('invalid_regulation_graphics_attempt')
+            from .regulation_graphics_grid_runtime import replay_attempt
+            if attempt['graphics_failures'] and (attempt['model_call_started'] or attempt['model_provenance']):
+                raise ValueError('invalid_regulation_graphics_attempt')
+            return replay_attempt(assets,attempt)
         if not assets or attempt['version']!='regulation-model-attempt-v2':
             raise ValueError('invalid_regulation_graphics_attempt')
         batches=[assets[i:i+MAX_ASSETS]for i in range(0,len(assets),MAX_ASSETS)]

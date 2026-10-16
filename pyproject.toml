@@ -33,6 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 chatgpt-plan = [
+    "tiktoken==0.12.0",
     "Authlib>=1.8.0,<2",
     "joserfc>=1.7.5,<2",
 ]
@@ -59,3 +60,6 @@ markers = [
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*"]
+
+[tool.setuptools.package-data]
+"tradingagents.strategies.data_sources" = ["assets/*.tiktoken", "assets/*.txt", "assets/*.md"]

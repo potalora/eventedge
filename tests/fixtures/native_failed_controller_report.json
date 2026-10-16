@@ -1,0 +1,176 @@
+{
+  "fixture_kind": "minimized_retained_native_report",
+  "original_sha256": "fa6d5e982fe2739457c342ddf30500c7e4eac618b8268dc8efa0e04969b1e078",
+  "report": {
+    "outcome": "failed",
+    "accounting_valid": true,
+    "staging_complete": false,
+    "staging_valid": false,
+    "evidence_complete": true,
+    "sources": {
+      "configuration": "3e0ae89d4eb806b41ab086d66389fe41000a9195d29c70c76a42d0630d6491c5",
+      "unresolved": [
+        {
+          "source": "edgar",
+          "reason_code": "provider_error"
+        }
+      ]
+    },
+    "source_health_failures": [
+      {
+        "strategy": "filing_analysis",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "insider_activity",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "quantum_readiness",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "regulatory_pipeline",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "filing_analysis",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "insider_activity",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "quantum_readiness",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "regulatory_pipeline",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "bounded_document_research",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "filing_analysis",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "insider_activity",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "quantum_readiness",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "regulatory_pipeline",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "bounded_document_research",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "filing_analysis",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "insider_activity",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "quantum_readiness",
+        "status": "data_failure"
+      },
+      {
+        "strategy": "regulatory_pipeline",
+        "status": "data_failure"
+      }
+    ],
+    "cohorts": {
+      "horizon_1y_size_100k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_1y_size_10k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_1y_size_50k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_1y_size_5k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_30d_size_100k": {
+        "accounting_valid": true,
+        "staging_complete": true,
+        "staging_valid": true
+      },
+      "horizon_30d_size_10k": {
+        "accounting_valid": true,
+        "staging_complete": true,
+        "staging_valid": true
+      },
+      "horizon_30d_size_50k": {
+        "accounting_valid": true,
+        "staging_complete": true,
+        "staging_valid": true
+      },
+      "horizon_30d_size_5k": {
+        "accounting_valid": true,
+        "staging_complete": true,
+        "staging_valid": true
+      },
+      "horizon_3m_size_100k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_3m_size_10k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_3m_size_50k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_3m_size_5k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_6m_size_100k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_6m_size_10k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_6m_size_50k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      },
+      "horizon_6m_size_5k": {
+        "accounting_valid": true,
+        "staging_complete": false,
+        "staging_valid": false
+      }
+    }
+  }
+}

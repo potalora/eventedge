@@ -30,6 +30,8 @@ class _Memo:
     # Fully reviewed image receipts have an independent material contract.
     # Final thesis failure does not invalidate those completed image checks.
     graphics_entries: dict[tuple, list[dict]] = field(default_factory=dict)
+    # Compact successor alone uses single-flight ownership of complete partitions.
+    graphics_inflight: dict = field(default_factory=dict)
     # Exact private settings comparisons assign opaque, invocation-local IDs.
     # Credentials/headers/endpoints never enter serialized keys or provenance.
     client_settings: list[tuple] = field(default_factory=list)

@@ -202,3 +202,47 @@ Any later authorized rollout uses a new generation and verifies scheduler
 freshness, bounded completion, native auth/model success, accounting/prices,
 staging, optional-source recovery, replay and resource headroom. Report meaningful
 failures/recovery; do not create automatic retry storms or relax guards.
+
+
+## Prospective review clock opt-in
+
+`verified_scoped_claims_next_open_v2` is a separately selected document-decision
+policy for a new frozen generation. It requires `prospective_next_open_v1`,
+`dependency_isolation_v1`, and a hash-pinned generation profile. The registry's
+`verified_scoped_claims_v1` declaration still binds its original source, purpose,
+claims and finite expiry. Existing V1 requests, receipts and midnight rejection
+keep their original meaning; V2 does not renew that declaration or reinterpret
+an old failed review.
+
+V2 binds the blind request and provisional review to the exact reference and
+eligible XNYS sessions and next-open boundary. Actual verification completion
+is still timestamped after the response. Provisional evidence can inform Sol,
+but grants no paper-entry authority. Every configured source document must have
+a validated decision or an explicitly failed journal-only record in each frozen
+horizon. Missing documents cannot disappear silently.
+
+The existing accepted decision-input payload freezes one final cutoff and a
+binding to all horizon checkpoints. A validated review must precede that actual
+cutoff, which must precede the next XNYS open and remain within the original
+scope expiry. Direct staging reads the already accepted clock and exact profile
+before committee effects; completed/recovery replay rebuilds the same binding.
+A later session cannot reuse a prior document's final authority. Reporting
+checks the original frozen registry, accepted source/screening/decision bytes
+and every staged ledger clock. Failed model evidence remains failed and counted
+separately from validated document decisions.
+
+The offline regressions use constructed model responses and real intake,
+validation, sixteen ledgers, staging and replay. They exercise reviews after
+New York midnight, missing or caller-minted final bindings, omitted candidates,
+scope expiry, source/profile/response/model tampering and unchanged V1 rejection.
+Exact-profile regression also corrects committee lookup keys: ledger decisions
+use the configured paper policy ID, while `:health:<horizon>` remains a health
+identity. These checks are preparation evidence, not native acceptance or a
+change to an active generation.
+
+The final prepared clock/V4/profile/expiry selection passed **49 tests** in
+18.29 seconds, including sixteen-book midnight staging and zero-call replay,
+caller-minted clock rejection, frozen-profile drift, and independent source vs
+decision-envelope commit/configuration mismatches before committee. One existing
+`websockets.legacy` deprecation warning remains. This is local constructed
+acceptance; a future frozen generation still requires its own native proof.

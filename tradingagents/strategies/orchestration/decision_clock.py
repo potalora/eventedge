@@ -54,13 +54,15 @@ def mutable_vintage(config: dict, session: date, *, now: datetime | None = None)
 
 def create_context(config: dict, session: date, *, acquired_at: datetime,
                    cutoff: datetime, source_digest: str, enrichment_digest: str,
-                   eligibility_digest: str = hashlib.sha256(b'null').hexdigest()) -> dict:
+                   eligibility_digest: str = hashlib.sha256(b'null').hexdigest(), document_review_binding=None) -> dict:
     context = {'policy': policy(config), 'reference_session': session.isoformat(),
                'acquisition_started_at': _aware(acquired_at).isoformat(),
                'cutoff': _aware(cutoff).isoformat(),
                'eligible_session': next_session(session).isoformat(),
                'source_digest': source_digest, 'enrichment_digest': enrichment_digest,
                'eligibility_digest': eligibility_digest}
+    if document_review_binding is not None:
+        context['document_review_binding'] = document_review_binding
     return validate_context(config, session, context)
 
 
@@ -69,6 +71,10 @@ def validate_context(config: dict, session: date, context: object) -> dict:
         raise ValueError('prospective decision context required')
     required = {'policy', 'reference_session', 'acquisition_started_at', 'cutoff',
                 'eligible_session', 'source_digest', 'enrichment_digest', 'eligibility_digest'}
+    from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY
+    document_next_open = config.get('autoresearch', {}).get('bounded_document_decision_policy') == DOCUMENT_NEXT_OPEN_POLICY
+    if document_next_open:
+        required.add('document_review_binding')
     if set(context) != required or context['policy'] != PROSPECTIVE:
         raise ValueError('invalid decision clock schema or policy')
     if context['reference_session'] != session.isoformat():
@@ -83,6 +89,9 @@ def validate_context(config: dict, session: date, context: object) -> dict:
     for field in ('source_digest', 'enrichment_digest', 'eligibility_digest'):
         if not isinstance(context[field], str) or not re.fullmatch(r'[0-9a-f]{64}', context[field]):
             raise ValueError('invalid decision evidence digest')
+    if document_next_open:
+        from ..document_review_clock import validate_binding_context
+        validate_binding_context(config, session, context)
     return dict(context)
 
 
@@ -303,7 +312,24 @@ def _validate_research_inputs(owner, session, store, accepted, source_data, sour
             or context['enrichment_digest'] != expected['enrichment_digest']
             or _aware(context['acquisition_started_at']) != acquired_at):
         raise ValueError('research decision clock binding mismatch')
+    from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY
+    if owner._base_config.get('autoresearch', {}).get('bounded_document_decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
+        expected_document_binding = _document_final_binding(owner, session, source_data, source_digest, _aware(context['cutoff']))
+        if context['document_review_binding'] != expected_document_binding:
+            raise ValueError('invalid_document_decision_final_binding')
     return enrichment, context
+
+
+def _document_final_binding(owner, session, source_data, source_digest, cutoff):
+    from ..document_review_clock import build_final_binding
+    from .research_screening import load_screening
+    horizons = tuple(sorted({cohort['config'].horizon for cohort in owner.cohorts}))
+    accepted = load_screening(owner, session, source_digest, horizons)
+    if accepted is None:
+        raise ValueError('invalid_document_decision_screening')
+    screened, _, receipt = accepted
+    return build_final_binding(owner._base_config, session, source_data, screened, source_digest, cutoff,
+        receipt['screening_sha256'])
 
 
 def _research_acquisition(config, session, source_data):
@@ -347,9 +373,15 @@ def _prepare_research_inputs(owner, session, source_data, source_digest, fetch_e
         enrichment_digest = _decision_digest(store, enrichment)
         context = None
         if policy(owner._base_config) == PROSPECTIVE:
+            cutoff = _aware((now or utc_now)())
+            document_binding = None
+            from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY
+            if owner._base_config.get('autoresearch', {}).get('bounded_document_decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
+                document_binding = _document_final_binding(owner, session, source_data, source_digest, cutoff)
             context = create_context(owner._base_config, session, acquired_at=acquired_at,
-                cutoff=_aware((now or utc_now)()), source_digest=source_digest,
-                enrichment_digest=enrichment_digest, eligibility_digest=eligibility_digest)
+                cutoff=cutoff, source_digest=source_digest,
+                enrichment_digest=enrichment_digest, eligibility_digest=eligibility_digest,
+                document_review_binding=document_binding)
         binding = {'version': 'research-decision-inputs-v1', 'policy': POLICY,
             'clock_policy': policy(owner._base_config), 'epoch_id': owner._epoch_id,
             'source_digest': source_digest, 'eligibility_digest': eligibility_digest,

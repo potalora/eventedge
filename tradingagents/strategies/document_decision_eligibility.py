@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 POLICY = 'verified_scoped_claims_v1'
 REVIEW_VERSION = 'independent_claim_review_v1'
 AUTOMATIC_REVIEW_VERSION = 'automatic_review_v1'
+NEXT_OPEN_REVIEW_VERSION = 'automatic_review_next_open_v2'
 VERSION = 'document-decision-eligibility-v1'
 _SCOPE = {'policy', 'ticker', 'issuer', 'document_id', 'original_sha256', 'as_of',
           'effective_from', 'effective_until', 'required_pages', 'required_claim_ids',
@@ -169,7 +170,7 @@ def _claim(value):
         _invalid('unit')
 
 
-def _assess(recognition, scope, ticker, session_as_of):
+def _assess(recognition, scope, ticker, session_as_of, *, review_clock=None):
     # Detach accepted data and reject nonfinite/non-JSON values before hashing.
     scope_json, recognition_json = _canonical(scope), _canonical(recognition)
     automatic_scope = type(scope) is dict and type(scope.get('independent_review')) is dict and scope['independent_review'].get('version') == AUTOMATIC_REVIEW_VERSION
@@ -221,16 +222,29 @@ def _assess(recognition, scope, ticker, session_as_of):
     _strings(recognition['residual_failures'], 33, 256)
     _sha(recognition['response_sha256'])
     review = scope['independent_review']
-    automatic = type(review) is dict and review.get('version') == AUTOMATIC_REVIEW_VERSION
-    _shape(review, _REVIEW | ({'automatic_verification'} if automatic else set())); _sealed(review)
-    if review['version'] not in (REVIEW_VERSION, AUTOMATIC_REVIEW_VERSION):
+    automatic = type(review) is dict and review.get('version') in (AUTOMATIC_REVIEW_VERSION, NEXT_OPEN_REVIEW_VERSION)
+    extra = {'review_clock'} if review_clock is not None else set()
+    _shape(review, _REVIEW | ({'automatic_verification'} if automatic else set()) | extra); _sealed(review)
+    if review_clock is not None:
+        from .document_review_clock import validate_review_clock
+        review_clock = validate_review_clock(review_clock, session_as_of)
+        if review['version'] != NEXT_OPEN_REVIEW_VERSION or review['review_clock'] != review_clock:
+            _invalid('review_clock')
+    elif review['version'] not in (REVIEW_VERSION, AUTOMATIC_REVIEW_VERSION):
         _invalid('review')
     _shape(review['reviewer'], {'kind', 'identity'})
     if review['reviewer']['kind'] not in (('automatic_visual',) if automatic else ('human', 'independent_visual')):
         _invalid('review')
     _text(review['reviewer']['identity'], 256)
-    if not as_of <= _timestamp(review['reviewed_at']) <= session:
-        _invalid('review_time')
+    reviewed_at = _timestamp(review['reviewed_at'])
+    if review_clock is None:
+        if not as_of <= reviewed_at <= session:
+            _invalid('review_time')
+    else:
+        if not as_of <= reviewed_at < _timestamp(review_clock['next_open']):
+            _invalid('review_time')
+        if not start <= reviewed_at <= until:
+            _invalid('window')
     for key in ('ticker', 'issuer', 'document_id', 'original_sha256', 'as_of'):
         if review[key] != scope[key]:
             _invalid('review_identity')
@@ -283,7 +297,7 @@ def _assess(recognition, scope, ticker, session_as_of):
     if set(observed) != required or set(independently_reviewed) != required or {c['page'] for c in claims} != set(scope['required_pages']):
         _invalid('coverage')
     if automatic:
-        _validate_automatic_review(recognition, scope, review)
+        _validate_automatic_review(recognition, scope, review, review_clock=review_clock)
     for claim_id in scope['required_claim_ids']:
         claim, independent = observed[claim_id], independently_reviewed[claim_id]
         if (any(claim[k] != independent[k] for k in ('id', 'page', 'printed_value', 'citation'))
@@ -302,14 +316,19 @@ def _assess(recognition, scope, ticker, session_as_of):
     if automatic:
         receipt.update(correlated_model_risk=True, guarantees_accuracy=False,
                        automatic_verification_sha256=_digest(review['automatic_verification']))
+    if review_clock is not None:
+        from .document_review_clock import POLICY as NEXT_OPEN_POLICY
+        receipt.update(version='document-decision-eligibility-next-open-v2', policy=NEXT_OPEN_POLICY,
+            review_clock=review_clock, paper_decision_eligible=False,
+            execution_authority='requires_final_decision_clock')
     receipt['receipt_sha256'] = _digest(receipt)
     return receipt
 
 
-def assess_decision_eligibility(recognition, scope, *, ticker, session_as_of):
+def assess_decision_eligibility(recognition, scope, *, ticker, session_as_of, review_clock=None):
     """Return a sealed admissibility receipt; never place orders or grant gates."""
     try:
-        return _assess(recognition, scope, ticker, session_as_of)
+        return _assess(recognition, scope, ticker, session_as_of, review_clock=review_clock)
     except ValueError as error:
         if str(error).startswith('invalid_document_decision_'):
             raise
@@ -438,7 +457,7 @@ def _automatic_scope(scope):
     return json.loads(_canonical(scope))
 
 
-def _blind_prompts(context, scope):
+def _blind_prompts(context, scope, *, review_clock=None):
     from tradingagents.strategies.bounded_document_research import (
         LEGACY_REQUEST_VERSION, REQUEST_VERSION, SCOPED_REQUEST_VERSION, SCOPED_READABILITY_INSTRUCTIONS,
     )
@@ -451,7 +470,10 @@ def _blind_prompts(context, scope):
         system = _BLIND_SYSTEM + SCOPED_READABILITY_INSTRUCTIONS
     else:
         _invalid('request')
-    return system, _canonical({'recognition_contract': context, 'decision_scope': scope})
+    payload = {'recognition_contract': context, 'decision_scope': scope}
+    if review_clock is not None:
+        payload.update(version='blind-document-review-next-open-request-v2', review_clock=review_clock)
+    return system, _canonical(payload)
 
 
 def _request_context(request):
@@ -487,12 +509,15 @@ def _declared_source(context, scope):
         _invalid('coverage')
 
 
-def prepare_automatic_verification(request, scope):
+def prepare_automatic_verification(request, scope, *, review_clock=None):
     """Gold-free blind request; attachments stay on the existing native route."""
     try:
         context, scope = _request_context(request), _automatic_scope(scope)
         _declared_source(context, scope)
-        return _blind_prompts(context, scope)
+        if review_clock is not None:
+            from .document_review_clock import validate_review_clock
+            review_clock = validate_review_clock(review_clock, review_clock.get('reference_session'))
+        return _blind_prompts(context, scope, review_clock=review_clock)
     except ValueError as error:
         if str(error).startswith('invalid_document_decision_'):
             raise
@@ -553,10 +578,10 @@ def _automatic_provenance(provenance, context):
     return json.loads(_canonical(provenance))
 
 
-def _validate_automatic_review(primary, scope, review):
+def _validate_automatic_review(primary, scope, review, *, review_clock=None):
     automatic = review['automatic_verification']
     _shape(automatic, _AUTOMATIC_KEYS)
-    if (automatic['version'] != 'automatic-visual-check-v1'
+    if (automatic['version'] != ('automatic-visual-check-next-open-v2' if review_clock is not None else 'automatic-visual-check-v1')
             or automatic['context_sufficient'] is not True
             or type(automatic['material_context_failures']) is not list or automatic['material_context_failures']
             or automatic['correlated_model_risk'] is not True or automatic['guarantees_accuracy'] is not False
@@ -571,7 +596,7 @@ def _validate_automatic_review(primary, scope, review):
     if type(blind) is not dict or blind.get('receipt_sha256') != automatic['verification_receipt_sha256']:
         _invalid('automatic_review')
     declared = {k: v for k, v in scope.items() if k != 'independent_review'}
-    system, user = _blind_prompts(context, declared)
+    system, user = _blind_prompts(context, declared, review_clock=review_clock)
     if _digest({'system':system, 'user':user}) != automatic['blind_request_sha256']:
         _invalid('automatic_request')
     provenance = _automatic_provenance(automatic['model_provenance'], context)
@@ -589,12 +614,12 @@ def _validate_automatic_review(primary, scope, review):
 
 
 def build_automatic_review(primary, verification_text, request, scope, *, ticker,
-                           session_as_of, verified_at, model_provenance):
+                           session_as_of, verified_at, model_provenance, review_clock=None):
     """Build reviewed claims only after separate blind agreement and context checks."""
     from tradingagents.strategies.bounded_document_research import _strict_json, validate_recognition
     try:
         context, declared = _request_context(request), _automatic_scope(scope)
-        system, user = prepare_automatic_verification(request, declared)
+        system, user = prepare_automatic_verification(request, declared, review_clock=review_clock)
         wrapper = _strict_json(verification_text)
         _shape(wrapper, {'recognition', 'context_sufficient', 'material_context_failures'})
         if (wrapper['context_sufficient'] is not True or type(wrapper['material_context_failures']) is not list
@@ -616,11 +641,16 @@ def build_automatic_review(primary, verification_text, request, scope, *, ticker
                 'verification_recognition':blind, 'model_provenance':provenance, 'model_provenance_sha256':_digest(provenance),
                 'blind_request_sha256':_digest({'system':system, 'user':user}), 'context_sufficient':True,
                 'material_context_failures':[], 'correlated_model_risk':True, 'guarantees_accuracy':False}}
+        if review_clock is not None:
+            from .document_review_clock import validate_review_clock
+            review_clock = validate_review_clock(review_clock, session_as_of)
+            review.update(version=NEXT_OPEN_REVIEW_VERSION, review_clock=review_clock)
+            review['automatic_verification']['version'] = 'automatic-visual-check-next-open-v2'
         review['receipt_sha256'] = _digest(review)
         # Reuse the ordinary scope/identity/window/claim checks; this also rechecks
         # blind evidence instead of treating an automatically generated hash as
         # an attestation. No eligibility leaves the function until all agree.
-        _assess(primary, dict(declared, independent_review=review), ticker, session_as_of)
+        _assess(primary, dict(declared, independent_review=review), ticker, session_as_of, review_clock=review_clock)
         return json.loads(_canonical(review))
     except ValueError as error:
         if str(error).startswith('invalid_document_decision_'):

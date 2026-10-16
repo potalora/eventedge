@@ -131,6 +131,10 @@ class LLMAnalyzer:
 
     def __init__(self, config: dict | None = None) -> None:
         self.config = config or {}
+        from tradingagents.strategies.data_sources.regulation_graphics_grid import configured as graphics_execution_configured
+        graphics_execution_configured(self.config)
+        from tradingagents.strategies.data_sources.regulation_prompt_budget import configured as budget_configured
+        budget_configured(self.config.get('autoresearch', {}))
         self._model_name = self.config.get(
             "autoresearch", {}
         ).get("autoresearch_model", "claude-haiku-4-5-20251001")
@@ -416,6 +420,12 @@ class LLMAnalyzer:
 
         try:
             ar = self.config.get('autoresearch', {})
+            from tradingagents.strategies.document_review_clock import POLICY as NEXT_OPEN_POLICY, review_clock
+            clock_options = {}
+            if ar.get('bounded_document_decision_policy') == NEXT_OPEN_POLICY:
+                clock_options = {'review_clock':review_clock(self.config, session_as_of)}
+                if type(decision_scope) is not dict or 'independent_review' in decision_scope:
+                    raise ValueError('invalid_document_decision_clock_policy')
             if ar.get('bounded_document_decision_policy') is not None:
                 execution = self.config.get('execution', {})
                 if execution.get('mode') != 'paper' or execution.get('execution_enabled') is not False:
@@ -441,10 +451,10 @@ class LLMAnalyzer:
                     POLICY as DECISION_POLICY, assess_decision_eligibility,
                     prepare_automatic_verification, build_automatic_review,
                 )
-                if decision_policy != DECISION_POLICY:
+                if decision_policy not in (DECISION_POLICY, NEXT_OPEN_POLICY):
                     raise ValueError('invalid_document_decision_policy')
                 if type(decision_scope) is dict and 'independent_review' not in decision_scope:
-                    system,user = prepare_automatic_verification(request,decision_scope)
+                    system,user = prepare_automatic_verification(request,decision_scope,**clock_options)
                     checked,check_stage = call(system,user,role='bounded',document_inputs=request.document_inputs,
                         stage_name='verification_attempt')
                     if verification_clock is not None:
@@ -454,12 +464,12 @@ class LLMAnalyzer:
                         verification_as_of = datetime.now(timezone.utc).isoformat()
                     automatic_review = build_automatic_review(recognition,checked,request,decision_scope,
                         ticker=ticker,session_as_of=session_as_of,verified_at=verification_as_of,
-                        model_provenance=check_stage['model_provenance'])
+                        model_provenance=check_stage['model_provenance'],**clock_options)
                     check_stage['validation_status'] = 'validated'
                     attempt['automatic_review'] = deepcopy(automatic_review)
                     decision_scope = {**decision_scope,'independent_review':automatic_review}
                 decision_eligibility = assess_decision_eligibility(recognition, decision_scope,
-                    ticker=ticker, session_as_of=session_as_of)
+                    ticker=ticker, session_as_of=session_as_of, **clock_options)
                 attempt['decision_eligibility'] = deepcopy(decision_eligibility)
             system, user = prepare_thesis(recognition, regime_suffix=self._regime_suffix(regime_context),
                 decision_eligibility=decision_eligibility)
@@ -752,7 +762,7 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
     # ------------------------------------------------------------------
 
     def analyze_regulation_evidence(
-        self, evidence: dict, *, target_bindings=(), regime_context: dict | None = None,
+        self, evidence: dict, *, target_bindings=(), regime_context: dict | None = None, assessment_policy=None,
     ) -> dict[str, Any]:
         """Assess all retained text and preserve the original attempt on failure."""
         import hashlib
@@ -772,12 +782,20 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
             'response_over_limit': False, 'validation_status': 'not_started', 'failure_reason': None}
         self.last_regulation_attempt = attempt
         try:
+            from tradingagents.strategies.data_sources.regulation_graphics_grid import configured as graphics_execution_configured
+            graphics_policy = graphics_execution_configured(self.config)
+            from tradingagents.strategies.data_sources.regulation_prompt_budget import configured as budget_configured, require_dispatchable
+            budget_policy = budget_configured(self.config.get('autoresearch', {}))
+            if graphics_policy is not None:
+                attempt.update(version='regulation-model-attempt-v5', graphics_plan=None,
+                    graphics_batches=[], graphics_failures=[], prompt_budget_proof=None)
             model_timeout()
             from tradingagents.strategies.data_sources.regulation_graphics_inputs import graphics_assets
             assets = graphics_assets(evidence)
             if assets:
                 from tradingagents.strategies.learning.regulation_graphics_runtime import recognize_graphics
-                attempt.update(version='regulation-model-attempt-v2', graphics_batches=[])
+                if graphics_policy is None:
+                    attempt.update(version='regulation-model-attempt-v2', graphics_batches=[])
                 try:
                     recognize_graphics(self, assets, attempt)
                 finally:
@@ -786,10 +804,17 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
                     self.last_research_request = None
                     self.last_call_transport_failure = None
                 request = prepare_request(evidence, target_bindings=target_bindings,
-                    regime_context=regime_context, graphics_batches=attempt['graphics_batches'])
+                    regime_context=regime_context, graphics_batches=attempt['graphics_batches'], assessment_policy=assessment_policy,
+                    prompt_budget_policy=budget_policy,
+                    **({'graphics_plan': attempt['graphics_plan']}
+                       if attempt['version'] == 'regulation-model-attempt-v5' else {}))
             else:
-                request = prepare_request(evidence, target_bindings=target_bindings, regime_context=regime_context)
+                request = prepare_request(evidence, target_bindings=target_bindings, regime_context=regime_context,
+                    assessment_policy=assessment_policy, prompt_budget_policy=budget_policy)
             attempt['source_provenance'] = json.loads(request.context.provenance_json)
+            if attempt['version'] == 'regulation-model-attempt-v5':
+                attempt['prompt_budget_proof'] = deepcopy(attempt['source_provenance']['prompt_budget_proof'])
+                require_dispatchable(attempt['prompt_budget_proof'])
             model_timeout()
             attempt['model_call_started'] = True
             text = self._call_llm(request.system, request.user, max_tokens=4096, role='thesis')

@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 
 VERSION = 'eventedge-runtime-recovery-v1'
+PROSPECTIVE_LAUNCH_MODE = 'prospective_once_v1'
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (300, 1800, 7200)
 MAX_INCIDENTS = 64
@@ -114,7 +115,10 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
                                      (session.isoformat(),)).fetchone():
             return _result('requires_user', 'identity_mismatch')
         executor.validate_bound_context(session, epoch.epoch_id)
-        policy_id = owner._policy_id_for_horizon(cohort['config'].horizon)
+        # Health partitions include a horizon suffix; authoritative committee
+        # and staging records use the engine's frozen ledger policy identity.
+        policy_id = str(cohort['engine'].ar_config.get('paper_ledger', {}).get(
+            'policy_id', 'foundation-' + cohort['config'].horizon))
         if not ledger.staging_completed(session, epoch.epoch_id, policy_id):
             missing_stage.append((cohort, policy_id))
     with persisted_only():
@@ -258,7 +262,45 @@ def load_journal(path: Path) -> dict:
                 or type(row['attempt_count']) is not int or not 0 <= row['attempt_count'] <= MAX_ATTEMPTS
                 or type(row['running']) is not bool):
             raise ValueError('state_corrupt')
+        if 'launch_mode' in row or 'launch_intent' in row:
+            validate_prospective_intent(row)
     return document
+
+
+def validate_prospective_intent(row):
+    """Finite additive one-shot marker; legacy records keep their old contract."""
+    fields = {'identity', 'disposition', 'reason_code', 'attempt_count', 'next_attempt_at',
+              'running', 'daily_started', 'updated_at', 'launch_mode', 'launch_intent'}
+    try:
+        intent, identity = row['launch_intent'], row['identity']
+        if (set(row) != fields or row['launch_mode'] != PROSPECTIVE_LAUNCH_MODE
+                or type(intent) is not dict or set(intent) != {'version', 'generation_created_at', 'started_at'}
+                or intent['version'] != 'prospective-native-launch-v1'
+                or type(identity) is not dict or set(identity) != {'generation_id', 'generation_commit',
+                    'config_sha256', 'session', 'state_dir', 'worktree_path'}
+                or type(row['daily_started']) is not bool or row['daily_started'] is not True
+                or type(row['running']) is not bool or type(row['attempt_count']) is not int
+                or row['attempt_count'] != 0):
+            raise ValueError()
+        created = intent['generation_created_at']
+        if type(created) is not str or len(created) > 64 or 'T' not in created:
+            raise ValueError()
+        datetime.fromisoformat(created)  # Preserve native naive creation identity without inventing a zone.
+        started = _utc(datetime.fromisoformat(intent['started_at']))
+        updated = _utc(datetime.fromisoformat(row['updated_at']))
+        if (updated < started or (row['running'] and
+                (row['disposition'] != 'retrying' or row['reason_code'] != 'interrupted'
+                 or row['next_attempt_at'] != intent['started_at'] or updated != started))
+                or (not row['running'] and
+                    (row['disposition'] == 'retrying' or row['next_attempt_at'] is not None))):
+            raise ValueError()
+        if (not re.fullmatch(r'gen_[0-9]{3,}', identity['generation_id'])
+                or not re.fullmatch('[0-9a-f]{40}', identity['generation_commit'])
+                or not re.fullmatch('[0-9a-f]{64}', identity['config_sha256'])
+                or date.fromisoformat(identity['session']).isoformat() != identity['session']):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise ValueError('state_corrupt') from None
 
 
 def new_incident(identity: dict, now: datetime) -> dict:

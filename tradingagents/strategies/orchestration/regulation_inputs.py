@@ -12,6 +12,15 @@ def validate_regulation_policy(data, config):
     try:
         policy = config.get('regulation_evidence_policy')
         retrieval = config.get('regulation_retrieval_policy')
+        from ..data_sources.regulation_assessment import configured as assessment_configured
+        assessment_configured(config)
+        # This ar-only boundary binds a finite replay version. Native model and
+        # execution requirements are checked against full config separately.
+        graphics_policy = config.get('graphics_execution_policy')
+        if graphics_policy not in (None, 'single_target_compact_v1') or (
+                graphics_policy is not None and (policy != POLICY
+                or config.get('regulation_prompt_budget_policy') != 'o200k_base_planning_v1')):
+            raise ValueError('invalid regulation graphics execution policy')
         from tradingagents.strategies.data_sources.regulation_government_copy import POLICIES as RETRIEVAL_POLICIES
         if retrieval is not None and (
                 type(retrieval) is not str or retrieval not in RETRIEVAL_POLICIES or policy != POLICY):

@@ -17,6 +17,7 @@ MAX_DOCUMENT_INPUTS = 8
 _FORMATS = {'image/png': ('.png', b'\x89PNG\r\n\x1a\n'),
             'application/pdf': ('.pdf', b'%PDF-')}
 _WIRE_KEYS = frozenset({'media_type', 'filename', 'sha256', 'data_base64'})
+ORIGINALS_LABEL_POLICY = 'originals_label_v1'
 
 
 def _invalid():
@@ -43,36 +44,50 @@ class PlanDocumentInput:
     data: bytes = field(repr=False)
     filename: str
     sha256: str
+    presentation_policy: str | None = None
 
     def __post_init__(self):
         _validate(self.media_type, self.data, self.filename, self.sha256)
+        if self.presentation_policy not in (None, ORIGINALS_LABEL_POLICY):
+            _invalid()
 
 
 def encode_document_inputs(inputs):
     """Encode explicitly supplied local bytes; never fetch, infer, or truncate."""
     if type(inputs) not in (list, tuple) or not 1 <= len(inputs) <= MAX_DOCUMENT_INPUTS:
         _invalid()
-    result, total = [], 0
+    result, total, policies = [], 0, set()
     for item in inputs:
         if type(item) is not PlanDocumentInput:
             _invalid()
         _validate(item.media_type, item.data, item.filename, item.sha256)
+        if item.presentation_policy not in (None, ORIGINALS_LABEL_POLICY):
+            _invalid()
+        policies.add(item.presentation_policy)
         total += len(item.data)
         if total > MAX_TOTAL_DOCUMENT_BYTES:
             _invalid()
         result.append({'media_type': item.media_type, 'filename': item.filename,
                        'sha256': item.sha256,
                        'data_base64': base64.b64encode(item.data).decode('ascii')})
+        if item.presentation_policy is not None:
+            result[-1]['presentation_policy'] = item.presentation_policy
+    if len(policies) != 1:
+        _invalid()
     return result
 
 
 def _validated_wire(wire_inputs):
     if type(wire_inputs) is not list or not 1 <= len(wire_inputs) <= MAX_DOCUMENT_INPUTS:
         _invalid()
-    result, total = [], 0
+    result, total, policies = [], 0, set()
     for item in wire_inputs:
-        if type(item) is not dict or item.keys() != _WIRE_KEYS:
+        if type(item) is not dict or item.keys() not in (_WIRE_KEYS, _WIRE_KEYS | {'presentation_policy'}):
             _invalid()
+        policy = item.get('presentation_policy')
+        if 'presentation_policy' in item and policy != ORIGINALS_LABEL_POLICY:
+            _invalid()
+        policies.add(policy)
         encoded = item['data_base64']
         if type(encoded) is not str or not 0 < len(encoded) <= 4 * ((MAX_DOCUMENT_BYTES + 2) // 3):
             _invalid()
@@ -86,14 +101,19 @@ def _validated_wire(wire_inputs):
         total += len(data)
         if total > MAX_TOTAL_DOCUMENT_BYTES:
             _invalid()
-        result.append(({key: item[key] for key in _WIRE_KEYS}, len(data)))
+        result.append((dict(item), len(data)))
+    if len(policies) != 1:
+        _invalid()
     return result
 
 
 def document_input_content(wire_inputs):
     """Revalidate exact JSON wire records before building official content blocks."""
     result = []
-    for item, _ in _validated_wire(wire_inputs):
+    for index, (item, _) in enumerate(_validated_wire(wire_inputs), 1):
+        if item.get('presentation_policy') == ORIGINALS_LABEL_POLICY:
+            result.append({'type': 'input_text',
+                           'text': f"Attached image {index} (one-based): {item['filename']}"})
         data_url = f"data:{item['media_type']};base64,{item['data_base64']}"
         if item['media_type'] == 'application/pdf':
             result.append({'type': 'input_file', 'filename': item['filename'],
@@ -107,4 +127,5 @@ def document_input_metadata(wire_inputs):
     """Detached ordered metadata only; never include document content."""
     return [{'media_type': item['media_type'], 'filename': item['filename'],
              'sha256': item['sha256'], 'size_bytes': size}
+            | ({'presentation_policy': item['presentation_policy']} if 'presentation_policy' in item else {})
             for item, size in _validated_wire(wire_inputs)]

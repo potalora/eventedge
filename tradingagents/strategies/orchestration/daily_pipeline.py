@@ -312,7 +312,8 @@ def finalize_daily_results(
         result["outcome_evidence_failures"] = coverage["failures"]
         decision = cohort["ledger"].committee_decision(
             state.session, state.epoch_id,
-            state.owner._policy_id_for_horizon(cohort["config"].horizon),
+            str(cohort["engine"].ar_config.get("paper_ledger", {}).get(
+                "policy_id", "foundation-" + cohort["config"].horizon)),
         )
         if state.research_screening_receipt is not None:
             result['research_screening_receipt'] = state.research_screening_receipt
@@ -1296,7 +1297,7 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
                     horizon = cohort['config'].horizon
                     regime = state.horizon_signals[horizon][1]
                     decision = cohort['ledger'].committee_decision(session, state.epoch_id,
-                        owner._policy_id_for_horizon(horizon))
+                        str(cohort['engine'].ar_config.get('paper_ledger', {}).get('policy_id', 'foundation-' + horizon)))
                     validate_book_source_scope(decision.get('status', {}) if isinstance(decision, dict) else {},
                         regime, codec_limits=source_store.codec_limits)
                     state.results[cohort['config'].name]['regime'] = regime

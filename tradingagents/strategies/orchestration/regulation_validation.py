@@ -9,7 +9,7 @@ from tradingagents.strategies.data_sources.regulation_evidence import digest
 from .regulation_inputs import validate_regulation_policy
 
 
-def _attempt(row, original, universe, company_map):
+def _attempt(row, original, universe, company_map, assessment_policy=None, graphics_execution_policy=None, prompt_budget_policy=None):
     """Rebuild a retained request and bind its actual bounded response text."""
     from tradingagents.strategies.data_sources.regulation_assessment import (
         MAX_RESPONSE_BYTES, prepare_request, validate_assessment, validate_target_bindings,
@@ -22,13 +22,21 @@ def _attempt(row, original, universe, company_map):
     keys = {'version', 'source_provenance', 'model_provenance', 'model_call_started',
         'response_received', 'response_text', 'response_sha256', 'response_bytes',
         'response_encoding', 'response_over_limit', 'validation_status', 'failure_reason'}
-    graphical = type(attempt) is dict and attempt.get('version') == 'regulation-model-attempt-v2'
+    planned = type(attempt) is dict and attempt.get('version') == 'regulation-model-attempt-v5'
+    graphical = type(attempt) is dict and attempt.get('version') in ('regulation-model-attempt-v2', 'regulation-model-attempt-v5')
+    if (graphics_execution_policy not in (None, 'single_target_compact_v1')
+            or planned != (graphics_execution_policy == 'single_target_compact_v1')
+            or (planned and prompt_budget_policy != 'o200k_base_planning_v1')
+            or (not planned and prompt_budget_policy is not None)):
+        raise ValueError('regulatory graphics execution policy differs')
     if graphical:
         keys |= {'graphics_batches'}
-        if 'graphics_failure' in attempt:
+        if planned:
+            keys |= {'graphics_plan', 'graphics_failures', 'prompt_budget_proof'}
+        elif 'graphics_failure' in attempt:
             keys.add('graphics_failure')
     if (type(attempt) is not dict or set(attempt) != keys
-            or attempt['version'] not in ('regulation-model-attempt-v1', 'regulation-model-attempt-v2')
+            or attempt['version'] not in ('regulation-model-attempt-v1', 'regulation-model-attempt-v2', 'regulation-model-attempt-v5')
             or type(attempt['model_provenance']) is not dict
             or attempt['model_provenance'] != (row.get('model_provenance') or {})
             or any(type(attempt[key]) is not bool for key in
@@ -55,10 +63,29 @@ def _attempt(row, original, universe, company_map):
             raise ValueError('unbound regulatory attempt')
         targets = validate_target_bindings(original, provenance['target_bindings'], universe, company_map)
         request = prepare_request(original, target_bindings=targets, regime_context=provenance['regime_context'],
+            assessment_policy=assessment_policy, prompt_budget_policy=prompt_budget_policy,
+            **({'graphics_plan': attempt['graphics_plan']} if planned else {}),
             **({'graphics_batches': attempt['graphics_batches']} if graphical else {}))
-        if digest(provenance) != digest(json.loads(request.context.provenance_json)):
+        expected_provenance = json.loads(request.context.provenance_json)
+        if planned:
+            from ..data_sources.regulation_prompt_budget import validate_proof, require_dispatchable
+            proof = attempt['prompt_budget_proof']
+            if proof != provenance.get('prompt_budget_proof'):
+                raise ValueError('regulatory prompt proof differs')
+            validate_proof(request.system, request.user, proof)
+            # Counter-unavailable failures retain their historic finite failure,
+            # never an accepted assessment, even after the installation is fixed.
+            expected_provenance['prompt_budget_proof'] = proof
+            try:
+                require_dispatchable(proof)
+            except ValueError as error:
+                if (valid or attempt['model_call_started'] or attempt['response_received']
+                        or attempt['failure_reason'] != str(error)):
+                    raise ValueError('regulatory prompt budget failure relabeled') from None
+        if digest(provenance) != digest(expected_provenance):
             raise ValueError('regulatory attempt request changed')
-    elif attempt['model_call_started'] or attempt['model_provenance'] or valid:
+    elif (attempt['model_call_started'] or attempt['model_provenance'] or valid
+            or (planned and attempt['prompt_budget_proof'] is not None)):
         raise ValueError('regulatory attempt lacks request')
     if not attempt['response_received']:
         if (valid or attempt['response_over_limit'] or any(attempt[key] is not None for key in
@@ -157,8 +184,11 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
             by_identity[key] = value
         from tradingagents.strategies.data_sources.equity_universe import EquityUniverse
         from tradingagents.strategies.data_sources.regulation_assessment import (
-            prepare_request, validate_assessment, validate_target_bindings, _RESPONSE_KEYS,
+            prepare_request, validate_assessment, validate_target_bindings, _RESPONSE_KEYS, completed_abstention,
         )
+        assessment_policy = config.get('regulation_assessment_policy')
+        graphics_execution_policy = config.get('graphics_execution_policy')
+        prompt_budget_policy = config.get('regulation_prompt_budget_policy')
         company_map = data.get('edgar', {}).get('company_tickers', {})
         snapshot = data.get('equity_universe', {}).get('snapshot')
         # An independent SEC outage can leave no company map, including the
@@ -191,7 +221,8 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                     context_consumers.append({'policy_id': policy_id, 'strategy': strategy,
                         'acquisition_complete': scope['content_complete']})
                     continue
-                seen, completed, failed = set(), 0, 0
+                seen, completed, failed, abstained, no_thesis = set(), 0, 0, 0, 0
+                abstentions = []
                 for row in assessments:
                     docid = row['document_id']
                     if (docid in seen or docid not in expected_rows
@@ -202,7 +233,8 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                         raise ValueError('regulatory assessment source differs')
                     seen.add(docid)
                     assessment = row.get('assessment')
-                    attempt_assessment = _attempt(row, graph['corpus'].get(docid), universe, company_map)
+                    attempt_assessment = _attempt(row, graph['corpus'].get(docid), universe, company_map,
+                        assessment_policy, graphics_execution_policy, prompt_budget_policy)
                     if assessment is None:
                         if (row.get('analysis_status') != 'failed' or row.get('journal_only') is not True
                                 or not isinstance(row.get('analysis_failure_reason'), str)
@@ -214,25 +246,38 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                     provenance = assessment['source_provenance']
                     bindings = validate_target_bindings(original, provenance['target_bindings'], universe, company_map)
                     request = prepare_request(original, target_bindings=bindings, regime_context=provenance['regime_context'],
+                        assessment_policy=assessment_policy, prompt_budget_policy=prompt_budget_policy,
+                        **({'graphics_plan': row['model_attempt']['graphics_plan']}
+                           if row['model_attempt']['version'] == 'regulation-model-attempt-v5' else {}),
                         **({'graphics_batches': row['model_attempt']['graphics_batches']}
-                           if row['model_attempt']['version'] == 'regulation-model-attempt-v2' else {}))
-                    response = {key: assessment[key] for key in _RESPONSE_KEYS}
+                           if row['model_attempt']['version'] in ('regulation-model-attempt-v2', 'regulation-model-attempt-v5') else {}))
+                    response = {key: assessment[key] for key in _RESPONSE_KEYS | (
+                        {'unresolved_decision_dependencies'} if assessment_policy else set())}
                     expected = validate_assessment(json.dumps(response, allow_nan=False), request.context)
                     if (digest(expected) != digest(assessment) or digest(attempt_assessment) != digest(assessment)
                             or row['document_assessment'] != expected['document_assessment']):
                         raise ValueError('regulatory assessment differs from originals')
                     sufficient = expected['regulation_evidence_status'] == 'sufficient'
-                    if sufficient:
+                    is_abstention = completed_abstention(expected)
+                    if sufficient or is_abstention:
                         if (row['analysis_status'] != 'validated' or row.get('analysis_failure_reason') is not None
-                                or row['regulation_evidence_status'] != 'sufficient'
+                                or row['regulation_evidence_status'] != expected['regulation_evidence_status']
                                 or row['model_attempt']['validation_status'] != 'validated'):
                             raise ValueError('regulatory assessment status differs')
-                        if expected['document_assessment'] == 'assessed_no_directional_thesis':
+                        if expected['document_assessment'] == 'assessed_no_directional_thesis' or is_abstention:
                             if row['ticker'] != '' or row['journal_only'] is not True:
                                 raise ValueError('regulatory no-thesis has order authority')
                         elif row['ticker'] != expected['target_ticker']:
                             raise ValueError('regulatory target differs')
                         completed += 1
+                        abstained += int(is_abstention)
+                        no_thesis += int(expected['document_assessment'] == 'assessed_no_directional_thesis')
+                        if is_abstention:
+                            abstentions.append({'document_id': docid, 'execution_authority': 'none',
+                                'decision_evidence_status': expected['decision_evidence_status'],
+                                'unresolved_decision_dependencies': expected['unresolved_decision_dependencies'],
+                                'unresolved_material_dependencies': expected['unresolved_material_dependencies'],
+                                'source_material_proof_sha256': provenance['source_material_proof']['receipt_sha256']})
                     else:
                         if row['analysis_status'] != 'failed' or row['journal_only'] is not True:
                             raise ValueError('regulatory insufficiency erased')
@@ -245,10 +290,17 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                 counts.append({'policy_id': policy_id, 'strategy': strategy,
                     'required_documents': len(expected_rows), 'assessed_documents': completed,
                     'failed_documents': failed, 'missing_documents': missing,
-                    'excluded_candidates': len(excluded), 'analysis_complete': complete})
-        return {'policy': scope['policy'], 'source_manifest_sha256': scope['manifest_sha256'],
+                    'excluded_candidates': len(excluded), 'analysis_complete': complete,
+                    **({'abstained_documents': abstained, 'no_thesis_documents': no_thesis,
+                        'assessment_policy': assessment_policy, 'abstentions': abstentions,
+                        'decision_evidence_complete': complete and not abstained} if assessment_policy else {})})
+        result = {'policy': scope['policy'], 'source_manifest_sha256': scope['manifest_sha256'],
             'acquisition_complete': scope['content_complete'],
             'analysis_complete': bool(counts) and all(row['analysis_complete'] for row in counts),
             'horizons': counts, 'source_context_consumers': context_consumers}
+        if assessment_policy:
+            result.update(assessment_policy=assessment_policy, assessment_complete=result['analysis_complete'],
+                decision_evidence_complete=bool(counts) and all(row['decision_evidence_complete'] for row in counts))
+        return result
     except (KeyError, TypeError, AttributeError, ValueError, OverflowError) as error:
         raise ValueError('invalid_regulation_health') from error

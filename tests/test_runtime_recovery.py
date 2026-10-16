@@ -160,7 +160,8 @@ def test_frozen_failed_source_waits_and_heartbeat_recovers_next_day(scheduler):
         calls.append(action)
         kwargs['heartbeat']()
         return 0, ''
-    failed = {'accounting_valid':True, 'sources':{'configuration':'c'*64,'unresolved':[{'http_status':503}]}}
+    failed = {'accounting_valid':True, 'staging_complete':True, 'outcome':'degraded',
+        'sources':{'configuration':'c'*64,'unresolved':[{'http_status':503}]}}
     first = tick(repo, now, launcher=launcher, reporter=lambda *a:failed, discover=lambda *a:[])
     assert first['status'] == 'waiting_next_session' and calls == ['daily']
     second = tick(repo, now+timedelta(days=1), launcher=launcher,
@@ -387,7 +388,8 @@ def test_four_accelerated_sessions_recover_missed_run_then_preserve_failed_sampl
     first = datetime(2026,10,14,22,1,tzinfo=timezone.utc)
     reports, calls = {}, []
     healthy = {'staging_complete':True,'accounting_valid':True,'evidence_complete':True,'sources':{}}
-    failed_source = {'accounting_valid':True,'sources':{'configuration':'c'*64,'unresolved':[{'http_status':503}]}}
+    failed_source = {'accounting_valid':True,'staging_complete':True,'outcome':'degraded',
+        'sources':{'configuration':'c'*64,'unresolved':[{'http_status':503}]}}
     def launcher(repo,row,session,action,**kwargs):
         calls.append((session,action))
         if session=='2026-10-14' and action=='daily':

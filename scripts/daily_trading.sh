@@ -10,10 +10,33 @@ mkdir -p "$LOG_DIR"
 
 TODAY=$(TZ=America/New_York date +%Y-%m-%d)
 DOW=$(TZ=America/New_York date +%u)  # 1=Monday ... 7=Sunday
+PROSPECTIVE_ARGS=()
+if [ "$#" -gt 0 ]; then
+    if [ "$#" -ne 10 ] || [ "$1" != '--prospective-session' ] || [ "$3" != '--expected-generation' ] || \
+       [ "$5" != '--expected-commit' ] || [ "$7" != '--expected-profile-sha256' ] || [ "$9" != '--expected-created-at' ]; then
+        echo 'Invalid prospective launch arguments.' >&2
+        exit 2
+    fi
+    PROSPECTIVE_ARGS=("$@")
+    # The native gate verifies the real clock, exact frozen identity, matching
+    # durable running intent and inherited exclusive lease before any fetch.
+    "$VENV_PYTHON" "$REPO_ROOT/scripts/recover_runtime.py" --repo-root "$REPO_ROOT" \
+        --validate-prospective-launch "${PROSPECTIVE_ARGS[@]}"
+    TODAY="$2"  # Reference label only; the real clock/source vintage stays native.
+    readonly VENV_PYTHON REPO_ROOT TODAY
+    readonly -a PROSPECTIVE_ARGS
+    prospective_environment_signature() {
+        printf '%q\n' "${EVENTEDGE_RUNTIME_LOCK_FD-}" "${EVENTEDGE_RUNTIME_LOCK_MODE-}" \
+            "${EVENTEDGE_PYTHON-}" "${EVENTEDGE_GENERATION_ID-}" "${EVENTEDGE_GENERATION_COMMIT-}" \
+            "${EVENTEDGE_GENERATION_CONFIG_FILE-}" "${EVENTEDGE_GENERATION_CONFIG_SHA256-}"
+    }
+    PROSPECTIVE_ENVIRONMENT_BEFORE=$(prospective_environment_signature)
+    readonly PROSPECTIVE_ENVIRONMENT_BEFORE
+fi
 
 # Avoid needless weekend invocations. Holidays still reach Python and are
 # rejected because a weekday is not necessarily an XNYS trading session.
-if [ "$DOW" -ge 6 ]; then
+if [ "${#PROSPECTIVE_ARGS[@]}" -eq 0 ] && [ "$DOW" -ge 6 ]; then
     echo "$TODAY: Weekend, skipping."
     exit 0
 fi
@@ -23,6 +46,14 @@ if [ -f "$REPO_ROOT/.env" ]; then
     set -a
     source "$REPO_ROOT/.env"
     set +a
+fi
+if [ "${#PROSPECTIVE_ARGS[@]}" -gt 0 ]; then
+    if [ "$(prospective_environment_signature)" != "$PROSPECTIVE_ENVIRONMENT_BEFORE" ]; then
+        echo 'Environment changed guarded prospective launch identity or lease.' >&2
+        exit 2
+    fi
+    "$VENV_PYTHON" "$REPO_ROOT/scripts/recover_runtime.py" --repo-root "$REPO_ROOT" \
+        --validate-prospective-launch "${PROSPECTIVE_ARGS[@]}"
 fi
 
 LOG_FILE="$LOG_DIR/daily_${TODAY}.log"

@@ -315,6 +315,10 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from ..data_sources.regulation_graphics_grid import configured as graphics_execution_configured
+        graphics_execution_configured(self.config)
+        from ..data_sources.regulation_assessment import configured as regulation_assessment_configured
+        regulation_assessment_configured(self.ar_config)
         from .filing_research_policy import configured as filing_research_disabled
         filing_research_disabled(self.ar_config)
         from .research_resilience import configured as research_resilience_configured
@@ -645,14 +649,17 @@ class MultiStrategyEngine:
             for candidate in candidates:
                 release_candidate_bytes(candidate)
             universe_assessments = []
+            from ..data_sources.regulation_assessment import completed_abstention
             if universe is not None:
                 for candidate in candidates:
                     if (candidate.metadata.get('state_economics_policy') == 'state_unemployment_v1' and not candidate.ticker):
                         continue
                     if (candidate.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1'
                             and candidate.metadata.get('analysis_status') == 'validated'
-                            and candidate.metadata.get('document_assessment') == 'assessed_no_directional_thesis'
-                            and candidate.metadata.get('regulation_evidence_status') == 'sufficient'
+                            and ((candidate.metadata.get('document_assessment') == 'assessed_no_directional_thesis'
+                                  and candidate.metadata.get('regulation_evidence_status') == 'sufficient')
+                                 or (self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
+                                     and completed_abstention(candidate.metadata.get('llm_analysis'))))
                             and candidate.journal_only and not candidate.ticker):
                         continue
                     decision = universe.decision(candidate.ticker)
@@ -987,6 +994,11 @@ class MultiStrategyEngine:
         from tradingagents.strategies.orchestration.decision_clock import resolve_cutoff, policy, PROSPECTIVE, require_live_staging
         decision_context = data.get('_decision_context')
         cutoff = resolve_cutoff(self.config, session, decision_context)
+        from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY, validate_final_signals, validate_stage_binding
+        if self.ar_config.get('bounded_document_decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
+            validate_stage_binding(self, session, decision_context, epoch_id, shared_regime, original_enrichment)
+            validate_final_signals(self.config, session, data, shared_signals, shared_regime, horizon,
+                decision_context.get('document_review_binding') if isinstance(decision_context, dict) else None)
         if self.ar_config.get('state_economics_policy') and any(
                 row.get('strategy') == 'state_economics' and not row.get('journal_only')
                 and row.get('direction') in {'long', 'short'} for row in shared_signals):
@@ -3188,10 +3200,13 @@ class MultiStrategyEngine:
                     regime_context=regime_context, **decision_options)
                 if decision_policy is not None:
                     eligibility = llm_result.get('decision_eligibility', {})
-                    if (decision_policy != 'verified_scoped_claims_v1'
+                    from tradingagents.strategies.document_review_clock import POLICY as NEXT_OPEN_POLICY
+                    expected_authority = ('requires_final_decision_clock' if decision_policy == NEXT_OPEN_POLICY
+                        else 'ordinary_committee_and_risk_gates')
+                    if (decision_policy not in ('verified_scoped_claims_v1', NEXT_OPEN_POLICY)
                             or eligibility.get('eligible') is not True
                             or eligibility.get('policy') != decision_policy
-                            or eligibility.get('execution_authority') != 'ordinary_committee_and_risk_gates'
+                            or eligibility.get('execution_authority') != expected_authority
                             or llm_result.get('assessment_scope') != 'selected_pages'
                             or llm_result.get('journal_only') is not (llm_result.get('direction') == 'neutral')):
                         raise ValueError('invalid_bounded_document_eligibility')
@@ -3217,15 +3232,21 @@ class MultiStrategyEngine:
                     raise ValueError('invalid_regulation_evidence_policy')
                 source_graph = (filing_data or {}).get('regulations', {}).get('regulation_evidence', {})
                 if (self.ar_config.get('regulation_retrieval_policy') is not None
+                        or self.ar_config.get('regulation_assessment_policy') is not None
                         or source_graph.get('retrieval_policy') is not None):
                     validate_regulation_policy(filing_data, self.ar_config)
                 regulation_arguments = regulation_analysis_inputs(c, filing_data, universe)
                 regulation_call_started = True
                 llm_result = analyzer.analyze_regulation_evidence(
-                    regime_context=regime_context, **regulation_arguments)
+                    regime_context=regime_context, **regulation_arguments,
+                    **({'assessment_policy': self.ar_config['regulation_assessment_policy']}
+                       if self.ar_config.get('regulation_assessment_policy') is not None else {}))
                 c.metadata['document_assessment'] = llm_result['document_assessment']
                 c.metadata['regulation_evidence_status'] = llm_result['regulation_evidence_status']
-                if llm_result['regulation_evidence_status'] != 'sufficient':
+                from ..data_sources.regulation_assessment import completed_abstention
+                if llm_result['regulation_evidence_status'] != 'sufficient' and not (
+                        self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
+                        and completed_abstention(llm_result)):
                     c.metadata['regulation_assessment'] = llm_result
                     provenance = getattr(analyzer, 'last_call_provenance', None)
                     if isinstance(provenance, dict) and provenance:
@@ -3344,16 +3365,19 @@ class MultiStrategyEngine:
             if not isinstance(llm_result, dict) or not llm_result:
                 raise ValueError("analysis_unavailable")
             llm_result = dict(llm_result)
-            if llm_result.get("direction") not in {"long", "short", "neutral"}:
+            from ..data_sources.regulation_assessment import completed_abstention
+            abstained = full_regulation and completed_abstention(llm_result)
+            if not abstained and llm_result.get("direction") not in {"long", "short", "neutral"}:
                 raise ValueError("invalid_direction")
             score_key = "conviction" if "conviction" in llm_result else "score"
-            value = llm_result.get(score_key)
+            value = 0.0 if abstained else llm_result.get(score_key)
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
                 raise ValueError("invalid_score")
             score = float(value)
             if not math.isfinite(score) or not 0 <= score <= 1:
                 raise ValueError("invalid_score")
-            llm_result[score_key] = score
+            if not abstained:
+                llm_result[score_key] = score
             for key in ("defendant_ticker", "primary_ticker"):
                 if key in llm_result and (not isinstance(llm_result[key], str) or len(llm_result[key]) > 16):
                     raise ValueError(f"invalid_{key}")
@@ -3387,7 +3411,7 @@ class MultiStrategyEngine:
                     raise ValueError("invalid_secondary_impacts")
             ticker = c.ticker
             if full_regulation:
-                if llm_result.get('document_assessment') == 'assessed_no_directional_thesis':
+                if llm_result.get('document_assessment') == 'assessed_no_directional_thesis' or abstained:
                     if llm_result.get('target_ticker') is not None:
                         raise ValueError('invalid_regulation_target')
                     ticker = ''
@@ -3416,7 +3440,7 @@ class MultiStrategyEngine:
             if reuse is not None:
                 analyzer.last_call_provenance["request_reuse"] = reuse
                 c.metadata["model_provenance"] = dict(analyzer.last_call_provenance)
-            c.ticker, c.direction, c.score = ticker, llm_result["direction"], score
+            c.ticker, c.direction, c.score = ticker, 'neutral' if abstained else llm_result["direction"], score
             c.metadata["llm_analysis"] = llm_result
             c.metadata["analysis_status"] = "validated"
             if c.metadata.get("non_actionable_reason") == "missing_source_text":
