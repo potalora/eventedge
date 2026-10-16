@@ -4,6 +4,7 @@ HTTP/SSE responses are offline fixtures. Model bodies intentionally test schema
 and replay only, and provide no native recognition or full-generation claim.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -32,10 +33,44 @@ def test_graphics_fixture_supports_all_recorded_request_contracts(version):
     assert len(graphics.replay_graphics_receipt(rows, {'recognition': recognition, 'review': review})) == 1
 
 
+
+def _run_graphical_source(harness, *, timeout):
+    """Finite test infrastructure allowance, independent of production budgets."""
+    from collections import Counter
+    import subprocess
+    import time
+    started=time.monotonic()
+    def diagnostics(result, timed_out):
+        text=lambda value:(value.decode('utf-8',errors='replace') if isinstance(value,bytes) else value or '')[-8192:]
+        events=harness.trace()
+        summary={'elapsed_seconds':time.monotonic()-started,'timeout_seconds':timeout,
+            'timed_out':timed_out,'returncode':getattr(result,'returncode',None),'model_roles':dict(Counter(row['role']for row in events if row['kind']=='model')),
+            'trace_events':len(events),'portfolio_db_files':len(list(harness.state.glob('horizon_*/portfolio.db'))),
+            'operational_report_exists':(harness.repo/'docs/reports/2026-10-15-gen_020-operational-report.json').exists(),
+            'stdout_tail':text(result.stdout),'stderr_tail':text(result.stderr),
+            'fixture_path':str(harness.repo.parent)}
+        path=harness.repo.parent/'graphics-workflow-diagnostics.json'
+        path.write_text(json.dumps(summary,sort_keys=True,indent=2)+'\n')
+        return summary
+    try:
+        result=harness.run('2026-10-15T22:00:00+00:00',regulation_graphics=True,timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        try:
+            summary=diagnostics(error,True)
+            if hasattr(error,'add_note'):error.add_note('Graphics fixture progress: '+json.dumps(summary,sort_keys=True))
+        except Exception as diagnostic_error:
+            if hasattr(error,'add_note'):error.add_note('Graphics diagnostics unavailable: '+type(diagnostic_error).__name__)
+        raise
+    diagnostics(result,False)
+    return result
+
+
 def test_current_graphical_source_runs_through_all_horizons_books_and_report(tmp_path):
     harness = create_harness(tmp_path, profile_variant='fresh_generation_v3_v4')
     assert len(harness.audit['policy_overrides']) == 4
-    result = harness.run('2026-10-15T22:00:00+00:00', regulation_graphics=True, timeout=420)
+    # Both hosted runs reached the 420s outer limit; the retained local run
+    # took 246s. This test allowance leaves production deadlines intact.
+    result = _run_graphical_source(harness, timeout=1200)
     assert result.returncode == 0, result.stdout + result.stderr
     report = harness.report('2026-10-15')
     assert report['accounting_valid'] and report['staging_complete'] and report['evidence_complete'], report
@@ -68,3 +103,65 @@ def test_current_graphical_source_runs_through_all_horizons_books_and_report(tmp
     for role in ('regulation_graphics_recognition', 'regulation_graphics_review'):
         calls = [row for row in trace if row['kind'] == 'model' and row['role'] == role]
         assert len(calls) == expected_batches, {role: len(calls), 'expected': expected_batches}
+
+
+
+def test_graphics_fixture_timeout_retains_progress_and_reaps_child(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from scheduled_acceptance.harness import Harness
+    repo=tmp_path/'repo';(repo/'.venv/bin').mkdir(parents=True);(repo/'scripts').mkdir()
+    (repo/'.venv/bin/python').symlink_to(sys.executable)
+    trace=tmp_path/'transport.jsonl'
+    code=f"""import json,os,sys,time
+from pathlib import Path
+print('started fixture',flush=True)
+print('fixture stderr',file=sys.stderr,flush=True)
+Path({str(trace)!r}).write_text(json.dumps({{'kind':'model','role':'regulation_graphics_recognition','pid':os.getpid(),'ppid':os.getppid()}}))
+time.sleep(60)
+"""
+    (repo/'scripts/recover_runtime.py').write_text(code)
+    state=repo/'state';state.mkdir()
+    harness=Harness(repo,state,repo/'unused.json',{},tmp_path/'scenario.json',trace,
+                    {'PATH':os.environ['PATH']},'fixture')
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_graphical_source(harness,timeout=2)
+    diagnostics=json.loads((tmp_path/'graphics-workflow-diagnostics.json').read_text())
+    assert diagnostics['timed_out'] is True and diagnostics['timeout_seconds']==2
+    assert diagnostics['elapsed_seconds']>=2
+    assert diagnostics['model_roles']=={'regulation_graphics_recognition':1}
+    assert 'started fixture' in diagnostics['stdout_tail']
+    assert 'fixture stderr' in diagnostics['stderr_tail']
+    pid=harness.trace()[0]['pid']
+    with pytest.raises(ProcessLookupError):os.kill(pid,0)
+
+
+@pytest.mark.parametrize('scenario,failed', [(True,False),(False,False),(True,True),pytest.param('',True,id='empty-scope'),
+                                             pytest.param(True,'import',id='missing-bootstrap')])
+def test_fixture_startup_precedes_foreign_sitecustomize_and_fails_closed(tmp_path,scenario,failed):
+    import os
+    import subprocess
+    import sys
+    from scheduled_acceptance.harness import _write_bootstrap_hook
+    venv=tmp_path/'venv'
+    subprocess.run([sys.executable,'-m','venv','--without-pip',str(venv)],check=True,capture_output=True)
+    python=venv/'bin/python'
+    sites=json.loads(subprocess.check_output([str(python),'-c','import json,site;print(json.dumps(site.getsitepackages()))'],text=True))
+    support=tmp_path/'support';package=support/'scheduled_acceptance';package.mkdir(parents=True)
+    (package/'__init__.py').write_text('')
+    marker=tmp_path/'order'
+    if failed!='import':(package/'bootstrap.py').write_text("import os,socket\nfrom pathlib import Path\ndef install():\n with Path(os.environ['ORDER']).open('a') as stream:stream.write('bootstrap\\n')\n if os.environ.get('FAIL_BOOTSTRAP'):raise RuntimeError('constructed startup failure')\n def blocked(*args,**kwargs):raise RuntimeError('offline socket denied')\n socket.socket.connect=blocked\n")
+    _write_bootstrap_hook(Path(sites[0]),[str(support)])
+    foreign=tmp_path/'foreign';foreign.mkdir()
+    (foreign/'sitecustomize.py').write_text("import os\nfrom pathlib import Path\nwith Path(os.environ['ORDER']).open('a') as stream:stream.write('foreign\\n')\n")
+    env={'PATH':os.defpath,'PYTHONPATH':str(foreign),'ORDER':str(marker),'PYTHONDONTWRITEBYTECODE':'1'}
+    if scenario is not False:env['EVENTEDGE_ACCEPTANCE_SCENARIO']=''if scenario==''else'constructed-scenario'
+    if failed is True:env['FAIL_BOOTSTRAP']='1'
+    code="import os,socket\nfrom pathlib import Path\nwith Path(os.environ['ORDER']).open('a') as stream:stream.write('application\\n')\nif os.environ.get('EVENTEDGE_ACCEPTANCE_SCENARIO'):\n try:socket.socket().connect(('127.0.0.1',9))\n except RuntimeError as error:assert str(error)=='offline socket denied'\n else:raise AssertionError('socket guard missing')\n"
+    result=subprocess.run([str(python),'-c',code],env=env,capture_output=True,text=True,timeout=15)
+    assert result.returncode==(90 if failed else 0),result.stdout+result.stderr
+    if failed=='import':
+        assert not marker.exists()
+        return
+    assert marker.read_text().splitlines()==(['bootstrap']if failed else ['bootstrap','foreign','application']if scenario else ['foreign','application'])

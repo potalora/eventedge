@@ -32,6 +32,23 @@ def _json(path, value):
     path.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n')
 
 
+def _write_bootstrap_hook(site, paths):
+    # .pth executes before sitecustomize, whose name may resolve to a system file.
+    # Wrap import as well as install: site.py otherwise suppresses hook errors.
+    startup="""import os,sys
+if 'EVENTEDGE_ACCEPTANCE_SCENARIO' in os.environ and not getattr(sys,'_eventedge_acceptance_installed',False):
+ sys._eventedge_acceptance_installed=True
+ try:
+  from scheduled_acceptance.bootstrap import install
+  install()
+ except BaseException:
+  import traceback
+  traceback.print_exc()
+  os._exit(90)
+"""
+    (site/'acceptance.pth').write_text('\n'.join([*paths,'import os; exec('+repr(startup)+')'])+'\n')
+
+
 def _changes(before, after, path=()):
     if type(before) is dict and type(after) is dict:
         assert before.keys() == after.keys()
@@ -287,8 +304,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     sites = json.loads(subprocess.run([str(python), '-c', 'import json,site; print(json.dumps(site.getsitepackages()))'],
                                      check=True, capture_output=True, text=True).stdout)
     site = Path(sites[0])
-    (site/'acceptance.pth').write_text('\n'.join([*dependency_paths, str(ROOT/'tests')])+'\n')
-    (site/'sitecustomize.py').write_text('import os\ntry:\n from scheduled_acceptance.bootstrap import install\n install()\nexcept BaseException:\n import traceback\n traceback.print_exc()\n os._exit(90)\n')
+    _write_bootstrap_hook(site,[*dependency_paths,str(ROOT/'tests')])
     scenario = base/'scenario.json'
     trace = base/'transport.jsonl'
     shim = base/'bin'
