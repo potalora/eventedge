@@ -17,6 +17,7 @@ import re
 from urllib.parse import urlsplit
 
 POLICY = 'complete_document_text_v1'
+ACQUISITION_FAILURE_VERSION = 'regulation-acquisition-failure-v1'
 EXTRACTION_VERSION = 'regulation-text-v1'
 MAX_DETAIL_BYTES = 2 * 1024**2
 MAX_BODY_BYTES = 16 * 1024**2
@@ -418,12 +419,13 @@ def build_regulation_evidence(row, raw_detail, bodies, *, observed_at, pdf_resul
         pdf = pdf_results.get(rid)
         if government is not None:
             if (type(government) is not dict or set(government) not in
-                    ({'primary_failure'}, {'primary_failure', 'crosswalk_receipt'}) or pdf is not None):
+                    ({'primary_failure'}, {'primary_failure', 'crosswalk_receipt'},
+                     {'primary_failure', 'crosswalk_receipt', 'graphics_receipts'}) or pdf is not None):
                 fail('invalid_regulation_government_copy')
             _primary_failure(government['primary_failure'], resource)
             from .regulation_government_copy import extract_government_copy
             proof = extract_government_copy(raw_detail, raw, check=check, retrieval_policy=retrieval_policy,
-                crosswalk_receipt=government.get('crosswalk_receipt'))
+                crosswalk_receipt=government.get('crosswalk_receipt'), graphics_receipts=government.get('graphics_receipts'))
             text = proof['text']
         elif kind == 'pdf':
             # No bounded raw-reextraction authority is wired for this source.
@@ -444,7 +446,13 @@ def build_regulation_evidence(row, raw_detail, bodies, *, observed_at, pdf_resul
         if government is not None:
             unit.update(representation='verified_government_copy_text', government_copy=proof,
                         primary_failure=deepcopy(government['primary_failure']))
-        unit['unit_id'] = 'regulation:' + rid + ':' + digest([receipt['sha256'], unit['text_sha256'], EXTRACTION_VERSION])
+        unit_identity = [receipt['sha256'], unit['text_sha256'], EXTRACTION_VERSION]
+        if government is not None and proof.get('graphics'):
+            unit['representation'] = 'verified_government_copy_with_graphics'
+            unit['graphics_sha256'] = digest([{'graphic_id': row['graphic_id'], 'sha256': row['receipt']['sha256']}
+                for row in proof['graphics']])
+            unit_identity.append(unit['graphics_sha256'])
+        unit['unit_id'] = 'regulation:' + rid + ':' + digest(unit_identity)
         if pdf is not None:
             unit['pdf_evidence'] = deepcopy(pdf)
         units.append(unit)
@@ -475,6 +483,9 @@ def validate_regulation_evidence(value):
                 governments[rid] = {'primary_failure': unit['primary_failure']}
                 if 'crosswalk_receipt' in unit['government_copy']:
                     governments[rid]['crosswalk_receipt'] = unit['government_copy']['crosswalk_receipt']
+                if unit['government_copy'].get('graphics'):
+                    governments[rid]['graphics_receipts'] = {row['graphic_id']: row['receipt']
+                        for row in unit['government_copy']['graphics']}
         expected = build_regulation_evidence(value['identity'], raw, bodies,
             observed_at=value['detail_receipt']['observed_at'], body_observed_at=times, pdf_results=pdfs,
             retrieval_policy=value.get('retrieval_policy'), government_copies=governments)
@@ -528,6 +539,8 @@ No failed or missing original can acquire a model or scope exemption here.
             retained_bytes += sum(unit['primary_failure']['receipt']['bytes'] for unit in value['units'] if 'primary_failure' in unit)
             retained_bytes += sum(unit.get('government_copy', {}).get('crosswalk_receipt', {}).get('bytes', 0)
                                   for unit in value['units'])
+            retained_bytes += sum(row['receipt']['bytes'] for unit in value['units']
+                for row in unit.get('government_copy', {}).get('graphics', []))
         for docid, failed in failures.items():
             failed_keys = {'identity', 'detail_receipt', 'resources', 'body_receipts', 'failure'}
             if retrieval_policy is not None:
@@ -554,8 +567,10 @@ No failed or missing original can acquire a model or scope exemption here.
                 retained_bytes += len(raw)
             if retrieval_policy is not None:
                 attempts = failed['retrieval_attempts']
-                from .regulation_government_copy import POLICY_V2
-                if type(attempts) is not list or len(attempts) > MAX_ATTACHMENTS + (3 if retrieval_policy == POLICY_V2 else 2):
+                from .regulation_government_copy import POLICY_V2, POLICY_V3, MAX_GRAPHICS, MAX_GRAPHIC_BYTES
+                maximum_attempts = MAX_ATTACHMENTS + (3 + MAX_GRAPHICS if retrieval_policy == POLICY_V3
+                    else 3 if retrieval_policy == POLICY_V2 else 2)
+                if type(attempts) is not list or len(attempts) > maximum_attempts:
                     fail('invalid_regulation_retrieval_attempt')
                 if attempts:
                     if failed['detail_receipt'] is None:
@@ -566,7 +581,7 @@ No failed or missing original can acquire a model or scope exemption here.
                     if failed['resources'] != plan['resources']:
                         fail('invalid_regulation_retrieval_attempt')
                     resources = {resource['resource_id']: resource for resource in plan['resources']}
-                    originals, copies, crosswalks = {}, {}, set()
+                    originals, copies, crosswalks, graphics, graphic_plans = {}, {}, {}, set(), {}
                     for attempt in attempts:
                         resource = resources.get(attempt.get('resource_id')) if isinstance(attempt, dict) else None
                         if resource is None:
@@ -578,22 +593,46 @@ No failed or missing original can acquire a model or scope exemption here.
                                 fail('invalid_regulation_retrieval_attempt')
                             raw_attempt = _retrieval_attempt(attempt, resource)
                             originals[rid] = attempt
+                        elif url.startswith('https://img.federalregister.gov/'):
+                            from .regulation_government_copy import government_graphics_plan
+                            if (retrieval_policy != POLICY_V3 or rid not in copies or rid not in crosswalks
+                                    or copies[rid]['http_status'] != 200 or copies[rid]['complete'] is not True
+                                    or crosswalks[rid]['http_status'] != 200 or crosswalks[rid]['complete'] is not True
+                                    or (rid, url) in graphics):
+                                fail('invalid_regulation_retrieval_attempt')
+                            if rid not in graphic_plans:
+                                graphic_plans[rid] = {row['url']: row for row in government_graphics_plan(raw_detail,
+                                    receipt_bytes(copies[rid]['receipt'], MAX_BODY_BYTES),
+                                    crosswalk_receipt=crosswalks[rid]['receipt'], retrieval_policy=retrieval_policy)}
+                            if url not in graphic_plans[rid]:
+                                fail('invalid_regulation_retrieval_attempt')
+                            raw_attempt = _retrieval_attempt(attempt, resource, government_url=url)
+                            if len(raw_attempt) > MAX_GRAPHIC_BYTES:
+                                fail('invalid_regulation_retrieval_attempt')
+                            graphics.add((rid, url))
                         elif url.startswith('https://www.federalregister.gov/'):
                             from .regulation_government_copy import government_crosswalk_url
-                            if (rid not in copies or rid in crosswalks or copies[rid]['http_status'] != 200
-                                    or copies[rid]['complete'] is not True):
+                            sec = plan['identity']['agency_id'] == 'SEC'
+                            if (rid in crosswalks or rid not in originals
+                                    or (not sec and (rid not in copies or copies[rid]['http_status'] != 200
+                                        or copies[rid]['complete'] is not True))):
                                 fail('invalid_regulation_retrieval_attempt')
+                            _primary_failure(originals[rid], resource)
                             metadata_url = government_crosswalk_url(raw_detail, retrieval_policy=retrieval_policy)
                             raw_attempt = _retrieval_attempt(attempt, resource, government_url=metadata_url)
                             if len(raw_attempt) > MAX_DETAIL_BYTES:
                                 fail('invalid_regulation_retrieval_attempt')
-                            crosswalks.add(rid)
+                            crosswalks[rid] = attempt
                         else:
                             from .regulation_government_copy import government_copy_plan
                             if rid in copies or rid not in originals:
                                 fail('invalid_regulation_retrieval_attempt')
                             _primary_failure(originals[rid], resource)
-                            government_url = government_copy_plan(raw_detail, retrieval_policy=retrieval_policy)['url']
+                            metadata = crosswalks.get(rid)
+                            if metadata is not None and (metadata['http_status'] != 200 or metadata['complete'] is not True):
+                                fail('invalid_regulation_retrieval_attempt')
+                            government_url = government_copy_plan(raw_detail, retrieval_policy=retrieval_policy,
+                                crosswalk_receipt=metadata['receipt'] if metadata is not None else None)['url']
                             raw_attempt = _retrieval_attempt(attempt, resource, government_url=government_url)
                             copies[rid] = attempt
                         retained_bytes += len(raw_attempt)
@@ -624,7 +663,22 @@ No failed or missing original can acquire a model or scope exemption here.
                 or coverage['failed_rows'] != len(rows) - complete
                 or coverage['content_complete'] is not expected_complete):
             fail('invalid_regulation_source')
-        return {**deepcopy(coverage), 'policy': POLICY,
+        acquisition = {}
+        if 'regulation_acquisition_failure' in payload:
+            marker = payload['regulation_acquisition_failure']
+            if (type(marker) is not dict or set(marker) != {
+                    'version', 'reason_code', 'boundary', 'graph_manifest_sha256'}
+                    or marker['version'] != ACQUISITION_FAILURE_VERSION
+                    or marker['reason_code'] != 'timeout'
+                    or marker['boundary'] != 'source_publication'
+                    or marker['graph_manifest_sha256'] != graph['manifest_sha256']):
+                fail('invalid_regulation_source')
+            # Raw material coverage remains sealed and independently replayable.
+            # A late acquisition cannot authorize analysis of that raw corpus.
+            acquisition = {'raw_content_complete': coverage['content_complete'],
+                'content_complete': False, 'acquisition_complete': False,
+                'acquisition_failure': deepcopy(marker)}
+        return {**deepcopy(coverage), **acquisition, 'policy': POLICY,
                 **({'retrieval_policy': retrieval_policy} if retrieval_policy is not None else {}),
                 'manifest_sha256': graph['manifest_sha256'],
                 'evidence_sha256': {docid: value['manifest_sha256'] for docid, value in corpus.items()},

@@ -271,3 +271,28 @@ def test_freeze_durably_syncs_file_and_parent_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(os, 'fsync', sync)
     SourceInputStore(tmp_path / 'cache', accepted_dir=tmp_path / 'accepted').freeze(FROZEN, {}, acquired_at=NOW)
     assert synced == [False, True]
+
+
+@pytest.mark.parametrize('source', [None, 'regulations'])
+def test_complete_regulatory_graphics_have_finite_prospective_codec_capacity(source):
+    from tradingagents.strategies.orchestration.source_inputs import source_codec_limits, MAX_NODES
+    config = {'autoresearch': {'regulation_evidence_policy':'complete_document_text_v1',
+        'regulation_retrieval_policy':'verified_government_copy_v3'}}
+    assert source_codec_limits(config, source=source) == {'max_bytes':32*1024**2, 'max_nodes':MAX_NODES}
+    # Actual three graphic-bearing rules alone occupy 17,035,497 typed bytes.
+    # The old bound fails visibly; prospective capacity roundtrips without loss.
+    payload = {'material':'x'*(17*1024**2)}
+    with pytest.raises(SourceInputError, match='byte limit'):
+        SourceInputStore.encode(payload)
+    encoded = SourceInputStore.encode(payload, **source_codec_limits(config, source=source))
+    assert SourceInputStore.decode(encoded, **source_codec_limits(config, source=source)) == payload
+
+
+@pytest.mark.parametrize('policy', [None, 'verified_government_copy_v1', 'verified_government_copy_v2'])
+def test_legacy_regulation_codec_capacity_unchanged(policy):
+    from tradingagents.strategies.orchestration.source_inputs import source_codec_limits
+    config = {'autoresearch':{'regulation_evidence_policy':'complete_document_text_v1',
+        'regulation_retrieval_policy':policy}}
+    assert source_codec_limits(config, source='regulations') == {}
+    config['autoresearch']['regulation_retrieval_policy']='verified_government_copy_v3'
+    assert source_codec_limits(config, source='fred') == {}

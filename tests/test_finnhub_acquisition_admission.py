@@ -43,7 +43,8 @@ class Provider:
 def engine(source, **settings):
     result = object.__new__(MultiStrategyEngine)
     result.registry = SimpleNamespace(get=lambda name: source if name == 'finnhub' else None)
-    result.ar_config = {'finnhub_acquisition': settings}
+    result.config = {'autoresearch': {'finnhub_acquisition': settings}}
+    result.ar_config = result.config['autoresearch']
     return result
 
 

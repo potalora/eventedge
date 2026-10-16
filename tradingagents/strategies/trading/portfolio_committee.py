@@ -963,12 +963,13 @@ expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if n
         from tradingagents.strategies.llm_utils import call_analysis_model
         from tradingagents.strategies.chatgpt_plan_client import require_configured_billing
         from tradingagents.strategies.runtime_deadline import (
-            DEFAULT_MODEL_BUDGET_S, ModelDeadlineExceeded, current_model_deadline,
+            model_phase_budget_seconds, ModelDeadlineExceeded, current_model_deadline,
             model_backoff, model_budget, model_timeout,
         )
+        allowance = model_phase_budget_seconds(self.config)
         deadline = current_model_deadline()
         if deadline is None:
-            with model_budget(time.monotonic() + DEFAULT_MODEL_BUDGET_S):
+            with model_budget(time.monotonic() + allowance):
                 return self._call_llm(system=system, prompt=prompt, max_tokens=max_tokens)
         model_timeout()
         client = self._get_client()

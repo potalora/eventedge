@@ -17,7 +17,7 @@ from typing import Any
 import requests
 
 from .evidence import current_session_date, require_current_as_of, require_current_vintage, acquisition_time
-from .request_policy import provider_request, provider_budget, current_provider_deadline
+from .request_policy import provider_request, provider_budget, current_provider_deadline, provider_timeout
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ BULK_URL = "https://www.ncei.noaa.gov/access/services/data/v1"
 CATALOG_URL = "https://www.ncei.noaa.gov/pub/data/ghcn/daily"
 REGIONAL_BUDGET_SECONDS = 180
 MAX_REGIONAL_STATIONS = 12_000
+MAX_REGIONAL_WORKERS = 16
 
 # Key US agricultural states (Corn Belt + Plains)
 AG_STATES = {
@@ -300,6 +301,13 @@ class NOAASource:
                 **self.regional_coverage, "exclusions":dict(self.observation_exclusions),
                 "missing":missing, "station_aggregation":"arithmetic_mean_per_state_date_datatype"},
         }
+        # The same absolute budget includes decoding, regional collection and
+        # aggregation. A late complete sample must not certify timely coverage.
+        try:
+            provider_timeout("noaa")
+        except SourceFetchError:
+            failures.update({state: "timeout" for state in AG_STATES})
+            summary["coverage"]["complete"] = False
         if failures:
             # Incomplete regional input cannot establish calm/zero conditions.
             for field in ("heat_stress_days", "frost_events", "precip_deficit_pct", "avg_temp_anomaly_f"):
@@ -352,6 +360,8 @@ class NOAASource:
                     params={"dataset":"daily-summaries", "stations":",".join(batch),
                         "startDate":start, "endDate":end, "dataTypes":"TMAX,TMIN,PRCP",
                         "units":"standard", "includeAttributes":"true", "format":"json"}, timeout=(5,15)).json()
+                # requests read timeouts bound inactivity, not total body time.
+                provider_timeout("noaa")
             if not isinstance(data,list) or not all(isinstance(row,dict) for row in data):
                 raise SourceFetchError("NOAA bulk schema invalid", reason_code="invalid_response")
             rows, excluded, seen = [], 0, set()
@@ -380,7 +390,10 @@ class NOAASource:
             return rows, excluded
         regional = {state:[] for state in AG_STATES}
         errors = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # Overlap slow healthy batches without increasing the shared provider
+        # request-start or daily limits. The full 79-batch native roster needs
+        # margin for heterogeneous late batches inside the same 180s deadline.
+        with ThreadPoolExecutor(max_workers=MAX_REGIONAL_WORKERS) as executor:
             futures = [executor.submit(acquire,batch) for batch in batches]
             for future in futures:
                 try:
@@ -394,6 +407,11 @@ class NOAASource:
             error = errors[0]
             error.partial_data = {"states":regional}
             raise error
+        try:
+            provider_timeout("noaa")
+        except SourceFetchError as exc:
+            exc.partial_data = {"states": regional}
+            raise
         return regional
 
     def clear_cache(self) -> None:

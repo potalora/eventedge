@@ -26,6 +26,21 @@ MAX_REGULATION_SOURCE_BYTES = 32 * 1024**2
 _CONTENT_BUDGET = ContextVar('regulations_content_bytes', default=None)
 
 
+def _check_source_publication(payload):
+    """Fail late publication without rewriting the sealed raw coverage proof."""
+    try:
+        provider_timeout('regulations')
+    except SourceFetchError as error:
+        if error.reason_code != 'timeout':
+            raise
+        from .regulation_evidence import ACQUISITION_FAILURE_VERSION
+        marker = {'version': ACQUISITION_FAILURE_VERSION, 'reason_code': 'timeout',
+            'boundary': 'source_publication',
+            'graph_manifest_sha256': payload['regulation_evidence']['manifest_sha256']}
+        raise SourceFetchError('Regulations publication deadline exhausted', reason_code='timeout',
+            partial_data={**payload, 'regulation_acquisition_failure': marker}) from error
+
+
 def _read_response(response, maximum, *, retained=None):
     """Charge discovery, details and originals to one opt-in source byte owner."""
     owner = _CONTENT_BUDGET.get()
@@ -244,7 +259,12 @@ class RegulationsSource:
             if evidence_policy != POLICY:
                 raise ValueError('invalid_regulation_evidence_policy')
             if current_provider_deadline('regulations') is None:
-                with provider_budget('regulations', time.monotonic() + 60):
+                from .regulation_government_copy import POLICY_V3
+                # V3's retained graphic corpus adds up to 128 paced requests.
+                # The current 98 assets alone require 49 seconds at the fixed
+                # provider rate; an outer owner can still impose a tighter cap.
+                seconds = 180 if retrieval_policy == POLICY_V3 else 60
+                with provider_budget('regulations', time.monotonic() + seconds):
                     return self.get_recent_proposed_rules(agencies, days_back, as_of=as_of,
                                                          evidence_policy=evidence_policy, retrieval_policy=retrieval_policy)
             return self._complete_recent_rules(agencies, days_back, as_of=as_of,
@@ -348,15 +368,22 @@ class RegulationsSource:
                                 failures[docid]['body_receipts'] = {}
                                 for unit in retained['units']:
                                     if 'government_copy' in unit:
-                                        failures[docid]['retrieval_attempts'].extend([
-                                            deepcopy(unit['primary_failure']),
-                                            {'resource_id': unit['resource_id'], 'http_status': 200,
-                                             'complete': True, 'receipt': deepcopy(unit['receipt'])}])
+                                        attempts = [deepcopy(unit['primary_failure'])]
+                                        copy_attempt = {'resource_id': unit['resource_id'], 'http_status': 200,
+                                             'complete': True, 'receipt': deepcopy(unit['receipt'])}
+                                        if unit['government_copy']['identity']['agency_id'] != 'SEC':
+                                            attempts.append(copy_attempt)
                                         if 'crosswalk_receipt' in unit['government_copy']:
-                                            failures[docid]['retrieval_attempts'].append({
+                                            attempts.append({
                                                 'resource_id': unit['resource_id'], 'http_status': 200,
                                                 'complete': True, 'receipt': deepcopy(
                                                     unit['government_copy']['crosswalk_receipt'])})
+                                        if unit['government_copy']['identity']['agency_id'] == 'SEC':
+                                            attempts.append(copy_attempt)
+                                        for graphic in unit['government_copy'].get('graphics', []):
+                                            attempts.append({'resource_id': unit['resource_id'], 'http_status': 200,
+                                                'complete': True, 'receipt': deepcopy(graphic['receipt'])})
+                                        failures[docid]['retrieval_attempts'].extend(attempts)
                                     else:
                                         failures[docid]['body_receipts'][unit['resource_id']] = deepcopy(unit['receipt'])
                     corpus.pop(docid, None)
@@ -393,10 +420,28 @@ class RegulationsSource:
                                         and attempt['http_status'] in {403, 404, 410}):
                                     raise
                                 from .regulation_government_copy import (
-                                    POLICY_V2, government_copy_plan, government_crosswalk_url, extract_government_copy,
+                                    POLICY_V3, EXTENDED_POLICIES, MAX_GRAPHIC_BYTES,
+                                    government_copy_plan, government_crosswalk_url, extract_government_copy,
+                                    government_graphics_plan,
                                 )
                                 primary_failure = deepcopy(retrieval_attempts[-1])
-                                government_plan = government_copy_plan(raw_detail, retrieval_policy=retrieval_policy)
+                                crosswalk_receipt = None
+                                try:
+                                    government_plan = government_copy_plan(raw_detail, retrieval_policy=retrieval_policy)
+                                except ValueError as error:
+                                    if str(error) != 'missing_regulation_government_crosswalk':
+                                        raise
+                                    metadata_url = government_crosswalk_url(raw_detail, retrieval_policy=retrieval_policy)
+                                    metadata_attempt = {}
+                                    try:
+                                        self._content_request(metadata_url, maximum=MAX_DETAIL_BYTES,
+                                            capture=metadata_attempt)
+                                    finally:
+                                        if metadata_attempt:
+                                            retrieval_attempts.append({'resource_id': rid, **metadata_attempt})
+                                    crosswalk_receipt = metadata_attempt['receipt']
+                                    government_plan = government_copy_plan(raw_detail, retrieval_policy=retrieval_policy,
+                                        crosswalk_receipt=crosswalk_receipt)
                                 government_url = government_plan['url']
                                 government_attempt = {}
                                 try:
@@ -406,7 +451,9 @@ class RegulationsSource:
                                     if government_attempt:
                                         retrieval_attempts.append({'resource_id': rid, **government_attempt})
                                 government_copies[rid] = {'primary_failure': primary_failure}
-                                if retrieval_policy == POLICY_V2 and government_plan['identity']['agency_id'] == 'FTC':
+                                if crosswalk_receipt is not None:
+                                    government_copies[rid]['crosswalk_receipt'] = crosswalk_receipt
+                                if retrieval_policy in EXTENDED_POLICIES and government_plan['identity']['agency_id'] == 'FTC':
                                     try:
                                         extract_government_copy(raw_detail, body, retrieval_policy=retrieval_policy,
                                             check=lambda: provider_timeout('regulations'))
@@ -422,6 +469,22 @@ class RegulationsSource:
                                             if metadata_attempt:
                                                 retrieval_attempts.append({'resource_id': rid, **metadata_attempt})
                                         government_copies[rid]['crosswalk_receipt'] = metadata_attempt['receipt']
+                                if retrieval_policy == POLICY_V3 and government_plan['identity']['agency_id'] == 'SEC':
+                                    graphics_plan = government_graphics_plan(raw_detail, body,
+                                        retrieval_policy=retrieval_policy, crosswalk_receipt=crosswalk_receipt,
+                                        check=lambda: provider_timeout('regulations'))
+                                    graphics_receipts = {}
+                                    for graphic in graphics_plan:
+                                        graphic_attempt = {}
+                                        try:
+                                            self._content_request(graphic['url'], maximum=MAX_GRAPHIC_BYTES,
+                                                capture=graphic_attempt)
+                                        finally:
+                                            if graphic_attempt:
+                                                retrieval_attempts.append({'resource_id': rid, **graphic_attempt})
+                                        graphics_receipts[graphic['graphic_id']] = graphic_attempt['receipt']
+                                    if graphics_receipts:
+                                        government_copies[rid]['graphics_receipts'] = graphics_receipts
                                 stamp = government_attempt['receipt']['observed_at']
                             else:
                                 stamp = datetime.now(timezone.utc).isoformat()
@@ -464,11 +527,14 @@ class RegulationsSource:
             if retrieval_policy is not None:
                 graph['retrieval_policy'] = retrieval_policy
             graph['manifest_sha256'] = digest(graph)
+            retained = {'proposed_rules': rows, 'coverage': discovery, 'regulation_evidence': graph}
+            _check_source_publication(retained)
             if discovery_error is not None or not graph['coverage']['content_complete']:
                 raise SourceFetchError('Regulations required content incomplete', reason_code='batch_failure',
-                    partial_data={'proposed_rules': rows, 'coverage': discovery, 'regulation_evidence': graph})
+                    partial_data=retained)
             result = CoverageRecords(rows, coverage=discovery)
             result.regulation_evidence = graph
+            _check_source_publication(retained)
             return result
         finally:
             _CONTENT_BUDGET.reset(token)

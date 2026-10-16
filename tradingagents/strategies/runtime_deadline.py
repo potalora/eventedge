@@ -20,6 +20,43 @@ DEFAULT_MODEL_BUDGET_S = 2400.0
 MODEL_CALL_CAP_S = 120.0
 
 
+FULL_REGULATION_GRAPHICS_POLICY = "full_regulation_graphics_v1"
+
+
+def _full_graphics_policy(config: dict) -> bool:
+    """One frozen prospective timing contract; absent policy retains history."""
+    if not isinstance(config, dict):
+        raise ValueError("invalid_model_runtime_policy")
+    ar = config.get("autoresearch", {})
+    if not isinstance(ar, dict):
+        raise ValueError("invalid_model_runtime_policy")
+    if "model_runtime_policy" not in ar:
+        return False
+    execution = config.get("execution", {})
+    temperature = ar.get("llm_temperature", 0.0)
+    if (ar.get("model_runtime_policy") != FULL_REGULATION_GRAPHICS_POLICY
+            or ar.get("regulation_retrieval_policy") != "verified_government_copy_v3"
+            or ar.get("llm_billing_mode") != "chatgpt_plan"
+            or ar.get("autoresearch_model") != "gpt-6-luna"
+            or ar.get("llm_effort") != "high"
+            or ar.get("thesis_model") != "gpt-6.1-sol"
+            or ar.get("thesis_effort") != "high"
+            or type(temperature) is not float
+            or temperature != 0.0
+            or not isinstance(execution, dict) or execution.get("mode") != "paper"
+            or execution.get("execution_enabled") is not False):
+        raise ValueError("invalid_model_runtime_policy")
+    return True
+
+
+def model_phase_budget_seconds(config: dict) -> float:
+    return 9000.0 if _full_graphics_policy(config) else DEFAULT_MODEL_BUDGET_S
+
+
+def graphics_call_seconds(config: dict) -> float:
+    return 240.0 if _full_graphics_policy(config) else MODEL_CALL_CAP_S
+
+
 class ModelDeadlineExceeded(TimeoutError):
     """The shared model phase or individual transport exhausted its allowance."""
 
@@ -94,7 +131,8 @@ def bounded_model_phase(function):
     """Give standalone callers the same aggregate ceiling as the daily pipeline."""
     @wraps(function)
     def bounded(*args, **kwargs):
+        allowance = model_phase_budget_seconds(getattr(args[0], "config", {}) if args else {})
         deadline = current_model_deadline()
-        with model_budget(deadline if deadline is not None else time.monotonic() + DEFAULT_MODEL_BUDGET_S):
+        with model_budget(deadline if deadline is not None else time.monotonic() + allowance):
             return function(*args, **kwargs)
     return bounded

@@ -3089,12 +3089,13 @@ class MultiStrategyEngine:
     ) -> list[Candidate]:
         """Run LLM analysis on candidates that have needs_llm_analysis=True."""
         from tradingagents.strategies.runtime_deadline import (
-            DEFAULT_MODEL_BUDGET_S, current_model_deadline, model_budget,
+            model_phase_budget_seconds, current_model_deadline, model_budget,
         )
         from tradingagents.strategies.candidate_parallel import analyze_candidates
+        allowance = model_phase_budget_seconds(self.config)
         if current_model_deadline() is None:
             import time
-            with model_budget(time.monotonic() + DEFAULT_MODEL_BUDGET_S):
+            with model_budget(time.monotonic() + allowance):
                 return self._enrich_with_llm(candidates, strategy_name, regime_context,
                                              filing_data=filing_data, universe=universe)
         enriched = list(candidates)

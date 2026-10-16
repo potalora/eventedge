@@ -24,7 +24,8 @@ def forbid_transport(monkeypatch):
 
 def engine(policy=POLICY):
     value = MultiStrategyEngine.__new__(MultiStrategyEngine)
-    value.ar_config = {} if policy is None else {'award_attribution_policy': policy}
+    value.config = {'autoresearch': {} if policy is None else {'award_attribution_policy': policy}}
+    value.ar_config = value.config['autoresearch']
     value.paper_trade_strategies = [GovtContractsStrategy()]
     value._on_event = lambda *args, **kwargs: None
     value._analyzer = None

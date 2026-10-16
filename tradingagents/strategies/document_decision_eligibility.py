@@ -439,12 +439,16 @@ def _automatic_scope(scope):
 
 
 def _blind_prompts(context, scope):
-    from tradingagents.strategies.bounded_document_research import LEGACY_REQUEST_VERSION, REQUEST_VERSION
+    from tradingagents.strategies.bounded_document_research import (
+        LEGACY_REQUEST_VERSION, REQUEST_VERSION, SCOPED_REQUEST_VERSION, SCOPED_READABILITY_INSTRUCTIONS,
+    )
     version = context.get('recognition_request_version')
     if version == LEGACY_REQUEST_VERSION:
         system = _LEGACY_BLIND_SYSTEM
     elif version == REQUEST_VERSION:
         system = _BLIND_SYSTEM
+    elif version == SCOPED_REQUEST_VERSION:
+        system = _BLIND_SYSTEM + SCOPED_READABILITY_INSTRUCTIONS
     else:
         _invalid('request')
     return system, _canonical({'recognition_contract': context, 'decision_scope': scope})

@@ -106,6 +106,7 @@ def call_analysis_model(
     provenance: dict | None = None,
     response_observer=None,
     document_inputs=None,
+    max_call_seconds=None,
 ) -> str:
     """Bound real SDK transport including startup, retries and response reading.
 
@@ -113,12 +114,19 @@ def call_analysis_model(
     Native supported clients run in a disposable process, with SDK retries off.
     """
     from .chatgpt_plan_client import ChatGPTPlanClient
+    if max_call_seconds is not None:
+        if type(max_call_seconds) not in (int, float) or max_call_seconds not in (120, 240):
+            raise ValueError("invalid_model_call_cap")
+        if max_call_seconds == 240 and (not isinstance(client, ChatGPTPlanClient)
+                or model != LUNA_MODEL or effort != 'high' or temperature != 0.0
+                or document_inputs is None):
+            raise ValueError("invalid_model_call_cap")
     if document_inputs is not None:
         if not isinstance(client, ChatGPTPlanClient) or model != LUNA_MODEL:
             raise ValueError("document_inputs_require_luna_plan")
         from .plan_document_inputs import encode_document_inputs
         encoded_documents = encode_document_inputs(document_inputs)
-    timeout = model_timeout()
+    timeout = model_timeout() if max_call_seconds is None else model_timeout(max_call_seconds)
     request = dict(model=model, system=system, prompt=prompt, max_tokens=max_tokens,
                    temperature=temperature, effort=effort)
     if document_inputs is not None:

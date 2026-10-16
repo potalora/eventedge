@@ -117,7 +117,7 @@ def _terminal_report(report):
     if any(row.get('status') == 'strategy_defect' for row in report.get('source_health_failures', [])):
         return _result('requires_user', 'checkpoint_invalid')
     # New complete accepted evidence can prove recovery after an earlier
-    # preflight auth incident; keep that incident in the report, not as a sticky
+    # preflight source-access incident; keep that incident in the report, not as a sticky
     # blocker that contradicts the newer verified sample.
     if (report.get('accounting_valid') and report.get('staging_complete')
             and report.get('evidence_complete')
@@ -125,11 +125,9 @@ def _terminal_report(report):
             and not report.get('source_health_failures')
             and not report.get('candidate_input_issues')):
         return _result('recovered', 'complete')
-    source_errors = list(report.get('sources', {}).get('unresolved', []))
-    for incident in report.get('preflight_incidents', []):
-        source_errors.extend(incident.get('failures', []))
-    if any(item.get('http_status') in {401, 403} for item in source_errors):
-        return _result('requires_user', 'auth_required')
+    # Source HTTP denials, including historical preflights, cannot establish
+    # model credential loss. Explicit worker auth results retain their contract;
+    # accepted degraded samples follow the ordinary source-coverage policy.
     if (report.get('accounting_valid') and report.get('sources', {}).get('configuration') and report.get('sources', {}).get('unresolved')
             and not any(row.get('code') == 'accepted_sources_invalid' for row in report.get('diagnostics', []))):
         return _result('wait_next_session', 'accepted_outcome')

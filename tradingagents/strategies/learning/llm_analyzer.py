@@ -245,7 +245,7 @@ class LLMAnalyzer:
             f"Factor regime into your conviction level."
         )
 
-    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis", document_inputs=None) -> str:
+    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis", document_inputs=None, max_call_seconds=None) -> str:
         """Make a single LLM call. Returns response text or empty string."""
         from tradingagents.strategies.candidate_response_reuse import reused_candidate_response, retain_candidate_response
         from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
@@ -277,6 +277,13 @@ class LLMAnalyzer:
             if candidate_request is not None:
                 candidate_request.key = candidate_request.digest = candidate_request.pending = None
         try:
+            from tradingagents.strategies.runtime_deadline import graphics_call_seconds
+            configured_call_seconds = graphics_call_seconds(self.config)
+            if max_call_seconds is not None:
+                if (type(max_call_seconds) not in (int, float)
+                        or max_call_seconds != configured_call_seconds
+                        or role != 'bounded' or document_inputs is None):
+                    raise ValueError('invalid_model_call_cap')
             model_timeout()
             if document_inputs is not None:
                 from tradingagents.strategies.plan_document_inputs import encode_document_inputs
@@ -318,6 +325,7 @@ class LLMAnalyzer:
                 effort=effort, provenance=self.last_call_provenance,
                 response_observer=observed_response,
                 **({"document_inputs": document_inputs} if document_inputs is not None else {}),
+                **({"max_call_seconds": max_call_seconds} if max_call_seconds is not None else {}),
             )
             self.last_call_provenance["role"] = role
             if document_inputs is None:
@@ -352,7 +360,7 @@ class LLMAnalyzer:
         """
         import hashlib
         from tradingagents.strategies.bounded_document_research import (
-            POLICY, MAX_RESPONSE_BYTES, SAFE_FAILURE_CODES, prepare_recognition, validate_recognition,
+            POLICY, REQUEST_VERSION, MAX_RESPONSE_BYTES, SAFE_FAILURE_CODES, prepare_recognition, validate_recognition,
             prepare_thesis, validate_thesis,
         )
         from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
@@ -418,7 +426,8 @@ class LLMAnalyzer:
                     or self._thesis_model != 'gpt-6.1-sol' or self._thesis_effort != 'high'):
                 raise ValueError('invalid_bounded_document')
             model_timeout()
-            request = prepare_recognition(evidence, session_as_of=session_as_of)
+            request = prepare_recognition(evidence, session_as_of=session_as_of,
+                request_version=ar.get('bounded_document_recognition_request_version', REQUEST_VERSION))
             attempt['source_identity'] = json.loads(request.context_json)
             text, stage = call(request.system, request.user, role='bounded', document_inputs=request.document_inputs)
             recognition = validate_recognition(text, request)
@@ -754,6 +763,8 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
         self.last_call_provenance = {}
         self.last_call_failure = ''
         self.last_call_response = None
+        self.last_research_request = None
+        self.last_call_transport_failure = None
         attempt = {'version': 'regulation-model-attempt-v1', 'source_provenance': None,
             'model_provenance': {}, 'model_call_started': False, 'response_received': False,
             'response_text': None, 'response_sha256': None, 'response_bytes': None,
@@ -762,7 +773,22 @@ Analyze for trading signals and return JSON.""" + self._regime_suffix(regime_con
         self.last_regulation_attempt = attempt
         try:
             model_timeout()
-            request = prepare_request(evidence, target_bindings=target_bindings, regime_context=regime_context)
+            from tradingagents.strategies.data_sources.regulation_graphics_inputs import graphics_assets
+            assets = graphics_assets(evidence)
+            if assets:
+                from tradingagents.strategies.learning.regulation_graphics_runtime import recognize_graphics
+                attempt.update(version='regulation-model-attempt-v2', graphics_batches=[])
+                try:
+                    recognize_graphics(self, assets, attempt)
+                finally:
+                    self.last_call_response = None
+                    self.last_call_provenance = {}
+                    self.last_research_request = None
+                    self.last_call_transport_failure = None
+                request = prepare_request(evidence, target_bindings=target_bindings,
+                    regime_context=regime_context, graphics_batches=attempt['graphics_batches'])
+            else:
+                request = prepare_request(evidence, target_bindings=target_bindings, regime_context=regime_context)
             attempt['source_provenance'] = json.loads(request.context.provenance_json)
             model_timeout()
             attempt['model_call_started'] = True

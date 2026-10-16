@@ -25,6 +25,7 @@ CONTRACT_VERSION = 'source-inputs-v1'
 MAX_BYTES = 16 * 1024 * 1024
 MAX_DEPTH = 48
 MAX_NODES = 500_000
+REGULATION_GRAPHICS_MAX_BYTES = 32 * 1024 * 1024
 FULL_FILING_MAX_BYTES = 512 * 1024 * 1024
 FULL_FILING_MAX_NODES = 8_000_000
 
@@ -43,13 +44,17 @@ def _capacity(max_bytes=None, max_nodes=None) -> tuple[int, int]:
 
 
 def source_codec_limits(config: Mapping, *, source: str | None = None) -> dict[str, int]:
-    """Full-filing corpora have explicit finite capacity; other stores keep defaults."""
+    """Complete corpora have explicit finite capacity; other stores keep defaults."""
     ar_config = config.get('autoresearch', {})
     if ((ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
             and source in (None, 'edgar'))
             or (ar_config.get('congress_disclosure_policy') == 'display_audit_only_v1'
                 and source in (None, 'congress'))):
         return {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES}
+    if (ar_config.get('regulation_evidence_policy') == 'complete_document_text_v1'
+            and ar_config.get('regulation_retrieval_policy') == 'verified_government_copy_v3'
+            and source in (None, 'regulations')):
+        return {'max_bytes': REGULATION_GRAPHICS_MAX_BYTES, 'max_nodes': MAX_NODES}
     return {}
 
 

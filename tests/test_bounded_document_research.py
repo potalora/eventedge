@@ -249,6 +249,35 @@ def test_scoped_thesis_cannot_replace_reviewed_numeric_source_facts(number):
         module().validate_thesis(json.dumps(response),decision_eligibility=eligibility)
 
 
+@pytest.mark.parametrize('context,used,direction', [
+    ('true', ['revenue'], 'long'), (1, ['revenue'], 'long'),
+    (True, 'revenue', 'long'), (True, [None], 'neutral'),
+    (True, ['unreviewed'], 'neutral'), (True, ['revenue', 'revenue'], 'neutral'),
+    (False, ['revenue'], 'long'), (False, ['revenue'], 'short'),
+    (True, [], 'long'), (True, [], 'short'),
+])
+def test_scoped_thesis_malformed_or_contradictory_context_stays_invalid(context, used, direction):
+    eligibility = {'required_claim_ids':['revenue'],
+        'verified_claims':[{'id':'revenue','printed_value':'1,204.50','unit':'USD millions'}]}
+    response = {'assessment_scope':'selected_pages','direction':direction,'score':.9,
+        'rationale':'Constructed boundary control.', 'evidence_claim':'Reviewed revenue count.',
+        'context_sufficient':context,'used_claim_ids':used}
+    with pytest.raises(ValueError, match='^invalid_document_decision_context$'):
+        module().validate_thesis(json.dumps(response), decision_eligibility=eligibility)
+
+
+@pytest.mark.parametrize('context,used', [(False, []), (False, ['revenue']), (True, ['revenue'])])
+def test_scoped_thesis_valid_neutral_is_explicitly_journal_only(context, used):
+    eligibility = {'required_claim_ids':['revenue'],
+        'verified_claims':[{'id':'revenue','printed_value':'1,204.50','unit':'USD millions'}]}
+    response = {'assessment_scope':'selected_pages','direction':'neutral','score':0,
+        'rationale':'No current directional edge is established.', 'evidence_claim':'Selected historical evidence only.',
+        'context_sufficient':context,'used_claim_ids':used}
+    result = module().validate_thesis(json.dumps(response), decision_eligibility=eligibility)
+    assert result['analysis_status'] == 'validated' and result['journal_only'] is True
+    assert result['full_document_quality_accepted'] is False
+
+
 @pytest.mark.parametrize('after_cutoff',[False,True])
 def test_unattended_analyzer_produces_review_from_blind_source_check_without_runtime_answers(analyzer,tmp_path,monkeypatch,after_cutoff):
     from test_document_decision_workflow import decision_payload

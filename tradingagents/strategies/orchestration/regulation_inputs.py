@@ -57,7 +57,8 @@ def regulation_analysis_inputs(candidate, shared_data, universe):
     try:
         metadata = candidate.metadata
         source = shared_data['regulations']
-        validate_regulation_source(source)
+        if validate_regulation_source(source)['content_complete'] is not True:
+            raise ValueError('invalid_regulation_source')
         ref = metadata['regulation_evidence_ref']
         if (metadata['regulation_evidence_policy'] != POLICY
                 or metadata['analysis_type'] != 'regulation'

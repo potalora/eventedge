@@ -525,6 +525,51 @@ def _volatility(state: Path, generation: str, session: str, commit: str, sources
     return result
 
 
+def _regulation_transport_recoveries(payload: dict, validated_scope: dict | None) -> tuple[dict, bool]:
+    """Bind preserved transport failures to completely replayed government copies.
+
+    Legacy diagnostics have no URL/resource identity. Therefore the entire
+    unrecovered failure multiset must match the graph's failed primary requests,
+    before report deduplication. Extra failures cannot borrow a copy's proof.
+    ``validated_scope`` comes only from validate_regulation_policy in _sources.
+    """
+    from collections import Counter
+    if (validated_scope is None or validated_scope.get('content_complete') is not True
+            or payload.get('error') not in (None, '')):
+        return {}, False
+    graph = payload['regulation_evidence']
+    proofs = []
+    for evidence in graph['corpus'].values():
+        for unit in evidence['units']:
+            if 'primary_failure' in unit:
+                proofs.append((unit['primary_failure']['http_status'], {
+                    'policy': graph['retrieval_policy'],
+                    'manifest_sha256': graph['manifest_sha256'],
+                    'resource_id': unit['resource_id'], 'unit_id': unit['unit_id'],
+                    'primary_receipt_sha256': unit['primary_failure']['receipt']['sha256'],
+                    'government_receipt_sha256': unit['receipt']['sha256']}))
+    events = payload.get('_request_diagnostics', [])
+    if not proofs or not events:
+        return {}, False
+    failures = [(index, event) for index, event in enumerate(events)
+                if isinstance(event, dict) and event.get('recovered') is False
+                and event.get('reason_code') not in (None, 'success')]
+    fields = ('provider', 'operation', 'reason_code', 'http_status', 'attempts', 'recovered')
+    actual = Counter(tuple(event.get(key) for key in fields) for _, event in failures)
+    expected = Counter(('regulations', 'get', 'http_error', status, 1, False)
+                       for status, _ in proofs)
+    if actual != expected:
+        return {}, True
+    # Equal signatures are indistinguishable in the legacy event stream. Bind
+    # each exactly once, in retained corpus/resource order, retaining all IDs.
+    remaining = list(proofs)
+    recovered = {}
+    for index, event in failures:
+        position = next(i for i, (status, _) in enumerate(remaining) if status == event['http_status'])
+        _, recovered[index] = remaining.pop(position)
+    return recovered, False
+
+
 def _sources(state: Path, generation: str, session: str, commit: str, diagnose, *, retained_sources=None) -> dict:
     result = {'recovered':[], 'unresolved':[], 'observations':{}}
     slot = configuration_fingerprint({'generation':generation,'session':session})
@@ -583,6 +628,8 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
         if isinstance(regulation_graph, dict) and 'retrieval_policy' in regulation_graph:
             regulation_config['regulation_retrieval_policy'] = regulation_graph['retrieval_policy']
         regulation_scope = validate_regulation_policy(envelope['payload'], regulation_config)
+        regulation_recoveries, regulation_mismatch = _regulation_transport_recoveries(
+            envelope['payload'].get('regulations', {}), regulation_scope)
         if regulation_scope is not None:
             result['regulation_source_coverage'] = regulation_scope
             if retained_sources is not None:
@@ -642,7 +689,10 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                 result['unresolved'].append({'provider':source,'reason_code':'invalid_response','http_status':None})
             else:
                 result['observations'][source]=coverage_status or ('failed' if payload.get('error') not in (None,'') else 'success')
-            for event in payload.get('_request_diagnostics',[]):
+            if source == 'regulations' and regulation_mismatch:
+                result['unresolved'].append({'provider':source,'source':source,
+                    'reason_code':'government_copy_diagnostics_mismatch','http_status':None})
+            for event_index, event in enumerate(payload.get('_request_diagnostics',[])):
                 if not isinstance(event,dict) or not all(_safe_id(event.get(key)) for key in ('provider','operation')) or event.get('reason_code') is not None and not _safe_id(event['reason_code']) or type(event.get('recovered')) is not bool or type(event.get('attempts')) is not int or not 0<=event['attempts']<=5:
                     raise ValueError('source diagnostics invalid')
                 status = event.get('http_status')
@@ -653,7 +703,10 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                 # (e.g. Alpaca transports the equity-universe source).
                 safe['source'] = source
                 safe['reason_code'] = event.get('reason_code') or 'success'
-                if event['recovered']:
+                if source == 'regulations' and event_index in regulation_recoveries:
+                    safe.update(recovered=True, transport_recovered=event['recovered'],
+                                recovery_basis=regulation_recoveries[event_index])
+                if safe['recovered']:
                     result['recovered'].append(safe)
                 elif safe['reason_code']!='success':
                     result['unresolved'].append(safe)

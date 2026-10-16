@@ -10,9 +10,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # The existing suite takes about 24 minutes on hosted runners; allow the
-    # real subprocess acceptance gate to finish before the remaining suite.
-    timeout-minutes: 60
+    # The last accepted hosted run took 47 minutes before the additional
+    # full-corpus graphics workflow gate. Keep a finite completion margin.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,8 +30,9 @@ jobs:
 
   test-openbb:
     runs-on: ubuntu-latest
-    # The existing pinned-SDK suite can exceed 30 minutes before acceptance.
-    timeout-minutes: 60
+    # The last accepted pinned-SDK run took 52 minutes before the additional
+    # full-corpus graphics workflow gate.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

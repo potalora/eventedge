@@ -411,3 +411,77 @@ def test_intervention_cli_distinguishes_busy_lock_from_invalid_evidence(
     assert source_repair.main(["interventions", "--repo-root", str(tmp_path)]) == 75
     monkeypatch.setattr(source_repair, "current_repair_requests", busy)
     assert source_repair.main(["requests", "--repo-root", str(tmp_path)]) == 2
+
+
+def _publish_with_worker_umask(directory):
+    """Managed report directories already permit consumer traversal."""
+    import os
+    from tradingagents.strategies.orchestration.operational_report import write_operational_report
+
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    (directory / 'source-repair').mkdir(mode=0o755, exist_ok=True)
+    (directory / 'source-repair').chmod(0o755)
+    value = report(reason='http_error', status=403)
+    paths = write_operational_report(value, directory)
+    previous = os.umask(0o077)
+    try:
+        result = api().publish_intervention_proposal(value, paths, now=NOW)
+    finally:
+        os.umask(previous)
+    from pathlib import Path
+    return Path(result['path'])
+
+
+def test_intervention_publication_overrides_restrictive_worker_umask(tmp_path):
+    import stat
+    import subprocess
+    import sys
+
+    destination = _publish_with_worker_umask(tmp_path)
+    # Execute an actual reader as well as checking the publication mode.
+    # The Linux/root test below exercises a different unprivileged consumer UID.
+    result = subprocess.run(
+        [sys.executable, '-c',
+         'import json,sys; print(json.load(open(sys.argv[1]))["status"])',
+         str(destination)], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == 'available'
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o644
+    # A refresh also repairs a previously published private-mode projection.
+    destination.chmod(0o600)
+    assert _publish_with_worker_umask(tmp_path) == destination
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o644
+
+
+def test_root_projection_is_readable_but_not_writable_by_different_unprivileged_uid():
+    import os
+    from pathlib import Path
+    import pwd
+    import subprocess
+    import sys
+    import tempfile
+
+    if sys.platform != 'linux' or os.geteuid() != 0:
+        pytest.skip('cross-UID permission check requires Linux root publisher')
+    consumer = pwd.getpwnam('nobody')
+    executable = Path('/usr/bin/python3')
+    if not executable.exists():
+        pytest.skip('system Python required for privilege-drop reader')
+    with tempfile.TemporaryDirectory(prefix='eventedge-intervention-', dir='/tmp') as folder:
+        directory = Path(folder).resolve()
+        directory.chmod(0o755)
+        destination = _publish_with_worker_umask(directory)
+        assert destination.stat().st_uid == 0
+        result = subprocess.run(
+            [str(executable), '-c', '''import json,os,sys
+assert os.geteuid() != 0
+with open(sys.argv[1]) as source:
+    assert json.load(source)['status'] == 'available'
+try:
+    open(sys.argv[1], 'ab').close()
+except PermissionError:
+    print('readable_not_writable')
+else:
+    raise AssertionError('consumer must not write root projection')
+''', str(destination)], user=consumer.pw_uid, group=consumer.pw_gid,
+            extra_groups=[], cwd='/tmp', capture_output=True, text=True, check=True)
+        assert result.stdout.strip() == 'readable_not_writable'

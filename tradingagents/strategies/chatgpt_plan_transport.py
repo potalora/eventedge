@@ -10,6 +10,9 @@ import json
 MAX_EVENT_BYTES = 4 * 1024 * 1024
 MAX_STREAM_BYTES = 32 * 1024 * 1024
 MAX_STREAM_EVENTS = 100_000
+MAX_METADATA_BYTES = 64 * 1024
+MAX_METADATA_DEPTH = 9
+MAX_METADATA_NODES = 512
 _SAFE_CODES = frozenset({
     "subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable",
     "auth_denied", "model_unavailable", "provider_error", "transport_timeout",
@@ -148,6 +151,69 @@ def _slot(event):
     return output, content
 
 
+def _informational_metadata(event, response_id):
+    """Accept only the observed extension envelope, never response authority.
+
+    This is our bounded adapter contract, not an assertion of documented
+    upstream semantics. Only the observed all-clear moderation shape qualifies.
+    Category names are opaque bounded labels; their exact vocabulary is not
+    verified. Metadata never supplies response content, identity or completion.
+    """
+    if set(event) != {"type", "sequence_number", "response_id", "metadata"}:
+        _fail("stream_invalid")
+    identity = event["response_id"]
+    body = event["metadata"]
+    if type(identity) is not str or not identity.strip() or response_id is None or identity != response_id or type(body) is not dict:
+        _fail("stream_invalid")
+    encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(encoded) > MAX_METADATA_BYTES:
+        _fail("stream_invalid")
+    pending, nodes = [(body, 0)], 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        if depth > MAX_METADATA_DEPTH or nodes > MAX_METADATA_NODES:
+            _fail("stream_invalid")
+        if type(value) is dict:
+            nodes += len(value)  # Keys count toward the same finite budget.
+            if nodes > MAX_METADATA_NODES:
+                _fail("stream_invalid")
+            pending.extend((child, depth + 1) for child in value.values())
+        elif type(value) is list:
+            pending.extend((child, depth + 1) for child in value)
+
+    def mapping(value, keys):
+        if type(value) is not dict or set(value) != keys:
+            _fail("stream_invalid")
+        return value
+
+    root = mapping(body, {"openai_chatgpt_moderation_metadata"})
+    wrapper = mapping(root["openai_chatgpt_moderation_metadata"],
+                      {"prompt", "generation", "tool_call", "tool_response"})
+    for key in ("generation", "tool_call", "tool_response"):
+        mapping(wrapper[key], set())
+    prompt = mapping(wrapper["prompt"], {"omnimod"})
+    moderation = mapping(prompt["omnimod"], {"protection_type", "outputs"})
+    if moderation["protection_type"] != "omnimod":
+        _fail("stream_invalid")
+    outputs = moderation["outputs"]
+    if type(outputs) is not list or len(outputs) != 1:
+        _fail("stream_invalid")
+    output = mapping(outputs[0], {"results", "is_blocked"})
+    if output["is_blocked"] is not False:
+        _fail("stream_invalid")
+    results = output["results"]
+    if type(results) is not list or len(results) != 1:
+        _fail("stream_invalid")
+    result = mapping(results[0], {"category_flags"})
+    flags = result["category_flags"]
+    if type(flags) is not dict or len(flags) != 42:
+        _fail("stream_invalid")
+    if any(type(key) is not str or not key.strip() or len(key.encode("utf-8")) > 128 or value is not False
+           for key, value in flags.items()):
+        _fail("stream_invalid")
+
+
 def _sparse_terminal(response, items_added, items_done, item_ids, slot_phases,
                      deltas, done, parts_done, parts_added, lifecycle_valid):
     """Recover only explicit empty output from fully closed, indexed items.
@@ -260,6 +326,7 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
     items_added, slot_phases, content_started = {}, {}, set()
     sparse_lifecycle_valid = True
     response_id = None
+    last_sequence = None
     total_bytes = 0
     try:
         with client.responses.with_streaming_response.create(model=model, instructions=system,
@@ -283,6 +350,14 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                     continue
                 if completed is not None or sentinel:
                     _fail("stream_invalid")
+                if "sequence_number" in event:
+                    sequence = event["sequence_number"]
+                    if type(sequence) is not int or sequence < 0 or (last_sequence is not None and sequence <= last_sequence):
+                        _fail("stream_invalid")
+                    last_sequence = sequence
+                if kind == "response.metadata":
+                    _informational_metadata(event, response_id)
+                    continue
                 response = event.get("response")
                 if kind in {"response.output_text.delta", "response.output_text.done", "response.content_part.added", "response.content_part.done"}:
                     sparse_lifecycle_valid &= type(event.get("item_id")) is str and bool(event["item_id"])

@@ -147,7 +147,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     The snapshot commit has its own identity. No source-repository Git writes,
     remotes, user configuration, real credentials or production state are used.
     """
-    if profile_variant not in {'retained_production', 'government_copy_v2'}:
+    if profile_variant not in {'retained_production', 'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4'}:
         raise ValueError('unsupported acceptance profile variant')
     base = Path(tmp_path).resolve() / 'scheduled'
     repo = base / 'repo'
@@ -182,10 +182,25 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     assert sha(original_body) == ORIGINAL_SHA
     original = json.loads(original_body)
     candidate = deepcopy(original)
-    if profile_variant == 'government_copy_v2':
+    if profile_variant in {'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4'}:
         assert candidate['autoresearch']['regulation_retrieval_policy'] == 'verified_government_copy_v1'
-        candidate['autoresearch']['regulation_retrieval_policy'] = 'verified_government_copy_v2'
+        candidate['autoresearch']['regulation_retrieval_policy'] = ('verified_government_copy_v3'
+            if profile_variant == 'fresh_generation_v3_v4' else 'verified_' + profile_variant)
+    if profile_variant == 'fresh_generation_v3_v4':
+        scope = candidate['autoresearch']['bounded_document_registry'][0]['decision_scope']
+        scope['purpose'] = "Verify only the historical pledge security counts printed on selected page 18 for Cadre Holdings, Inc. as of December 16, 2021, preserving each count's printed unit, row and column association. This scope establishes historical count context only; it makes no claim about current holdings, current catalysts or present trading relevance."
     policy_overrides = _changes(original, candidate)
+    if profile_variant == 'fresh_generation_v3_v4':
+        field = 'bounded_document_recognition_request_version'
+        assert field not in original['autoresearch']
+        candidate['autoresearch'][field] = 'bounded-document-recognition-request-v4'
+        policy_overrides.append({'path':['autoresearch',field], 'original':None,
+                                 'fixture':candidate['autoresearch'][field], 'added':True})
+        field = 'model_runtime_policy'
+        assert field not in original['autoresearch']
+        candidate['autoresearch'][field] = 'full_regulation_graphics_v1'
+        policy_overrides.append({'path':['autoresearch',field], 'original':None,
+                                 'fixture':candidate['autoresearch'][field], 'added':True})
     candidate_body = (json.dumps(candidate, sort_keys=True, indent=2) + '\n').encode()
     candidate_sha = sha(candidate_body) if policy_overrides else ORIGINAL_SHA
     environment_body = ENVIRONMENT_PROOF.read_bytes()

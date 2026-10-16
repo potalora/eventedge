@@ -1726,11 +1726,15 @@ def run_horizon_screening(state: DailyRunState) -> dict[str, Any] | None:
         return state.fail_candidates("shared_source_bundle_invalid")
     logger.info("Shared data fetched: %s", list(state.shared_data.keys()))
     import time
-    from tradingagents.strategies.runtime_deadline import DEFAULT_MODEL_BUDGET_S, model_budget
+    from tradingagents.strategies.runtime_deadline import model_phase_budget_seconds, current_model_deadline, model_budget
     from tradingagents.strategies.candidate_response_reuse import candidate_response_memo
     from tradingagents.strategies.orchestration.multi_strategy_engine import hold_incomplete_model_sample, model_sample_incomplete
-    if state.model_deadline is None:
-        state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
+    allowance = model_phase_budget_seconds(state.owner._base_config)
+    outer_deadline = current_model_deadline()
+    # Retain the tightest absolute ceiling even after an outer context exits.
+    state.model_deadline = min(time.monotonic() + allowance,
+        state.model_deadline if state.model_deadline is not None else float('inf'),
+        outer_deadline if outer_deadline is not None else float('inf'))
     horizons = tuple(sorted({cohort["config"].horizon for cohort in
                              (owner.cohorts if resilience else state.valid)}))
     restored = None
@@ -2594,11 +2598,15 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     )
     if conflicts:
         return state.fail_candidate_classification(conflicts)
-    from tradingagents.strategies.runtime_deadline import DEFAULT_MODEL_BUDGET_S, model_budget
+    from tradingagents.strategies.runtime_deadline import model_phase_budget_seconds, current_model_deadline, model_budget
     from tradingagents.strategies.data_sources.request_policy import provider_budget
     import time
-    if state.model_deadline is None:
-        state.model_deadline = time.monotonic() + DEFAULT_MODEL_BUDGET_S
+    allowance = model_phase_budget_seconds(state.owner._base_config)
+    outer_deadline = current_model_deadline()
+    # Retain the tightest absolute ceiling even after an outer context exits.
+    state.model_deadline = min(time.monotonic() + allowance,
+        state.model_deadline if state.model_deadline is not None else float('inf'),
+        outer_deadline if outer_deadline is not None else float('inf'))
     # Reference/volatility/enrichment wall time consumes the original model
     # allowance. No later SDK operation may start on a fresh per-call clock.
     from .decision_clock import prepare_decision_inputs

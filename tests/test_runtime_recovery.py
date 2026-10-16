@@ -415,11 +415,62 @@ def test_four_accelerated_sessions_recover_missed_run_then_preserve_failed_sampl
     assert {item['session']:item['reason_code'] for item in result['incidents']}['2026-10-15']=='accepted_outcome'
 
 
-def test_new_clean_accepted_evidence_resolves_historical_preflight_auth_incident():
+def test_new_clean_accepted_evidence_resolves_historical_preflight_source_access_incident():
     report = {'accounting_valid':True,'staging_complete':True,'evidence_complete':True,
         'sources':{'observations':{'edgar':'success'},'unresolved':[]},
         'source_health_failures':[],'candidate_input_issues':[],
         'preflight_incidents':[{'failures':[{'source':'edgar','http_status':401}]}]}
     assert controller._terminal_report(report)==recovery._result('recovered','complete')
     report['sources']['unresolved']=[{'provider':'edgar','http_status':401}]
-    assert controller._terminal_report(report)==recovery._result('requires_user','auth_required')
+    assert controller._terminal_report(report)==recovery._result('wait_next_session','accepted_outcome')
+
+
+@pytest.mark.parametrize('status', [401, 403])
+def test_source_http_access_failure_is_accepted_degraded_sample_not_model_auth(status):
+    """Retained gen_021 shape: source denial plus incomplete provider coverage."""
+    from copy import deepcopy
+
+    report = {'accounting_valid':True, 'staging_complete':True, 'evidence_complete':True,
+        'sources':{'configuration':'c'*64, 'unresolved':[
+            {'provider':'regulations', 'source':'regulations', 'operation':'get',
+             'http_status':status, 'reason_code':'http_error', 'recovered':False},
+            {'provider':'noaa', 'http_status':None, 'reason_code':'provider_error'},
+            {'provider':'regulations', 'http_status':None, 'reason_code':'batch_failure'}]},
+        'source_health_failures':[{'strategy':'commodity_macro', 'status':'data_failure'}],
+        'candidate_input_issues':[], 'diagnostics':[],
+        'preflight_incidents':[{'failures':[
+            {'source':'regulations', 'http_status':status, 'reason_code':'batch_failure'}],
+            'runtime_failures':[]}]}
+    before = deepcopy(report)
+    assert controller._terminal_report(report) == recovery._result('wait_next_session', 'accepted_outcome')
+    assert report == before  # Historical and current source facts remain intact.
+
+
+@pytest.mark.parametrize('incomplete', ['staging_complete', 'evidence_complete', 'accounting_valid'])
+def test_historical_source_denial_cannot_mask_unrelated_incomplete_recovery_evidence(incomplete):
+    from copy import deepcopy
+
+    report = {'accounting_valid':True, 'staging_complete':True, 'evidence_complete':True,
+        'sources':{'configuration':'c'*64, 'observations':{'regulations':'success'},
+                   'unresolved':[]},
+        'source_health_failures':[], 'candidate_input_issues':[],
+        'preflight_incidents':[{'failures':[
+            {'source':'regulations', 'http_status':403, 'reason_code':'http_error'}]}]}
+    assert controller._terminal_report(report) == recovery._result('recovered', 'complete')
+    report[incomplete] = False
+    before = deepcopy(report)
+    assert controller._terminal_report(report) is None
+    assert report == before
+
+
+def test_strategy_defect_remains_operator_required_despite_source_access_failure():
+    report = {'accounting_valid':True, 'staging_complete':True, 'evidence_complete':True,
+        'sources':{'configuration':'c'*64, 'unresolved':[
+            {'provider':'regulations', 'http_status':403, 'reason_code':'http_error'}]},
+        'source_health_failures':[{'status':'strategy_defect'}]}
+    assert controller._terminal_report(report) == recovery._result('requires_user', 'checkpoint_invalid')
+
+
+def test_explicit_validated_worker_auth_result_remains_operator_required():
+    value = recovery._result('requires_user', 'auth_required')
+    assert controller._worker_result(0, 'RECOVERY_RESULT='+json.dumps(value)) == value

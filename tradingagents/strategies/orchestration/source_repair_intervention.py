@@ -401,13 +401,17 @@ def _publish_sidecar(destination, data):
         temporary = os.open(
             name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o644,
+            0o600,
             dir_fd=descriptor,
         )
         with os.fdopen(temporary, "wb") as stream:
             temporary = None
             stream.write(data)
             stream.flush()
+            # This fixed-schema sanitized sidecar is a cross-UID projection.
+            # os.open's requested mode is masked by a private worker umask;
+            # set the consumer-readable mode explicitly before publication.
+            os.fchmod(stream.fileno(), 0o644)
             os.fsync(stream.fileno())
         os.replace(name, destination.name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
         os.fsync(descriptor)

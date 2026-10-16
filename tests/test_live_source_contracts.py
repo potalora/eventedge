@@ -222,9 +222,12 @@ def test_noaa_direct_summary_uses_one_deadline_for_catalog_and_all_batches(monke
     assert clock[0] == 180  # Fourth station batch cannot start or reset the budget.
     assert [url for url, _, _, _ in calls[2:]] == [noaa.BULK_URL] * 3
     assert exc.value.failed_operations == {state: "timeout" for state in noaa.AG_STATES}
-    # Complete state/day/type samples still cannot excuse an unacquired station batch.
-    assert exc.value.partial_data["states_reporting"] == 3
-    assert exc.value.partial_data["coverage"]["missing"] == {}
+    # A third state's batch finishes exactly at the exhausted deadline and is
+    # withheld; two timely samples cannot excuse unacquired station batches.
+    assert exc.value.partial_data["states_reporting"] == 2
+    assert exc.value.partial_data["coverage"]["missing"] == {
+        "KS": ["2026-10-06:PRCP", "2026-10-06:TMAX", "2026-10-06:TMIN"]
+    }
     assert exc.value.partial_data["coverage"]["catalog_station_count"] == 400
     assert exc.value.partial_data["coverage"]["complete"] is False
 

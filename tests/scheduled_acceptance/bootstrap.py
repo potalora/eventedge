@@ -129,7 +129,13 @@ def _model_text(request):
             document_prompt = json.loads(prompt[prompt.index('{'):])
         except (ValueError,TypeError):
             document_prompt = None
-        if isinstance(document_prompt,dict) and 'recognition_contract' in document_prompt:
+        graphic_model = None
+        if isinstance(document_prompt, dict) and scenario().get('regulation_graphics'):
+            from scheduled_acceptance.regulation_graphics_fixture import model
+            graphic_model = model(document_prompt, scenario().get('fault'))
+        if graphic_model is not None:
+            value, role = graphic_model
+        elif isinstance(document_prompt,dict) and 'recognition_contract' in document_prompt:
             value = {'recognition':_recognition(document_prompt['recognition_contract']),
                 'context_sufficient':True,'material_context_failures':[]}
             role = 'document_verification'
@@ -211,6 +217,11 @@ def _install():
         params = kwargs.get('params') or {}
         safe_params = {key:value for key,value in params.items() if key not in {'api_key','token','key'}}
         trace('http',method=method,url=url,params=safe_params)
+        if current.get('regulation_graphics'):
+            from scheduled_acceptance.regulation_graphics_fixture import response
+            graphic_response = response(fixture, url, params, fault)
+            if graphic_response is not None:
+                return graphic_response
         if fault == 'stall_transport' or (fault == 'stall_transport_worker' and
                 any('transport_worker.py' in arg for arg in sys.argv)):
             trace('stalled_transport',url=url)

@@ -110,6 +110,88 @@ def test_visual_prompts_preserve_newlines_in_all_printed_association_fields():
 
 CAMPAIGN = json.loads((Path(__file__).parent / 'fixtures' / 'bounded_document_campaign_20261015.json').read_text())
 
+SCHEDULED = json.loads((Path(__file__).parent / 'fixtures' / 'bounded_document_scheduled_20261015.json').read_text())
+
+
+def _scheduled_transport_rebinding():
+    """Keep native judgments, rebinding only transport identities for CI bytes."""
+    from test_bounded_document_research import wire, PDF, PNG
+    from tradingagents.strategies.bounded_document_research import prepare_recognition
+    row = SCHEDULED
+    wrapper = json.loads(row['blind_response'])
+    context = row['source_identity']
+    evidence = {key:deepcopy(context[key]) for key in ('policy', 'document_id', 'as_of',
+        'original_pages', 'selected_pages', 'probes', 'residual_failures')}
+    evidence['original'] = wire(PDF, 'application/pdf', context['original']['filename'])
+    attachment = context['attachments'][0]
+    evidence['attachments'] = [wire(PNG, 'image/png', attachment['filename']) | {
+        key:deepcopy(attachment[key]) for key in ('pages', 'render_identity')} | {
+        'source_sha256':evidence['original']['sha256']}]
+    request = prepare_recognition(evidence, session_as_of='2026-10-15')
+    rebound = json.loads(request.context_json)
+    raw = json.loads(row['primary_response'])
+    for recognition in (raw, wrapper['recognition']):
+        recognition.update(original_sha256=rebound['original']['sha256'],
+            request_identity_sha256=rebound['request_identity_sha256'])
+    primary = validate_recognition(json.dumps(raw), request)
+    scope = deepcopy(row['decision_scope'])
+    scope['original_sha256'] = rebound['original']['sha256']
+    return primary, wrapper, request, scope
+
+
+def test_scheduled_native_blind_context_refusal_stays_failed_before_thesis():
+    import hashlib
+    from tradingagents.strategies.document_decision_eligibility import build_automatic_review
+    row = SCHEDULED
+    for stage in ('primary', 'blind'):
+        assert hashlib.sha256(row[stage + '_response'].encode()).hexdigest() == row[stage + '_response_sha256']
+    request = RecognitionRequest('', '', json.dumps(row['source_identity']), ())
+    validate_recognition(row['primary_response'], request)
+    wrapper = json.loads(row['blind_response'])
+    assert wrapper['context_sufficient'] is False
+    assert wrapper['material_context_failures'] == [
+        'The exhibit is dated December 16, 2021; this page provides historical pledge counts only and does not establish current holdings or a current catalyst.',
+        'The selected page does not provide evidence establishing the present relevance of these historical counts.',
+    ]
+    assert row['failure_reason'] == 'invalid_document_decision_context'
+    assert row['thesis_attempt'] is None
+    primary, wrapper, request, scope = _scheduled_transport_rebinding()
+    # This refusal belongs to the blind context gate, before Sol or claim-ID
+    # validation; it must not be converted into a neutral success.
+    with pytest.raises(ValueError, match='^invalid_document_decision_context$'):
+        build_automatic_review(primary, json.dumps(wrapper), request, scope,
+            ticker='CDRE', session_as_of='2026-10-15', verified_at='2026-10-15T22:13:34+00:00',
+            model_provenance=row['blind_model_provenance'])
+
+
+def test_proposed_new_generation_scope_changes_only_historical_verification_purpose():
+    from tradingagents.strategies.document_decision_eligibility import prepare_automatic_verification, build_automatic_review
+    from tradingagents.strategies.bounded_document_research import prepare_thesis
+    row = SCHEDULED
+    old, new = row['decision_scope'], row['proposed_new_generation_scope']
+    assert {key for key in old if old[key] != new[key]} == {'purpose'}
+    assert 'historical pledge security counts' in new['purpose']
+    assert 'December 16, 2021' in new['purpose'] and 'selected page 18' in new['purpose']
+    assert 'printed unit, row and column association' in new['purpose']
+    assert 'no claim about current holdings, current catalysts or present trading relevance' in new['purpose']
+    primary, wrapper, request, scope = _scheduled_transport_rebinding()
+    scope['purpose'] = new['purpose']
+    system, user = prepare_automatic_verification(request, scope)
+    assert json.loads(user)['decision_scope'] == scope
+    assert old['purpose'] not in user
+    assert 'ALL context needed for ONLY the declared bounded purpose' in system
+    # A new purpose does not retroactively accept the retained old false-context
+    # response. Sol receives a separate decision contract only after new review.
+    assert wrapper['context_sufficient'] is False and row['thesis_attempt'] is None
+    with pytest.raises(ValueError, match='^invalid_document_decision_context$'):
+        build_automatic_review(primary, json.dumps(wrapper), request, scope,
+            ticker='CDRE', session_as_of='2026-10-15', verified_at='2026-10-15T22:13:34+00:00',
+            model_provenance=row['blind_model_provenance'])
+    thesis_system, thesis_user = prepare_thesis({}, decision_eligibility={'purpose':new['purpose']})
+    assert new['purpose'] in thesis_user
+    assert 'sufficient for the claimed present decision' in thesis_system
+    assert 'Use neutral for no edge or insufficient material context' in thesis_system
+
 
 @pytest.mark.parametrize('sample', ['4', '5', '6', '7'])
 def test_fixed_native_campaign_keeps_every_matching_and_disagreeing_sample(sample):

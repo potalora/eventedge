@@ -22,8 +22,13 @@ def _attempt(row, original, universe, company_map):
     keys = {'version', 'source_provenance', 'model_provenance', 'model_call_started',
         'response_received', 'response_text', 'response_sha256', 'response_bytes',
         'response_encoding', 'response_over_limit', 'validation_status', 'failure_reason'}
+    graphical = type(attempt) is dict and attempt.get('version') == 'regulation-model-attempt-v2'
+    if graphical:
+        keys |= {'graphics_batches'}
+        if 'graphics_failure' in attempt:
+            keys.add('graphics_failure')
     if (type(attempt) is not dict or set(attempt) != keys
-            or attempt['version'] != 'regulation-model-attempt-v1'
+            or attempt['version'] not in ('regulation-model-attempt-v1', 'regulation-model-attempt-v2')
             or type(attempt['model_provenance']) is not dict
             or attempt['model_provenance'] != (row.get('model_provenance') or {})
             or any(type(attempt[key]) is not bool for key in
@@ -37,12 +42,20 @@ def _attempt(row, original, universe, company_map):
                     attempt['failure_reason'])))):
         raise ValueError('invalid regulatory attempt outcome')
     provenance = attempt['source_provenance']
+    if graphical:
+        from tradingagents.strategies.learning.regulation_graphics_runtime import replay_graphics_attempt
+        if original is None:
+            raise ValueError('unbound regulatory graphics attempt')
+        material = replay_graphics_attempt(original, attempt)
+        if material is None and (provenance is not None or valid or attempt['response_received']):
+            raise ValueError('failed regulatory graphics accepted')
     request = None
     if provenance is not None:
         if original is None or type(provenance) is not dict:
             raise ValueError('unbound regulatory attempt')
         targets = validate_target_bindings(original, provenance['target_bindings'], universe, company_map)
-        request = prepare_request(original, target_bindings=targets, regime_context=provenance['regime_context'])
+        request = prepare_request(original, target_bindings=targets, regime_context=provenance['regime_context'],
+            **({'graphics_batches': attempt['graphics_batches']} if graphical else {}))
         if digest(provenance) != digest(json.loads(request.context.provenance_json)):
             raise ValueError('regulatory attempt request changed')
     elif attempt['model_call_started'] or attempt['model_provenance'] or valid:
@@ -200,7 +213,9 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                     original = graph['corpus'][docid]
                     provenance = assessment['source_provenance']
                     bindings = validate_target_bindings(original, provenance['target_bindings'], universe, company_map)
-                    request = prepare_request(original, target_bindings=bindings, regime_context=provenance['regime_context'])
+                    request = prepare_request(original, target_bindings=bindings, regime_context=provenance['regime_context'],
+                        **({'graphics_batches': row['model_attempt']['graphics_batches']}
+                           if row['model_attempt']['version'] == 'regulation-model-attempt-v2' else {}))
                     response = {key: assessment[key] for key in _RESPONSE_KEYS}
                     expected = validate_assessment(json.dumps(response, allow_nan=False), request.context)
                     if (digest(expected) != digest(assessment) or digest(attempt_assessment) != digest(assessment)
