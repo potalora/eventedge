@@ -14,8 +14,10 @@ REQUEST_VERSION='regulation-graphics-request-v9'
 RECOGNITION_VERSION='regulation-graphics-content-v1'
 REVIEW_VERSION='regulation-graphics-content-review-v1'
 PLAN_VERSION='regulation-graphics-execution-plan-v3'
-SOL_PLAN_VERSION='regulation-graphics-execution-plan-v4'
-SOL_REQUEST_VERSION='regulation-graphics-request-v10'
+SOL_PLAN_VERSION='regulation-graphics-execution-plan-v5'
+SOL_REQUEST_VERSION='regulation-graphics-request-v11'
+_SOL_PRIOR_PLAN_VERSION='regulation-graphics-execution-plan-v4'
+_SOL_PRIOR_REQUEST_VERSION='regulation-graphics-request-v10'
 SOL_MODEL_POLICY='sol_high_v1'
 POLICY='single_target_compact_v1'
 RADIUS=3
@@ -95,6 +97,57 @@ errors is an array of objects with exactly at,issue. at is a location OBJECT or 
 '''+_LOCATION_GUIDANCE
 
 
+# Append only for the finite V11 Sol request. V9/V10 base systems stay frozen.
+_SOL_MECHANICAL_GUIDANCE='''
+Mechanical contract for this request (all source fidelity requirements above still apply):
+Locations refer only to local material. A {"note":i} pointer is valid ONLY when that note's body is in image1,
+including visual literals/relations. Foreign-body notes stay foreign with their local anchors/scopes;
+link local relationships to genuine local consumers, never relabel or duplicate a foreign body.
+Every index is an in-range nonboolean integer. Literal locations must contain nonblank printed text;
+table-cell pointers never address covered merge slots; use their anchors. Regions are ordered and in bounds;
+"last" is allowed only in region through, never region from or span points.
+A table is nonempty with nonempty equal-width rows. Spans cover at least two slots, never overlap,
+have a printed nonnull top-left anchor and null covered slots; do not emit 1x1 spans.
+Header regions contain at least one region. Parent indices are unique, in range and acyclic;
+every child region is contained by a same-axis parent region. Foreign source anchors contain at least
+one local literal anchor. A nonnull anchor marker is an exact nonempty substring of its anchor literal.
+Units require at least one region OR consumer and an exact unit substring at their local literal.
+Every note anchor marker is nonnull and occurs exactly in its local anchor literal. Foreign notes have
+nonempty local anchors/scopes and EMPTY consumer_sources. A local note may lack anchors/scopes only
+with explicit foreign consumer_sources. Each such source's nonempty marker occurs in its quote.
+Each continuation has a unique local cell and at least one before OR after source fragment.
+Every relation to list has 1–64 locations; geometry and endpoint require 2–64. Never invent or duplicate
+endpoints/consumers to reach a minimum. A series needs an axis relation to a visual whose kind is axis.
+Unit, footnote and caption visuals require nonempty relations; other kinds may have empty relations
+when faithful. All actual source material and associations must still be retained.
+List maxima: text 512,tables 128,notes 128,continuations 128,visuals 512,reading_order 768,unresolved 64;
+table rows/columns 512 and spans/headers/units 512 per table; other nested lists 64. Aggregate table slots 512.
+Aggregate structural objects 512 counts spans+headers+units+visuals+visual relations. Aggregate notes/foreign 128
+counts all notes plus foreign-body notes again plus header/continuation source objects plus consumer_sources.
+Aggregate literal chars 64000 counts text+nonnull matrix strings+note bodies+source/consumer-source quotes.
+Every supplied string is nonempty/nonwhitespace and at most 4096 chars; note markers and nonnull anchor
+markers are at most 128. Strict JSON forbids duplicate keys, nonfinite numbers, fences and extra prose.
+Before initial OR corrected output, recheck the entire object graph, not just the feedback path.
+Copy punctuation, spelling, grammar and source typos exactly as printed; never autocorrect them.
+Do not remove material or claim completion to satisfy a bound. Uncertainty remains partial/unresolved.
+'''
+_SOL_REVIEW_GUIDANCE='''
+Local pointer contract: a {"note":i} error location is valid ONLY when that note's body is in image1.
+Use an in-range genuine affected local text/table/cell/visual/local-note location, or null when there is
+no representable local affected location. Cell error locations may address blank or covered slots.
+Error issues are nonempty/nonwhitespace strings of at most 4096 chars; error list at most 64.
+Check source punctuation, spelling, grammar and typos exactly as printed; never autocorrect or excuse
+a mismatch. Review all whole originals and the entire candidate, never only prior feedback.
+'''
+
+
+def _request_system(stage,version):
+    if stage not in ('recognition','review')or version not in (REQUEST_VERSION,_SOL_PRIOR_REQUEST_VERSION,SOL_REQUEST_VERSION):legacy._fail('request')
+    base=_RECOGNITION_SYSTEM if stage=='recognition'else _REVIEW_SYSTEM
+    if version==SOL_REQUEST_VERSION:base+=_SOL_MECHANICAL_GUIDANCE if stage=='recognition'else _SOL_REVIEW_GUIDANCE
+    return base
+
+
 
 class _ContentDefect(ValueError):
     def __init__(self,code,path,detail=None):
@@ -146,11 +199,15 @@ def _metadata(assets):
 
 @legacy._guard
 def prepare_execution_plan(assets,*,model_policy=None):
-    if model_policy is not None and model_policy!=SOL_MODEL_POLICY:legacy._fail('model_policy')
+    return _execution_plan(assets,model_policy,SOL_PLAN_VERSION if model_policy is not None else PLAN_VERSION)
+
+
+def _execution_plan(assets,route,version):
+    if (route is None and version!=PLAN_VERSION)or(route is not None and(route!=SOL_MODEL_POLICY or version not in (_SOL_PRIOR_PLAN_VERSION,SOL_PLAN_VERSION))):legacy._fail('model_policy')
     meta=_metadata(assets)
     targets=[{'target_index':i,'target_id':a['id'],'context_ids':[b['id']for j,b in enumerate(meta)if j!=i and abs(i-j)<=RADIUS]}for i,a in enumerate(meta)]
     plan={'version':PLAN_VERSION,'policy':POLICY,'presentation_policy':ORIGINALS_LABEL_POLICY,'radius':RADIUS,'max_corrections':1,'assets':meta,'targets':targets}
-    if model_policy is not None:plan.update(version=SOL_PLAN_VERSION,model_policy=model_policy)
+    if route is not None:plan.update(version=version,model_policy=route)
     plan['plan_sha256']=legacy._digest(plan)
     sizes={a['id']:a['size_bytes']for a in meta}
     for t in targets:
@@ -167,7 +224,7 @@ def model_policy(plan):
         if route!=SOL_MODEL_POLICY:legacy._fail('model_policy')
         keys.add('model_policy')
     legacy._shape(plan,keys)
-    if (plan['version']!=(SOL_PLAN_VERSION if route else PLAN_VERSION)or plan['policy']!=POLICY
+    if (plan['version']not in ((_SOL_PRIOR_PLAN_VERSION,SOL_PLAN_VERSION)if route else(PLAN_VERSION,))or plan['policy']!=POLICY
         or plan['presentation_policy']!=ORIGINALS_LABEL_POLICY or type(plan['radius'])is not int or plan['radius']!=RADIUS
         or type(plan['max_corrections'])is not int or plan['max_corrections']!=1
         or plan['plan_sha256']!=legacy._digest({k:v for k,v in plan.items()if k!='plan_sha256'})):legacy._fail('plan')
@@ -190,16 +247,21 @@ def model_policy(plan):
     return route
 
 
+def _plan_request_version(plan):
+    model_policy(plan)
+    return {PLAN_VERSION:REQUEST_VERSION,_SOL_PRIOR_PLAN_VERSION:_SOL_PRIOR_REQUEST_VERSION,SOL_PLAN_VERSION:SOL_REQUEST_VERSION}[plan['version']]
+
+
 def _request_model_policy(c):
     route=c.get('model_policy')
     if 'model_policy'in c:
-        if route!=SOL_MODEL_POLICY or c.get('version')!=SOL_REQUEST_VERSION:legacy._fail('model_policy')
+        if route!=SOL_MODEL_POLICY or c.get('version')not in (_SOL_PRIOR_REQUEST_VERSION,SOL_REQUEST_VERSION):legacy._fail('model_policy')
     elif c.get('version')!=REQUEST_VERSION:legacy._fail('request')
     return route
 
 
 def _plan(assets,plan):
-    if legacy._canonical(plan)!=legacy._canonical(prepare_execution_plan(assets,model_policy=model_policy(plan))):legacy._fail('plan')
+    if legacy._canonical(plan)!=legacy._canonical(_execution_plan(assets,model_policy(plan),plan['version'])):legacy._fail('plan')
     return plan
 
 def _feedback(correction):
@@ -222,12 +284,12 @@ def _make(assets,plan,index,recognition=None,correction=None,*,_admission=True):
     c={'version':REQUEST_VERSION,'stage':'recognition'if recognition is None else'review','plan_sha256':plan['plan_sha256'],'target_index':index,
        'target':meta[0],'context_assets':meta[1:],'presentation_policy':ORIGINALS_LABEL_POLICY,
        'recognition_receipt_sha256':None if recognition is None else recognition['receipt_sha256'],'correction':correction}
-    if model_policy(plan)is not None:c.update(version=SOL_REQUEST_VERSION,model_policy=SOL_MODEL_POLICY)
+    if model_policy(plan)is not None:c.update(version=_plan_request_version(plan),model_policy=SOL_MODEL_POLICY)
     c['request_identity_sha256']=legacy._digest(c)
     user={'task':'Read labelled image1 completely; context originals are labelled2 onward.'}
     if recognition is not None:user={'recognition':recognition['result']}
     elif correction is not None:user['correction']=_feedback(correction)
-    system=_RECOGNITION_SYSTEM if recognition is None else _REVIEW_SYSTEM
+    system=_request_system(c['stage'],c['version'])
     user=legacy._canonical(user)
     q=legacy.GraphicsRequest(system,user,legacy._canonical(c),inputs)
     if _admission:_admit(q)
@@ -252,7 +314,7 @@ def _checked_request(q,recognition=None):
     if (c['presentation_policy']!=ORIGINALS_LABEL_POLICY or c['stage']!=('recognition'if recognition is None else'review')
         or c['recognition_receipt_sha256']!=(None if recognition is None else recognition['receipt_sha256'])
         or c['request_identity_sha256']!=legacy._digest({k:v for k,v in c.items()if k!='request_identity_sha256'})):legacy._fail('request')
-    system=_RECOGNITION_SYSTEM if recognition is None else _REVIEW_SYSTEM
+    system=_request_system(c['stage'],c['version'])
     user={'task':'Read labelled image1 completely; context originals are labelled2 onward.'}
     if recognition is not None:
         user={'recognition':recognition['result']}

@@ -28,11 +28,11 @@ def _memo_key(analyzer,assets,plan):
         if type(value)is dict:return {k:public(v)for k,v in value.items()if k.lower()not in {'api_key','chatgpt_plan_auth_path','auth_path','token','secret','password','headers','base_url'}}
         if type(value)is list:return [public(v)for v in value]
         return value
-    route=contract.model_policy(plan)
-    policy={'profile':public(analyzer.config),'request':contract.SOL_REQUEST_VERSION if route else contract.REQUEST_VERSION,'plan':plan,
+    route=contract.model_policy(plan);version=contract._plan_request_version(plan)
+    policy={'profile':public(analyzer.config),'request':version,'plan':plan,
         'stage_tuple':{'model':'gpt-6.1-sol'if route else'gpt-6-luna','effort':'high','role':'bounded',
             'billing':'chatgpt_plan','max_tokens':4096,'temperature':0.0,'max_call_seconds':graphics_call_seconds(analyzer.config)},
-        'recognition_system':contract._RECOGNITION_SYSTEM,'review_system':contract._REVIEW_SYSTEM,
+        'recognition_system':contract._request_system('recognition',version),'review_system':contract._request_system('review',version),
         'global_slots':GLOBAL_STAGE_SLOTS,'workers':TARGET_WORKERS,'max_corrections':1}
     return memo,(*key,'compact-complete-partition-v1',current_model_deadline(),legacy._digest(policy))
 

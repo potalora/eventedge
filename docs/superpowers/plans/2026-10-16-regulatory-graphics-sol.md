@@ -13,7 +13,7 @@
 - Recognition and independent graphics review use `gpt-6.1-sol`, `high`, bounded role, logical max tokens 4096 and temperature 0.0. Base autoresearch remains `gpt-6-luna` high; thesis/committee routing is unchanged.
 - No paid API fallback, new dependency, source truncation, relaxed fidelity validation, relabelled failure, or old-receipt migration.
 - Preserve one correction, at most four native stages per target, 240 seconds per call, four target workers per document, eight global stages and the same absolute 9000-second phase deadline.
-- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. Sol uses plan V4 and request V10 with the explicit model policy bound into their hashes.
+- Retain V3/V9 Luna plan/request bytes and legacy V1–V5 behavior. New Sol plans use V5/request V11; retain exact replay of the failed V4/V10 attempt. The explicit model policy and fixed prompt pair are bound into plan/request hashes.
 - Keep old generations and pending paper intents unchanged. Deploy behavior changes only into a fresh generation after exact-candidate CI and native evidence pass.
 
 ## Shared interfaces
@@ -30,6 +30,8 @@ stream_plan_response(..., regulation_graphics_model_policy=None)
 ```
 
 The Sol plan and request context add `model_policy: sol_high_v1`. Transport payloads and native provenance use `regulation_graphics_model_policy: sol_high_v1`. No local route marker is sent as an unsupported provider API field. The marker is rejected when orphaned, unknown, or incompatible with the required profile, model, effort, originals, billing mode or limits.
+
+The first native V10 attempt failed on unstated geometry cardinality and retained a source punctuation error. A finite whole-contract audit also found implicit foreign-note pointer restrictions. V11 adds the existing mechanical requirements to the Sol prompts, preserving all validators and budgets. Historical V10 responses stay unchanged; their exact failed chain remains replayable. New tests cover the observed structural defects, fixed version/prompt pairing and cross-version reuse refusal before a new sealed native attempt.
 
 ## Task 1: Graphics contract and analyzer routing
 
