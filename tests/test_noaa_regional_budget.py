@@ -1,4 +1,5 @@
 """Offline full-roster NOAA acquisition under a deterministic wall clock."""
+from collections import deque
 from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
@@ -131,8 +132,44 @@ def test_terminal_bulk_failure_keeps_retries_and_incomplete_summary(regional_tra
     assert caught.value.partial_data['heat_stress_days'] is None
 
 
+def _record_rate_admissions(monkeypatch):
+    """Observe exact limiter reservations inside its existing shared lock."""
+    admitted = {}
+
+    class RecordedHistory(deque):
+        def __init__(self, key):
+            super().__init__()
+            self.key = key
+            admitted[key] = []
+
+        def append(self, timestamp):
+            admitted[self.key].append(timestamp)
+            super().append(timestamp)
+
+    class Histories(dict):
+        def setdefault(self, key, default):
+            if key not in self:
+                self[key] = RecordedHistory(key)
+            return self[key]
+
+    monkeypatch.setattr(request_policy, '_HISTORY', Histories())
+    return admitted
+
+
+def _assert_shared_noaa_admissions(admitted, total):
+    assert len(admitted) == 2
+    assert {(key[0], key[2], key[3]) for key in admitted} == {
+        ('noaa', 5, 1), ('noaa', 10000, 86400)}
+    assert len({key[1] for key in admitted}) == 1  # One shared clock/history domain.
+    for (_, _, count, window), timestamps in admitted.items():
+        assert len(timestamps) == total
+        assert all(sum(start <= other < start + window for other in timestamps) <= count
+                   for start in timestamps), timestamps
+
+
 def test_sixteen_inflight_batches_keep_shared_five_per_second_limit(monkeypatch):
-    """Real threads overlap slow calls while the physical request starts pace."""
+    """Sixteen slow calls overlap; both shared admission windows stay exact."""
+    admitted = _record_rate_admissions(monkeypatch)
     lock, release = Lock(), Event()
     started, active, peak = [], [0], [0]
     stations = [f'US{i:09d}' for i in range(1600)]
@@ -163,8 +200,57 @@ def test_sixteen_inflight_batches_keep_shared_five_per_second_limit(monkeypatch)
     noaa.NOAASource().fetch_region_daily('2026-09-09', '2026-10-15')
     assert len(started) == peak[0] == 16
     assert request_policy.PROVIDER_LIMITS['noaa'] == ((5, 1), (10000, 86400))
-    assert all(sum(start <= other < start + 1 for other in started) <= 5
-               for start in started)
+    # The limiter reserves before transport dispatch. Thread scheduling can delay
+    # entry after reservation, so transport timestamps cannot prove admission
+    # windows. Observe the actual locked history, including both catalog calls.
+    _assert_shared_noaa_admissions(admitted, total=18)
+
+
+def test_dispatch_pause_does_not_change_shared_admission_accounting(monkeypatch):
+    admitted = _record_rate_admissions(monkeypatch)
+    now, entries, reservations = [0.0], [], []
+    original_slot = request_policy._slot
+
+    def slot_then_pause(budget):
+        original_slot(budget)
+        reservations.append(now[0])
+        if len(reservations) == 1:
+            now[0] += .01  # Deterministic scheduler pause before transport entry.
+
+    def transport(*args, **kwargs):
+        entries.append(now[0])
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(request_policy, '_slot', slot_then_pause)
+    with request_policy.provider_budget('noaa', 10, clock=lambda: now[0],
+            sleep=lambda delay: now.__setitem__(0, now[0] + delay), max_attempts=1):
+        for _ in range(6):
+            request_policy.provider_request('noaa', 'GET', 'offline', transport=transport)
+    _assert_shared_noaa_admissions(admitted, total=6)
+    assert reservations == [0, .01, .01, .01, .01, 1]
+    assert entries == [.01, .01, .01, .01, .01, 1]
+    # All six dispatches fit this interval despite legal five-per-second slots.
+    assert all(.01 <= entry < 1.01 for entry in entries)
+
+
+def test_shared_daily_quota_exhaustion_prevents_transport(monkeypatch):
+    monkeypatch.setattr(request_policy, '_HISTORY', {})
+    clock = lambda: 0.0
+    day_history = deque(float(-2000 + index // 5) for index in range(9999))
+    request_policy._HISTORY[('noaa', clock, 10000, 86400)] = day_history
+    entries = []
+
+    def transport(*args, **kwargs):
+        entries.append(True)
+        return SimpleNamespace(status_code=200)
+
+    with request_policy.provider_budget('noaa', 1, clock=clock, max_attempts=1):
+        request_policy.provider_request('noaa', 'GET', 'offline', transport=transport)
+        with pytest.raises(SourceFetchError) as caught:
+            request_policy.provider_request('noaa', 'GET', 'offline', transport=transport)
+    assert caught.value.reason_code == 'timeout'
+    assert entries == [True]
+    assert len(day_history) == 10000
 
 
 def test_final_complete_bulk_body_after_deadline_is_not_accepted(regional_transport):

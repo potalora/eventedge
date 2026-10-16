@@ -235,9 +235,12 @@ def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=(
             if before_attempt is not None:
                 before_attempt()
             _slot(budget)
+            remaining = budget.deadline - budget.clock()
+            if remaining <= 0:
+                raise SourceFetchError("Provider acquisition deadline exhausted", reason_code="timeout")
             attempts += 1
             response = None
-            response = attempt(budget.deadline - budget.clock())
+            response = attempt(remaining)
             status = getattr(response, "status_code", None)
             if isinstance(status, int) and not 200 <= status < 300:
                 if status in return_statuses:

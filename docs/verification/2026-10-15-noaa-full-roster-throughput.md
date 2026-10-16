@@ -32,8 +32,8 @@ after regional collection, and before accepting the completed summary. A late
 sample remains incomplete and its actionable weather metrics are withheld.
 All 79 original batches, the complete inventory selection, 100-station batch
 bound, 180-second total acquisition deadline, shorter parent deadlines,
-transient retries, five physical request starts per second and 10,000 daily
-request starts are preserved. Measurement quality, contiguous observation
+transient retries, and the shared rolling admission limits of five request
+slots per second and 10,000 per day are preserved. Measurement quality, contiguous observation
 window, seven-day freshness limit, state-day arithmetic means, and incomplete
 coverage rejection retain their existing definitions. Concurrency improves
 throughput for slow healthy responses; persistent upstream failures still fail.
@@ -49,9 +49,28 @@ the initial eight-worker candidate; each now rejects those late results. The
 full-roster test verifies all 7,877 station identities in exactly 79 batches, complete ten-state samples, and the contiguous thirty-day window.
 Separate tests retain shorter-parent and terminal-retry failures. A real-thread
 transport test verifies sixteen simultaneously outstanding requests while the
-shared rolling limiter permits at most five bulk starts in one second.
+shared rolling limiter admits at most five requests per second and 10,000 per
+day, counting the station catalog and inventory as well as bulk requests. The
+test records the actual history append under the limiter lock, rather than a
+later transport callback timestamp. A deterministic ten-millisecond pause
+between reservation and dispatch demonstrates why otherwise compliant slots
+can appear as six callback entries in a sliding second. Operating-system
+scheduling, HTTP setup and network delivery can shift actual dispatch or server
+arrival times; this limiter does not guarantee their exact rolling counts. The
+provider quota remains five requests per second and 10,000 per day. The test
+correction adds no tolerance or quota increase; it corrects the measured
+boundary and leaves that dispatch-jitter limitation explicit. An exhausted
+daily admission quota is separately checked to prevent another transport call.
 
-Validation: 151 focused tests passed across `test_noaa_regional_budget.py`,
+The shared request policy also rechecks the remaining budget after admission,
+before invoking HTTP or SDK transport. A scheduling pause that consumes the
+remaining budget now prevents dispatch instead of passing a nonpositive value
+to a minimum socket timeout. Regression cases cover exact expiry, elapsed
+expiry and an unchanged positive timeout. This remains a cooperative check;
+it cannot prevent operating-system suspension after the check itself.
+
+Validation: 174 focused tests passed across `test_noaa_regional_budget.py`,
+`test_request_policy.py`,
 `test_source_audit_repairs.py`, `test_environmental_contract_repairs.py`,
 `test_live_source_contracts.py`, `test_gen005_fixes.py`, and
 `test_source_reliability_pipeline.py`. These offline results do not establish

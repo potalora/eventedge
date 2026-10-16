@@ -121,6 +121,47 @@ def test_exhausted_deadline_never_starts_late_retry(monkeypatch):
     assert 'secret' not in str(exc.value)
 
 
+@pytest.mark.parametrize('elapsed', [1.0, 2.0])
+@pytest.mark.parametrize('kind', ['http', 'sdk'])
+def test_expiry_after_rate_admission_prevents_dispatch(monkeypatch, elapsed, kind):
+    p, clock, calls, events = policy(), Clock(), [], []
+    original_slot = p._slot
+
+    def admitted_then_delayed(budget):
+        original_slot(budget)
+        clock.now = elapsed
+
+    monkeypatch.setattr(p, '_slot', admitted_then_delayed)
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: calls.append(kw) or response())
+    with p.provider_budget('test', 1.0, clock=clock, sleep=clock.sleep,
+                           limits=(), max_attempts=1, diagnostics=events):
+        with pytest.raises(SourceFetchError) as caught:
+            if kind == 'http':
+                p.provider_request('test', 'GET', 'https://offline.test')
+            else:
+                p.provider_call('test', 'operation', lambda: calls.append(True))
+        assert p.current_provider_deadline('test') == 1.0
+    assert calls == []
+    assert caught.value.reason_code == 'timeout' and caught.value.attempts == 0
+    assert events[-1]['reason_code'] == 'timeout' and events[-1]['attempts'] == 0
+
+
+def test_positive_budget_after_rate_admission_keeps_remaining_timeout(monkeypatch):
+    p, clock, calls = policy(), Clock(), []
+    original_slot = p._slot
+
+    def admitted_then_delayed(budget):
+        original_slot(budget)
+        clock.now = .25
+
+    monkeypatch.setattr(p, '_slot', admitted_then_delayed)
+    monkeypatch.setattr(requests, 'get', lambda *a, **kw: calls.append(kw) or response())
+    with p.provider_budget('test', 1.0, clock=clock, sleep=clock.sleep, limits=(), max_attempts=1):
+        assert p.provider_request('test', 'GET', 'https://offline.test').status_code == 200
+        assert p.current_provider_deadline('test') == 1.0
+    assert calls == [{'timeout': .75}]
+
+
 def test_sdk_retries_typed_transient_only_and_preserves_partial():
     p=policy()
     clock=Clock()
