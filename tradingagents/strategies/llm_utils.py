@@ -107,6 +107,7 @@ def call_analysis_model(
     response_observer=None,
     document_inputs=None,
     max_call_seconds=None,
+    regulation_graphics_model_policy=None,
 ) -> str:
     """Bound real SDK transport including startup, retries and response reading.
 
@@ -114,14 +115,24 @@ def call_analysis_model(
     Native supported clients run in a disposable process, with SDK retries off.
     """
     from .chatgpt_plan_client import ChatGPTPlanClient
+    graphics_route = regulation_graphics_model_policy is not None
+    if graphics_route:
+        if not isinstance(client, ChatGPTPlanClient):
+            raise ValueError('invalid_regulation_graphics_model_policy')
+        from .plan_document_inputs import encode_document_inputs
+        from .regulation_graphics_route import validate_regulation_graphics_route
+        encoded_documents = encode_document_inputs(document_inputs)
+        validate_regulation_graphics_route(model_policy=regulation_graphics_model_policy,
+            model=model, effort=effort, document_inputs=encoded_documents,
+            max_tokens=max_tokens, temperature=temperature, max_call_seconds=max_call_seconds)
     if max_call_seconds is not None:
         if type(max_call_seconds) not in (int, float) or max_call_seconds not in (120, 240):
             raise ValueError("invalid_model_call_cap")
-        if max_call_seconds == 240 and (not isinstance(client, ChatGPTPlanClient)
+        if max_call_seconds == 240 and not graphics_route and (not isinstance(client, ChatGPTPlanClient)
                 or model != LUNA_MODEL or effort != 'high' or temperature != 0.0
                 or document_inputs is None):
             raise ValueError("invalid_model_call_cap")
-    if document_inputs is not None:
+    if document_inputs is not None and not graphics_route:
         if not isinstance(client, ChatGPTPlanClient) or model != LUNA_MODEL:
             raise ValueError("document_inputs_require_luna_plan")
         from .plan_document_inputs import encode_document_inputs
@@ -131,10 +142,15 @@ def call_analysis_model(
                    temperature=temperature, effort=effort)
     if document_inputs is not None:
         request["document_inputs"] = encoded_documents
+    if graphics_route:
+        request['regulation_graphics_model_policy'] = regulation_graphics_model_policy
+        request['max_call_seconds'] = max_call_seconds
     if provenance is not None:
         provenance.clear()
         provenance.update(configured_model=model, returned_model=None, returned_revision=None,
                           identity_status="unpinned", response_id=None, reasoning_effort=effort)
+        if graphics_route:
+            provenance['regulation_graphics_model_policy'] = regulation_graphics_model_policy
     # Include supported SDK subclasses; injected call primitives are not SDKs.
     native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
     module = ("chatgpt_plan" if isinstance(client, ChatGPTPlanClient) else

@@ -9,11 +9,18 @@ from tradingagents.strategies.data_sources.regulation_evidence import digest
 from .regulation_inputs import validate_regulation_policy
 
 
-def _attempt(row, original, universe, company_map, assessment_policy=None, graphics_execution_policy=None, prompt_budget_policy=None):
+def _attempt(row, original, universe, company_map, assessment_policy=None, graphics_execution_policy=None, prompt_budget_policy=None, regulation_graphics_model_policy=None):
     """Rebuild a retained request and bind its actual bounded response text."""
     from tradingagents.strategies.data_sources.regulation_assessment import (
         MAX_RESPONSE_BYTES, prepare_request, validate_assessment, validate_target_bindings,
     )
+    from ..data_sources.regulation_prompt_budget import graphics_model_policy
+    declared_model_policy = graphics_model_policy({
+        **({'regulation_graphics_model_policy': regulation_graphics_model_policy}
+            if regulation_graphics_model_policy is not None else {}),
+        'graphics_execution_policy': graphics_execution_policy,
+        'regulation_prompt_budget_policy': prompt_budget_policy,
+        'regulation_evidence_policy': 'complete_document_text_v1'})
     attempt = row.get('model_attempt')
     if attempt is None:
         if row.get('assessment') is not None or row.get('model_provenance'):
@@ -43,6 +50,10 @@ def _attempt(row, original, universe, company_map, assessment_policy=None, graph
                 ('model_call_started', 'response_received', 'response_over_limit'))
             or attempt['validation_status'] not in ('failed', 'validated')):
         raise ValueError('invalid regulatory model attempt')
+    if planned and attempt['graphics_plan'] is not None:
+        from ..data_sources.regulation_graphics_grid import model_policy
+        if model_policy(attempt['graphics_plan']) != declared_model_policy:
+            raise ValueError('regulatory graphics model policy differs')
     valid = attempt['validation_status'] == 'validated'
     if ((valid and attempt['failure_reason'] is not None)
             or (not valid and (type(attempt['failure_reason']) is not str
@@ -189,6 +200,7 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
         assessment_policy = config.get('regulation_assessment_policy')
         graphics_execution_policy = config.get('graphics_execution_policy')
         prompt_budget_policy = config.get('regulation_prompt_budget_policy')
+        regulation_graphics_model_policy = config.get('regulation_graphics_model_policy')
         company_map = data.get('edgar', {}).get('company_tickers', {})
         snapshot = data.get('equity_universe', {}).get('snapshot')
         # An independent SEC outage can leave no company map, including the
@@ -234,7 +246,8 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                     seen.add(docid)
                     assessment = row.get('assessment')
                     attempt_assessment = _attempt(row, graph['corpus'].get(docid), universe, company_map,
-                        assessment_policy, graphics_execution_policy, prompt_budget_policy)
+                        assessment_policy, graphics_execution_policy, prompt_budget_policy,
+                        regulation_graphics_model_policy)
                     if assessment is None:
                         if (row.get('analysis_status') != 'failed' or row.get('journal_only') is not True
                                 or not isinstance(row.get('analysis_failure_reason'), str)

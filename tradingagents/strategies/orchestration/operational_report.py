@@ -907,16 +907,18 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                     profile_ar = profile.get('autoresearch', {})
                     if (profile_ar.get('regulation_assessment_policy') is not None
                             or 'graphics_execution_policy' in profile_ar
-                            or 'regulation_prompt_budget_policy' in profile_ar):
+                            or 'regulation_prompt_budget_policy' in profile_ar
+                            or 'regulation_graphics_model_policy' in profile_ar):
                         from ..data_sources.regulation_assessment import configured as assessment_configured
                         assessment_configured(profile_ar)
                         if (profile_ar.get('regulation_evidence_policy') != expected_regulation['policy']
                                 or profile_ar.get('regulation_retrieval_policy') != expected_regulation.get('retrieval_policy')):
                             raise ValueError('frozen regulation policy differs from source')
-                    if 'graphics_execution_policy' in profile_ar:
+                    if 'graphics_execution_policy' in profile_ar or 'regulation_graphics_model_policy' in profile_ar:
                         from ..data_sources.regulation_graphics_grid import configured as graphics_configured
                         graphics_configured(profile)
-                    for key in ('regulation_assessment_policy', 'graphics_execution_policy', 'regulation_prompt_budget_policy'):
+                    for key in ('regulation_assessment_policy', 'graphics_execution_policy', 'regulation_prompt_budget_policy',
+                            'regulation_graphics_model_policy'):
                         if profile_ar.get(key) is not None:
                             assessment_config[key] = profile_ar[key]
                 report['sources']['regulation_analysis_coverage'] = validate_regulation_health(

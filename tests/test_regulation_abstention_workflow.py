@@ -8,6 +8,7 @@ import pytest
 from test_source_reliability_pipeline import pipeline,run_campaign,accepted_input_bytes
 from test_regulation_evidence import fixture as rule_fixture,DOC
 from test_regulation_abstention import POLICY
+from regulation_plan_fixtures import inert_plan_identity
 
 pytestmark=pytest.mark.scheduled_acceptance
 
@@ -15,7 +16,7 @@ pytestmark=pytest.mark.scheduled_acceptance
 @pytest.mark.parametrize('runtime_policy',['legacy','compact_budget'])
 @pytest.mark.parametrize('profile_damage',['bytes','missing_evidence','wrong_retrieval'])
 @pytest.mark.parametrize('disposition',['issuer','supporting'])
-def test_abstention_completes_all_books_honest_report_and_frozen_replay(pipeline,monkeypatch,profile_damage,disposition,runtime_policy):
+def test_abstention_completes_all_books_honest_report_and_frozen_replay(pipeline,monkeypatch,profile_damage,disposition,runtime_policy,inert_plan_identity):
     fixture,owner,config,repo=pipeline
     _,detail,bodies=rule_fixture(attachment=True)
     if disposition=='supporting':
@@ -66,6 +67,7 @@ def test_abstention_completes_all_books_honest_report_and_frozen_replay(pipeline
     if runtime_policy=='compact_budget':
         from test_regulation_prompt_budget_integration import config as compact_config
         profile=compact_config()
+        profile['autoresearch']['chatgpt_plan_auth_path']=inert_plan_identity.auth_path
         for target in(config,owner._base_config,*[c['engine'].config for c in owner.cohorts]):
             target['autoresearch'].update(profile['autoresearch'])
             target.setdefault('execution',{}).update(profile['execution'])
@@ -77,6 +79,7 @@ def test_abstention_completes_all_books_honest_report_and_frozen_replay(pipeline
     result,wire,report=run_campaign(pipeline,fixture.session)
     assert result['outcome']=='clean' and report['accounting_valid'] and report['staging_complete']
     assert len(report['cohorts'])==16 and fixture.model_calls['regulation_abstention']==1
+    assert bool(inert_plan_identity.reads) is (runtime_policy=='compact_budget')
     coverage=report['sources']['regulation_analysis_coverage']
     assert coverage['analysis_complete'] and all(row['abstained_documents']==1 for row in coverage['horizons'])
     assert coverage['assessment_complete'] and not coverage['decision_evidence_complete']

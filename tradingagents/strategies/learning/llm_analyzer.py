@@ -249,7 +249,7 @@ class LLMAnalyzer:
             f"Factor regime into your conviction level."
         )
 
-    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis", document_inputs=None, max_call_seconds=None) -> str:
+    def _call_llm(self, system: str, user: str, max_tokens: int = 4096, *, role: str = "thesis", document_inputs=None, max_call_seconds=None, regulation_graphics_model_policy=None) -> str:
         """Make a single LLM call. Returns response text or empty string."""
         from tradingagents.strategies.candidate_response_reuse import reused_candidate_response, retain_candidate_response
         from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
@@ -257,6 +257,32 @@ class LLMAnalyzer:
         from tradingagents.strategies.runtime_deadline import ModelDeadlineExceeded, ModelTransportError, model_timeout
         model = self._model_name if role == "bounded" else self._thesis_model
         effort = self._effort if role == "bounded" else self._thesis_effort
+        if regulation_graphics_model_policy is not None:
+            # Validate the complete frozen profile and call before any client/auth
+            # selection. Resolve only local variables; even the fork stays Luna.
+            self.last_research_request = None
+            self.last_call_response = {'received': False, 'text': None}
+            self.last_call_provenance = {}
+            self.last_call_transport_failure = None
+            self.last_call_failure = ""
+            try:
+                from tradingagents.strategies.data_sources import regulation_graphics_grid as graphics
+                from tradingagents.strategies.plan_document_inputs import encode_document_inputs
+                from tradingagents.strategies.regulation_graphics_route import validate_regulation_graphics_route
+                if (graphics.configured(self.config) != graphics.POLICY
+                        or self.config['autoresearch'].get('regulation_graphics_model_policy') != regulation_graphics_model_policy
+                        or role != 'bounded' or self._model_name != 'gpt-6-luna' or self._effort != 'high'
+                        or self._thesis_model != 'gpt-6.1-sol' or self._thesis_effort != 'high'):
+                    raise ValueError('invalid_regulation_graphics_model_policy')
+                encoded = encode_document_inputs(document_inputs)
+                validate_regulation_graphics_route(model_policy=regulation_graphics_model_policy,
+                    model='gpt-6.1-sol', effort=effort, document_inputs=encoded, max_tokens=max_tokens,
+                    temperature=self._temperature, max_call_seconds=max_call_seconds)
+                model = 'gpt-6.1-sol'
+            except Exception:
+                self.last_call_failure = "analysis_unavailable"
+                logger.error("LLM graphics route admission failed")
+                return ""
         from tradingagents.strategies.orchestration.research_resilience import configured as resilience_configured
         from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
         self.last_research_request = None
@@ -272,6 +298,8 @@ class LLMAnalyzer:
         self.last_call_provenance = {"configured_model": model, "returned_model": None,
                                      "returned_revision": None, "identity_status": "unpinned",
                                      "response_id": None, "reasoning_effort": effort, "role": role}
+        if regulation_graphics_model_policy is not None:
+            self.last_call_provenance['regulation_graphics_model_policy'] = regulation_graphics_model_policy
         # Attachment identity is not part of the legacy candidate memo key.
         # Clear pending state as well: a prior plain request must not be committed
         # accidentally after a document call (including a failed call).
@@ -330,6 +358,8 @@ class LLMAnalyzer:
                 response_observer=observed_response,
                 **({"document_inputs": document_inputs} if document_inputs is not None else {}),
                 **({"max_call_seconds": max_call_seconds} if max_call_seconds is not None else {}),
+                **({"regulation_graphics_model_policy": regulation_graphics_model_policy}
+                   if regulation_graphics_model_policy is not None else {}),
             )
             self.last_call_provenance["role"] = role
             if document_inputs is None:

@@ -8,12 +8,15 @@ import json
 from copy import deepcopy
 from . import regulation_graphics as legacy
 from tradingagents.strategies.plan_document_inputs import (
-    PlanDocumentInput,encode_document_inputs,MAX_DOCUMENT_INPUTS,MAX_TOTAL_DOCUMENT_BYTES,ORIGINALS_LABEL_POLICY,
+    PlanDocumentInput,encode_document_inputs,document_input_metadata,MAX_DOCUMENT_INPUTS,MAX_TOTAL_DOCUMENT_BYTES,ORIGINALS_LABEL_POLICY,
 )
 REQUEST_VERSION='regulation-graphics-request-v9'
 RECOGNITION_VERSION='regulation-graphics-content-v1'
 REVIEW_VERSION='regulation-graphics-content-review-v1'
 PLAN_VERSION='regulation-graphics-execution-plan-v3'
+SOL_PLAN_VERSION='regulation-graphics-execution-plan-v4'
+SOL_REQUEST_VERSION='regulation-graphics-request-v10'
+SOL_MODEL_POLICY='sol_high_v1'
 POLICY='single_target_compact_v1'
 RADIUS=3
 MAX_TARGETS=128
@@ -121,6 +124,8 @@ def configured(config):
     if type(config)is not dict:legacy._fail('policy')
     ar=config.get('autoresearch',{})
     if type(ar)is not dict:legacy._fail('policy')
+    if 'regulation_graphics_model_policy'in ar:
+        if ar['regulation_graphics_model_policy']!=SOL_MODEL_POLICY or 'graphics_execution_policy'not in ar:legacy._fail('model_policy')
     if 'graphics_execution_policy'not in ar:return None
     from tradingagents.strategies.runtime_deadline import _full_graphics_policy
     if (ar.get('graphics_execution_policy')!=POLICY or ar.get('regulation_evidence_policy')!='complete_document_text_v1'
@@ -140,10 +145,12 @@ def _metadata(assets):
     return result
 
 @legacy._guard
-def prepare_execution_plan(assets):
+def prepare_execution_plan(assets,*,model_policy=None):
+    if model_policy is not None and model_policy!=SOL_MODEL_POLICY:legacy._fail('model_policy')
     meta=_metadata(assets)
     targets=[{'target_index':i,'target_id':a['id'],'context_ids':[b['id']for j,b in enumerate(meta)if j!=i and abs(i-j)<=RADIUS]}for i,a in enumerate(meta)]
     plan={'version':PLAN_VERSION,'policy':POLICY,'presentation_policy':ORIGINALS_LABEL_POLICY,'radius':RADIUS,'max_corrections':1,'assets':meta,'targets':targets}
+    if model_policy is not None:plan.update(version=SOL_PLAN_VERSION,model_policy=model_policy)
     plan['plan_sha256']=legacy._digest(plan)
     sizes={a['id']:a['size_bytes']for a in meta}
     for t in targets:
@@ -151,8 +158,48 @@ def prepare_execution_plan(assets):
         if len(ids)>MAX_DOCUMENT_INPUTS or sum(sizes[x]for x in ids)>MAX_TOTAL_DOCUMENT_BYTES:legacy._fail('asset_limit')
     return plan
 
+@legacy._guard
+def model_policy(plan):
+    if type(plan)is not dict:legacy._fail('plan')
+    route=plan.get('model_policy')
+    keys={'version','policy','presentation_policy','radius','max_corrections','assets','targets','plan_sha256'}
+    if 'model_policy'in plan:
+        if route!=SOL_MODEL_POLICY:legacy._fail('model_policy')
+        keys.add('model_policy')
+    legacy._shape(plan,keys)
+    if (plan['version']!=(SOL_PLAN_VERSION if route else PLAN_VERSION)or plan['policy']!=POLICY
+        or plan['presentation_policy']!=ORIGINALS_LABEL_POLICY or type(plan['radius'])is not int or plan['radius']!=RADIUS
+        or type(plan['max_corrections'])is not int or plan['max_corrections']!=1
+        or plan['plan_sha256']!=legacy._digest({k:v for k,v in plan.items()if k!='plan_sha256'})):legacy._fail('plan')
+    meta=plan['assets'];seen=set()
+    if type(meta)is not list or not 1<=len(meta)<=MAX_TARGETS:legacy._fail('plan')
+    for m in meta:
+        legacy._shape(m,{'id','filename','sha256','size_bytes','context'})
+        if (type(m['id'])is not str or not legacy.re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}',m['id'])or m['id']in seen
+            or type(m['filename'])is not str or not legacy.re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}',m['filename'])
+            or '..'in m['filename']or not m['filename'].endswith('.png')
+            or type(m['sha256'])is not str or not legacy.re.fullmatch('[a-f0-9]{64}',m['sha256'])
+            or type(m['size_bytes'])is not int or not 1<=m['size_bytes']<=legacy.MAX_ASSET_BYTES):legacy._fail('plan')
+        legacy._text(m['context'],32768,empty=True);seen.add(m['id'])
+    targets=[{'target_index':i,'target_id':a['id'],'context_ids':[b['id']for j,b in enumerate(meta)if j!=i and abs(i-j)<=RADIUS]}for i,a in enumerate(meta)]
+    if legacy._canonical(plan['targets'])!=legacy._canonical(targets):legacy._fail('plan')
+    sizes={a['id']:a['size_bytes']for a in meta}
+    for t in targets:
+        ids=[t['target_id'],*t['context_ids']]
+        if len(ids)>MAX_DOCUMENT_INPUTS or sum(sizes[x]for x in ids)>MAX_TOTAL_DOCUMENT_BYTES:legacy._fail('asset_limit')
+    return route
+
+
+def _request_model_policy(c):
+    route=c.get('model_policy')
+    if 'model_policy'in c:
+        if route!=SOL_MODEL_POLICY or c.get('version')!=SOL_REQUEST_VERSION:legacy._fail('model_policy')
+    elif c.get('version')!=REQUEST_VERSION:legacy._fail('request')
+    return route
+
+
 def _plan(assets,plan):
-    if legacy._canonical(plan)!=legacy._canonical(prepare_execution_plan(assets)):legacy._fail('plan')
+    if legacy._canonical(plan)!=legacy._canonical(prepare_execution_plan(assets,model_policy=model_policy(plan))):legacy._fail('plan')
     return plan
 
 def _feedback(correction):
@@ -175,6 +222,7 @@ def _make(assets,plan,index,recognition=None,correction=None,*,_admission=True):
     c={'version':REQUEST_VERSION,'stage':'recognition'if recognition is None else'review','plan_sha256':plan['plan_sha256'],'target_index':index,
        'target':meta[0],'context_assets':meta[1:],'presentation_policy':ORIGINALS_LABEL_POLICY,
        'recognition_receipt_sha256':None if recognition is None else recognition['receipt_sha256'],'correction':correction}
+    if model_policy(plan)is not None:c.update(version=SOL_REQUEST_VERSION,model_policy=SOL_MODEL_POLICY)
     c['request_identity_sha256']=legacy._digest(c)
     user={'task':'Read labelled image1 completely; context originals are labelled2 onward.'}
     if recognition is not None:user={'recognition':recognition['result']}
@@ -193,14 +241,15 @@ def _admit(q):
 def _checked_request(q,recognition=None):
     if type(q)is not legacy.GraphicsRequest:legacy._fail('request')
     c=json.loads(q.context_json)
-    legacy._shape(c,{'version','stage','plan_sha256','target_index','target','context_assets','presentation_policy','recognition_receipt_sha256','correction','request_identity_sha256'})
+    route=_request_model_policy(c)
+    legacy._shape(c,{'version','stage','plan_sha256','target_index','target','context_assets','presentation_policy','recognition_receipt_sha256','correction','request_identity_sha256'}|({'model_policy'}if route else set()))
     meta=[c['target'],*c['context_assets']]
     if len(meta)!=len(q.document_inputs)or not 1<=len(meta)<=7:legacy._fail('request')
     for m,item in zip(meta,q.document_inputs):
         if item.presentation_policy!=ORIGINALS_LABEL_POLICY:legacy._fail('request')
         a={'id':m['id'],'filename':m['filename'],'sha256':m['sha256'],'data':item.data,'context':m['context']}
         if _metadata([a])[0]!=m:legacy._fail('request')
-    if (c['version']!=REQUEST_VERSION or c['presentation_policy']!=ORIGINALS_LABEL_POLICY or c['stage']!=('recognition'if recognition is None else'review')
+    if (c['presentation_policy']!=ORIGINALS_LABEL_POLICY or c['stage']!=('recognition'if recognition is None else'review')
         or c['recognition_receipt_sha256']!=(None if recognition is None else recognition['receipt_sha256'])
         or c['request_identity_sha256']!=legacy._digest({k:v for k,v in c.items()if k!='request_identity_sha256'})):legacy._fail('request')
     system=_RECOGNITION_SYSTEM if recognition is None else _REVIEW_SYSTEM
@@ -367,12 +416,29 @@ def _parse_content(raw,error_type):
         raise error_type('content_json','$',detail)from None
 
 def _receipt(stage,q,c,raw,result,p):
-    value={'version':'regulation-graphics-'+stage+'-receipt-v4','request_identity':c,'model_request':legacy._logical_request(q),
+    value={'version':'regulation-graphics-'+stage+'-receipt-v4','request_identity':c,'model_request':_logical_request(q),
         'model_provenance':p,'response_text':raw,'response_sha256':legacy.hashlib.sha256(raw.encode()).hexdigest(),'result':result,**legacy._FLAGS}
     value['receipt_sha256']=legacy._digest(value);return json.loads(legacy._canonical(value))
 
+def _logical_request(q):
+    route=_request_model_policy(json.loads(q.context_json))
+    return legacy.request_receipt(model='gpt-6.1-sol'if route else'gpt-6-luna',role='bounded',effort='high',max_tokens=4096,
+        temperature=0.0,system=q.system,prompt=q.user)
+
+
 def _native_provenance(p,q):
-    result=legacy._provenance(p,q)
+    route=_request_model_policy(json.loads(q.context_json))
+    if type(p)is not dict or len(legacy._canonical(p).encode())>32768:legacy._fail('model_provenance')
+    model='gpt-6.1-sol'if route else'gpt-6-luna'
+    required={'configured_model':model,'returned_model':model,'reasoning_effort':'high','billing_mode':'chatgpt_plan','role':'bounded'}
+    if any(p.get(k)!=v for k,v in required.items()):legacy._fail('model_provenance')
+    if route:
+        if p.get('regulation_graphics_model_policy')!=route:legacy._fail('model_provenance')
+    elif 'regulation_graphics_model_policy'in p:legacy._fail('model_provenance')
+    expected=document_input_metadata(encode_document_inputs(q.document_inputs))
+    if legacy._canonical(p.get('document_inputs'))!=legacy._canonical(expected):legacy._fail('model_provenance')
+    if 'model_request'in p and legacy._canonical(p['model_request'])!=legacy._canonical(_logical_request(q)):legacy._fail('model_provenance')
+    result=json.loads(legacy._canonical(p))
     if type(result.get('response_id'))is not str or not 1<=len(result['response_id'])<=256 or not result['response_id'].strip():legacy._fail('model_provenance')
     return result
 

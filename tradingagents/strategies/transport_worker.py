@@ -94,13 +94,35 @@ def _execute_plan(payload):
     from tradingagents.strategies.chatgpt_plan_transport import (
         ChatGPTPlanTransportError, stream_plan_response,
     )
-    deadline = time.monotonic() + payload["timeout"]
     document_options = {}
     request = payload["request"]
+    graphics_route = 'regulation_graphics_model_policy' in request
+    if graphics_route or 'max_call_seconds' in request:
+        timeout = payload.get('timeout')
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 240:
+            return {"error": "provider_error", "status_code": None,
+                    "error_metadata": {"error_code": "invalid_request"}}
+    deadline = time.monotonic() + payload["timeout"]
+    if graphics_route or 'max_call_seconds' in request:
+        from tradingagents.strategies.regulation_graphics_route import validate_regulation_graphics_route
+        try:
+            validate_regulation_graphics_route(model_policy=request.get('regulation_graphics_model_policy'),
+                model=request.get('model'), effort=request.get('effort'),
+                document_inputs=request.get('document_inputs'), max_tokens=request.get('max_tokens'),
+                temperature=request.get('temperature'), max_call_seconds=request.get('max_call_seconds'))
+            if (payload.get('provider') != 'chatgpt_plan'
+                    or type(request.get('system')) is not str or type(request.get('prompt')) is not str):
+                raise ValueError
+        except ValueError:
+            return {"error": "provider_error", "status_code": None,
+                    "error_metadata": {"error_code": "invalid_request"}}
+        document_options.update(regulation_graphics_model_policy=request['regulation_graphics_model_policy'],
+            max_tokens=request['max_tokens'], temperature=request['temperature'],
+            max_call_seconds=request['max_call_seconds'])
     if "document_inputs" in request:
         from tradingagents.strategies.plan_document_inputs import document_input_content
         try:
-            if request.get("model") != "gpt-6-luna":
+            if not graphics_route and request.get("model") != "gpt-6-luna":
                 raise ValueError
             document_input_content(request["document_inputs"])
         except ValueError:
@@ -194,6 +216,9 @@ def execute(payload):
     if payload["kind"] == "model":
         if payload["provider"] == "chatgpt_plan":
             return _execute_plan(payload)
+        if 'regulation_graphics_model_policy' in payload['request'] or 'max_call_seconds' in payload['request']:
+            return {"error": "provider_error", "status_code": None,
+                    "error_metadata": {"error_code": "invalid_request"}}
         from tradingagents.strategies.llm_utils import _call_model_direct
         if payload["provider"] == "openai":
             from openai import OpenAI

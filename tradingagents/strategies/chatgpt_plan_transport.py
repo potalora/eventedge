@@ -296,7 +296,9 @@ def _terminal_text(response, deltas, done, items_done, parts_done, parts_added, 
     return text
 
 
-def stream_plan_response(client, *, model, system, prompt, effort, provenance=None, document_inputs=None):
+def stream_plan_response(client, *, model, system, prompt, effort, provenance=None, document_inputs=None,
+                         regulation_graphics_model_policy=None, max_tokens=None,
+                         temperature=None, max_call_seconds=None):
     """Return text only after one consistent completed response and stream EOF.
 
     Exact prompts and effort are sent without truncation. Unsupported plan
@@ -307,10 +309,21 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         provenance.clear()
     if type(model) is not str or not model or type(system) is not str or type(prompt) is not str or type(effort) is not str or effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
         _fail("invalid_request")
+    graphics_route = regulation_graphics_model_policy is not None
+    if graphics_route:
+        from .regulation_graphics_route import validate_regulation_graphics_route
+        try:
+            validate_regulation_graphics_route(model_policy=regulation_graphics_model_policy,
+                model=model, effort=effort, document_inputs=document_inputs,
+                max_tokens=max_tokens, temperature=temperature, max_call_seconds=max_call_seconds)
+        except ValueError:
+            _fail('invalid_request')
+    elif any(value is not None for value in (max_tokens, temperature, max_call_seconds)):
+        _fail('invalid_request')
     content = prompt
     document_metadata = None
     if document_inputs is not None:
-        if model != "gpt-6-luna":
+        if not graphics_route and model != "gpt-6-luna":
             _fail("invalid_request")
         from .plan_document_inputs import document_input_content, document_input_metadata
         try:
@@ -472,6 +485,9 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         raise ChatGPTPlanTransportError("stream_interrupted") from None
     if completed is None:
         _fail("stream_incomplete")
+    if graphics_route and (completed.get('model') != model
+            or type(completed.get('id')) is not str or not completed['id'].strip()):
+        _fail('stream_invalid')
     if provenance is not None:
         def public(name):
             value = completed.get(name)
@@ -481,4 +497,6 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
             identity_status="pinned" if revision else "unpinned", response_id=public("id"), reasoning_effort=effort)
         if document_metadata is not None:
             provenance["document_inputs"] = document_metadata
+        if graphics_route:
+            provenance['regulation_graphics_model_policy'] = regulation_graphics_model_policy
     return text

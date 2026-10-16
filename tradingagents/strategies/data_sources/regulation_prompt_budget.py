@@ -35,11 +35,23 @@ def _fail(code):
 
 
 def configured(config):
+    graphics_model_policy(config)
     policy = config.get('regulation_prompt_budget_policy')
     if policy not in (None, POLICY) or (policy is not None and (
             config.get('regulation_evidence_policy') != 'complete_document_text_v1'
             or config.get('graphics_execution_policy') != 'single_target_compact_v1')):
         _fail('budget_policy')
+    return policy
+
+
+def graphics_model_policy(config):
+    """Validate the finite opt-in even at ar-only replay/profile boundaries."""
+    policy = config.get('regulation_graphics_model_policy')
+    if 'regulation_graphics_model_policy' in config and (type(policy) is not str or policy != 'sol_high_v1'
+            or config.get('graphics_execution_policy') != 'single_target_compact_v1'
+            or config.get('regulation_prompt_budget_policy') != POLICY
+            or config.get('regulation_evidence_policy') != 'complete_document_text_v1'):
+        _fail('graphics_model_policy')
     return policy
 
 

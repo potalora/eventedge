@@ -28,7 +28,10 @@ def _memo_key(analyzer,assets,plan):
         if type(value)is dict:return {k:public(v)for k,v in value.items()if k.lower()not in {'api_key','chatgpt_plan_auth_path','auth_path','token','secret','password','headers','base_url'}}
         if type(value)is list:return [public(v)for v in value]
         return value
-    policy={'profile':public(analyzer.config),'request':contract.REQUEST_VERSION,'plan':plan,
+    route=contract.model_policy(plan)
+    policy={'profile':public(analyzer.config),'request':contract.SOL_REQUEST_VERSION if route else contract.REQUEST_VERSION,'plan':plan,
+        'stage_tuple':{'model':'gpt-6.1-sol'if route else'gpt-6-luna','effort':'high','role':'bounded',
+            'billing':'chatgpt_plan','max_tokens':4096,'temperature':0.0,'max_call_seconds':graphics_call_seconds(analyzer.config)},
         'recognition_system':contract._RECOGNITION_SYSTEM,'review_system':contract._REVIEW_SYSTEM,
         'global_slots':GLOBAL_STAGE_SLOTS,'workers':TARGET_WORKERS,'max_corrections':1}
     return memo,(*key,'compact-complete-partition-v1',current_model_deadline(),legacy._digest(policy))
@@ -38,7 +41,7 @@ def _empty(index,q,stage,round_index):
     c=json.loads(q.context_json)
     return {'version':'regulation-graphics-failed-attempt-v4','target_index':index,'round_index':round_index,
         'asset_ids':[c['target']['id'],*[a['id']for a in c['context_assets']]],'stage':stage,
-        'request_identity':c,'model_request':legacy._logical_request(q),'model_provenance':{},
+        'request_identity':c,'model_request':contract._logical_request(q),'model_provenance':{},
         'model_call_started':False,'response_received':False,'response_text':None,'response_sha256':None,
         'response_bytes':None,'response_encoding':None,'response_over_limit':False,'validation_status':'failed',
         'failure_reason':None,'failure_class':'terminal','feedback':[]}
@@ -54,7 +57,9 @@ def _stage(worker,q,index,round_index,name,recognition=None,seen_ids=None):
         if not _SLOTS.acquire(timeout=model_timeout(9000.0)):raise ModelDeadlineExceeded('model_deadline_exhausted')
         try:
             model_timeout();failure['model_call_started']=True
-            raw=worker._call_llm(q.system,q.user,max_tokens=4096,role='bounded',document_inputs=q.document_inputs,max_call_seconds=graphics_call_seconds(worker.config))
+            route=contract._request_model_policy(json.loads(q.context_json))
+            raw=worker._call_llm(q.system,q.user,max_tokens=4096,role='bounded',document_inputs=q.document_inputs,max_call_seconds=graphics_call_seconds(worker.config),
+                **({'regulation_graphics_model_policy':route}if route else {}))
             h._original(failure,worker,raw);failure['model_provenance']=deepcopy(worker.last_call_provenance)
             model_timeout()
             response_id=failure['model_provenance'].get('response_id')
@@ -98,7 +103,9 @@ def _prepare(assets,plan,index,name,recognition=None,correction=None,*,round_ind
 
 def _target(analyzer,assets,plan,index):
     rounds=[];recognition=None;reuse=False;correction=None;seen_ids=set()
-    try:worker=analyzer.fork_for_parallel()
+    try:
+        worker=analyzer.fork_for_parallel()
+        if contract.model_policy(plan)is not None and worker is analyzer:legacy._fail('parallel_worker')
     except Exception as error:
         q=_prepare(assets,plan,index,'recognition');failure=_empty(index,q,'recognition',0)
         failure['failure_reason']='analysis_unavailable';failure['receipt_sha256']=_helpers()._seal(failure)
@@ -131,7 +138,7 @@ def _failure(q,value,index,round_index,name,recognition=None):
         or value['validation_status']!='failed' or value['receipt_sha256']!=h._seal(value)
         or value['failure_class']not in {'terminal','recognition_content','review_malformed','review_rejected'}):legacy._fail('failed_attempt')
     c=json.loads(q.context_json)
-    if (value['request_identity']!=c or value['model_request']!=legacy._logical_request(q)
+    if (value['request_identity']!=c or value['model_request']!=contract._logical_request(q)
         or value['asset_ids']!=[c['target']['id'],*[a['id']for a in c['context_assets']]]
         or type(value['model_provenance'])is not dict or len(legacy._canonical(value['model_provenance']).encode())>32768
         or any(type(value[k])is not bool for k in ('model_call_started','response_received','response_over_limit'))):legacy._fail('failed_request')
@@ -285,7 +292,7 @@ def _finish(analyzer,assets,attempt):
 def recognize_graphics(analyzer,assets,attempt):
     if (contract.configured(analyzer.config)!=contract.POLICY or analyzer._model_name!='gpt-6-luna'or analyzer._effort!='high'
         or analyzer._thesis_model!='gpt-6.1-sol'or analyzer._thesis_effort!='high'or type(analyzer._temperature)is not float or analyzer._temperature!=0.0):legacy._fail('policy')
-    attempt.setdefault('prompt_budget_proof',None);plan=contract.prepare_execution_plan(assets)
+    attempt.setdefault('prompt_budget_proof',None);plan=contract.prepare_execution_plan(assets,model_policy=analyzer.config['autoresearch'].get('regulation_graphics_model_policy'))
     attempt.update(version='regulation-model-attempt-v5',graphics_plan=plan,graphics_batches=[],graphics_failures=[])
     mk=_memo_key(analyzer,assets,plan);owner=False;event=None
     if mk is not None:
@@ -305,6 +312,7 @@ def recognize_graphics(analyzer,assets,attempt):
                 _unstarted_partition(assets,plan,attempt,'invalid_regulation_graphics_memo_owner');_finish(analyzer,assets,attempt);return
         if cached is not None:
             # Invalid cached proof is terminal, never evicted into a fresh correction loop.
+            if cached.get('graphics_plan')!=plan:legacy._fail('memo_plan')
             attempt.update(cached);_finish(analyzer,assets,attempt);return
     try:
         with ThreadPoolExecutor(max_workers=TARGET_WORKERS,thread_name_prefix='regulation-graphic')as pool:
