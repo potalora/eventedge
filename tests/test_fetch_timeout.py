@@ -108,7 +108,7 @@ def test_generation_timeout_message_matches_constant(tmp_path):
             cmd="run_cohorts", timeout=gm._GENERATION_TIMEOUT_S
         )
 
-    with patch.object(gm.subprocess, "run", side_effect=_raise_timeout):
+    with patch.object(gm, "_run_preflight_worker", side_effect=_raise_timeout):
         result = mgr._run_cohorts_subprocess(gen_data, [])
 
     assert result["outcome"] == "failed"

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib.metadata
 import logging
 import os
+import platform
 import re
 import tempfile
 import uuid
@@ -13,6 +16,32 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def worker_runtime_identity(
+    repo_root: str | Path, *, generation_id: str, generation_commit: str,
+    profile_sha256: str,
+) -> dict:
+    """Record the worker environment with the continuity tool's existing digest.
+
+    This is provenance, not a successful-run or dependency-lock conformance
+    assertion. Only the digest is retained; no package inventory or paths leak
+    into the run artifact. The immutable attempt already retains worker stderr.
+    """
+    distributions = sorted((item.metadata["Name"], item.version)
+                           for item in importlib.metadata.distributions())
+    encoded = json.dumps(distributions, sort_keys=True, separators=(",", ":"),
+                         allow_nan=False).encode()
+    lock = Path(repo_root) / "uv.lock"
+    return {
+        "version": "worker-runtime-identity-v1",
+        "generation_id": generation_id,
+        "generation_commit": generation_commit,
+        "profile_sha256": profile_sha256,
+        "python": platform.python_version(),
+        "dependencies_sha256": hashlib.sha256(encoded).hexdigest(),
+        "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest() if lock.is_file() else None,
+    }
 
 _EVIDENCE_FIELDS = (
     "schema_version",

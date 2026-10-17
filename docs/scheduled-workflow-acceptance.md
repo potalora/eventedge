@@ -11,13 +11,21 @@ guards. Healthy idle controller observations did not establish that combination.
 Run the named gate from the candidate checkout with its installed dependencies:
 
 ```sh
-python -m pytest -q -m 'scheduled_acceptance and not live' tests
-python -m pytest -q -m 'not live and not scheduled_acceptance' tests
+python -m pytest -q -m 'scheduled_acceptance and not document_qualification and not live' tests
+python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
 ```
 
 CI runs both commands in the baseline and pinned optional-SDK environments. A
 failed gate blocks acceptance. Skipped, expected-failure, or omitted scenarios do
 not establish the corresponding requirement.
+
+The October 17 [stabilization profile](stabilization-profile.md) is the current
+supported gate: the exact checked-in sixteen-book profile, two-session positive
+paper fills, zero-IO replay, and explicit required/optional FRED failure cases.
+The full 98-image scenario is deferred with its document features and remains
+selectable using `-m 'document_qualification and not live'`. Its component and
+replay regressions remain in ordinary CI. Historical document-profile evidence
+below does not qualify those features for the stabilization profile.
 
 The subprocess harness creates an independent temporary Git repository, frozen
 generation worktree, profile, state directories and virtual environment. Its
@@ -37,6 +45,15 @@ storage are isolated. A synthetic ancestor-variable regression verifies that
 normal loading cannot inherit configuration from the surrounding checkout.
 
 ## Profile provenance
+
+The stabilization variant reads `config/profiles/stabilization-v1.json` directly.
+It records the original and normalized profile hashes and audits only disposable
+paths, inert authentication and a matching inert EDGAR contact header. Its frozen
+blocklist, model routes, risk settings and explicit exclusions are unchanged.
+The runtime artifact binds code, profile and installed-dependency fingerprints.
+No bounded-document fixture is created for this variant.
+
+The following retained profile remains a historical control.
 
 The retained fixture is the original non-secret deployment profile, SHA256
 `cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d`.
@@ -111,6 +128,9 @@ the systemd control group's responsibility.
 
 ## October 15 regression matrix
 
+This matrix describes the earlier document-enabled candidate and its separate
+qualification requirements. It is not the October 17 stabilization scope.
+
 The additional prospective profile exercises government-copy V3 graphics and
 the explicitly selected bounded-document recognition request V4. The original
 profile and legacy request contracts remain separate controls. These tests cover
@@ -161,6 +181,10 @@ retained evidence and an appropriate regression; they do not become exclusions
 because a prior fixture passed.
 
 ## Native evidence and remaining acceptance
+
+These retained component observations concern the document-enabled candidate.
+Native document qualification is deferred for stabilization, whose native
+acceptance must instead match its exact declared supported scope.
 
 Private component receipts are retained under
 `data/forward-readiness/deployment-20261014/fresh-generation-20261015/`:

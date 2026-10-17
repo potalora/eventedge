@@ -253,6 +253,10 @@ def _install():
                 raise AssertionError('unconfigured congressional fixture endpoint')
             return fixture.response(body)
         if 'api.stlouisfed.org' in url:
+            failed_series = {'fred_optional_payems_503': 'PAYEMS',
+                             'fred_required_hy_503': 'BAMLH0A0HYM2'}.get(fault)
+            if params['series_id'] == failed_series:
+                return fixture.response({}, 503, headers={'Retry-After': '0'})
             series = fixture.fred(params['series_id'],observation_start=params['observation_start'],observation_end=params['observation_end'])
             observations = [{'date':str(day.date()),'value':str(value),'realtime_start':'1900-01-01','realtime_end':'9999-12-31'}
                             for day,value in series.items()]

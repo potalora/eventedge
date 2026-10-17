@@ -275,6 +275,28 @@ def _terminal_report(report):
         return _result('requires_user', 'checkpoint_invalid')
     if any(row.get('status') == 'strategy_defect' for row in report.get('source_health_failures', [])):
         return _result('requires_user', 'checkpoint_invalid')
+    if 'completion' in report:
+        completion = report['completion']
+        if (not isinstance(completion, dict)
+                or completion.get('version') != 'supported_sixteen_books_v1'):
+            return _result('requires_user', 'checkpoint_invalid')
+        if (completion.get('workflow_complete') is True and report.get('evidence_complete') is True
+                and report.get('accounting_valid') is True and report.get('staging_valid') is True):
+            return _result('recovered', 'complete')
+        if report.get('staging_complete') and report.get('accounting_valid'):
+            expected_holds = {'research_held', 'screening_model_incomplete', 'committee_incomplete',
+                'required_source_failed', 'supported_health_invalid'}
+            reasons = completion.get('reason_codes')
+            if (report.get('evidence_complete') is True and report.get('staging_valid') is True
+                    and isinstance(reasons, list) and reasons and all(type(reason) is str for reason in reasons)
+                    and set(reasons) <= expected_holds):
+                # The accepted evidence proves a held/missed sample. Retain it
+                # without claiming workflow completion or freezing future days.
+                return _result('wait_next_session', 'accepted_outcome')
+            return _result('requires_user', 'checkpoint_invalid')
+        # An interrupted economic/staging phase still reaches the existing
+        # durable recovery path. Completion never authorizes missing model work.
+        return None
     # New complete accepted evidence can prove recovery after an earlier
     # preflight source-access incident; keep that incident in the report, not as a sticky
     # blocker that contradicts the newer verified sample.

@@ -57,6 +57,8 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "signal_return_basis",
         "benchmark_return_basis",
         "research_resilience_policy",
+        "source_capability_policy",
+        "stabilization_profile_policy",
     }
 )
 _NESTED_POLICY_KEYS = {
@@ -168,7 +170,8 @@ def _validate_execution_policy_schema(policy: object) -> None:
     optional = {
         "portfolio_policy", "price_source_policy", "benchmark_price_source_policy",
         "risk_discipline", "carrying_cost_clock", "corporate_action_terms", "daily_loss_basis",
-        "signal_return_basis", "benchmark_return_basis", "research_resilience_policy"
+        "signal_return_basis", "benchmark_return_basis", "research_resilience_policy",
+        "source_capability_policy", "stabilization_profile_policy"
     }
     missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
@@ -179,6 +182,14 @@ def _validate_execution_policy_schema(policy: object) -> None:
         from .research_resilience import configured
         if not configured(policy):
             raise ValueError("invalid_research_resilience_policy")
+    if "source_capability_policy" in policy:
+        from .research_resilience import capability_configured
+        if not capability_configured(policy):
+            raise ValueError("invalid_source_capability_policy")
+    if "stabilization_profile_policy" in policy:
+        from .operating_contract import POLICY as STABILIZATION_POLICY
+        if type(policy['stabilization_profile_policy']) is not str or policy['stabilization_profile_policy'] != STABILIZATION_POLICY:
+            raise ValueError("invalid_stabilization_profile")
     source_keys = {"price_source_policy", "benchmark_price_source_policy"}
     if actual & source_keys and not source_keys.issubset(actual):
         raise ValueError("execution_policy price source policy pair is incomplete")

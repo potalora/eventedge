@@ -10,8 +10,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # The last accepted hosted run took 47 minutes before the additional
-    # full-corpus graphics workflow gate. Keep a finite completion margin.
+    # Preserve a finite margin around the complete supported-profile gate.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -24,14 +23,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[chatgpt-plan]' pytest
       - name: Scheduled workflow acceptance gate
-        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not live' tests
+        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not document_qualification and not live' tests
       - name: Run remaining non-live suite
-        run: python -m pytest -q -m 'not live and not scheduled_acceptance' tests
+        run: python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
 
   test-openbb:
     runs-on: ubuntu-latest
-    # The last accepted pinned-SDK run took 52 minutes before the additional
-    # full-corpus graphics workflow gate.
+    # Preserve the same bounded acceptance in the pinned optional-SDK environment.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +44,6 @@ jobs:
           python -m pip check
           openbb-build
       - name: Scheduled workflow acceptance gate with OpenBB installed
-        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not live' tests
+        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not document_qualification and not live' tests
       - name: Run remaining non-live suite with OpenBB installed
-        run: python -m pytest -q -m 'not live and not scheduled_acceptance' tests
+        run: python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
