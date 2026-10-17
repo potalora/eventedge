@@ -21,6 +21,10 @@ from typing import Any
 from tradingagents.strategies.execution.ids import stable_id
 
 from tradingagents.strategies.modules import get_paper_trade_strategies
+from tradingagents.strategies.orchestration.generation_config import (
+    FROZEN_CONFIG_NAME,
+    read_generation_config,
+)
 from tradingagents.strategies.orchestration.runtime_lock import (
     canonical_runtime_lock_path,
     runtime_lock,
@@ -501,6 +505,7 @@ def assess_generation(
     ]
     paths = [
         manifest,
+        state / FROZEN_CONFIG_NAME,
         *(
             Path(str(db) + suffix)
             for db in databases
@@ -534,6 +539,12 @@ def assess_generation(
                         if source.is_symlink() or any(path.is_symlink() for path in source.rglob('*')):
                             raise ValueError('immutable readiness evidence contains a symlink')
                         shutil.copytree(source, snapshot / name, symlinks=False)
+                frozen_config = state / FROZEN_CONFIG_NAME
+                if frozen_config.exists():
+                    # Recovery receipts bind these exact regular-file bytes.
+                    # Include them in the same before/after identity checks.
+                    body, _, _ = read_generation_config(frozen_config)
+                    (snapshot / FROZEN_CONFIG_NAME).write_bytes(body)
                 if before != _fingerprint(paths):
                     raise ValueError("state changed during readiness assessment")
                 result = _assess_generation(

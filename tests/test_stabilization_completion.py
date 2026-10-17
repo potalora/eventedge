@@ -386,3 +386,110 @@ def test_committee_cannot_omit_native_admitted_signal(tmp_path):
                 {'epoch_id':record.epoch_id,'session':FRIDAY.isoformat()},document,[])
     finally:
         ledger.close()
+
+
+@pytest.fixture
+def recovered_supported_session(completed_supported_session, tmp_path, monkeypatch):
+    """Construct native receipt reader evidence; no actual interruption is claimed."""
+    from tradingagents.strategies.execution.ids import stable_id
+    from tradingagents.strategies.orchestration import release_readiness as readiness
+    from tradingagents.strategies.orchestration.generation_config import FROZEN_CONFIG_NAME
+    from tradingagents.strategies.orchestration.runtime_recovery import (
+        VERSION, _hash_document, session_recovery_proof, validate_recovery_receipt,
+    )
+    from tradingagents.strategies.orchestration.session_executor import PHASES
+    repo, state, contract = completed_supported_session
+    frozen = state / FROZEN_CONFIG_NAME
+    frozen.write_bytes(PROFILE.read_bytes())
+    manifest_path = state.parent / 'manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['generations'][0]['config_file'] = str(frozen)
+    manifest_path.write_text(json.dumps(manifest))
+    import subprocess
+    subprocess.run(['git', '-C', str(repo), 'init'], check=True, capture_output=True)
+    lock = repo / 'data/operational/eventedge-runtime.lock'
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    # This canonical evidence fixture uses a fixed commit, without a Git checkout.
+    # Keep all financial, source, report and recovery validators real.
+    monkeypatch.setattr(readiness, '_verify_worktree', lambda *args: None)
+    economic = {'market': {'benchmarks': [{'symbol': 'SPY'}]}}
+    with sqlite3.connect(state / 'metrics_v2.sqlite3') as connection:
+        epoch = json.loads(connection.execute('SELECT payload_json FROM metric_epochs WHERE epoch_id=?', (EPOCH,)).fetchone()[0])
+        epoch['status'] = 'open'
+        connection.execute('UPDATE metric_epochs SET payload_json=? WHERE epoch_id=?', (json.dumps(epoch), EPOCH))
+    for name in contract.roster:
+        with sqlite3.connect(state / name / 'portfolio.db') as connection:
+            connection.execute('UPDATE session_execution_contexts SET economic_inputs_json=?, input_digest=?, market_digest=?, starting_state_digest=?',
+                (json.dumps(economic), stable_id('session_economic_inputs', economic),
+                 stable_id('session_market_inputs', economic['market']), 'opening'))
+            previous = 'opening'
+            for index, phase in enumerate(PHASES):
+                following = f'phase-{index}'
+                _insert(connection, 'session_phases', session_phase_id=phase, cohort_id=name,
+                    session=SESSION, phase=phase, completed_at=SESSION,
+                    pre_state_digest=previous, post_state_digest=following)
+                previous = following
+            _insert(connection, 'benchmark_observations', observation_id='SPY', cohort_id=name,
+                epoch_id=EPOCH, session=SESSION, symbol='SPY', valid=1)
+    SourceInputStore(tmp_path / 'cache', accepted_dir=state / 'source_inputs/decision_inputs').freeze(
+        {'generation': GENERATION, 'session': SESSION, 'commit': COMMIT,
+         'configuration': source_configuration_fingerprint(contract.config), 'purpose': 'decision-inputs-v1'},
+        {}, acquired_at=datetime(2026, 10, 6, 23, tzinfo=timezone.utc))
+    proof = session_recovery_proof(state, GENERATION, SESSION, EPOCH)
+    receipt = {'version': VERSION, 'generation_id': GENERATION, 'generation_commit': COMMIT,
+        'session': SESSION, 'configuration_sha256': contract.profile_sha256, 'epoch_id': EPOCH,
+        'completed_at': '2026-10-06T23:00:00+00:00', 'original_interruption_preserved': True,
+        'proof': proof, 'proof_sha256': _hash_document(proof)}
+    path = state / 'runtime_recovery' / f'{SESSION}.json'
+    path.parent.mkdir()
+    path.write_text(json.dumps(receipt))
+    assert validate_recovery_receipt(state, GENERATION, SESSION, COMMIT,
+        expected_configuration=contract.profile_sha256)['books_count'] == 16
+    baseline = _report(repo)
+    assert baseline['recovery']['proof_sha256'] == receipt['proof_sha256']
+    assert baseline['completion']['workflow_complete'] is True
+    import gc
+    gc.collect()  # Close fixture SQLite context-manager cycles before the read-only check.
+    return repo, state
+
+
+def test_readiness_preserves_native_recovery_frozen_config(recovered_supported_session):
+    from tradingagents.strategies.orchestration.release_readiness import assess_generation
+    repo, state = recovered_supported_session
+    result = assess_generation(repo, GENERATION, COMMIT, date.fromisoformat(SESSION), sessions=1)
+    assert result['ready'] is True, result
+    assert result['sessions'][0]['workflow_complete'] is True
+
+
+@pytest.mark.parametrize('fault', ['missing', 'mismatch', 'corrupt', 'symlink'])
+def test_readiness_rejects_invalid_recovery_frozen_config(recovered_supported_session, fault):
+    from tradingagents.strategies.orchestration.generation_config import FROZEN_CONFIG_NAME
+    from tradingagents.strategies.orchestration.release_readiness import assess_generation
+    repo, state = recovered_supported_session
+    path = state / FROZEN_CONFIG_NAME
+    path.unlink()
+    if fault == 'mismatch':
+        path.write_text('{}')
+    elif fault == 'corrupt':
+        path.write_text('{')
+    elif fault == 'symlink':
+        path.symlink_to(PROFILE)
+    with pytest.raises(ValueError):
+        assess_generation(repo, GENERATION, COMMIT, date.fromisoformat(SESSION), sessions=1)
+
+
+def test_readiness_rejects_frozen_config_change_during_assessment(recovered_supported_session, monkeypatch):
+    from tradingagents.strategies.orchestration import release_readiness as readiness
+    from tradingagents.strategies.orchestration.generation_config import FROZEN_CONFIG_NAME
+    repo, state = recovered_supported_session
+    original = readiness._assess_generation
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        assert result['ready'] is True
+        path = state / FROZEN_CONFIG_NAME
+        path.write_bytes(path.read_bytes() + b'\n')
+        return result
+    monkeypatch.setattr(readiness, '_assess_generation', changed)
+    with pytest.raises(ValueError, match='state changed during readiness assessment'):
+        readiness.assess_generation(repo, GENERATION, COMMIT, date.fromisoformat(SESSION), sessions=1)
