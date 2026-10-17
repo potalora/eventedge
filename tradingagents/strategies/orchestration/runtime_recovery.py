@@ -86,14 +86,22 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
     now = _utc(now or datetime.now(timezone.utc))
     if policy(owner._base_config) != PROSPECTIVE or not owner.cohorts:
         return _result('requires_user', 'identity_mismatch')
-    contexts = [cohort['ledger'].session_execution_context(session) for cohort in owner.cohorts]
+    from .shared_execution import configured, load_shared_execution, validate_shared_execution
+    try:
+        seal = load_shared_execution(owner, session) if configured(owner) else None
+    except (ValueError, TypeError, KeyError):
+        return _result('requires_user', 'checkpoint_invalid')
+    try:
+        contexts = [cohort['ledger'].session_execution_context(session) for cohort in owner.cohorts]
+    except (ValueError, TypeError, KeyError):
+        return _result('requires_user', 'checkpoint_invalid')
     if any(cohort['ledger'].session_invalid_reason(session) for cohort in owner.cohorts):
         return _result('requires_user', 'accepted_session_invalid')
     if owner._metric_store.pending_critical_gap() is not None:
         return _result('requires_user', 'accepted_session_invalid')
-    if not any(context is not None for context in contexts):
+    if seal is None and not any(context is not None for context in contexts):
         return _result('wait_next_session', 'missed_session')
-    if not all(context is not None for context in contexts):
+    if seal is None and not all(context is not None for context in contexts):
         return _result('requires_user', 'checkpoint_invalid')
     epoch = owner._metric_store.current_epoch()
     if epoch is None or epoch.status != 'open':
@@ -102,6 +110,12 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
     if epoch.generation_id != generation.generation_id or epoch.generation_commit != generation.generation_commit:
         return _result('requires_user', 'identity_mismatch')
     owner._epoch_id = epoch.epoch_id
+    plans = None
+    if seal is not None:
+        try:
+            plans = validate_shared_execution(owner, seal, session, epoch.epoch_id)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return _result('requires_user', 'checkpoint_invalid')
     missing_stage = []
     # Validate every book BEFORE any resumed effect. No mixed identity/fresh book
     # is accepted merely because another book already committed execution.
@@ -114,7 +128,8 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
         if ledger.connection.execute('SELECT 1 FROM session_execution_contexts WHERE session > ? LIMIT 1',
                                      (session.isoformat(),)).fetchone():
             return _result('requires_user', 'identity_mismatch')
-        executor.validate_bound_context(session, epoch.epoch_id)
+        if plans is None:
+            executor.validate_bound_context(session, epoch.epoch_id)
         # Health partitions include a horizon suffix; authoritative committee
         # and staging records use the engine's frozen ledger policy identity.
         policy_id = str(cohort['engine'].ar_config.get('paper_ledger', {}).get(
@@ -122,11 +137,17 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
         if not ledger.staging_completed(session, epoch.epoch_id, policy_id):
             missing_stage.append((cohort, policy_id))
     with persisted_only():
+        by_name = {plan.cohort['config'].name: plan for plan in plans} if plans is not None else {}
         for cohort in owner.cohorts:
             ledger, executor = cohort['ledger'], cohort['executor']
             if not all(ledger.phase_completed(session, phase) for phase in PHASES):
-                outcome = executor.execute_open_and_mark(session, epoch.epoch_id,
-                    executor.persisted_input_bundle(session), executor.persisted_borrow_rates(session), now)
+                plan = by_name.get(cohort['config'].name)
+                if plan is None:
+                    outcome = executor.execute_open_and_mark(session, epoch.epoch_id,
+                        executor.persisted_input_bundle(session), executor.persisted_borrow_rates(session), now)
+                else:
+                    outcome = executor.execute_open_and_mark(session, epoch.epoch_id,
+                        plan.bundle, dict(plan.borrow_rates), now, sealed_precondition=plan.precondition)
                 if not outcome.valid or outcome.snapshot is None:
                     return _result('requires_user', 'accepted_session_invalid')
         if not missing_stage:

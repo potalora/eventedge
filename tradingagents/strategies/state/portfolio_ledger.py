@@ -3421,6 +3421,50 @@ class PortfolioLedger:
         """Durably terminalize an intent after broker-confirmed cancellation."""
         return self._terminalize_intent(intent_id, "cancelled", occurred_at, reason)
 
+    def overdue_cancellation_inputs(self, session: date, *, intent_ids=None) -> dict[str, object]:
+        """Bounded overdue identities/associations and transitions, without effects.
+
+        Explicit IDs also verify the same accepted intents after cancellation.
+        """
+        parameters = [self.cohort_id]
+        if intent_ids is None:
+            predicate = "status='pending' AND price_rule='next_session_open' AND eligible_session < ?"
+            parameters.append(self._encode(session))
+        else:
+            if len(intent_ids) > 10000 or len(set(intent_ids)) != len(intent_ids):
+                raise LedgerConflictError("overdue cancellation inputs exceed bounds")
+            predicate = "intent_id IN (" + ",".join("?" for _ in intent_ids) + ")"
+            parameters.extend(intent_ids)
+        rows = self._connection.execute(
+            "SELECT * FROM order_intents WHERE cohort_id=? AND " + predicate + " ORDER BY intent_id LIMIT 10001",
+            parameters).fetchall()
+        if len(rows) > 10000 or (intent_ids is not None and len(rows) != len(intent_ids)):
+            raise LedgerConflictError("overdue cancellation inputs exceed bounds or are missing")
+        intents, transitions, signals, associations, allocations = [], [], [], [], []
+        for row in rows:
+            intents.append(dict(row))
+            transitions.extend(dict(r) for r in self._connection.execute(
+                "SELECT * FROM order_status_transitions WHERE intent_id=? ORDER BY transition_id LIMIT 10001",
+                (row["intent_id"],)))
+            associated = self._connection.execute(
+                "SELECT s.* FROM intent_signals a JOIN signals s ON s.signal_id=a.signal_id "
+                "WHERE a.intent_id=? ORDER BY s.signal_id LIMIT 10001", (row["intent_id"],)).fetchall()
+            references = self._connection.execute(
+                "SELECT * FROM intent_signals WHERE intent_id=? ORDER BY signal_id LIMIT 10001",
+                (row["intent_id"],)).fetchall()
+            if not associated or [r["signal_id"] for r in associated] != [r["signal_id"] for r in references]:
+                raise LedgerConflictError("overdue cancellation signal identity missing")
+            associations.extend(dict(r) for r in references)
+            allocations.extend(dict(r) for r in self._connection.execute(
+                "SELECT * FROM exit_intent_lots WHERE intent_id=? ORDER BY lot_id LIMIT 10001",
+                (row["intent_id"],)))
+            signals.append({"intent_id": row["intent_id"], "signals": [self._signal_from_row(r).__dict__ for r in associated]})
+            if (len(transitions) > 10000 or len(associations) > 10000 or len(allocations) > 10000
+                    or sum(len(r["signals"]) for r in signals) > 10000):
+                raise LedgerConflictError("overdue cancellation associations exceed bounds")
+        return {"intents": intents, "transitions": transitions, "signals": signals,
+                "associations": associations, "exit_allocations": allocations}
+
     def cancel_overdue_next_open_intents(
         self, session: date, occurred_at: datetime
     ) -> tuple[OrderIntent, ...]:
