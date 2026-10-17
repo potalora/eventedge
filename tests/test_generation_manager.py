@@ -409,7 +409,67 @@ class TestGenerationDailyRun:
         with runtime_lock(manager._runtime_lock_path, exclusive=True):
             pass
 
-    def test_subprocess_inherits_verified_lock_fd_and_mode(
+    @pytest.mark.parametrize("leader_exits", [False, True])
+    def test_daily_worker_timeout_owns_descendants_and_retains_full_output(
+        self, tmp_path, manager, monkeypatch, leader_exits
+    ):
+        import time
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        worker_dir = tmp_path / ("leader-exits" if leader_exits else "leader-waits")
+        scripts = worker_dir / "scripts"
+        scripts.mkdir(parents=True)
+        pid_file = tmp_path / f"grandchild-{leader_exits}.pid"
+        script = scripts / "run_cohorts.py"
+        lock_file = tmp_path / f"lock-{leader_exits}.txt"
+        script.write_text(
+            "import os, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            f"open({str(lock_file)!r}, 'w').write('|'.join([os.environ.get('EVENTEDGE_RUNTIME_LOCK_FD', ''), os.environ.get('EVENTEDGE_RUNTIME_LOCK_MODE', '')]))\n"
+            "sys.stdout.write('O' * 70000); sys.stdout.flush()\n"
+            "sys.stderr.write('E' * 70000); sys.stderr.flush()\n"
+            + ("sys.exit(0)\n" if leader_exits else "time.sleep(30)\n")
+        )
+        manager._venv_python = Path(sys.executable)
+        monkeypatch.setattr(gm_mod, "_GENERATION_TIMEOUT_S", 0.5)
+        gen_data = {
+            "gen_id": "gen_test", "git_commit": "test", "state_dir": str(tmp_path),
+            "worktree_path": str(worker_dir),
+        }
+        started = time.monotonic()
+        with runtime_lock(manager._runtime_lock_path, exclusive=True) as lock:
+            result = manager._run_cohorts_subprocess(
+                gen_data, ["--date", "2026-08-06"], inherited_lock=lock
+            )
+        elapsed = time.monotonic() - started
+        assert result["error"] == "Timed out after 0.5s"
+        assert elapsed < 6, f"daily worker cleanup took {elapsed:.2f}s"
+        evidence = json.loads(Path(result["evidence_path"]).read_text())
+        assert evidence["process_status"] == "timeout"
+        assert len(evidence["stdout"]) >= 70000
+        assert len(evidence["stderr"]) >= 70000
+        assert evidence["stdout"].startswith("O")
+        assert evidence["stderr"].startswith("E")
+        assert lock_file.read_text() == f"{lock.fd}|exclusive"
+        with runtime_lock(manager._runtime_lock_path, exclusive=True):
+            pass
+        child_pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+                stat_file = Path(f"/proc/{child_pid}/stat")
+                if stat_file.exists() and stat_file.read_text().split()[2] == "Z":
+                    break
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("daily worker descendant survived timeout cleanup")
+
+    def test_worker_inherits_verified_lock_fd_and_mode(
         self, git_repo, manager
     ):
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
@@ -418,7 +478,7 @@ class TestGenerationDailyRun:
         info = manager.start_generation("inherited lock handoff")
         captured = {}
 
-        def capture_run(*args, **kwargs):
+        def capture_worker(*args, **kwargs):
             captured.update(kwargs)
             return MagicMock(
                 returncode=0, stdout=_valid_daily_stdout(), stderr=""
@@ -431,7 +491,7 @@ class TestGenerationDailyRun:
             "worktree_path": info.worktree_path,
         }
         with runtime_lock(manager._runtime_lock_path, exclusive=True) as lock:
-            with patch.object(gm_mod.subprocess, "run", side_effect=capture_run):
+            with patch.object(gm_mod, "_run_preflight_worker", side_effect=capture_worker):
                 manager._run_cohorts_subprocess(
                     gen_data, ["--date", "2026-08-06"], inherited_lock=lock
                 )
@@ -470,13 +530,11 @@ class TestGenerationDailyRun:
         """Verify that _run_cohorts_subprocess sets the right env vars."""
         info = manager.start_generation("env test")
 
-        # Mock subprocess.run at module level, but only for non-git calls
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
         captured_calls = []
 
-        def capture_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
+        def capture_worker(cmd, **kwargs):
             captured_calls.append((cmd, kwargs))
             mock_result = MagicMock()
             mock_result.returncode = 0
@@ -484,14 +542,14 @@ class TestGenerationDailyRun:
             mock_result.stderr = ""
             return mock_result
 
-        # Directly call _run_cohorts_subprocess with a mocked subprocess
+        # Directly call _run_cohorts_subprocess with the owned worker mocked.
         gen_data = {
             "gen_id": info.gen_id,
             "git_commit": info.git_commit,
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
-        with patch.object(gm_mod.subprocess, "run", side_effect=capture_run):
+        with patch.object(gm_mod, "_run_preflight_worker", side_effect=capture_worker):
             manager._run_cohorts_subprocess(gen_data, ["--date", "2026-03-31"])
 
         assert len(captured_calls) == 1
@@ -548,7 +606,7 @@ class TestGenerationDailyRun:
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
         process = MagicMock(returncode=0, stdout=_valid_daily_stdout(), stderr="")
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             first = manager._run_cohorts_subprocess(
                 {
                     "gen_id": info.gen_id,
@@ -608,7 +666,7 @@ class TestGenerationDailyRun:
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
-        with patch.object(gm_mod.subprocess, "run", side_effect=raised):
+        with patch.object(gm_mod, "_run_preflight_worker", side_effect=raised):
             result = manager._run_cohorts_subprocess(
                 gen_data,
                 ["--date", "2026-09-06"],
@@ -635,7 +693,7 @@ class TestGenerationDailyRun:
         monkeypatch.setenv("ARCHIVE_API_KEY", secret)
         process = MagicMock(returncode=0, stdout=_valid_daily_stdout(), stderr="")
         with (
-            patch.object(gm_mod.subprocess, "run", return_value=process),
+            patch.object(gm_mod, "_run_preflight_worker", return_value=process),
             patch.object(
                 gm_mod,
                 "persist_run_evidence",
@@ -671,7 +729,7 @@ class TestGenerationDailyRun:
 
         timeout = subprocess.TimeoutExpired(["worker"], 3600, output=b"partial")
         with (
-            patch.object(gm_mod.subprocess, "run", side_effect=timeout),
+            patch.object(gm_mod, "_run_preflight_worker", side_effect=timeout),
             patch.object(
                 gm_mod,
                 "persist_run_evidence",
@@ -1087,7 +1145,7 @@ class TestGenerationDailyRun:
             stderr="ERROR: 16/16 cohorts failed",
         )
 
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             results = manager.run_daily("2026-08-10")
 
         result = results[info.gen_id]
@@ -1127,7 +1185,7 @@ class TestGenerationDailyRun:
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             result = manager._run_cohorts_subprocess(gen_data, ["--date", "2026-03-31"])
 
         assert result["success"] is False
@@ -1161,7 +1219,7 @@ class TestGenerationDailyRun:
             ),
             stderr="",
         )
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             results = manager.run_daily("2026-03-31")
 
         result = results[info.gen_id]
@@ -1492,7 +1550,7 @@ class TestRunLogPersistence:
             )
             stderr = ""
 
-        monkeypatch.setattr(gm.subprocess, "run", lambda *a, **k: _Proc())
+        monkeypatch.setattr(gm, "_run_preflight_worker", lambda *a, **k: _Proc())
         result = mgr._run_cohorts_subprocess(
             gen_data, ["run-daily", "--date", "2026-05-29"]
         )

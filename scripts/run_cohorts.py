@@ -297,6 +297,20 @@ def _build_config(args: argparse.Namespace) -> dict:
     else:
         config = dict(DEFAULT_CONFIG)
     config["autoresearch"] = dict(config.get("autoresearch", {}))
+    from tradingagents.strategies.orchestration.operating_contract import configured as stabilization_configured
+    frozen_behavior = stabilization_configured(config)
+    if frozen_behavior:
+        # The supported generation freezes behavior in reviewed bytes. Secret
+        # credentials remain launcher-owned; ambient trade/contact settings may
+        # only repeat the frozen values, never change their source identity.
+        for declared in (args.block_tickers, os.environ.get('BLOCKED_TICKERS')):
+            if declared:
+                selected = [ticker.strip().upper() for ticker in declared.split(',') if ticker.strip()]
+                if selected != config['autoresearch'].get('blocked_tickers'):
+                    raise ValueError('generation_config_behavior_conflict')
+        contact = os.environ.get('EDGAR_USER_AGENT')
+        if contact and contact != config['autoresearch'].get('edgar_user_agent'):
+            raise ValueError('generation_config_behavior_conflict')
     state_dir_override = os.environ.get("AUTORESEARCH_STATE_DIR")
     if state_dir_override:
         config["autoresearch"]["state_dir"] = state_dir_override
@@ -311,10 +325,10 @@ def _build_config(args: argparse.Namespace) -> dict:
         "fmp_api_key",
     ):
         env_val = os.environ.get(key.upper(), "")
-        if env_val:
+        if env_val and not (frozen_behavior and key == 'edgar_user_agent'):
             config["autoresearch"][key] = env_val
     blocked = args.block_tickers or os.environ.get("BLOCKED_TICKERS", "")
-    if blocked:
+    if blocked and not frozen_behavior:
         config["autoresearch"]["blocked_tickers"] = [
             ticker.strip().upper() for ticker in blocked.split(",") if ticker.strip()
         ]
@@ -491,6 +505,20 @@ def _run_daily(
         raise SystemExit(exit_code)
 
 
+def _record_runtime_identity(config: dict, generation_id: str, generation_commit: str) -> None:
+    if config.get("autoresearch", {}).get("stabilization_profile_policy") != "supported_sixteen_books_v1":
+        return
+    from pathlib import Path
+    from tradingagents.strategies.orchestration.run_evidence import worker_runtime_identity
+
+    identity = worker_runtime_identity(
+        Path(__file__).resolve().parents[1], generation_id=generation_id,
+        generation_commit=generation_commit,
+        profile_sha256=os.environ.get("EVENTEDGE_GENERATION_CONFIG_SHA256", ""),
+    )
+    print("EVENTEDGE_RUNTIME_IDENTITY_V1=" + json.dumps(identity, sort_keys=True), file=sys.stderr)
+
+
 def main():
     _raise_fd_limit()
     parser = _build_parser()
@@ -498,6 +526,7 @@ def main():
     exact_trading_date = _validate_args(args, parser)
     generation_id, generation_commit = _generation_identity(parser)
     config = _build_config(args)
+    _record_runtime_identity(config, generation_id, generation_commit)
     preflight_mode = args.preflight_mode or "all"
     if args.preflight:
         _run_preflight(config, exact_trading_date, preflight_mode)

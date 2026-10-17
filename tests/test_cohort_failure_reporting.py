@@ -1055,7 +1055,7 @@ def _run_with_proc(tmp_path, proc):
     }
     with (
         patch(
-            "tradingagents.strategies.orchestration.generation_manager.subprocess.run",
+            "tradingagents.strategies.orchestration.generation_manager._run_preflight_worker",
             return_value=proc,
         ),
         patch.object(GenerationManager, "_write_run_log", lambda self, *a, **k: None),
@@ -1425,7 +1425,7 @@ def test_worker_exception_is_failed(tmp_path):
         "worktree_path": str(tmp_path / "wt"),
     }
     with patch(
-        "tradingagents.strategies.orchestration.generation_manager.subprocess.run",
+        "tradingagents.strategies.orchestration.generation_manager._run_preflight_worker",
         side_effect=RuntimeError("worker launch failed"),
     ):
         result = mgr._run_cohorts_subprocess(gen_data, ["--date", "2026-06-01"])

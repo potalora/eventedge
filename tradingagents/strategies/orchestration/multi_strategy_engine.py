@@ -323,6 +323,8 @@ class MultiStrategyEngine:
         filing_research_disabled(self.ar_config)
         from .research_resilience import configured as research_resilience_configured
         research_resilience_configured(self.ar_config)
+        from .research_resilience import capability_configured
+        capability_configured(self.ar_config)
         from .congress_policy import configured
         configured(self.ar_config)
         from tradingagents.strategies.data_sources.filing_attribution_policy import configured as filing_attribution_configured
@@ -338,6 +340,11 @@ class MultiStrategyEngine:
         from .bounded_document_inputs import configure_strategies as configure_document_strategies
         self.paper_trade_strategies = configure_document_strategies(self.paper_trade_strategies, self.ar_config)
 
+        from .operating_contract import configured as stabilization_configured, configure_strategies as stabilization_strategies
+        if stabilization_configured(self.config):
+            self.paper_trade_strategies = stabilization_strategies(self.paper_trade_strategies, self.ar_config)
+        from .filing_research_policy import declaration as filing_declaration
+        filing_declaration(self.ar_config)
         from .source_lifecycle_policy import configured as lifecycle_configured
         lifecycle_configured(self.ar_config, self.paper_trade_strategies)
 
@@ -438,11 +445,15 @@ class MultiStrategyEngine:
         research_hold_reasons = []
         from .source_lifecycle_policy import declared_scope, DECLARATION_KEY as LIFECYCLE_KEY, health_evidence
         retirement_scope = declared_scope(data, self.ar_config, self.paper_trade_strategies)
+        from .filing_research_policy import declared_scope as filing_scope, health_evidence as filing_health_evidence, DECLARATION_KEY as FILING_KEY
+        bulk_filing_scope = filing_scope(data, config=self.ar_config)
         congress_audit_scope = audit_scope(data, self.ar_config, trading_date)
         signal_data = ({key: value for key, value in data.items() if key not in ('congress', DECLARATION_KEY)}
                        if configured(self.ar_config) else data)
         if retirement_scope is not None:
             signal_data = {key: value for key, value in signal_data.items() if key != LIFECYCLE_KEY}
+        if bulk_filing_scope is not None:
+            signal_data = {key: value for key, value in signal_data.items() if key != FILING_KEY}
         if resilience:
             from .source_inputs import source_codec_limits
             names = set(data) | {'fred', 'yfinance'}
@@ -450,10 +461,11 @@ class MultiStrategyEngine:
                 names.add('equity_universe')
             names.update(source for strategy in self.paper_trade_strategies
                          for source in strategy.data_sources)
-            _, research_scope = project_sources(data, names,
-                codec_limits=source_codec_limits(self.config))
-            signal_data = {key: value for key, value in signal_data.items()
-                           if key in research_scope['usable_sources']}
+            projected_sources, research_scope = project_sources(data, names,
+                codec_limits=source_codec_limits(self.config),
+                capability_policy=self.ar_config.get('source_capability_policy'))
+            signal_data = {key: projected_sources[key] for key in signal_data
+                           if key in projected_sources}
         from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
         scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
         if resilience and any(not isinstance(data.get(source), dict)
@@ -601,6 +613,7 @@ class MultiStrategyEngine:
                 from tradingagents.strategies.metrics.identity import _stable_id
                 disabled_evidence = {"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}
                 disabled_evidence.update(health_evidence(retirement_scope, strategy.name))
+                disabled_evidence.update(filing_health_evidence(bulk_filing_scope, strategy.name))
                 if strategy.name == 'congressional_trades' and disabled_reason == CONGRESS_POLICY:
                     disabled_evidence['disclosure_policy'] = CONGRESS_POLICY
                     if congress_audit_scope is not None:
@@ -613,10 +626,13 @@ class MultiStrategyEngine:
                 continue
             try:
                 params = strategy.get_default_params(horizon=horizon)
+                from .research_resilience import strategy_capability_holds
+                capability_holds = (strategy_capability_holds(research_scope, strategy.name, strategy.data_sources)
+                    if resilience else [])
                 from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
                 with candidate_universe(universe):
                     candidates = (admit_candidates(strategy.name, [], budget=None)
-                        if any(source in scope_errors or (resilience and source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES)
+                        if capability_holds or any(source in scope_errors or (resilience and source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES)
                                for source in strategy.data_sources) or (resilience and filing_isolation is not None
                                    and strategy.name == 'quantum_readiness'
                                    and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete') or (strategy.name == 'state_economics' and state_failure == 'invalid_state_unemployment_evidence')
@@ -675,6 +691,15 @@ class MultiStrategyEngine:
                         candidate.metadata.setdefault("non_actionable_reason", "equity_universe_unresolved")
                         candidate.journal_only = True
             provider_errors = _provider_errors(data, strategy.data_sources)
+            if resilience and self.ar_config.get('source_capability_policy'):
+                from .research_resilience import strategy_capability_holds
+                capability_holds = strategy_capability_holds(research_scope, strategy.name, strategy.data_sources)
+                for source in ('fred', 'yfinance'):
+                    if source in strategy.data_sources and source in signal_data and not any(
+                            name.startswith(source + '.') for name in capability_holds):
+                        provider_errors.pop(source, None)
+                if capability_holds:
+                    provider_errors['source_capability'] = ','.join(capability_holds)
             if resilience:
                 for source in strategy.data_sources:
                     if source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES:
@@ -2187,6 +2212,15 @@ class MultiStrategyEngine:
         data.update(declaration(self.ar_config))
         from .source_lifecycle_policy import declaration as lifecycle_declaration
         data.update(lifecycle_declaration(self.ar_config, self.paper_trade_strategies))
+        from .filing_research_policy import declaration as filing_declaration
+        data.update(filing_declaration(self.ar_config))
+        from .source_inputs import public_source_configuration_declaration
+        # The shared source store is bound to the orchestrator's base profile;
+        # per-book risk/size overrides are separate ledger policy evidence.
+        if self.ar_config.get('stabilization_profile_policy') == 'supported_sixteen_books_v1':
+            binding_config = (litigation_target_owner._base_config
+                if litigation_target_owner is not None else self.config)
+            data.update(public_source_configuration_declaration(binding_config))
         if decision_policy == PROSPECTIVE and not diagnostic:
             data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
                                             'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
@@ -2761,33 +2795,53 @@ class MultiStrategyEngine:
         if source is None:
             return {}
 
+        from .research_resilience import capability_configured, acquisition_group, acquisition_manifest, FRED_GROUPS
+        from datetime import timezone
+        capability = capability_configured(self.ar_config)
+        started_at = datetime.now(timezone.utc).isoformat()
+        groups = {}
         result: dict[str, Any] = {}
         failures: list[str] = []
 
         # Credit spreads for regime model
         try:
             spreads = source.fetch_credit_spreads(start_date, end_date)
+            if capability:
+                groups['credit_spreads'] = acquisition_group(FRED_GROUPS['credit_spreads'])
             result.update(
                 spreads
             )  # Keys are FRED series IDs (BAMLH0A0HYM2, BAMLC0A4CBBB)
         except SourceFetchError as exc:
             result.update(exc.partial_data)
             failures.append(str(exc))
+            if capability:
+                groups['credit_spreads'] = acquisition_group(FRED_GROUPS['credit_spreads'], error=exc, independent=True)
         except Exception:
             logger.error("Failed to fetch FRED credit spreads")
             failures.append("FRED credit spreads [provider_error]")
+            if capability:
+                groups['credit_spreads'] = acquisition_group(FRED_GROUPS['credit_spreads'], error_text=failures[-1])
 
         # Economic indicators for regime model
         try:
             indicators = source.fetch_economic_indicators(start_date, end_date)
+            if capability:
+                groups['economic_indicators'] = acquisition_group(FRED_GROUPS['economic_indicators'])
             result.update(indicators)  # Keys are FRED series IDs (UNRATE, PAYEMS, etc.)
         except SourceFetchError as exc:
             result.update(exc.partial_data)
             failures.append(str(exc))
+            if capability:
+                groups['economic_indicators'] = acquisition_group(FRED_GROUPS['economic_indicators'], error=exc, independent=True)
         except Exception:
             logger.error("Failed to fetch FRED economic indicators")
             failures.append("FRED economic indicators [provider_error]")
+            if capability:
+                groups['economic_indicators'] = acquisition_group(FRED_GROUPS['economic_indicators'], error_text=failures[-1])
 
+        if capability:
+            result['_capability_acquisition'] = acquisition_manifest('fred', groups, start_date, end_date,
+                started_at, datetime.now(timezone.utc).isoformat())
         if failures:
             result["error"] = "; ".join(failures)
 
@@ -3000,6 +3054,11 @@ class MultiStrategyEngine:
             logger.warning("yfinance source not available")
             return {}
 
+        from .research_resilience import capability_configured, acquisition_group, acquisition_manifest, _project_capabilities
+        from datetime import timezone
+        capability = capability_configured(self.ar_config)
+        started_at = datetime.now(timezone.utc).isoformat()
+        groups = {}
         result: dict[str, Any] = {}
         from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
         failures = []
@@ -3053,9 +3112,13 @@ class MultiStrategyEngine:
         logger.info("Fetching prices for %d core tickers", len(core_tickers))
         try:
             prices_df = source.fetch_prices(core_tickers, start_date, end_date)
+            if capability:
+                groups['research_prices'] = acquisition_group(core_tickers)
         except Exception as exc:
             error = source_fetch_error("Yahoo research history failed", exc)
             failures.append(str(error))
+            if capability:
+                groups['research_prices'] = acquisition_group(core_tickers, error=error)
             prices_df = error.partial_data.get("prices", pd.DataFrame())
 
         # Split into per-ticker DataFrames
@@ -3072,20 +3135,33 @@ class MultiStrategyEngine:
             prices[core_tickers[0]] = prices_df
 
         result["prices"] = prices
-        self._price_cache.update(prices)
+        if not capability:
+            self._price_cache.update(prices)
 
         # Fetch VIX for regime model
         try:
             vix_df = source.fetch_vix(start_date, end_date)
+            if capability:
+                groups['vix'] = acquisition_group(['^VIX'])
         except Exception as exc:
             error = source_fetch_error("Yahoo VIX history failed", exc)
             failures.append(str(error))
-            vix_df = pd.DataFrame()
+            if capability:
+                groups['vix'] = acquisition_group(['^VIX'], error=error)
+            # Preserve rejected observations in immutable evidence. The failed
+            # outcome still excludes this frame from projection and acceptance.
+            vix_df = error.partial_data.get('vix', pd.DataFrame()) if capability else pd.DataFrame()
         if not vix_df.empty:
             result["vix"] = vix_df
 
         if failures:
             result["error"] = "; ".join(failures)
+        if capability:
+            result['_capability_acquisition'] = acquisition_manifest('yfinance', groups, start_date, end_date,
+                started_at, datetime.now(timezone.utc).isoformat())
+            from .source_inputs import source_codec_limits
+            accepted, _, _ = _project_capabilities(result, 'yfinance', codec_limits=source_codec_limits(self.config))
+            self._price_cache.update(accepted.get('prices', {}))
         return result
 
     # ------------------------------------------------------------------

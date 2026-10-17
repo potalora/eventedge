@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from importlib.metadata import version as package_version
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import date, datetime, timedelta, timezone
@@ -236,6 +237,10 @@ class SessionInputAcquisitionError(RuntimeError):
 
 class _GovernedRecoveryConflictError(LedgerConflictError):
     """Recovery evidence is unusable without authorizing ledger mutation."""
+
+
+class _SealedPreconditionConflictError(LedgerConflictError):
+    """A changed accepted starting state cannot authorize cancellation/invalidation."""
 
 
 class SessionExecutor:
@@ -884,6 +889,36 @@ class SessionExecutor:
         if state_errors:
             raise CorporateActionBatchError(actions, state_errors)
 
+    def prepare_execution_context(self, session, epoch_id, bundle, borrow_rates, processed_at):
+        """Read-only acceptance shared by first binding and the durable seal."""
+        self._validate_clock(session, epoch_id, processed_at)
+        context = self.ledger.session_execution_context(session)
+        required = tuple(context["required_tickers"]) if context is not None else self.required_tickers(session, epoch_id)
+        for ticker in required:
+            reason = self.ledger.session_invalid_reason(session, ticker)
+            if reason:
+                raise LedgerConflictError(f"quarantined {ticker}: {reason}")
+        bars, actions, benchmarks = self._validate_bundle(bundle, required, session, processed_at)
+        self._verify_governed_recoveries(session=session, epoch_id=epoch_id, bars=bars,
+                                        governed_recoveries=bundle.governed_recoveries)
+        errors = self.ledger.corporate_action_batch_errors(session, actions, processed_at, allow_prior=True)
+        if errors:
+            raise CorporateActionBatchError(actions, errors)
+        market, config, borrow, provenance = self._execution_context_documents(
+            session, required, bars, actions, benchmarks, borrow_rates, bundle.governed_recoveries)
+        coverage = (json.loads(str(context["economic_inputs_json"]))["market"].get("action_coverage", {})
+                    if context is not None else {day.isoformat(): list(tickers) for day, tickers in
+                                    sorted(self.ledger.inventory_action_requirements(session).items())})
+        market["action_coverage"] = coverage
+        payment_ids = sorted(a.action_id for a in bundle.payment_actions if any(a.action_id == b.action_id for b in actions))
+        if payment_ids:
+            market["payment_action_ids"] = payment_ids
+        volatility, values = (self._rehydrate_bound_volatility_evidence(context, epoch_id)
+                              if context is not None and self.portfolio_policy_config is not None
+                              else self._resolve_staged_volatility_evidence(session, epoch_id))
+        return {"required_tickers": required, "market": market, "config": config,
+                "borrow": borrow, "provenance": provenance, "volatility": volatility}, values
+
     def persisted_input_bundle(self, session: date) -> SessionInputBundle:
         """Rehydrate bound canonical economics for a partial-session resume."""
         context = self.ledger.session_execution_context(session)
@@ -1128,6 +1163,7 @@ class SessionExecutor:
                 "execution context conflict: effective config or borrow inputs changed"
             )
         self.ledger.verify_session_phase_chain(session, PHASES)
+        self._verify_committed_execution_policy_binding(session, epoch_id)
         if self.portfolio_policy_config is not None:
             self._rehydrate_bound_volatility_evidence(context, epoch_id)
         return borrow_rates
@@ -1139,6 +1175,7 @@ class SessionExecutor:
         price_source: PriceSource | SessionInputBundle,
         borrow_rates: dict[str, Decimal | None],
         processed_at: datetime,
+        *, sealed_precondition: Mapping[str, object] | None = None,
     ) -> SessionExecutionResult:
         """Execute the causal phases, resuming only at committed boundaries."""
         self._validate_clock(session, epoch_id, processed_at)
@@ -1273,70 +1310,88 @@ class SessionExecutor:
                 bars=bars,
                 governed_recoveries=bundle.governed_recoveries,
             )
-            if bound_context is None:
-                self.ledger.cancel_overdue_next_open_intents(
-                    session, session_open(session)
-                )
-                state_errors = self.ledger.corporate_action_batch_errors(
-                    session, actions, processed_at, allow_prior=True
-                )
-                if state_errors:
-                    raise CorporateActionBatchError(actions, state_errors)
-            market_inputs, config_inputs, borrow_inputs, provenance = (
-                self._execution_context_documents(
-                    session,
-                    required,
-                    bars,
-                    actions,
-                    benchmarks,
-                    borrow_rates,
-                    bundle.governed_recoveries,
-                )
-            )
-            coverage = self.ledger.inventory_action_requirements(session) if bound_context is None else bundle.action_coverage
-            selected_payment_ids = sorted(a.action_id for a in bundle.payment_actions if any(a.action_id == b.action_id for b in actions))
-            if selected_payment_ids:
-                market_inputs["payment_action_ids"] = selected_payment_ids
-            market_inputs["action_coverage"] = {day.isoformat(): list(tickers) for day, tickers in sorted(coverage.items())}
-            if bound_context is None:
-                starting_state = self.ledger.execution_starting_state(session)
-                economic_inputs = {
-                    "market": market_inputs,
-                    "starting_state": _canonical_json_value(starting_state),
-                }
-                if self.portfolio_policy_config is not None:
-                    economic_inputs[_POLICY_VOLATILITY_EVIDENCE_KEY] = (
-                        volatility_document
+            # Cancellation and the first authoritative context commit together.
+            with self.ledger.transaction() if bound_context is None else nullcontext():
+                prepared = None
+                if bound_context is None:
+                    prepared, annualized_volatility_evidence = self.prepare_execution_context(
+                        session, epoch_id, bundle, borrow_rates, processed_at)
+                    volatility_document = prepared["volatility"]
+                    if sealed_precondition is not None:
+                        from .shared_execution import validate_unbound_precondition
+                        validate_unbound_precondition(self.ledger, session, sealed_precondition)
+                        if prepared != sealed_precondition["prepared"]:
+                            raise _SealedPreconditionConflictError("shared execution prepared inputs changed at binding")
+                    self.ledger.cancel_overdue_next_open_intents(
+                        session, session_open(session)
                     )
-                economic_json = json.dumps(
-                    economic_inputs, sort_keys=True, separators=(",", ":")
+                    state_errors = self.ledger.corporate_action_batch_errors(
+                        session, actions, processed_at, allow_prior=True
+                    )
+                    if state_errors:
+                        raise CorporateActionBatchError(actions, state_errors)
+                market_inputs, config_inputs, borrow_inputs, provenance = (
+                    self._execution_context_documents(
+                        session,
+                        required,
+                        bars,
+                        actions,
+                        benchmarks,
+                        borrow_rates,
+                        bundle.governed_recoveries,
+                    )
                 )
-            else:
-                economic_json = str(bound_context["economic_inputs_json"])
-            market_digest = stable_id("session_market_inputs", market_inputs)
-            input_digest = (
-                stable_id("session_economic_inputs", economic_inputs)
-                if bound_context is None
-                else str(bound_context["input_digest"])
-            )
-            self.ledger.bind_session_execution_context(
-                session,
-                epoch_id,
-                input_digest,
-                market_digest,
-                config_digest,
-                borrow_digest,
-                required,
-                economic_json,
-                json.dumps(provenance, sort_keys=True, separators=(",", ":")),
-                processed_at,
-                (
-                    stable_id("session_governed_state", starting_state)
+                coverage = self.ledger.inventory_action_requirements(session) if bound_context is None else bundle.action_coverage
+                selected_payment_ids = sorted(a.action_id for a in bundle.payment_actions if any(a.action_id == b.action_id for b in actions))
+                if selected_payment_ids:
+                    market_inputs["payment_action_ids"] = selected_payment_ids
+                market_inputs["action_coverage"] = {day.isoformat(): list(tickers) for day, tickers in sorted(coverage.items())}
+                if prepared is not None:
+                    if (market_inputs != prepared["market"] or config_inputs != prepared["config"]
+                            or borrow_inputs != prepared["borrow"] or provenance != prepared["provenance"]):
+                        raise LedgerConflictError("prepared execution documents changed at initial binding")
+                if bound_context is None:
+                    starting_state = self.ledger.execution_starting_state(session)
+                    economic_inputs = {
+                        "market": market_inputs,
+                        "starting_state": _canonical_json_value(starting_state),
+                    }
+                    if self.portfolio_policy_config is not None:
+                        economic_inputs[_POLICY_VOLATILITY_EVIDENCE_KEY] = (
+                            volatility_document
+                        )
+                    economic_json = json.dumps(
+                        economic_inputs, sort_keys=True, separators=(",", ":")
+                    )
+                else:
+                    economic_json = str(bound_context["economic_inputs_json"])
+                market_digest = stable_id("session_market_inputs", market_inputs)
+                input_digest = (
+                    stable_id("session_economic_inputs", economic_inputs)
                     if bound_context is None
-                    else str(bound_context["starting_state_digest"])
-                ),
-                json.dumps(borrow_inputs, sort_keys=True, separators=(",", ":")),
-            )
+                    else str(bound_context["input_digest"])
+                )
+                self.ledger.bind_session_execution_context(
+                    session,
+                    epoch_id,
+                    input_digest,
+                    market_digest,
+                    config_digest,
+                    borrow_digest,
+                    required,
+                    economic_json,
+                    json.dumps(provenance, sort_keys=True, separators=(",", ":")),
+                    # A sealed context inherits the original input acceptance
+                    # clock; a later recovery is never a fresh observation.
+                    (bundle.validated_at if sealed_precondition is not None
+                     and isinstance(bundle, _PersistedSessionInputBundle) else processed_at),
+                    (
+                        stable_id("session_governed_state", starting_state)
+                        if bound_context is None
+                        else str(bound_context["starting_state_digest"])
+                    ),
+                    json.dumps(borrow_inputs, sort_keys=True, separators=(",", ":")),
+                )
             if bound_context is not None:
                 state_errors = self.ledger.corporate_action_batch_errors(
                     session, actions, processed_at, allow_prior=True
@@ -1346,6 +1401,8 @@ class SessionExecutor:
             self._expected_state_digest = self.ledger.verify_session_phase_chain(
                 session, PHASES
             )
+        except _SealedPreconditionConflictError as error:
+            return SessionExecutionResult(session, False, None, str(error), ())
         except CorporateActionBatchError as error:
             reason = self.ledger.reject_corporate_action_batch(
                 session,
@@ -1649,6 +1706,9 @@ class SessionExecutor:
         from .research_resilience import configured as research_resilience_configured, POLICY as RESEARCH_POLICY
         if research_resilience_configured(self.ar_config):
             semantic_inputs['research_resilience_policy'] = RESEARCH_POLICY
+        for policy_key in ("stabilization_profile_policy", "source_capability_policy"):
+            if policy_key in self.ar_config:
+                semantic_inputs[policy_key] = self.ar_config[policy_key]
         if self.pricing_version == SIP_PRICING_VERSION:
             # Bind current provider and benchmark semantics against same-session
             # source-policy substitution.

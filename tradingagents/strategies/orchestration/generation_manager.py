@@ -1293,21 +1293,10 @@ class GenerationManager:
 
         start = time.monotonic()
         try:
-            if preflight_mode is not None:
-                proc = _run_preflight_worker(
-                    cmd, cwd=gen_data["worktree_path"], env=env,
-                    timeout=_GENERATION_TIMEOUT_S, pass_fds=pass_fds,
-                )
-            else:
-                proc = subprocess.run(
-                    cmd,
-                    cwd=gen_data["worktree_path"],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=_GENERATION_TIMEOUT_S,
-                    pass_fds=pass_fds,
-                )
+            proc = _run_preflight_worker(
+                cmd, cwd=gen_data["worktree_path"], env=env,
+                timeout=_GENERATION_TIMEOUT_S, pass_fds=pass_fds,
+            )
             elapsed = time.monotonic() - start
             capture.update(
                 {
