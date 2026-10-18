@@ -9,6 +9,34 @@ import sys
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/check_target_host_smoke.py'
+SHADOW = Path('/home/hermes/.hermes/private/projects/eventedge')
+
+
+@pytest.fixture
+def collector_host(monkeypatch):
+    """Keep advisory shadow probes and systemd reads independent of this host."""
+    state = {'shadow': False, 'shadow_probes': 0, 'shadow_git_calls': []}
+    native_is_dir, native_run = Path.is_dir, subprocess.run
+
+    def is_dir(path):
+        if path == SHADOW:
+            state['shadow_probes'] += 1
+            if isinstance(state['shadow'], Exception):
+                raise state['shadow']
+            return state['shadow']
+        return native_is_dir(path)
+
+    def run(args, *positional, **options):
+        if args[0] == 'systemctl':
+            return subprocess.CompletedProcess(args, 0, stdout='', stderr='')
+        if args[:3] == ['git', '-C', str(SHADOW)]:
+            state['shadow_git_calls'].append(args)
+            return subprocess.CompletedProcess(args, 0, stdout='c' * 40 + '\n', stderr='')
+        return native_run(args, *positional, **options)
+
+    monkeypatch.setattr(Path, 'is_dir', is_dir)
+    monkeypatch.setattr(subprocess, 'run', run)
+    return state
 
 
 def snapshot():
@@ -89,7 +117,7 @@ def test_invalid_json_reports_only_sanitized_failure(tmp_path):
     assert 'Target-host inspection unavailable' in result.stderr
 
 
-def test_collector_reads_only_selected_env_presence_and_manifest_rows(tmp_path):
+def test_collector_reads_only_selected_env_presence_and_manifest_rows(tmp_path, collector_host):
     import runpy
     module = runpy.run_path(str(SCRIPT))
     repo = tmp_path / 'repo'
@@ -144,7 +172,7 @@ def test_active_worktree_boundary_and_identity_fail_closed(tmp_path, field, valu
 
 
 @pytest.mark.parametrize('symlink_level', ['worktrees', 'generation'])
-def test_collector_rejects_worktree_symlink_outside_repo(tmp_path, symlink_level):
+def test_collector_rejects_worktree_symlink_outside_repo(tmp_path, symlink_level, collector_host):
     import runpy
     module = runpy.run_path(str(SCRIPT))
     repo = tmp_path / 'repo'
@@ -167,3 +195,61 @@ def test_collector_rejects_worktree_symlink_outside_repo(tmp_path, symlink_level
     row = module['collect_snapshot'](repo)['active_generations'][0]
     assert row['worktree_in_boundary'] is False
     assert row['head'] == ''
+
+
+@pytest.mark.parametrize('condition,exists,status', [
+    (False, False, 'absent'),
+    (True, True, 'present'),
+    (PermissionError('PRIVATE_ERROR'), None, 'inaccessible'),
+])
+def test_collector_distinguishes_shadow_absence_from_inaccessible_metadata(
+        tmp_path, collector_host, condition, exists, status):
+    import runpy
+    module = runpy.run_path(str(SCRIPT))
+    repo = tmp_path / 'repo'
+    (repo / 'data/generations').mkdir(parents=True)
+    (repo / 'data/generations/manifest.json').write_text(json.dumps({'generations': []}))
+    collector_host['shadow'] = condition
+    result = module['collect_snapshot'](repo)
+    assert result['shadow'] == {'path': str(SHADOW), 'exists': exists,
+                                'status': status, 'head': 'c' * 40 if exists else ''}
+    assert collector_host['shadow_probes'] == 1
+    assert len(collector_host['shadow_git_calls']) == int(exists is True)
+    assert 'PRIVATE_ERROR' not in json.dumps(result)
+    # The development shadow is advisory; it does not redefine the production
+    # boundary assessment or its strict allowlisted report schema.
+    production = snapshot()
+    production['shadow'] = result['shadow']
+    report = module['assess_snapshot'](production, 'a' * 40, 'test-vps')
+    assert report['inspection_passed'] is True
+    assert 'shadow' not in report
+
+
+def test_collector_inaccessible_shadow_survives_self_contained_ssh_serialization(
+        tmp_path, collector_host):
+    import inspect
+    import runpy
+    module = runpy.run_path(str(SCRIPT))
+    reconstructed = {}
+    exec(inspect.getsource(module['collect_snapshot']), reconstructed)
+    repo = tmp_path / 'repo'
+    (repo / 'data/generations').mkdir(parents=True)
+    (repo / 'data/generations/manifest.json').write_text(json.dumps({'generations': []}))
+    collector_host['shadow'] = PermissionError('PRIVATE_ERROR')
+    result = reconstructed['collect_snapshot'](repo)
+    assert result['shadow']['exists'] is None
+    assert result['shadow']['status'] == 'inaccessible'
+    assert collector_host['shadow_git_calls'] == []
+
+
+@pytest.mark.parametrize('error', [OSError('PRIVATE_ERROR'), RuntimeError('PRIVATE_ERROR')])
+def test_collector_does_not_swallow_unrelated_shadow_probe_errors(tmp_path, collector_host, error):
+    import runpy
+    module = runpy.run_path(str(SCRIPT))
+    repo = tmp_path / 'repo'
+    (repo / 'data/generations').mkdir(parents=True)
+    (repo / 'data/generations/manifest.json').write_text(json.dumps({'generations': []}))
+    collector_host['shadow'] = error
+    with pytest.raises(type(error), match='PRIVATE_ERROR'):
+        module['collect_snapshot'](repo)
+    assert collector_host['shadow_git_calls'] == []

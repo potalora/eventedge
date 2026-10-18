@@ -2966,7 +2966,13 @@ class MultiStrategyEngine:
         except Exception as exc:
             from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
             error = source_fetch_error("Source acquisition failed", exc)
-            return {**error.partial_data, "error": str(error)}
+            return {**error.partial_data, "error": str(error), "_coverage": {
+                "status": "partial" if error.partial_data else "failed",
+                "reason_code": error.reason_code, "http_status": error.http_status,
+                "attempts": error.attempts,
+                "failed_operations": dict(error.failed_operations),
+                "failed_http_statuses": dict(error.failed_http_statuses),
+            }}
 
     def _fetch_usda_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
         """Preserve crops fetched before any required crop failure."""

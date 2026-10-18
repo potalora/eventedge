@@ -484,7 +484,9 @@ def test_explicit_headless_login_url_has_no_retained_tokens(auth, provider, tmp_
     assert 'synthetic-access' not in ''.join(printed) and 'synthetic-refresh' not in ''.join(printed)
 
 
-def test_parent_profile_lookup_rejects_fifo_without_blocking(auth, tmp_path):
+@pytest.mark.parametrize('blocking_control', [False, True])
+def test_parent_profile_lookup_rejects_fifo_without_blocking(auth, tmp_path, blocking_control):
+    import signal
     import subprocess
     import sys
     directory = tmp_path/'private'
@@ -492,17 +494,35 @@ def test_parent_profile_lookup_rejects_fifo_without_blocking(auth, tmp_path):
     path = directory/'auth.json'
     os.mkfifo(path, 0o600)
     code = '''
-import sys, time
+import os, signal, sys, time
 from tradingagents.strategies.plan_auth import read_profile_identity, PlanAuthError
+# Arm the hard operation guard after imports; blocking filesystem calls cannot
+# rely on the cooperative 100ms profile deadline to interrupt them.
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.setitimer(signal.ITIMER_REAL, 2)
 try:
+    if sys.argv[2] == 'blocking-control':
+        os.open(sys.argv[1], os.O_RDONLY)
+        raise AssertionError('Blocking FIFO unexpectedly opened')
     read_profile_identity(sys.argv[1], deadline=time.monotonic()+.1)
 except PlanAuthError as error:
-    print(str(error))
+    print(str(error), flush=True)
 else:
     raise AssertionError('FIFO accepted')
+finally:
+    signal.setitimer(signal.ITIMER_REAL, 0)
 '''
-    result = subprocess.run([sys.executable, '-B', '-c', code, str(path)], capture_output=True, timeout=2, check=True)
-    assert result.stdout == b'storage_unsafe\n'
+    mode = 'blocking-control' if blocking_control else 'profile'
+    # This separate bound covers cold interpreter imports and teardown; the
+    # child still has the original hard two-second FIFO operation limit.
+    result = subprocess.run([sys.executable, '-B', '-c', code, str(path), mode],
+                            capture_output=True, timeout=10)
+    if blocking_control:
+        assert result.returncode == -signal.SIGALRM
+        assert result.stdout == b''
+    else:
+        result.check_returncode()
+        assert result.stdout == b'storage_unsafe\n'
 
 
 def test_parent_profile_snapshot_does_not_wait_for_active_refresh_lock(auth, provider, tmp_path):

@@ -136,7 +136,11 @@ def source_date(value: Any) -> bool:
 
 def source_number(value: Any, *, minimum=None, maximum=None) -> bool:
     """Consumed numerical observations must be finite and within their domain."""
-    return (isinstance(value, Real) and not isinstance(value, bool)
-            and math.isfinite(value)
-            and (minimum is None or value >= minimum)
+    if not isinstance(value, Real) or isinstance(value, bool):
+        return False
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        return False
+    return (finite and (minimum is None or value >= minimum)
             and (maximum is None or value <= maximum))

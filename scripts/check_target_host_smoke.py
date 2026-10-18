@@ -94,11 +94,20 @@ def collect_snapshot(repo):
                    'mtime_utc': datetime.datetime.fromtimestamp(p.stat().st_mtime,
                        datetime.timezone.utc).isoformat()} for p in paths]
     shadow = Path('/home/hermes/.hermes/private/projects/eventedge')
+    # Advisory shadow metadata must not erase the production snapshot when the
+    # reader lacks access. Unknown is distinct from an absent directory.
+    try:
+        shadow_exists = shadow.is_dir()
+    except PermissionError:
+        shadow_exists = None
+    shadow_status = ('inaccessible' if shadow_exists is None else
+                     'present' if shadow_exists else 'absent')
     return {'collected_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'hostname': socket.gethostname(),
             'production': {'path': str(repo), 'head': head(repo)},
-            'shadow': {'path': str(shadow), 'exists': shadow.is_dir(),
-                       'head': head(shadow) if shadow.is_dir() else ''},
+            'shadow': {'path': str(shadow), 'exists': shadow_exists,
+                       'status': shadow_status,
+                       'head': head(shadow) if shadow_exists is True else ''},
             'manifest_sha256': hashlib.sha256(manifest_bytes).hexdigest(),
             'active_generations': active, 'units': units,
             'credentials_present': credentials, 'latest_report_files': latest,

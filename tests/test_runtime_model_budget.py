@@ -42,27 +42,56 @@ def stalled_server():
         thread.join(timeout=2)
 
 
-def test_fred_native_transport_does_not_hold_subprocess_after_gather(stalled_server):
+@pytest.mark.parametrize('linger_after_gather', [False, True])
+def test_fred_native_transport_does_not_hold_subprocess_after_gather(stalled_server, linger_after_gather):
+    import os
+    import select
+
     script = '''
-import time
+import sys, threading, time
 from tradingagents.strategies.data_sources.fred_source import FREDSource
 from tradingagents.strategies.data_sources.request_policy import provider_budget
 from tradingagents.strategies.orchestration.multi_strategy_engine import _gather_with_timeout
 source=FREDSource(api_key="offline")
 source._base_url=%r
+print("ready",flush=True)
+assert sys.stdin.readline() == "go\\n"
 start=time.monotonic()
 def fetch():
  with provider_budget("fred",time.monotonic()+1,max_attempts=1):
   return source.fetch_series("UNRATE","2026-10-01","2026-10-06")
 result=_gather_with_timeout({"fred":(fetch,())},1.2)
 assert "error" in result["fred"]
-print(time.monotonic()-start)
+if sys.argv[1] == "linger":
+ threading.Thread(target=threading.Event().wait,daemon=False,
+                  name="synthetic-post-gather-linger").start()
+print("gathered",time.monotonic()-start,flush=True)
 ''' % (f"http://127.0.0.1:{stalled_server.server_port}")
-    started = time.monotonic()
-    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5)
-    assert completed.returncode == 0, completed.stderr
-    assert stalled_server.started.is_set(), "must exercise the real FRED HTTP boundary"
-    assert time.monotonic() - started < 2.5
+    mode = "linger" if linger_after_gather else "natural-exit"
+    child = subprocess.Popen([sys.executable, "-c", script, mode], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        # Bound cold startup separately. The child waits for GO after imports,
+        # so the existing 2.5s guard still covers gather plus natural teardown.
+        ready, _, _ = select.select([child.stdout], [], [], 10)
+        assert ready, "cold child startup did not become ready"
+        assert os.read(child.stdout.fileno(), 6) == b"ready\n"
+        started = time.monotonic()
+        if linger_after_gather:
+            with pytest.raises(subprocess.TimeoutExpired) as error:
+                child.communicate(input=b"go\n", timeout=2.5)
+            assert b"gathered " in (error.value.stdout or b"")
+            assert child.poll() is None, "lingering child must not count as natural exit"
+        else:
+            stdout, stderr = child.communicate(input=b"go\n", timeout=2.5)
+            assert child.returncode == 0, stderr
+            assert stdout.startswith(b"gathered ")
+            assert time.monotonic() - started < 2.5
+        assert stalled_server.started.is_set(), "must exercise the real FRED HTTP boundary"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate()
 
 
 def test_real_responses_transport_is_killed_at_total_deadline(stalled_server):
