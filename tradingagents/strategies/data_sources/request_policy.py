@@ -55,6 +55,11 @@ def provider_budget(provider, deadline, *, clock=None, sleep=None,
     """Scope provider operations to a deadline and yield safe diagnostics."""
     if not math.isfinite(deadline) or not 1 <= max_attempts <= 5:
         raise ValueError("invalid provider acquisition budget")
+    parent = _CURRENT.get()
+    if diagnostics is None and parent is not None and parent.provider == provider:
+        # Narrowing an operation's budget must not hide its request outcomes.
+        # Explicit sinks and unrelated provider scopes remain independent.
+        diagnostics = parent.diagnostics
     budget = _Budget(provider, deadline, clock or time.monotonic, sleep or time.sleep,
                      random_fn or random.random, max_attempts,
                      tuple(PROVIDER_LIMITS.get(provider, ()) if limits is None else limits),
