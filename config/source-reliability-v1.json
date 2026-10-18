@@ -1,0 +1,75 @@
+{
+  "version": "source_reliability_catalog_v1",
+  "cases": [
+    {
+      "case_id": "noaa_native_bulk_timeout_20261018",
+      "source": "noaa",
+      "provider": "noaa",
+      "operation": "bulk_daily_observations",
+      "reason_code": "timeout",
+      "http_status": null,
+      "classification": "source_or_network",
+      "provenance": "native_observation",
+      "evidence_kind": "retained_diagnostic",
+      "evidence_sha256": "b81777d6c0f421878a82be60e5195f116b7425c13165ba6a7adbbb1fc39e709f",
+      "accepted_observation_id": null,
+      "lesson_code": "retain_unresolved_transport_evidence"
+    },
+    {
+      "case_id": "noaa_native_bulk_503_20261018",
+      "source": "noaa",
+      "provider": "noaa",
+      "operation": "bulk_daily_observations",
+      "reason_code": "http_error",
+      "http_status": 503,
+      "classification": "source_or_network",
+      "provenance": "native_observation",
+      "evidence_kind": "retained_diagnostic",
+      "evidence_sha256": "b81777d6c0f421878a82be60e5195f116b7425c13165ba6a7adbbb1fc39e709f",
+      "accepted_observation_id": null,
+      "lesson_code": "retain_unresolved_transport_evidence"
+    },
+    {
+      "case_id": "noaa_documented_control_timeout_20261018",
+      "source": "noaa",
+      "provider": "noaa",
+      "operation": "get",
+      "reason_code": "timeout",
+      "http_status": null,
+      "classification": "source_or_network",
+      "provenance": "documented_control",
+      "evidence_kind": "retained_diagnostic",
+      "evidence_sha256": "c17262222a3856438b6b3c66cfce9e3b6c49b83be95c2344b541fffb0d8ee0c7",
+      "accepted_observation_id": null,
+      "lesson_code": "retain_unresolved_transport_evidence"
+    },
+    {
+      "case_id": "noaa_access_two_family_control_20261018",
+      "source": "noaa",
+      "provider": "noaa",
+      "operation": "get",
+      "reason_code": "timeout",
+      "http_status": null,
+      "classification": "source_or_network",
+      "provenance": "observed_request_control",
+      "evidence_kind": "retained_diagnostic",
+      "evidence_sha256": "7b1964f3e12d4d694d1b36c6a450956a8fcf5313d1b7f370a3803dc47ac6abb8",
+      "accepted_observation_id": null,
+      "lesson_code": "retain_unresolved_transport_evidence"
+    },
+    {
+      "case_id": "finnhub_mutated_optional_estimate_20261018",
+      "source": "finnhub",
+      "provider": "finnhub",
+      "operation": "unspecified",
+      "reason_code": "invalid_response",
+      "http_status": null,
+      "classification": "code_defect",
+      "provenance": "controlled_mutation",
+      "evidence_kind": "verified_regression",
+      "evidence_sha256": "6970b70294881899bd3d16a6e1d5eaffec47e1b59968b51667c5dffc8446b124",
+      "accepted_observation_id": null,
+      "lesson_code": "validate_optional_consumed_numbers"
+    }
+  ]
+}

@@ -754,6 +754,9 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                                              'http_status':coverage.get('http_status') if isinstance(coverage,dict) and type(coverage.get('http_status')) is int else None})
         for kind in ('recovered','unresolved'):
             result[kind] = sorted({json.dumps(row,sort_keys=True):row for row in result[kind]}.values(),key=lambda row:json.dumps(row,sort_keys=True))
+        # Bind observational learning only after the accepted-source projection
+        # has passed its existing identity, digest and source-contract checks.
+        result['observation_sha256'] = envelope['digest']
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         diagnose('accepted_sources_invalid')
     return result
@@ -807,6 +810,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
     snapshot guarantee is for archived copies/offline fixtures, never an implicit
     fallback when a live lock is busy or invalid.
     """
+    from .source_reliability import load_source_reliability
     if not _safe_id(generation) or date.fromisoformat(session).isoformat()!=session:
         raise ValueError('invalid report identity')
     if _state_snapshot is not None and not snapshot_guaranteed:
@@ -841,6 +845,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             report['generation_commit'] = commit
         except (OSError, ValueError, TypeError, KeyError):
             diagnose('manifest_invalid')
+            report['source_reliability'] = load_source_reliability(report, repo)
             return report
         operating_profile = None
         frozen_profile = None
@@ -1125,6 +1130,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             from .operating_contract import evaluate_completion
             report['completion'] = evaluate_completion(operating_profile, facts)
         diagnostics.sort(key=lambda row:(row['code'],row.get('scope','')))
+        report['source_reliability'] = load_source_reliability(report, repo)
         return report
 
 
@@ -1451,6 +1457,15 @@ def render_operational_report(report: dict) -> str:
         for alert in policy['alerts']:
             lines.append(f"- Event {alert['kind']}: {alert['provider']} ({alert['alert_id']}).")
         lines.append('Repair procedure and monitor contract: docs/source-incident-policy.md.')
+    if 'source_reliability' in report:
+        learning = report['source_reliability']
+        lines.extend(['', '## Source reliability learning', '',
+            f"Assessment: {learning['assessment_status']}; reviewed catalog: {learning['catalog_status']}; review required: {learning['review_required']}.",
+            'Known patterns are previous learning, not proof of the current cause. This metadata does not change source health, retries or trading permissions.'])
+        for row in learning['patterns']:
+            lines.append(f"- {row['source']} / {row['operation']}: {row['reason_code']}; current attribution {row['current_attribution']}; known pattern {row['known_pattern']} ({row['pattern_id']}).")
+        if learning['selection_truncated']:
+            lines.append('Learning pattern bound exceeded; inspect retained canonical source evidence.')
     if report['preflight_incidents']:
         lines.extend(['','## Preflight incidents',''])
         for item in report['preflight_incidents']:

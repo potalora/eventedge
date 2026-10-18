@@ -95,6 +95,90 @@ checks; this source policy does not replace them.
    verified-defect and approval criteria. Resume through the next ordinary
    session and verify the recovery event; preserve accepted historical inputs.
 
+## Historical acceptance and reliability learning
+
+Every source/data-path change must exercise retained real historical evidence
+through its relevant native boundary, alongside deterministic fault controls.
+Record whether the artifact is original HTTP bytes, a normalized real capture,
+a reconstructed wire fixture or a controlled mutation. Preserve acquisition
+vintage, reference/observation session, source format, selected subset, original
+and fixture hashes, and material availability limits. A mutation is never a new
+provider observation. A normalized or alternate-format capture must not be
+described as the native HTTP contract. Missing positive native evidence remains
+an explicit qualification gap; do not invent a response, relabel a failed source
+or repeatedly spend credits to make an acceptance campaign appear complete.
+
+Every novel observed source failure becomes a review item, including failures
+whose cause remains unknown. Canonical operational reports now include bounded
+`source_reliability` metadata from the existing validated accepted-source
+projection. They retain distinct source/provider/operation/reason/status
+patterns and stable observation IDs binding generation, commit, session,
+configuration, acquisition time and accepted payload digest. Duplicate diagnostic
+rows, physical retries, report regeneration and replay do not create additional
+observations. Different real acquisitions retain different identities. These
+records do not define an outage count, uptime, failure rate or a denominator.
+
+Automatic v1 projection covers accepted-source acquisition failures only. Earlier
+preflight-only, health-only and harness failures remain in their existing report
+and attempt evidence; a later successful accepted acquisition must not erase the
+obligation to review them. Each novel such failure requires the same retained
+evidence, historical/control reproduction and reviewed catalog update. Keep
+`accepted_observation_id` null when no exact accepted-source identity exists;
+do not invent one or treat the later acquisition as the failed attempt. The
+catalog retains their reviewed historical learning without attributing a current
+accepted source to that cause. Missing native positive evidence remains a gap.
+Canonical source-related preflight or failed source-health evidence also sets a
+fixed review-required diagnostic, even when later accepted inputs are healthy.
+This flag creates no observation identity, pattern, causal attribution or
+empirical-provider count for the unbound evidence.
+
+The reviewed public catalog is
+[`config/source-reliability-v1.json`](../config/source-reliability-v1.json).
+It contains only fixed metadata, symbolic lessons and evidence hashes. Raw
+accepted envelopes, licensed/private data, contact/profile/credential material
+and trading state stay outside Git. Runtime never writes this catalog. The
+catalog is bounded to 64 KiB and 64 cases; reports select at most 64 unique
+patterns. Missing/invalid catalogs, invalid acquisition identity, unavailable
+evidence or exceeded bounds are explicitly unavailable/review-required.
+
+Known patterns and current attribution are separate. A matching error signature
+shows `previous_learning`; it does not show that today's cause is the same.
+Current attribution stays `unresolved` unless an exact accepted observation ID
+matches reviewed catalog evidence. Supported classifications are `code_defect`,
+`confirmed_upstream`, `source_or_network`, `configuration_access`, `unresolved`
+and `harness`. Provider-wide or confirmed-upstream claims require explicit
+provider confirmation and an empirical observation; a timeout, 503, one host's
+result, synthetic fault or operator guess does not suffice. Configuration/access
+and verified code findings remain distinct from source/network uncertainty.
+Fault mutations and harness cases never receive an empirical-provider flag.
+`documented_control` and `observed_request_control` mean actual outbound requests
+whose outcomes were retained, not a locally simulated transport or replay.
+Harness/regression evidence kinds are also excluded from empirical flags even
+when their error pattern resembles a real source observation. Catalog loading
+rejects symlinks and nonregular files with nonblocking descriptor opens; an
+unavailable advisory catalog cannot block the canonical report on a FIFO.
+
+For a new failure, preserve the accepted input and existing report/incident
+identity, reproduce offline against retained real data, and test a controlled
+counterexample. Review whether the cause is code, source/network, access or the
+harness. Add a sanitized evidence hash, fixture/provenance and selected lesson to
+the catalog in the same reviewed PR. If the cause is unresolved, record that
+instead of waiting for a conclusive diagnosis or assigning upstream blame. A
+classification correction keeps the original evidence and its provenance.
+Catalog review does not acknowledge/close an operational incident or authorize
+reacquisition, retries, substitutions, gate relaxation, trades or deployment.
+
+The initial NOAA learning preserves actual bulk timeouts/503 and documented
+controls as `source_or_network`. Later controls observed Access-path timeouts
+over both IP families while an official static historical station file was
+available from the same host. That static `.dly` format is not an Access JSON
+response, full weather coverage or an approved replacement. These observations
+do not prove a provider-wide outage, every station's compatibility, or the cause
+of an earlier generic accepted failure. Their catalog entries therefore have no
+exact accepted-observation binding. The Finnhub optional-estimate finding is a
+verified code defect exposed by a mutation of real-derived input, and is retained
+separately without counting it as an observed provider reliability failure.
+
 ## Finite acceptance and closeout
 
 The MVP is accepted when deterministic tests demonstrate transient escalation,

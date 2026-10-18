@@ -51,9 +51,11 @@ descendants on timeout or leader exit and preserves full worker result output.
 
 ## Verification and release evidence
 
-Run the supported scheduled gate with constructed external IO:
+Run recorded historical source replay before the supported scheduled gate:
 
 ```bash
+.venv/bin/python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-history.json
+.venv/bin/python scripts/run_historical_source_acceptance.py --private-corpus /absolute/private/corpus --require-full-supported-scope --report /absolute/private/full-history.json
 .venv/bin/python -m pytest -q -m 'scheduled_acceptance and not document_qualification and not live' tests
 ```
 
@@ -69,9 +71,15 @@ The full 98-image document workflow is a separate deferred qualification:
 .venv/bin/python -m pytest -q -m 'document_qualification and not live' tests
 ```
 
-Document unit and replay regressions remain in ordinary non-live CI. The two
-existing hosted jobs run the supported scheduled gate followed by the remaining
-non-live suite, including the job with pinned optional OpenBB dependencies.
+Document unit and replay regressions remain in ordinary non-live CI. Both hosted
+environments require the public historical replay before the scheduled and
+remaining non-live suites. Full supported-source acceptance additionally requires
+the exact private corpus; missing artifacts fail rather than skip. See the
+[acceptance policy](scheduled-workflow-acceptance.md) and manifest under
+`tests/historical/` for provenance, source-format boundaries and coverage gaps.
+The historical source baseline uses recorded data. Constructed external IO in
+the scheduler scenarios supplies repeatable clock, interruption and fault cases;
+it cannot substitute for that baseline or establish empirical source reliability.
 
 Stabilization workers emit `EVENTEDGE_RUNTIME_IDENTITY_V1` on stderr, retained in
 the existing immutable attempt. It binds generation/code/profile, Python version,

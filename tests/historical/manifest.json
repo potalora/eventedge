@@ -1,0 +1,452 @@
+{
+  "excluded_policy_sources": {
+    "bounded_documents": "disabled in stabilization profile",
+    "regulations": "retired in stabilization profile; present only in older capture"
+  },
+  "limitations": [
+    "Public subset excludes licensed/private provider corpora; full source acceptance requires explicit external corpus.",
+    "Accepted source envelopes are normalized observations, not captured provider HTTP bodies.",
+    "Acquisition, reference session, observation and as-of dates remain distinct; replay does not prove fresh health."
+  ],
+  "private_captures": [
+    {
+      "boundary": "accepted_normalized_envelope",
+      "bytes": 47869133,
+      "expected": {
+        "award_attribution_complete": false,
+        "commodity_candidates": 0,
+        "commodity_candidates_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "congress_content_sha256": "0961060f1b23a27e1c3595738ea6d4692f62d9ce760b13c23d4c128358dacaba",
+        "court_dockets": 34,
+        "court_evidence_sha256": "5cf8382e8ed360aa820569972d58bdc6e52af97bd63bbf3b06f23dbffc83b8df",
+        "earnings_candidates": 4,
+        "earnings_candidates_sha256": "892fdbe55ef83c0d756ebd70d6a8b799b705edce838d62011ac8d6a29c6b5ce0",
+        "fred_series": 18,
+        "source_errors": {
+          "cftc": false,
+          "congress": false,
+          "courtlistener": false,
+          "drought_monitor": false,
+          "edgar": true,
+          "equity_universe": false,
+          "finnhub": false,
+          "fred": false,
+          "noaa": false,
+          "openbb": false,
+          "usaspending": false,
+          "usda": false,
+          "yfinance": false
+        },
+        "source_projection": {
+          "cftc": "usable",
+          "congress": "usable",
+          "courtlistener": "usable",
+          "drought_monitor": "usable",
+          "edgar": "excluded",
+          "equity_universe": "usable",
+          "finnhub": "usable",
+          "fred": "excluded",
+          "noaa": "usable",
+          "openbb": "usable",
+          "usaspending": "usable",
+          "usda": "usable",
+          "yfinance": "excluded"
+        },
+        "spy_last_session": "2026-10-14",
+        "spy_rows": 63,
+        "weather_candidates": 3,
+        "weather_candidates_sha256": "f2b1a53d38e3d7a9c1e01dca0e3c29008a3414702351fcbc0d00b8edaa35ccf6",
+        "weather_non_journal": 3,
+        "yahoo_frames": 37
+      },
+      "id": "gen022-reference-20261015",
+      "path": "gen022-20261015-source-inputs.json",
+      "provenance": {
+        "acquired_at": "2026-10-16T03:37:26.810768+00:00",
+        "acquisition_started_at": "2026-10-16T03:36:02.208600+00:00",
+        "identity": {
+          "commit": "df78a7acdbc1e04a09a40a6222e72939a0599993",
+          "configuration": "3e0ae89d4eb806b41ab086d66389fe41000a9195d29c70c76a42d0630d6491c5",
+          "generation": "gen_022",
+          "session": "2026-10-15"
+        },
+        "original_artifact_sha256": "d3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13",
+        "reference_session": "2026-10-15",
+        "vintage_as_of": "2026-10-15"
+      },
+      "sha256": "d3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13"
+    },
+    {
+      "boundary": "accepted_normalized_envelope",
+      "bytes": 22031228,
+      "expected": {
+        "award_attribution_complete": false,
+        "commodity_candidates": 0,
+        "commodity_candidates_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "congress_content_sha256": "22a388f68dba82fb3e9be4b128d95e3d18a868059b8caca37d632097c23d4af1",
+        "court_dockets": 37,
+        "court_evidence_sha256": "a7a39dd84c1a7b16d1d57eededa863a5de5287ba0b878340ceac5c000374ece4",
+        "earnings_candidates": 4,
+        "earnings_candidates_sha256": "c3358da1bb04285bb05b73ddbf7eec3ffe6e0be23241bc08360364ffbfe80a84",
+        "fred_series": 18,
+        "source_errors": {
+          "cftc": false,
+          "congress": false,
+          "courtlistener": false,
+          "drought_monitor": false,
+          "edgar": true,
+          "equity_universe": false,
+          "finnhub": false,
+          "fred": false,
+          "noaa": true,
+          "openbb": false,
+          "usaspending": false,
+          "usda": false,
+          "yfinance": false
+        },
+        "source_projection": {
+          "cftc": "usable",
+          "congress": "usable",
+          "courtlistener": "usable",
+          "drought_monitor": "usable",
+          "edgar": "excluded",
+          "equity_universe": "usable",
+          "finnhub": "usable",
+          "fred": "usable",
+          "noaa": "excluded",
+          "openbb": "usable",
+          "usaspending": "usable",
+          "usda": "usable",
+          "yfinance": "usable"
+        },
+        "spy_last_session": "2026-10-15",
+        "spy_rows": 63,
+        "weather_candidates": 3,
+        "weather_candidates_sha256": "d79f6d4238d648e16f5bbd611bd4bf228b2d4c7b9817aae34994c7b7a1a2e51e",
+        "weather_non_journal": 0,
+        "yahoo_frames": 37
+      },
+      "id": "native-reference-20261016",
+      "path": "native-20261016-source-inputs.json",
+      "provenance": {
+        "acquired_at": "2026-10-18T04:55:42.019098+00:00",
+        "acquisition_started_at": "2026-10-18T04:52:33.311713+00:00",
+        "identity": {
+          "commit": "7813e2ef2565c135e5b62f21ff865a8f82ee3c80",
+          "configuration": "7da51b2576aa4f1bfab18b0c6941b8ae7b3d4e7df3df91736f4fb0af4c45e06d",
+          "generation": "gen_001",
+          "session": "2026-10-16"
+        },
+        "original_artifact_sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da",
+        "reference_session": "2026-10-16",
+        "vintage_as_of": "2026-10-18"
+      },
+      "sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da"
+    }
+  ],
+  "private_wire": {
+    "acquired_at": "2026-10-18T04:42:39.411751+00:00",
+    "boundary": "raw_http",
+    "bytes": 508,
+    "expected_status": 200,
+    "id": "alpaca-sip-20261016",
+    "params": {
+      "adjustment": "raw",
+      "asof": "-",
+      "currency": "USD",
+      "end": "2026-10-16T23:59:59.999999-04:00",
+      "feed": "sip",
+      "limit": 201,
+      "sort": "asc",
+      "start": "2026-10-16T00:00:00-04:00",
+      "symbols": "BIL,SPY,VT,VTI",
+      "timeframe": "1Day"
+    },
+    "path": "alpaca-sip-20261016.json",
+    "reference_session": "2026-10-16",
+    "sha256": "c32bc207ebf47afe1e9efc66fed2aa66b2178e86d55f9466c335881fd9555aa2",
+    "source": "alpaca_sip",
+    "symbols": [
+      "BIL",
+      "SPY",
+      "VT",
+      "VTI"
+    ],
+    "url": "https://data.alpaca.markets/v2/stocks/bars"
+  },
+  "public_cases": [
+    {
+      "boundary": "normalized_capture",
+      "bytes": 23258,
+      "decoded_sha256": "9e26e003a79fbd720b0211da1e83d2bcb29034f3785bc8a51d0cc8a030f8721f",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "gen022-reference-20261015-noaa",
+      "path": "gen022-reference-20261015-noaa.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-16T03:37:26.810768+00:00",
+        "acquisition_started_at": "2026-10-16T03:36:02.208600+00:00",
+        "identity": {
+          "commit": "df78a7acdbc1e04a09a40a6222e72939a0599993",
+          "configuration": "3e0ae89d4eb806b41ab086d66389fe41000a9195d29c70c76a42d0630d6491c5",
+          "generation": "gen_022",
+          "session": "2026-10-15"
+        },
+        "original_artifact_sha256": "d3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13",
+        "reference_session": "2026-10-15",
+        "vintage_as_of": "2026-10-15"
+      },
+      "public_source_url": "https://www.ncei.noaa.gov/access/services/data/v1",
+      "selection": "payload.noaa excluding internal request diagnostics",
+      "sha256": "4f2288c87ec131797e32857d38c30d34fd380ffae1fd898a5532d5293ab63457",
+      "source": "noaa"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 9794,
+      "decoded_sha256": "dc30eedacee357023b870f617df732ddfe3d8317e37f333166b542f905a5fb93",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "gen022-reference-20261015-usda",
+      "path": "gen022-reference-20261015-usda.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-16T03:37:26.810768+00:00",
+        "acquisition_started_at": "2026-10-16T03:36:02.208600+00:00",
+        "identity": {
+          "commit": "df78a7acdbc1e04a09a40a6222e72939a0599993",
+          "configuration": "3e0ae89d4eb806b41ab086d66389fe41000a9195d29c70c76a42d0630d6491c5",
+          "generation": "gen_022",
+          "session": "2026-10-15"
+        },
+        "original_artifact_sha256": "d3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13",
+        "reference_session": "2026-10-15",
+        "vintage_as_of": "2026-10-15"
+      },
+      "public_source_url": "https://quickstats.nass.usda.gov/",
+      "selection": "payload.usda excluding internal request diagnostics",
+      "sha256": "8d6f8cc03b5bdc9cc16c850ffc19d0568cd1d9d4dcb93eec5918e7f66e07d2d7",
+      "source": "usda"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 447,
+      "decoded_sha256": "bf9ec9c9648c5506f9e508bb503b1268f0cfbf44171cb8a7416462fef3d1fa6d",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "gen022-reference-20261015-drought_monitor",
+      "path": "gen022-reference-20261015-drought_monitor.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-16T03:37:26.810768+00:00",
+        "acquisition_started_at": "2026-10-16T03:36:02.208600+00:00",
+        "identity": {
+          "commit": "df78a7acdbc1e04a09a40a6222e72939a0599993",
+          "configuration": "3e0ae89d4eb806b41ab086d66389fe41000a9195d29c70c76a42d0630d6491c5",
+          "generation": "gen_022",
+          "session": "2026-10-15"
+        },
+        "original_artifact_sha256": "d3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13",
+        "reference_session": "2026-10-15",
+        "vintage_as_of": "2026-10-15"
+      },
+      "public_source_url": "https://droughtmonitor.unl.edu/",
+      "selection": "payload.drought_monitor excluding internal request diagnostics",
+      "sha256": "f7ea2bfc401f9dacfd2e984d041a313d3fe66e349b4a2077bd58c7ec665ec164",
+      "source": "drought_monitor"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 503,
+      "decoded_sha256": "6ee9af421a7fc503273c36411dd3e741fe65eea07635eb52602ff084d105242a",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "gen022-reference-20261015-cftc",
+      "path": "gen022-reference-20261015-cftc.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-16T03:37:26.810768+00:00",
+        "acquisition_started_at": "2026-10-16T03:36:02.208600+00:00",
+        "identity": {
+          "commit": "df78a7acdbc1e04a09a40a6222e72939a0599993",
+          "configuration": "3e0ae89d4eb806b41ab086d66389fe41000a9195d29c70c76a42d0630d6491c5",
+          "generation": "gen_022",
+          "session": "2026-10-15"
+        },
+        "original_artifact_sha256": "d3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13",
+        "reference_session": "2026-10-15",
+        "vintage_as_of": "2026-10-15"
+      },
+      "public_source_url": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
+      "selection": "payload.cftc excluding internal request diagnostics",
+      "sha256": "8e0b519b1f72cd435203b7594b532b0d9cdb5a59c5091068b0990236a3e18bb9",
+      "source": "cftc"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 23757,
+      "decoded_sha256": "9d5e542a4f2d69187382b1eda9be9ba807e0acd69a72d8239a2767d8237a2d3d",
+      "expected_projected": false,
+      "expected_source_error": true,
+      "format": "source-inputs-json+gzip",
+      "id": "native-reference-20261016-noaa",
+      "path": "native-reference-20261016-noaa.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-18T04:55:42.019098+00:00",
+        "acquisition_started_at": "2026-10-18T04:52:33.311713+00:00",
+        "identity": {
+          "commit": "7813e2ef2565c135e5b62f21ff865a8f82ee3c80",
+          "configuration": "7da51b2576aa4f1bfab18b0c6941b8ae7b3d4e7df3df91736f4fb0af4c45e06d",
+          "generation": "gen_001",
+          "session": "2026-10-16"
+        },
+        "original_artifact_sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da",
+        "reference_session": "2026-10-16",
+        "vintage_as_of": "2026-10-18"
+      },
+      "public_source_url": "https://www.ncei.noaa.gov/access/services/data/v1",
+      "selection": "payload.noaa excluding internal request diagnostics",
+      "sha256": "ecb77c529aaf56db76b6689569f3c5b8345f17596dc92a7106dbf4fa80063d31",
+      "source": "noaa"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 9749,
+      "decoded_sha256": "66e8c4d4689a7b3e9f42cf521f5a9e030a1923c7afd9f04001ccbc71511ee41e",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "native-reference-20261016-usda",
+      "path": "native-reference-20261016-usda.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-18T04:55:42.019098+00:00",
+        "acquisition_started_at": "2026-10-18T04:52:33.311713+00:00",
+        "identity": {
+          "commit": "7813e2ef2565c135e5b62f21ff865a8f82ee3c80",
+          "configuration": "7da51b2576aa4f1bfab18b0c6941b8ae7b3d4e7df3df91736f4fb0af4c45e06d",
+          "generation": "gen_001",
+          "session": "2026-10-16"
+        },
+        "original_artifact_sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da",
+        "reference_session": "2026-10-16",
+        "vintage_as_of": "2026-10-18"
+      },
+      "public_source_url": "https://quickstats.nass.usda.gov/",
+      "selection": "payload.usda excluding internal request diagnostics",
+      "sha256": "094fe2d1fc0cdec12c9991f0d2ff603fc1e4bb0a61caf4c37dce0cb0f54185a7",
+      "source": "usda"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 449,
+      "decoded_sha256": "160fa02e6c12f91db3cd30afbde390138199eb9890214753d2a93a57eb215165",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "native-reference-20261016-drought_monitor",
+      "path": "native-reference-20261016-drought_monitor.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-18T04:55:42.019098+00:00",
+        "acquisition_started_at": "2026-10-18T04:52:33.311713+00:00",
+        "identity": {
+          "commit": "7813e2ef2565c135e5b62f21ff865a8f82ee3c80",
+          "configuration": "7da51b2576aa4f1bfab18b0c6941b8ae7b3d4e7df3df91736f4fb0af4c45e06d",
+          "generation": "gen_001",
+          "session": "2026-10-16"
+        },
+        "original_artifact_sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da",
+        "reference_session": "2026-10-16",
+        "vintage_as_of": "2026-10-18"
+      },
+      "public_source_url": "https://droughtmonitor.unl.edu/",
+      "selection": "payload.drought_monitor excluding internal request diagnostics",
+      "sha256": "7bb6823703b21385f491004a8df7e58f7bbf9f0d644a2b24bba5fc9897298f6e",
+      "source": "drought_monitor"
+    },
+    {
+      "boundary": "normalized_capture",
+      "bytes": 502,
+      "decoded_sha256": "6276ae280acb28755ef315799b3cd2901a40e639ca6ea1d2940e2e82f498c705",
+      "expected_projected": true,
+      "expected_source_error": false,
+      "format": "source-inputs-json+gzip",
+      "id": "native-reference-20261016-cftc",
+      "path": "native-reference-20261016-cftc.json.gz",
+      "provenance": {
+        "acquired_at": "2026-10-18T04:55:42.019098+00:00",
+        "acquisition_started_at": "2026-10-18T04:52:33.311713+00:00",
+        "identity": {
+          "commit": "7813e2ef2565c135e5b62f21ff865a8f82ee3c80",
+          "configuration": "7da51b2576aa4f1bfab18b0c6941b8ae7b3d4e7df3df91736f4fb0af4c45e06d",
+          "generation": "gen_001",
+          "session": "2026-10-16"
+        },
+        "original_artifact_sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da",
+        "reference_session": "2026-10-16",
+        "vintage_as_of": "2026-10-18"
+      },
+      "public_source_url": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/index.htm",
+      "selection": "payload.cftc excluding internal request diagnostics",
+      "sha256": "5ebafc6b711ca476685bd05d4fcfc3192cf90ec4959a5e60c293ca5c915589f8",
+      "source": "cftc"
+    },
+    {
+      "boundary": "raw_static_fixed_width",
+      "bytes": 810,
+      "format": "ghcnd-dly",
+      "id": "noaa-official-static-202010",
+      "limitations": [
+        "Static .dly bytes are not native Access JSON; any format adaptation must be explicit.",
+        "One station cannot establish full ten-state coverage or historical point-in-time availability."
+      ],
+      "path": "noaa-usw00014933-2020-10-original.dly",
+      "provenance": {
+        "acquired_at": "2026-10-18T18:56:35+00:00",
+        "observation_month": "2020-10",
+        "original_artifact_sha256": "70973412ee3a546954e0b811d93721f95a6640652da7a0f12a2d621f49f98cb3",
+        "selection": "three unchanged monthly TMAX/TMIN/PRCP lines",
+        "state": "IA",
+        "station": "USW00014933",
+        "station_name": "DES MOINES INTL AP",
+        "units": "TMAX/TMIN tenths Celsius; PRCP tenths millimetres; preserve measurement/quality/source flags"
+      },
+      "public_source_url": "https://www.ncei.noaa.gov/pub/data/ghcn/daily/all/USW00014933.dly",
+      "sha256": "af0ef1aa3ccc58cf980bbfea4f084dd794e58b7fae8cf838cde364b2b1850b58",
+      "source": "noaa"
+    }
+  ],
+  "public_weather_expectations": {
+    "2026-10-15": {
+      "candidates": 0,
+      "crop_decline": 1.0
+    },
+    "2026-10-16": {
+      "candidates": 0,
+      "crop_decline": 0.0
+    }
+  },
+  "record_presence_not_required_healthy_dependencies": true,
+  "record_roles": {
+    "congress": "disabled strategy; disclosure audit contract only",
+    "edgar": "observed failure; bulk filing disabled; issuer identity dependency retained",
+    "openbb": "observed enrichment_only marker; no provider wire capture"
+  },
+  "required_sources": [
+    "equity_universe",
+    "openbb",
+    "yfinance",
+    "finnhub",
+    "courtlistener",
+    "fred",
+    "congress",
+    "noaa",
+    "usda",
+    "drought_monitor",
+    "edgar",
+    "usaspending",
+    "cftc"
+  ],
+  "schema_version": 1,
+  "scope": "historical source contracts, not live readiness or financial workflow"
+}

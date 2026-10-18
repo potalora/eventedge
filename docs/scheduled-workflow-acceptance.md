@@ -8,16 +8,40 @@ guards. Healthy idle controller observations did not establish that combination.
 
 ## Release gate
 
-Run the named gate from the candidate checkout with its installed dependencies:
+Run the gates from the candidate checkout with its installed dependencies.
+Recorded historical source data is required before accepting the constructed
+workflow scenarios:
 
 ```sh
+python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-history.json
+python scripts/run_historical_source_acceptance.py --private-corpus /absolute/private/corpus --require-full-supported-scope --report /absolute/private/full-history.json
 python -m pytest -q -m 'scheduled_acceptance and not document_qualification and not live' tests
 python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
 ```
 
-CI runs both commands in the baseline and pinned optional-SDK environments. A
-failed gate blocks acceptance. Skipped, expected-failure, or omitted scenarios do
-not establish the corresponding requirement.
+CI runs the public historical replay and both pytest commands in the baseline and
+pinned optional-SDK environments. The private full-scope replay is additionally
+required before release acceptance; public CI alone cannot qualify the complete
+source set. A missing or invalid private corpus fails the full-scope command.
+A failed gate blocks acceptance. Skipped, expected-failure, or omitted scenarios
+do not establish the corresponding requirement.
+
+The versioned manifest in `tests/historical/manifest.json` binds actual recorded
+data, its acquisition time, reference/observation date, vintage, source format and
+SHA256. The runner denies network and model calls. Original HTTP bytes test the
+corresponding adapter; normalized accepted inputs test consumers and strategy
+contracts. An alternate source format is identified as such. Neither normalized
+captures nor reconstructed HTTP fixtures establish a native wire contract.
+Controlled mutations are reported separately from the unchanged historical
+baselines. Private/licensed inputs remain outside Git and public CI artifacts.
+
+Preserve historical failures as failures. A replay can pass by correctly
+retaining degraded coverage and rejecting unsafe data; it cannot turn that
+evidence into healthy native qualification. Acquisition on a later date also
+does not establish what was available at the earlier decision time. Current
+provider/model availability and prospective continuity require separate native
+evidence. Follow the [source incident policy](source-incident-policy.md) for each
+newly observed failure and its reviewed reliability lesson.
 
 The October 17 [stabilization profile](stabilization-profile.md) is the current
 supported gate: the exact checked-in sixteen-book profile, two-session positive
