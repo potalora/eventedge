@@ -26,6 +26,21 @@ OBSERVED = {
 }
 
 
+@pytest.fixture
+def fixed_governed_clock(monkeypatch):
+    from tradingagents.strategies.orchestration import governed_market_data, preflight
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+    # The adapter and both completion validators must share the fixture clock.
+    # Otherwise valid fixture bars become stale as the actual date advances.
+    monkeypatch.setattr(governed_market_data, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(preflight, "datetime", FixedDatetime)
+
+
 def _source(monkeypatch, *, mutation=None, now=NOW):
     monkeypatch.setenv("ALPACA_API_KEY", "offline-key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "offline-secret")
@@ -71,7 +86,7 @@ def test_factory_defaults_to_primary_sip_and_rejects_raw_yahoo_selection():
             prices.build_price_source({"autoresearch": {"paper_ledger": {"pricing_version": version}}})
 
 
-def test_primary_governed_bar_needs_no_recovery_record(monkeypatch):
+def test_primary_governed_bar_needs_no_recovery_record(monkeypatch, fixed_governed_clock):
     source = _source(monkeypatch)
     result = resolve_governed_bars(
         price_source=source, metric_store=None, epoch_id="new-gen", session=SESSION,
@@ -238,7 +253,7 @@ def test_epoch_context_accepts_current_primary_source_contract(tmp_path):
         ledger.close()
 
 
-def test_runtime_preflight_uses_current_primary_factory_and_real_resolver(monkeypatch, tmp_path):
+def test_runtime_preflight_uses_current_primary_factory_and_real_resolver(monkeypatch, tmp_path, fixed_governed_clock):
     from contextlib import contextmanager
     from types import SimpleNamespace
     from tradingagents.strategies.orchestration.preflight import run_preflight
