@@ -1,0 +1,4 @@
+# Original fixed-width NOAA bytes include significant trailing spaces.
+*-original.txt -text -whitespace
+*.dly -text -whitespace
+*-original.csv -text

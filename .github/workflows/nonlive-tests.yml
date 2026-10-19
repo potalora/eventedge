@@ -23,3 +23,12 @@ jobs:
           python -m pip install -e . pytest
       - name: Run non-live suite
         run: python -m pytest -q -m 'not live' tests
+      - name: Replay recorded NOAA yearly files
+        run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
+      - name: Retain NOAA yearly replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: noaa-yearly-replay-standard
+          path: /tmp/eventedge-noaa-yearly.json
+          retention-days: 14
