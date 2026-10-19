@@ -22,6 +22,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[chatgpt-plan]' pytest
+      - name: Replay recorded NOAA yearly files
+        run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
+      - name: Retain NOAA yearly replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: noaa-yearly-replay-standard
+          path: /tmp/eventedge-noaa-yearly.json
+          retention-days: 14
       - name: Replay recorded public historical sources
         run: python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-historical-acceptance.json
       - name: Retain public historical replay evidence
@@ -52,6 +61,15 @@ jobs:
           python -m pip install -r requirements-ci-openbb.txt -e '.[chatgpt-plan,openbb,commodities]'
           python -m pip check
           openbb-build
+      - name: Replay recorded NOAA yearly files
+        run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
+      - name: Retain NOAA yearly replay evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: noaa-yearly-replay-openbb
+          path: /tmp/eventedge-noaa-yearly.json
+          retention-days: 14
       - name: Replay recorded public historical sources with OpenBB installed
         run: python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-historical-acceptance.json
       - name: Retain public historical replay evidence with OpenBB installed
