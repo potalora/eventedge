@@ -7,6 +7,7 @@ source acquisition, calendar guards, orchestration and financial books remain.
 from __future__ import annotations
 
 import datetime as clock_module
+import hashlib
 import importlib
 from importlib import metadata
 import json
@@ -211,12 +212,14 @@ def _install():
             if getattr(module,'datetime',None) is REAL_DATETIME:
                 module.datetime = FixedDatetime
     _install_openbb()
-    def request(session, method,url,**kwargs):
+    def request(session, method,url,*,_yearly=False,**kwargs):
         current = scenario()
         fault = current.get('fault')
         params = kwargs.get('params') or {}
         safe_params = {key:value for key,value in params.items() if key not in {'api_key','token','key'}}
-        trace('http',method=method,url=url,params=safe_params)
+        boundary = ({'fixture_boundary':'noaa_yearly_original_lines',
+                     'fixture_original_acquisition_date':'2026-10-19'} if _yearly else {})
+        trace('http',method=method,url=url,params=safe_params,**boundary)
         if current.get('regulation_graphics'):
             from scheduled_acceptance.regulation_graphics_fixture import response
             graphic_response = response(fixture, url, params, fault)
@@ -230,6 +233,27 @@ def _install():
             return fixture.response({},503,headers={'Retry-After':'0'})
         if fault == 'midday_congress_503' and '/revision/main' in url:
             return fixture.response({},503,headers={'Retry-After':'0'})
+        if _yearly:
+            # Only this new HTTP boundary uses retained original public bytes.
+            # The Oct19 acquisition is replayed under a constructed Oct14/15
+            # clock; this establishes no historical point-in-time availability.
+            names = {
+                'https://www.ncei.noaa.gov/pub/data/ghcn/daily/ghcnd-stations.txt':
+                    'stations-ten-state-original.txt',
+                'https://www.ncei.noaa.gov/pub/data/ghcn/daily/ghcnd-inventory.txt':
+                    'inventory-ten-state-core-original.txt',
+                'https://www.ncei.noaa.gov/pub/data/ghcn/daily/by_year/2026.csv.gz':
+                    '2026-ten-state-37day-original.csv.gz',
+            }
+            assert method == 'GET' and url in names, 'unconfigured NOAA yearly fixture endpoint'
+            assert kwargs['stream'] is True and kwargs['allow_redirects'] is False
+            body = (Path(__file__).resolve().parents[1] / 'fixtures' / 'noaa_ghcnd_yearly' / names[url]).read_bytes()
+            assert len(body) <= kwargs['max_bytes']
+            trace('fixture_body',boundary='noaa_yearly_original_lines',url=url,
+                  sha256=hashlib.sha256(body).hexdigest(),bytes=len(body))
+            result = fixture.response(body,headers={'Content-Length':str(len(body))})
+            result.url = url
+            return result
         if url.endswith('/v2/assets'):
             return fixture.response([{'class':'us_equity','symbol':symbol,'exchange':'NASDAQ',
                 'status':'active','tradable':True} for symbol in SYMBOLS])
@@ -293,6 +317,8 @@ def _install():
         result.url = url
         return result
     requests.sessions.Session.request = request
+    noaa_yearly_source = importlib.import_module('tradingagents.strategies.data_sources.noaa_yearly_source')
+    noaa_yearly_source._yearly_http_get = lambda url,**kwargs: request(None,'GET',url,_yearly=True,**kwargs)
     def yahoo(*args,**kwargs):
         trace('sdk',endpoint='yfinance.download',tickers=args[0] if args else kwargs.get('tickers'))
         return fixture.yahoo(*args,**kwargs)

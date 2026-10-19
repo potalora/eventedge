@@ -42,7 +42,7 @@ Interface: `NOAAYearlySource().fetch_ag_weather_summary(date, lookback_days=30, 
 Files: registry, focused registry tests, NOAA delivery runbook and verification CLI; in the stabilization checkout, profile and historical acceptance integration.
 
 - [x] Test registry selection and unknown-policy rejection before implementation; bind changed configuration fingerprints.
-- [ ] Preserve missing-policy legacy behavior; select the new policy explicitly in the prospective stabilization profile.
+- [x] Preserve missing-policy legacy behavior; select the new policy explicitly in the prospective stabilization profile.
 - [x] Run public real fixtures and full retained-file replay without provider/model I/O; missing full originals must fail explicitly.
 - [x] Run bounded native source-only acquisition and bind the final decoder to those exact retained bodies with code/dependency identity and coverage/timing limits.
 - [ ] Run required focused and complete CI checks on the final pushed commits; retain reports and exact results.

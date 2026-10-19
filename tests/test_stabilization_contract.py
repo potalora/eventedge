@@ -26,6 +26,7 @@ def test_frozen_profile_has_exact_supported_scope():
     assert len(set(contract.horizon_policies.values())) == 4
     assert contract.config['decision_shadow']['enabled'] is False
     assert contract.config['autoresearch']['courtlistener_scope_policy'] == 'focused_litigation_v1'
+    assert contract.config['autoresearch']['noaa_delivery_policy'] == 'ghcnd_yearly_v1'
 
 
 @pytest.mark.parametrize('change', [
@@ -35,6 +36,8 @@ def test_frozen_profile_has_exact_supported_scope():
     lambda a: a.update(regulation_evidence_policy='complete_document_text_v1'),
     lambda a: a.update(filing_research_policy=None),
     lambda a: a.update(courtlistener_scope_policy=None),
+    lambda a: a.update(noaa_delivery_policy=None),
+    lambda a: a.update(noaa_delivery_policy='access'),
 ])
 def test_profile_rejects_scope_drift(change):
     from tradingagents.strategies.orchestration.operating_contract import profile_contract

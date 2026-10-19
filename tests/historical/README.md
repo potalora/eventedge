@@ -64,3 +64,25 @@ case and remain in `controlled_mutations`; they are not upstream observations.
 Record source/code/network attribution and unresolved uncertainty in the source
 reliability workflow. Missing raw wires remain an explicit boundary, never a
 fabricated HTTP baseline or a synthetic success receipt.
+
+## Explicit yearly NOAA route
+
+The prospective stabilization profile now selects `ghcnd_yearly_v1`. Its separate
+raw-file gate runs before this historical gate in both CI environments:
+
+```bash
+python scripts/verify_noaa_yearly_source.py --report /tmp/noaa-yearly.json
+```
+
+For development acceptance, `--full-corpus /explicit/noaa-originals` requires
+the pinned complete station catalog, element inventory and 2026 annual gzip.
+It passes those actual bodies through the selected native adapter with external
+IO denied. Missing or changed originals fail. See
+[`docs/noaa-yearly-delivery.md`](../../docs/noaa-yearly-delivery.md) for names,
+provenance, resource limits and the distinct numeric policy.
+
+The older normalized source captures above retain their original failed or
+successful NOAA outcomes. The new raw-file gate does not rewrite them or certify
+historical availability. Constructed scheduled tests replay the public raw
+subset under a labeled test clock; native current acquisition is separate
+evidence. Production activation still requires a new generation.

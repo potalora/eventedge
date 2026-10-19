@@ -68,6 +68,7 @@ def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingPr
                 or ar.get('research_resilience_policy') != 'dependency_isolation_v1'
                 or ar.get('source_capability_policy') != 'regime_strategy_capabilities_v1'
                 or ar.get('courtlistener_scope_policy') != 'focused_litigation_v1'
+                or ar.get('noaa_delivery_policy') != 'ghcnd_yearly_v1'
                 or ar.get('congress_disclosure_policy') != 'display_audit_only_v1'
                 or ar.get('equity_universe_policy') != 'us_exchange_listed_sip_v1'
                 or any(ar.get(key) is not None for key in OFF)

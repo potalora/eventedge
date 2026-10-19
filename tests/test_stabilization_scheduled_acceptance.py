@@ -26,10 +26,12 @@ def test_stabilization_harness_retains_exact_policy_and_model_routes(tmp_path):
         current[change["path"][-1]] = change["fixture"]
     assert candidate == fixture
     assert fixture["autoresearch"]["bounded_document_registry"] == []
+    assert fixture["autoresearch"]["noaa_delivery_policy"] == "ghcnd_yearly_v1"
     assert (harness.repo / "uv.lock").read_bytes() == (ROOT / "uv.lock").read_bytes()
     proof = harness.effective_config_proof()
     assert proof["regulation_retrieval_policy"] is None
     assert proof["blocked_tickers"] == ["GOOGL", "GOOG"]
+    assert proof["noaa_delivery_policy"] == "ghcnd_yearly_v1"
 
 
 def _complete(harness, session, *, continuity=True):
@@ -45,6 +47,27 @@ def _complete(harness, session, *, continuity=True):
     screening = harness.accepted_screening(session)
     assert set(screening["horizons"]) == {"30d", "3m", "6m", "1y"}
     assert sum(len(horizon["health"]) for horizon in screening["horizons"].values()) == 48
+    from tradingagents.strategies.orchestration.source_inputs import SourceInputStore
+    source_records = [SourceInputStore.decode(path.read_text())
+                      for path in (harness.state / "source_inputs").glob("*.json")]
+    accepted = [row for row in source_records if row["identity"]["session"] == session]
+    assert len(accepted) == 1
+    weather = accepted[0]["payload"]["noaa"]
+    assert not weather.get("error"), weather
+    assert weather["delivery_policy"] == "ghcnd_yearly_v1"
+    assert weather["numeric_policy"] == "ghcnd_metric_exact_to_standard_v1"
+    assert weather["coverage"]["complete"] is True
+    assert weather["coverage"]["catalog_station_count"] == 10
+    assert weather["observation_date"] == session
+    assert weather["vintage_as_of"] == session
+    assert all(row["integrity_complete"] is True for row in weather["coverage"]["files"])
+    fixture_names = {"ghcnd-stations.txt": "stations-ten-state-original.txt",
+                     "ghcnd-inventory.txt": "inventory-ten-state-core-original.txt",
+                     "2026.csv.gz": "2026-ten-state-37day-original.csv.gz"}
+    assert {row["official_url"].rsplit("/", 1)[-1]: row["sha256"]
+            for row in weather["coverage"]["files"]} == {
+        endpoint: hashlib.sha256((ROOT / "tests/fixtures/noaa_ghcnd_yearly" / filename).read_bytes()).hexdigest()
+        for endpoint, filename in fixture_names.items()}
     for table in ("account_snapshots", "staging_runs"):
         books = harness.book_rows(table)
         assert len(books) == 16
@@ -78,6 +101,11 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
     assert {row["role"] for row in models} == {"analysis", "committee"}
     assert all(row["model"] == "gpt-6.1-sol" and row["effort"] == "high" for row in models)
     assert not any("regulations.gov" in row.get("url", "") for row in trace)
+    noaa = [row for row in trace if row["kind"] == "http" and "ncei.noaa.gov" in row.get("url", "")]
+    assert {row["url"].rsplit("/", 1)[-1] for row in noaa} == {
+        "ghcnd-stations.txt", "ghcnd-inventory.txt", "2026.csv.gz"}
+    assert all(row["fixture_boundary"] == "noaa_yearly_original_lines" for row in noaa)
+    assert all(row["fixture_original_acquisition_date"] == "2026-10-19" for row in noaa)
     runtime_records = []
     for attempt in harness.attempts():
         if attempt["action"] != "daily":

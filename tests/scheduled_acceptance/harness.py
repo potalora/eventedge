@@ -155,6 +155,7 @@ from tradingagents.strategies.orchestration.source_inputs import source_configur
 config=_build_config(SimpleNamespace(block_tickers=''))
 print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
                   'regulation_retrieval_policy':config['autoresearch']['regulation_retrieval_policy'],
+                  'noaa_delivery_policy':config['autoresearch'].get('noaa_delivery_policy'),
                   'source_configuration':source_configuration_fingerprint(config)}))
 '''
         result = subprocess.run([str(self.python),'-c',code],cwd=self.repo,env=env,

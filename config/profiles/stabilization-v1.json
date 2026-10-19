@@ -103,6 +103,7 @@
     "min_trades_for_scoring": 5,
     "new_entry_eligibility_policy": "reference_session_activity_v1",
     "noaa_cdo_token": "",
+    "noaa_delivery_policy": "ghcnd_yearly_v1",
     "paper_ledger": {
       "bar_max_age_hours": 24,
       "benchmark_symbols": [
