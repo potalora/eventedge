@@ -1,0 +1,1020 @@
+{
+  "current_csv_dly_exact_matches": [
+    {
+      "date": "20260910",
+      "element": "TMAX",
+      "value": 272,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260910",
+      "element": "TMIN",
+      "value": 161,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260910",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260911",
+      "element": "TMAX",
+      "value": 283,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260911",
+      "element": "TMIN",
+      "value": 150,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260911",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260912",
+      "element": "TMAX",
+      "value": 250,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260912",
+      "element": "TMIN",
+      "value": 144,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260912",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": "T",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260913",
+      "element": "TMAX",
+      "value": 172,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260913",
+      "element": "TMIN",
+      "value": 133,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260913",
+      "element": "PRCP",
+      "value": 56,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260914",
+      "element": "TMAX",
+      "value": 256,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260914",
+      "element": "TMIN",
+      "value": 144,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260914",
+      "element": "PRCP",
+      "value": 188,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260915",
+      "element": "TMAX",
+      "value": 222,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260915",
+      "element": "TMIN",
+      "value": 167,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260915",
+      "element": "PRCP",
+      "value": 556,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260916",
+      "element": "TMAX",
+      "value": 200,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260916",
+      "element": "TMIN",
+      "value": 161,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260916",
+      "element": "PRCP",
+      "value": 15,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260917",
+      "element": "TMAX",
+      "value": 261,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260917",
+      "element": "TMIN",
+      "value": 200,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260917",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260918",
+      "element": "TMAX",
+      "value": 256,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260918",
+      "element": "TMIN",
+      "value": 183,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260918",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": "T",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260919",
+      "element": "TMAX",
+      "value": 289,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260919",
+      "element": "TMIN",
+      "value": 178,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260919",
+      "element": "PRCP",
+      "value": 300,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260920",
+      "element": "TMAX",
+      "value": 200,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260920",
+      "element": "TMIN",
+      "value": 156,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260920",
+      "element": "PRCP",
+      "value": 25,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260921",
+      "element": "TMAX",
+      "value": 167,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260921",
+      "element": "TMIN",
+      "value": 133,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260921",
+      "element": "PRCP",
+      "value": 61,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260922",
+      "element": "TMAX",
+      "value": 156,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260922",
+      "element": "TMIN",
+      "value": 128,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260922",
+      "element": "PRCP",
+      "value": 5,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260923",
+      "element": "TMAX",
+      "value": 206,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260923",
+      "element": "TMIN",
+      "value": 106,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260923",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260924",
+      "element": "TMAX",
+      "value": 194,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260924",
+      "element": "TMIN",
+      "value": 139,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260924",
+      "element": "PRCP",
+      "value": 18,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260925",
+      "element": "TMAX",
+      "value": 178,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260925",
+      "element": "TMIN",
+      "value": 150,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260925",
+      "element": "PRCP",
+      "value": 114,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260926",
+      "element": "TMAX",
+      "value": 200,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260926",
+      "element": "TMIN",
+      "value": 161,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260926",
+      "element": "PRCP",
+      "value": 79,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260927",
+      "element": "TMAX",
+      "value": 189,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260927",
+      "element": "TMIN",
+      "value": 156,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260927",
+      "element": "PRCP",
+      "value": 20,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260928",
+      "element": "TMAX",
+      "value": 250,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260928",
+      "element": "TMIN",
+      "value": 156,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260928",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260929",
+      "element": "TMAX",
+      "value": 244,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260929",
+      "element": "TMIN",
+      "value": 150,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260929",
+      "element": "PRCP",
+      "value": 183,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260930",
+      "element": "TMAX",
+      "value": 217,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260930",
+      "element": "TMIN",
+      "value": 194,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260930",
+      "element": "PRCP",
+      "value": 185,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261001",
+      "element": "TMAX",
+      "value": 206,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261001",
+      "element": "TMIN",
+      "value": 117,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261001",
+      "element": "PRCP",
+      "value": 38,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261002",
+      "element": "TMAX",
+      "value": 200,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261002",
+      "element": "TMIN",
+      "value": 72,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261002",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261003",
+      "element": "TMAX",
+      "value": 228,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261003",
+      "element": "TMIN",
+      "value": 89,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261003",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261004",
+      "element": "TMAX",
+      "value": 228,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261004",
+      "element": "TMIN",
+      "value": 100,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261004",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261005",
+      "element": "TMAX",
+      "value": 244,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261005",
+      "element": "TMIN",
+      "value": 78,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261005",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261006",
+      "element": "TMAX",
+      "value": 272,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261006",
+      "element": "TMIN",
+      "value": 117,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261006",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261007",
+      "element": "TMAX",
+      "value": 261,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261007",
+      "element": "TMIN",
+      "value": 133,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261007",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261008",
+      "element": "TMAX",
+      "value": 256,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261008",
+      "element": "TMIN",
+      "value": 100,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261008",
+      "element": "PRCP",
+      "value": 140,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261009",
+      "element": "TMAX",
+      "value": 300,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261009",
+      "element": "TMIN",
+      "value": 161,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261009",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261010",
+      "element": "TMAX",
+      "value": 300,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261010",
+      "element": "TMIN",
+      "value": 167,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261010",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261011",
+      "element": "TMAX",
+      "value": 311,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261011",
+      "element": "TMIN",
+      "value": 156,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261011",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261012",
+      "element": "TMAX",
+      "value": 306,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261012",
+      "element": "TMIN",
+      "value": 150,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261012",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261013",
+      "element": "TMAX",
+      "value": 200,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261013",
+      "element": "TMIN",
+      "value": 122,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261013",
+      "element": "PRCP",
+      "value": 3,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261014",
+      "element": "TMAX",
+      "value": 161,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261014",
+      "element": "TMIN",
+      "value": 106,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261014",
+      "element": "PRCP",
+      "value": 5,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261015",
+      "element": "TMAX",
+      "value": 156,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261015",
+      "element": "TMIN",
+      "value": 83,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20261015",
+      "element": "PRCP",
+      "value": 119,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    }
+  ],
+  "crossyear_dly_cells": [
+    {
+      "date": "20251231",
+      "element": "TMAX",
+      "value": 83,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20251231",
+      "element": "TMIN",
+      "value": -39,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20251231",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260101",
+      "element": "TMAX",
+      "value": -11,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260101",
+      "element": "TMIN",
+      "value": -89,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    },
+    {
+      "date": "20260101",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": " ",
+      "qflag": " ",
+      "sflag": "1"
+    }
+  ],
+  "edge_cases": {
+    "positive_temperature": {
+      "selected_source_line": 1,
+      "station": "USS0003E03S",
+      "state": "SD",
+      "date": "20260910",
+      "element": "TMAX",
+      "value": 230,
+      "mflag": "",
+      "qflag": "",
+      "sflag": "T",
+      "observation_time": "",
+      "expected_quality_usable": true,
+      "conversion": {
+        "raw_integer": 230,
+        "exact_standard_numerator": 367,
+        "exact_standard_denominator": 5,
+        "standard_float": 73.4,
+        "standard_unit": "degrees_F"
+      }
+    },
+    "trace_precipitation": {
+      "selected_source_line": 109,
+      "station": "USW00014852",
+      "state": "OH",
+      "date": "20260910",
+      "element": "PRCP",
+      "value": 0,
+      "mflag": "T",
+      "qflag": "",
+      "sflag": "1",
+      "observation_time": "2400",
+      "expected_quality_usable": true,
+      "conversion": {
+        "raw_integer": 0,
+        "exact_standard_numerator": 0,
+        "exact_standard_denominator": 1,
+        "standard_float": 0.0,
+        "standard_unit": "inches"
+      }
+    },
+    "quality_flagged": {
+      "selected_source_line": 14444,
+      "station": "USW00003929",
+      "state": "MO",
+      "date": "20260912",
+      "element": "TMIN",
+      "value": 290,
+      "mflag": "H",
+      "qflag": "S",
+      "sflag": "2",
+      "observation_time": "",
+      "expected_quality_usable": false,
+      "conversion": {
+        "raw_integer": 290,
+        "exact_standard_numerator": 421,
+        "exact_standard_denominator": 5,
+        "standard_float": 84.2,
+        "standard_unit": "degrees_F"
+      }
+    },
+    "zero_temperature": {
+      "selected_source_line": 27764,
+      "station": "USW00014918",
+      "state": "MN",
+      "date": "20260914",
+      "element": "TMIN",
+      "value": 0,
+      "mflag": "",
+      "qflag": "",
+      "sflag": "1",
+      "observation_time": "2400",
+      "expected_quality_usable": true,
+      "conversion": {
+        "raw_integer": 0,
+        "exact_standard_numerator": 32,
+        "exact_standard_denominator": 1,
+        "standard_float": 32.0,
+        "standard_unit": "degrees_F"
+      }
+    },
+    "negative_temperature": {
+      "selected_source_line": 28113,
+      "station": "USW00094931",
+      "state": "MN",
+      "date": "20260914",
+      "element": "TMIN",
+      "value": -17,
+      "mflag": "",
+      "qflag": "",
+      "sflag": "1",
+      "observation_time": "",
+      "expected_quality_usable": true,
+      "conversion": {
+        "raw_integer": -17,
+        "exact_standard_numerator": 1447,
+        "exact_standard_denominator": 50,
+        "standard_float": 28.94,
+        "standard_unit": "degrees_F"
+      }
+    }
+  }
+}
