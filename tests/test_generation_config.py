@@ -125,7 +125,7 @@ def test_manager_forwards_frozen_profile_and_clears_inherited_profile_for_legacy
     def run(cmd, **options):
         seen.append(options['env'])
         return SimpleNamespace(stdout=_valid_daily_stdout(), stderr='', returncode=0)
-    monkeypatch.setattr(gm.subprocess, 'run', run)
+    monkeypatch.setattr(gm, '_run_preflight_worker', run)
     monkeypatch.setenv('EVENTEDGE_GENERATION_CONFIG_FILE', '/unowned')
     monkeypatch.setenv('EVENTEDGE_GENERATION_CONFIG_SHA256', '0' * 64)
     rows = manager._load_manifest()['generations']
@@ -143,7 +143,7 @@ def test_corrupted_frozen_profile_fails_before_subprocess_and_records_history(ma
     from tradingagents.strategies.orchestration import generation_manager as gm
     info = manager.start_generation('profiled', config_file=profile)
     Path(info.config_file).write_text('{}')
-    monkeypatch.setattr(gm.subprocess, 'run', lambda *a, **k: pytest.fail('invalid profile must not launch worker'))
+    monkeypatch.setattr(gm, '_run_preflight_worker', lambda *a, **k: pytest.fail('invalid profile must not launch worker'))
     results = manager.run_daily('2026-10-09')
     assert results[info.gen_id]['outcome'] == 'failed'
     assert 'generation_config' in results[info.gen_id]['error']

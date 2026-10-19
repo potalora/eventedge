@@ -113,6 +113,21 @@ class Harness:
     def report(self, session):
         return json.loads((self.repo / 'docs/reports' / f'{session}-{GENERATION}-operational-report.json').read_text())
 
+    def readiness(self, session, *, sessions):
+        """Run the public checker against the same disposable native evidence."""
+        code = '''import json,sys
+from datetime import date
+from pathlib import Path
+from tradingagents.strategies.orchestration.release_readiness import assess_generation
+print(json.dumps(assess_generation(Path(sys.argv[1]),sys.argv[2],sys.argv[3],
+    date.fromisoformat(sys.argv[4]),sessions=int(sys.argv[5]))))
+'''
+        result = subprocess.run([str(self.python), '-c', code, str(self.repo), GENERATION,
+                                 self.commit, session, str(sessions)], cwd=self.repo, env=self.env,
+                                capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads(result.stdout)
+
     def attempts(self):
         return [json.loads(path.read_text()) for path in sorted((self.repo/'data/logs/run_attempts').rglob('*.json'))]
 
@@ -140,6 +155,7 @@ from tradingagents.strategies.orchestration.source_inputs import source_configur
 config=_build_config(SimpleNamespace(block_tickers=''))
 print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
                   'regulation_retrieval_policy':config['autoresearch']['regulation_retrieval_policy'],
+                  'noaa_delivery_policy':config['autoresearch'].get('noaa_delivery_policy'),
                   'source_configuration':source_configuration_fingerprint(config)}))
 '''
         result = subprocess.run([str(self.python),'-c',code],cwd=self.repo,env=env,
@@ -164,7 +180,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     The snapshot commit has its own identity. No source-repository Git writes,
     remotes, user configuration, real credentials or production state are used.
     """
-    if profile_variant not in {'retained_production', 'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4'}:
+    if profile_variant not in {'retained_production', 'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4', 'stabilization_v1'}:
         raise ValueError('unsupported acceptance profile variant')
     base = Path(tmp_path).resolve() / 'scheduled'
     repo = base / 'repo'
@@ -172,6 +188,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     for name in ('tradingagents', 'scripts', 'deploy'):
         shutil.copytree(ROOT/name, repo/name, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copyfile(ROOT/'.gitignore', repo/'.gitignore')
+    shutil.copyfile(ROOT/'uv.lock', repo/'uv.lock')
     # Fixture state must remain outside the committed code identity.
     with (repo/'.gitignore').open('a') as stream:
         stream.write('\n/data/\n/docs/reports/\n/.venv/\n/.worktrees/\n/.env\n')
@@ -195,8 +212,11 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     git('worktree', 'add', '--detach', str(worktree), commit)
     state = repo/'data/generations'/GENERATION
     state.mkdir(parents=True)
-    original_body = PROFILE.read_bytes()
-    assert sha(original_body) == ORIGINAL_SHA
+    original_body = ((ROOT/'config/profiles/stabilization-v1.json')
+                     if profile_variant == 'stabilization_v1' else PROFILE).read_bytes()
+    original_sha = sha(original_body)
+    if profile_variant != 'stabilization_v1':
+        assert original_sha == ORIGINAL_SHA
     original = json.loads(original_body)
     candidate = deepcopy(original)
     if profile_variant in {'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4'}:
@@ -219,7 +239,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
         policy_overrides.append({'path':['autoresearch',field], 'original':None,
                                  'fixture':candidate['autoresearch'][field], 'added':True})
     candidate_body = (json.dumps(candidate, sort_keys=True, indent=2) + '\n').encode()
-    candidate_sha = sha(candidate_body) if policy_overrides else ORIGINAL_SHA
+    candidate_sha = sha(candidate_body) if policy_overrides else original_sha
     environment_body = ENVIRONMENT_PROOF.read_bytes()
     retained_environment = json.loads(environment_body)
     assert retained_environment['version']=='retained-production-environment-v1'
@@ -241,6 +261,10 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
         'scope': 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'})
     auth_path.chmod(0o600)
     ar['chatgpt_plan_auth_path'] = str(auth_path)
+    if profile_variant == 'stabilization_v1':
+        # Freeze the same inert contact header used by the external HTTP fixture;
+        # reporting must reconstruct the effective source configuration exactly.
+        ar['edgar_user_agent'] = 'Offline acceptance fixture fixture@example.invalid'
     for target, key, suffix in ((normalized, 'project_dir', ''), (normalized, 'results_dir', 'data/results'),
             (normalized, 'data_cache_dir', 'data/dataflows_cache'), (ar, 'results_dir', 'data/results/bounded_documents'),
             (ar, 'source_cache_dir', 'data/source_cache')):
@@ -248,15 +272,16 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     # Synthetic bytes are not described as the retained original or native OCR.
     original_bytes = b'%PDF-1.7\nconstructed scheduled acceptance document fixture\n%%EOF\n'
     image_bytes = b'\x89PNG\r\n\x1a\nconstructed scheduled acceptance selected page fixture'
-    document = ar['bounded_document_registry'][0]
-    originals = [(document['original'], original_bytes), (document['attachments'][0], image_bytes)]
-    for spec, body in originals:
-        target = repo/'data/document-inputs'/spec['filename']
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(body)
-        spec.update(path=str(target), sha256=sha(body))
-    document['attachments'][0]['source_sha256'] = sha(original_bytes)
-    document['decision_scope']['original_sha256'] = sha(original_bytes)
+    if ar['bounded_document_registry']:
+        document = ar['bounded_document_registry'][0]
+        originals = [(document['original'], original_bytes), (document['attachments'][0], image_bytes)]
+        for spec, body in originals:
+            target = repo/'data/document-inputs'/spec['filename']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+            spec.update(path=str(target), sha256=sha(body))
+        document['attachments'][0]['source_sha256'] = sha(original_bytes)
+        document['decision_scope']['original_sha256'] = sha(original_bytes)
     substitutions = _changes(candidate, normalized)
     allowed_paths = {('project_dir',), ('results_dir',), ('data_cache_dir',),
         ('autoresearch', 'results_dir'), ('autoresearch', 'source_cache_dir'), ('autoresearch', 'chatgpt_plan_auth_path'),
@@ -266,11 +291,14 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
         ('autoresearch', 'bounded_document_registry', 0, 'attachments', 0, 'sha256'),
         ('autoresearch', 'bounded_document_registry', 0, 'attachments', 0, 'source_sha256'),
         ('autoresearch', 'bounded_document_registry', 0, 'decision_scope', 'original_sha256')}
+    if profile_variant == 'stabilization_v1':
+        allowed_paths = {path for path in allowed_paths if 'bounded_document_registry' not in path}
+        allowed_paths.add(('autoresearch', 'edgar_user_agent'))
     assert {tuple(row['path']) for row in substitutions} == allowed_paths
     profile = state/'generation-config.json'
     _json(profile, normalized)
     profile_sha = sha(profile.read_bytes())
-    audit = {'original_sha256': ORIGINAL_SHA, 'fixture_sha256': profile_sha,
+    audit = {'original_sha256': original_sha, 'fixture_sha256': profile_sha,
              'profile_variant':profile_variant, 'policy_overrides':policy_overrides,
              'candidate_profile_sha256':candidate_sha,
              'fixture_commit': commit, 'substitutions': substitutions,
@@ -286,6 +314,9 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
                 'inert cot_reports availability module; real native archive parser',
                 'HTTPX/HTTPX2 physical SSE response', 'synthetic plan-auth grant', 'synthetic local document bytes'],
              'scope': 'constructed external IO and document bytes; real internal shell/clock/ledger pipeline'}
+    if profile_variant == 'stabilization_v1':
+        audit['external_fixtures'].remove('synthetic local document bytes')
+        audit['scope'] = 'constructed external IO; exact stabilization profile; real internal shell/clock/ledger pipeline'
     _json(base/'substitution-audit.json', audit)
     _json(repo/'data/generations/manifest.json', {'generations': [{
         'gen_id': GENERATION, 'git_commit': commit, 'git_branch': 'fixture-base',

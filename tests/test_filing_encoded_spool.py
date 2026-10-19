@@ -466,21 +466,155 @@ def test_same_size_output_rewrite_after_readback_prevents_publication(tmp_path, 
     destination = tmp_path/'original.gz'
     native_read = os.read
     changed = []
+    native_identity = spool._encoded_identity
+    # Model a filesystem tick shared by the write and readback: content must
+    # still be checked when mtime/ctime do not distinguish the actual rewrite.
+    def coalesced_identity(info):
+        return native_identity(info)[:-2] + (0, 0)
+    monkeypatch.setattr(spool, '_encoded_identity', coalesced_identity)
     def corrupt_after_eof(fd, size):
         data = native_read(fd, size)
         if not data and not changed:
             original = destination.read_bytes()
+            before = spool._encoded_identity(destination.stat())
             os.chmod(destination, 0o600)
             destination.write_bytes(bytes([original[0]^1])+original[1:])
             os.chmod(destination, 0o400)
+            assert spool._encoded_identity(destination.stat()) == before
             changed.append(True)
         return data
     try:
         monkeypatch.setattr(spool.os, 'read', corrupt_after_eof)
         with pytest.raises(SourceFetchError): owner.retain_encoded(record, destination)
+        assert changed == [True]
         assert not destination.exists()
         assert owner.stats()['total_bytes'] == record.size
     finally:
+        owner.close()
+
+
+def test_rewrite_during_raw_reader_close_is_rechecked_before_publication(tmp_path, monkeypatch):
+    owner, record = owner_record(tmp_path)
+    destination = tmp_path/'original.gz'
+    native_close = owner._close_owned_fd
+    native_identity = spool._encoded_identity
+    monkeypatch.setattr(spool, '_encoded_identity', lambda info: native_identity(info)[:-2] + (0, 0))
+    changed = []
+    def corrupt_after_raw_close(entry):
+        raw_reader = entry in owner._entry(record)['reader_fds']
+        native_close(entry)
+        if raw_reader and not changed:
+            original = destination.read_bytes()
+            before = spool._encoded_identity(destination.stat())
+            destination.chmod(0o600)
+            destination.write_bytes(bytes([original[0]^1])+original[1:])
+            destination.chmod(0o400)
+            assert spool._encoded_identity(destination.stat()) == before
+            changed.append(True)
+    try:
+        monkeypatch.setattr(owner, '_close_owned_fd', corrupt_after_raw_close)
+        with pytest.raises(SourceFetchError): owner.retain_encoded(record, destination)
+        assert changed == [True]
+        assert owner.stats()['active_parent_readers'] == 0
+        assert owner.stats()['retained_bytes'] == 0
+        assert owner.stats()['total_bytes'] == record.size
+        assert not destination.exists()
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize('failure', ['read', 'deadline', 'uncertain_close', 'confirmed_close'])
+def test_final_content_verification_failure_cannot_publish(tmp_path, monkeypatch, failure):
+    now = [10.0]
+    with provider_budget('edgar', 20.0, clock=lambda: now[0], limits=()):
+        owner = spool.SpoolScope(tmp_path, original_deadline=20.0, physical_limit=100)
+        record = owner.spool_response(Response(b'abcdef'), identity=IDENTITY, max_bytes=6)
+        destination = tmp_path/'original.gz'
+        native_open, native_read, native_close = os.open, os.read, os.close
+        readers, final_fds, injected = [], set(), []
+        def open_reader(path, flags, *args, **kwargs):
+            fd = native_open(path, flags, *args, **kwargs)
+            if Path(path) == destination and flags & os.O_ACCMODE == os.O_RDONLY:
+                readers.append(fd)
+                if len(readers) == 2:
+                    assert owner.stats()['active_parent_readers'] == 0
+                    final_fds.add(fd)
+            return fd
+        def fail_read(fd, size):
+            if fd in final_fds:
+                assert not owner._lock._is_owned()
+                if failure == 'read':
+                    injected.append(True)
+                    raise OSError('private final read failure')
+                if failure == 'deadline':
+                    injected.append(True)
+                    now[0] = 20.0
+            return native_read(fd, size)
+        def fail_close(fd):
+            if fd in final_fds and failure in {'uncertain_close', 'confirmed_close'}:
+                injected.append(True)
+                if failure == 'confirmed_close': native_close(fd)
+                raise PermissionError('private final close failure')
+            return native_close(fd)
+        try:
+            monkeypatch.setattr(spool.os, 'open', open_reader)
+            monkeypatch.setattr(spool.os, 'read', fail_read)
+            monkeypatch.setattr(spool.os, 'close', fail_close)
+            with pytest.raises(SourceFetchError) as error:
+                owner.retain_encoded(record, destination)
+            assert injected
+            assert error.value.reason_code == ('timeout' if failure == 'deadline' else 'transport_error')
+            assert owner.stats()['retained_bytes'] == 0
+            if failure == 'uncertain_close':
+                assert destination.exists()
+                assert owner.stats()['total_bytes'] == record.size+destination.stat().st_size
+                assert owner.stats()['active_parent_writers'] == 1
+                with pytest.raises(SourceFetchError): owner.close()
+            else:
+                assert not destination.exists()
+                assert owner.stats()['total_bytes'] == record.size
+        finally:
+            monkeypatch.setattr(spool.os, 'close', native_close)
+            owner.close()
+        assert owner.stats()['total_bytes'] == 0
+        assert owner.stats()['closed'] is True
+
+
+def test_owner_close_interrupts_final_content_verification_without_locking_io(tmp_path, monkeypatch):
+    owner, record = owner_record(tmp_path)
+    destination = tmp_path/'original.gz'
+    native_open, native_read = os.open, os.read
+    readers, final_fds = [], set()
+    entered, resume = Event(), Event()
+    def open_reader(path, flags, *args, **kwargs):
+        fd = native_open(path, flags, *args, **kwargs)
+        if Path(path) == destination and flags & os.O_ACCMODE == os.O_RDONLY:
+            readers.append(fd)
+            if len(readers) == 2: final_fds.add(fd)
+        return fd
+    def pause_read(fd, size):
+        if fd in final_fds:
+            assert not owner._lock._is_owned()
+            entered.set()
+            assert resume.wait(3)
+        return native_read(fd, size)
+    try:
+        monkeypatch.setattr(spool.os, 'open', open_reader)
+        monkeypatch.setattr(spool.os, 'read', pause_read)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(copy_context().run, owner.retain_encoded, record, destination)
+            try:
+                assert entered.wait(3)
+                assert owner.stats()['active_parent_readers'] == 0
+                with pytest.raises(SourceFetchError): owner.close()
+            finally:
+                resume.set()
+            with pytest.raises(SourceFetchError): future.result(timeout=3)
+        assert owner.stats()['closed'] is True
+        assert owner.stats()['total_bytes'] == 0
+        assert not destination.exists()
+    finally:
+        resume.set()
         owner.close()
 
 

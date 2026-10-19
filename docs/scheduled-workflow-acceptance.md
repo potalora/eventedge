@@ -8,16 +8,48 @@ guards. Healthy idle controller observations did not establish that combination.
 
 ## Release gate
 
-Run the named gate from the candidate checkout with its installed dependencies:
+Run the gates from the candidate checkout with its installed dependencies.
+Recorded historical source data is required before accepting the constructed
+workflow scenarios:
 
 ```sh
-python -m pytest -q -m 'scheduled_acceptance and not live' tests
-python -m pytest -q -m 'not live and not scheduled_acceptance' tests
+python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-history.json
+python scripts/run_historical_source_acceptance.py --private-corpus /absolute/private/corpus --require-full-supported-scope --report /absolute/private/full-history.json
+python -m pytest -q -m 'scheduled_acceptance and not document_qualification and not live' tests
+python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
 ```
 
-CI runs both commands in the baseline and pinned optional-SDK environments. A
-failed gate blocks acceptance. Skipped, expected-failure, or omitted scenarios do
-not establish the corresponding requirement.
+CI runs the public historical replay and both pytest commands in the baseline and
+pinned optional-SDK environments. The private full-scope replay is additionally
+required before release acceptance; public CI alone cannot qualify the complete
+source set. A missing or invalid private corpus fails the full-scope command.
+A failed gate blocks acceptance. Skipped, expected-failure, or omitted scenarios
+do not establish the corresponding requirement.
+
+The versioned manifest in `tests/historical/manifest.json` binds actual recorded
+data, its acquisition time, reference/observation date, vintage, source format and
+SHA256. The runner denies network and model calls. Original HTTP bytes test the
+corresponding adapter; normalized accepted inputs test consumers and strategy
+contracts. An alternate source format is identified as such. Neither normalized
+captures nor reconstructed HTTP fixtures establish a native wire contract.
+Controlled mutations are reported separately from the unchanged historical
+baselines. Private/licensed inputs remain outside Git and public CI artifacts.
+
+Preserve historical failures as failures. A replay can pass by correctly
+retaining degraded coverage and rejecting unsafe data; it cannot turn that
+evidence into healthy native qualification. Acquisition on a later date also
+does not establish what was available at the earlier decision time. Current
+provider/model availability and prospective continuity require separate native
+evidence. Follow the [source incident policy](source-incident-policy.md) for each
+newly observed failure and its reviewed reliability lesson.
+
+The October 17 [stabilization profile](stabilization-profile.md) is the current
+supported gate: the exact checked-in sixteen-book profile, two-session positive
+paper fills, zero-IO replay, and explicit required/optional FRED failure cases.
+The full 98-image scenario is deferred with its document features and remains
+selectable using `-m 'document_qualification and not live'`. Its component and
+replay regressions remain in ordinary CI. Historical document-profile evidence
+below does not qualify those features for the stabilization profile.
 
 The subprocess harness creates an independent temporary Git repository, frozen
 generation worktree, profile, state directories and virtual environment. Its
@@ -37,6 +69,15 @@ storage are isolated. A synthetic ancestor-variable regression verifies that
 normal loading cannot inherit configuration from the surrounding checkout.
 
 ## Profile provenance
+
+The stabilization variant reads `config/profiles/stabilization-v1.json` directly.
+It records the original and normalized profile hashes and audits only disposable
+paths, inert authentication and a matching inert EDGAR contact header. Its frozen
+blocklist, model routes, risk settings and explicit exclusions are unchanged.
+The runtime artifact binds code, profile and installed-dependency fingerprints.
+No bounded-document fixture is created for this variant.
+
+The following retained profile remains a historical control.
 
 The retained fixture is the original non-secret deployment profile, SHA256
 `cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d`.
@@ -111,6 +152,9 @@ the systemd control group's responsibility.
 
 ## October 15 regression matrix
 
+This matrix describes the earlier document-enabled candidate and its separate
+qualification requirements. It is not the October 17 stabilization scope.
+
 The additional prospective profile exercises government-copy V3 graphics and
 the explicitly selected bounded-document recognition request V4. The original
 profile and legacy request contracts remain separate controls. These tests cover
@@ -161,6 +205,10 @@ retained evidence and an appropriate regression; they do not become exclusions
 because a prior fixture passed.
 
 ## Native evidence and remaining acceptance
+
+These retained component observations concern the document-enabled candidate.
+Native document qualification is deferred for stabilization, whose native
+acceptance must instead match its exact declared supported scope.
 
 Private component receipts are retained under
 `data/forward-readiness/deployment-20261014/fresh-generation-20261015/`:

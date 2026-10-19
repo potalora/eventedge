@@ -52,7 +52,10 @@ Older pending accounting is reconciled first. An unresolved retry or a
 `requires_user` incident blocks the next ordinary cycle. A safely completed P0
 with missed staging can advance to the next ordinary session. A complete miss
 before any accounting context was accepted is recorded as a missed session.
-Mixed bound and unbound books require operator review.
+Historical mixed bound and unbound books require operator review. The explicit
+[stabilization profile](stabilization-profile.md) can resume unstarted books only
+from its intact shared economic seal, after validating all sixteen books before
+any resumed effect.
 
 Each recovery has at most three worker attempts. Abandoned attempts remain
 charged after reboot. The initial delay is five minutes; subsequent recovery
@@ -64,20 +67,22 @@ The normal wrapper has a 3-hour-5-minute controller ceiling. One recovery worker
 has a 15-minute ceiling. The whole systemd invocation has a 3-hour-30-minute
 ceiling and a 30-second stop allowance, with `KillMode=control-group` and forced
 termination enabled. The application also kills and reaps each spawned process
-group on timeout or controller-wait failure. Captured subprocess output retains
-at most a 64 KiB tail. A heartbeat callback runs at least every sixty seconds
+group on timeout or controller-wait failure. The controller retains at most a
+64 KiB diagnostic tail; the inner daily/preflight owner retains complete separate
+stdout and stderr for the versioned worker result and immutable attempt. A heartbeat callback runs at least every sixty seconds
 while waiting; it never extends a worker's deadline.
 
 ## What can resume
 
 | Persisted condition | Controller behavior |
 | --- | --- |
+| Stabilization shared economic seal is intact; some or all books have no execution context yet | Validate the full epoch/code/profile, exact roster, per-book starting states and accepted economics before resuming any book. Bind unstarted contexts at the original input acceptance time. No fresh acquisition or committee synthesis. |
 | All sixteen execution contexts are intact, with a valid committed phase prefix and matching current state | Resume P0 through `SessionExecutor` with its exact persisted market and borrow inputs. No provider or model callback is allowed. |
 | P0 is complete and staging is partial | Before the eligible next-session open, stage only from complete accepted source, screening, candidate, volatility, enrichment, and committee evidence. A missing callback input stops recovery. |
 | The eligible open has passed | Finish safe bound P0 if necessary; record missed staging. Never publish a fresh historical decision or move its cutoff. |
 | Accounting and staging are already complete | Validate the original prospective bindings and rebuild the report; do not replay outcome acquisition, financial effects, or optional shadow work. |
 | Accepted source failure, model hold, or candidate quarantine | Preserve the accepted result. A later ordinary session can acquire a new sample under the existing source-incident policy. A frozen failed bundle is never replaced to make its original session pass. |
-| Changed identity/configuration, corrupt evidence, invalid accounting, mixed book boundaries, strategy defect, unresolved authentication, or exhausted attempts | Record `requires_user`; no automatic generation, configuration, source, credential, or code change. |
+| Changed identity/configuration, corrupt evidence, invalid accounting, mixed book boundaries without a valid stabilization seal, strategy defect, unresolved authentication, or exhausted attempts | Record `requires_user`; no automatic generation, configuration, source, credential, or code change. |
 
 A newer complete clean accepted sample can resolve an earlier preflight
 authentication incident. The report retains the earlier incident as provenance.
@@ -124,6 +129,13 @@ accepted source checkpoints, and the frozen profile. It distinguishes recovered
 accounting/staging from the original interrupted daily result. A malformed or
 changed proof remains incomplete; it cannot be hidden by a healthy heartbeat.
 Report regeneration cannot fabricate a missing original success receipt.
+
+For the stabilization profile, the report derives `completion` from the frozen
+scope and canonical source, screening, committee, health and ledger evidence.
+The report CLI and controller require `workflow_complete`; continuity additionally
+requires `continuity_eligible`. Declared research exclusions remain visible and
+never count as complete research coverage. An operational hold does not become a
+successful session merely because accounting completed.
 
 The controller discovers persisted incomplete sessions and wholly missed expected
 sessions within a bounded ten-calendar-day window. Pending journal incidents

@@ -65,9 +65,16 @@ def main(argv: list[str] | None = None) -> int:
                                 'source_incidents':report['source_incidents'],
                                 'json':str(paths['json']),'markdown':str(paths['markdown']),
                                 'source_repair_proposal':str(proposal),
-                                'source_intervention':intervention})
+                                'source_intervention':intervention,
+                                **({'completion':report['completion']} if 'completion' in report else {})})
         print(json.dumps({'reports':reports},sort_keys=True))
-        return 0 if all(row['evidence_complete'] and row['outcome'] in {'clean','degraded'} for row in reports) else 2
+        return 0 if all(
+            row['evidence_complete'] and row['outcome'] in {'clean','degraded'}
+            and ('completion' not in row or (
+                isinstance(row['completion'], dict)
+                and row['completion'].get('workflow_complete') is True
+            )) for row in reports
+        ) else 2
     except (OSError, ValueError, TypeError, KeyError, RuntimeLockBusy, RuntimeLockInvalid):
         print('Operational report unavailable: identity, evidence access, or runtime lock invalid.',file=sys.stderr)
         return 2

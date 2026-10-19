@@ -378,7 +378,7 @@ def pipeline(monkeypatch, tmp_path):
                     raise subprocess.TimeoutExpired(cmd, 1, output=stdout.getvalue(), stderr=stderr.getvalue()) from error
         return subprocess.CompletedProcess(cmd, code, stdout.getvalue(), stderr.getvalue())
 
-    monkeypatch.setattr(generation_manager.subprocess, "run", worker_process)
+    monkeypatch.setattr(generation_manager, "_run_preflight_worker", worker_process)
     fixture.manager = generation_manager.GenerationManager(str(tmp_path))
     yield fixture, orchestrator, config, tmp_path
     for cohort in orchestrator.cohorts:

@@ -237,6 +237,41 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     return configuration_fingerprint(effective)
 
 
+
+PUBLIC_CONFIGURATION_KEY = '_source_public_configuration'
+PUBLIC_CONFIGURATION_VERSION = 'source-public-configuration-v1'
+_SOURCE_CREDENTIALS = frozenset({'fmp_api_key', 'fred_api_key', 'finnhub_api_key',
+    'regulations_api_key', 'courtlistener_token', 'noaa_cdo_token', 'usda_nass_api_key',
+    'equity_universe_credentials'})
+
+
+def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
+    """Bind effective frozen behavior without reading or retaining credentials.
+
+    Credential-sensitive acquisition/cache identities keep their original
+    fingerprint. This additional declaration is retained inside the existing
+    accepted payload so historical completion can verify public behavior.
+    """
+    effective = dict(config)
+    effective.pop('decision_shadow', None)
+    omitted = _SOURCE_CREDENTIALS | {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
+    effective['autoresearch'] = {key: value for key, value in config.get('autoresearch', {}).items() if key not in omitted}
+    return configuration_fingerprint(effective)
+
+
+def public_source_configuration_declaration(config: Mapping[str, Any]) -> dict:
+    """Generation-bound, secret-free facts; never a new authority/success flag."""
+    ar = config.get('autoresearch', {})
+    if ar.get('stabilization_profile_policy') != 'supported_sixteen_books_v1':
+        return {}
+    import re
+    policy = ar.get('paper_ledger', {}).get('policy_id')
+    match = re.search(r'(?:^|-)generation-config-([a-f0-9]{64})$', policy) if isinstance(policy, str) else None
+    if match is None:
+        raise ValueError('invalid_source_public_configuration')
+    return {PUBLIC_CONFIGURATION_KEY: {'version': PUBLIC_CONFIGURATION_VERSION,
+        'profile_sha256': match[1], 'configuration_sha256': public_source_configuration_fingerprint(config)}}
+
 def registered_source_fingerprint(configuration: str, source: Any) -> str:
     settings = {'configuration': configuration}
     if source is not None:

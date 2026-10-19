@@ -1354,6 +1354,33 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
     )
 
     owner, session = state.owner, state.session
+    from .shared_execution import configured, load_shared_execution, prepare_shared_execution, freeze_shared_execution
+    accepted_seal = load_shared_execution(owner, session) if configured(owner) else None
+    if accepted_seal is not None:
+        # Ordinary retries share recovery's no-acquisition/no-new-decision boundary.
+        from .runtime_recovery import recover_owner
+        recovered = recover_owner(owner, session, now=state.processed_at)
+        if recovered['reason_code'] == 'complete':
+            from .runtime_recovery import persisted_only
+            restored = DailyRunState(owner=owner, trading_date=state.trading_date, session=session,
+                                     processed_at=state.processed_at, epoch_id=state.epoch_id)
+            with persisted_only():
+                early = partition_daily_replay(restored)
+            return early if early is not None else restored.finalize()
+        for cohort in owner.cohorts:
+            name, ledger = cohort["config"].name, cohort["ledger"]
+            snapshots = ledger.read_snapshots(session, session)
+            complete = recovered['reason_code'] == 'complete'
+            state.results[name] = {"error": not complete, "execution_valid": bool(snapshots and snapshots[0].valid),
+                "staging_valid": complete, "invalid_reason": '' if complete else recovered['reason_code'],
+                "recovery": recovered, "replayed": True}
+            if snapshots:
+                state.results[name]['account'] = snapshots[0].__dict__
+        return state.finalize()
+    if configured(owner) and state.fresh and len(state.fresh) != len(owner.cohorts):
+        # Old mixed sessions cannot be newly accepted from a replacement fetch.
+        raise ValueError("shared execution seal missing for mixed historical contexts")
+    sealed_books = {}
     if state.fresh:
         from .runtime_recovery import require_acquisition_allowed
         require_acquisition_allowed('execution_inputs')
@@ -1503,6 +1530,11 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
                 corporate_action_errors=corporate_errors,
             )
 
+    if configured(owner) and state.fresh:
+        prepared_seal = prepare_shared_execution(owner, session, state.epoch_id, state.bundle,
+                                                 state.processed_at, {})
+        accepted_seal = freeze_shared_execution(owner, prepared_seal)
+        sealed_books = accepted_seal['books']
     early = _record_due_outcomes(state, state.completed)
     if early is not None:
         return early
@@ -1548,6 +1580,7 @@ def run_governed_execution(state: DailyRunState) -> dict[str, Any] | None:
                     state.bundle.for_tickers(state.cohort_scopes[name]),
                     {},
                     state.processed_at,
+                    **({"sealed_precondition": sealed_books[name]} if sealed_books else {}),
                 )
             except Exception as error:
                 logger.error("Cohort %s execution failed", name, exc_info=True)

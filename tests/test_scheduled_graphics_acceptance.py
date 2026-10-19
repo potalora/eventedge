@@ -65,6 +65,7 @@ def _run_graphical_source(harness, *, timeout):
     return result
 
 
+@pytest.mark.document_qualification
 def test_current_graphical_source_runs_through_all_horizons_books_and_report(tmp_path):
     harness = create_harness(tmp_path, profile_variant='fresh_generation_v3_v4')
     assert len(harness.audit['policy_overrides']) == 4

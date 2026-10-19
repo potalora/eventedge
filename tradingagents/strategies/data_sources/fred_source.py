@@ -256,11 +256,15 @@ class FREDSource:
                 if exc.http_status is not None:
                     http_statuses[sid] = exc.http_status
         if failures:
-            raise SourceFetchError(
+            error = SourceFetchError(
                 "FRED series fetch failed", reason_code="batch_failure",
                 failed_operations=failures, failed_http_statuses=http_statuses,
                 partial_data=results,
             )
+            # Exhaustive adapter evidence is distinct from bounded diagnostics.
+            error.complete_operation_outcomes = {sid: 'failed' if sid in failures else 'complete'
+                                                 for sid in series_ids}
+            raise error
         return results
 
     def fetch_credit_spreads(self, start: str, end: str, *, as_of: str | None = None) -> dict[str, pd.Series]:

@@ -604,7 +604,8 @@ class FinnhubSource:
             for event in events:
                 if (not source_text(event.get("symbol")) or not source_date(event.get("date"))
                         or "epsActual" not in event
-                        or (event["epsActual"] is not None and not source_number(event["epsActual"]))):
+                        or (event["epsActual"] is not None and not source_number(event["epsActual"]))
+                        or (event.get("epsEstimate") is not None and not source_number(event["epsEstimate"]))):
                     invalid = True
                 else:
                     valid_events.append(event)

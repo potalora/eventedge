@@ -2,9 +2,31 @@
 import pandas as pd
 import pytest
 
-from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError, source_number
 from tradingagents.strategies.data_sources.fred_source import FREDSource
 from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
+
+
+@pytest.mark.parametrize('value', [
+    pytest.param(10 ** 400, id='oversized-positive-integer'),
+    pytest.param(-(10 ** 400), id='oversized-negative-integer'),
+])
+def test_source_number_rejects_integers_that_overflow_finite_conversion(value):
+    assert source_number(value) is False
+
+
+@pytest.mark.parametrize(('value', 'minimum', 'maximum', 'expected'), [
+    (-0.09, None, None, True),
+    (0, None, None, True),
+    (10 ** 300, None, None, True),
+    (-1.0, 0, None, False),
+    (101.0, None, 100, False),
+    (True, None, None, False),
+    ('1.5163', None, None, False),
+    (None, None, None, False),
+])
+def test_source_number_keeps_finite_domain_and_type_contract(value, minimum, maximum, expected):
+    assert source_number(value, minimum=minimum, maximum=maximum) is expected
 
 
 @pytest.mark.parametrize('bad', [float('inf'), float('-inf'), -1.0, 'invalid', float('nan')])

@@ -12,6 +12,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
 
 import requests
@@ -394,7 +395,7 @@ class NOAASource:
         # request-start or daily limits. The full 79-batch native roster needs
         # margin for heterogeneous late batches inside the same 180s deadline.
         with ThreadPoolExecutor(max_workers=MAX_REGIONAL_WORKERS) as executor:
-            futures = [executor.submit(acquire,batch) for batch in batches]
+            futures = [executor.submit(copy_context().run, acquire, batch) for batch in batches]
             for future in futures:
                 try:
                     rows, excluded = future.result()

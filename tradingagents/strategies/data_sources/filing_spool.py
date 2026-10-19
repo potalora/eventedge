@@ -342,37 +342,27 @@ class SpoolScope:
                 with self._lock:
                     stored_identity = _encoded_identity(
                         self._validate_encoded_name(destination, entry, closed=True))
-                    entry['fd'] = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
-                    close_attempted = False
-                    info = os.fstat(entry['fd'])
-                    if _encoded_identity(info) != stored_identity:
-                        raise _failure()
-                stored_digest, stored_count = hashlib.sha256(), 0
-                while True:
-                    self.check()
-                    chunk = os.read(entry['fd'], 65536)
-                    self.check()
-                    if not chunk:
-                        break
-                    stored_count += len(chunk)
-                    if stored_count > entry['size']:
-                        raise _failure()
-                    stored_digest.update(chunk)
-                if (stored_count != entry['size'] or stored_digest.digest() != sink.digest.digest()
-                        or _encoded_identity(os.fstat(entry['fd'])) != stored_identity):
-                    raise _failure()
+                close_attempted = False
+                self._verify_encoded_content(destination, entry, sink.digest.digest(), stored_identity)
                 with self._lock:
                     close_attempted = True
                     self._close_owned_fd(entry)
                 self.check()
             # Even a failed raw reader close prevents lease publication.
+            # Recheck contents after that close: a completed same-size rewrite
+            # can share mtime/ctime with the earlier readback on some filesystems.
+            close_attempted = False
+            stored_digest = self._verify_encoded_content(
+                destination, entry, sink.digest.digest(), stored_identity)
             with self._lock:
+                close_attempted = True
+                self._close_owned_fd(entry)
                 self.check()
                 if _encoded_identity(self._validate_encoded_name(destination, entry,
                                                                 closed=True)) != stored_identity:
                     raise _failure()
                 lease = EncodedOriginalLease(destination, record, entry['size'],
-                    stored_digest.hexdigest(), 'gzip_original_v1')
+                    stored_digest, 'gzip_original_v1')
                 entry['aliases'].add(lease)
                 entry['parent'] = False
                 self._encoded[lease] = entry
@@ -400,6 +390,36 @@ class SpoolScope:
                     self._finish_close()
                     if cleanup_error is not None:
                         raise cleanup_error from None
+
+    def _verify_encoded_content(self, destination, entry, expected_digest, stored_identity):
+        """Read a pinned inode in bounded chunks, leaving its FD owned by entry.
+
+        The caller holds the capture lock and closes through _close_owned_fd.
+        This verifies bytes at this read, not arbitrary same-UID writes after it.
+        """
+        with self._lock:
+            self.check()
+            if _encoded_identity(self._validate_encoded_name(destination, entry,
+                                                            closed=True)) != stored_identity:
+                raise _failure()
+            entry['fd'] = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
+            if _encoded_identity(os.fstat(entry['fd'])) != stored_identity:
+                raise _failure()
+        digest, count = hashlib.sha256(), 0
+        while True:
+            self.check()
+            chunk = os.read(entry['fd'], 65536)
+            self.check()
+            if not chunk:
+                break
+            count += len(chunk)
+            if count > entry['size']:
+                raise _failure()
+            digest.update(chunk)
+        if (count != entry['size'] or digest.digest() != expected_digest
+                or _encoded_identity(os.fstat(entry['fd'])) != stored_identity):
+            raise _failure()
+        return digest.hexdigest()
 
     def _validate_encoded_name(self, path, entry, *, closed=False):
         """Fail closed on missing/substituted names and destination directories."""
