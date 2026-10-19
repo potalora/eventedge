@@ -2665,7 +2665,12 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 raise
             # Only typed provider failures cross this boundary. Codec, identity,
             # accounting and unexpected internal exceptions remain hard failures.
-            return {'errors': {'openbb': {'reason_code': error.reason_code}}}
+            from .enrichment_capabilities import declaration
+            from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
+            return {**declaration(state.owner._base_config.get('autoresearch', {}), {
+                ETF_TO_FUTURES_UNDERLYING[signal['ticker']] for signal in all_signals
+                if ETF_TO_FUTURES_UNDERLYING.get(signal.get('ticker'))}),
+                'errors': {'openbb': {'reason_code': error.reason_code}}}
     try:
         with provider_budget("openbb", state.model_deadline):
             enrichment, decision_context = prepare_decision_inputs(
@@ -2810,8 +2815,13 @@ def summarize_cohort_results(
             label = "candidate data quarantined"
         if source_failures:
             label = (label + "; " if label else "") + "source coverage incomplete"
-        if any(result.get("committee_decision_status", {}).get("degraded") for result in results.values() if isinstance(result, dict)):
+        committees = [result.get('committee_decision_status', {}) for result in results.values() if isinstance(result, dict)]
+        if any(status.get('degraded') and (status.get('status') not in {'selected', 'abstained', 'no_candidates'}
+                or status.get('model_coverage', {}).get('complete') is False) for status in committees):
             label = (label + "; " if label else "") + "committee decision unavailable"
+        if any(status.get('enrichment_failures') or status.get('research_enrichment_scope', {}).get('excluded')
+                for status in committees):
+            label = (label + "; " if label else "") + "optional enrichment incomplete"
         if any(result.get("outcome_coverage_valid") is False for result in results.values() if isinstance(result, dict)):
             label = (label + "; " if label else "") + "outcome evidence incomplete"
     outcome = (

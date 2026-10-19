@@ -1709,6 +1709,10 @@ class SessionExecutor:
         for policy_key in ("stabilization_profile_policy", "source_capability_policy"):
             if policy_key in self.ar_config:
                 semantic_inputs[policy_key] = self.ar_config[policy_key]
+        from .enrichment_capabilities import configured as enrichment_configured
+        if enrichment_configured(self.ar_config):
+            for policy_key in ("enrichment_capability_policy", "retired_enrichment_capabilities"):
+                semantic_inputs[policy_key] = self.ar_config[policy_key]
         if self.pricing_version == SIP_PRICING_VERSION:
             # Bind current provider and benchmark semantics against same-session
             # source-policy substitution.

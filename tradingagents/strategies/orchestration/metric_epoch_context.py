@@ -59,6 +59,8 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "research_resilience_policy",
         "source_capability_policy",
         "stabilization_profile_policy",
+        "enrichment_capability_policy",
+        "retired_enrichment_capabilities",
     }
 )
 _NESTED_POLICY_KEYS = {
@@ -171,13 +173,16 @@ def _validate_execution_policy_schema(policy: object) -> None:
         "portfolio_policy", "price_source_policy", "benchmark_price_source_policy",
         "risk_discipline", "carrying_cost_clock", "corporate_action_terms", "daily_loss_basis",
         "signal_return_basis", "benchmark_return_basis", "research_resilience_policy",
-        "source_capability_policy", "stabilization_profile_policy"
+        "source_capability_policy", "stabilization_profile_policy",
+        "enrichment_capability_policy", "retired_enrichment_capabilities",
     }
     missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
         )
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(policy)
     if "research_resilience_policy" in policy:
         from .research_resilience import configured
         if not configured(policy):
@@ -261,6 +266,7 @@ def _validate_execution_policy_schema(policy: object) -> None:
         *_NESTED_POLICY_KEYS,
         "benchmark_symbols",
         "portfolio_policy",
+        "retired_enrichment_capabilities",
     }
     for key, value in policy.items():
         if key in nested_keys:
@@ -334,6 +340,12 @@ def build_epoch_context(
     }
     if len(source_versions) > 1:
         raise ValueError("cohort price source policies conflict")
+    enrichment_policies = {
+        row.execution_policy.get("enrichment_capability_policy")
+        for row in sorted_policies
+    }
+    if len(enrichment_policies) > 1:
+        raise ValueError("cohort enrichment capability policies conflict")
     policy_document = [asdict(policy) for policy in sorted_policies]
     behavior_hash = stable_id(
         "metric_behavior",

@@ -288,7 +288,8 @@ def _validate_research_inputs(owner, session, store, accepted, source_data, sour
             or (not reasons and 'research_hold_reasons' in enrichment)):
         raise ValueError('research decision hold enrichment mismatch')
     from .research_resilience import project_enrichment
-    _, enrichment_scope = project_enrichment(enrichment, codec_limits=store.codec_limits)
+    _, enrichment_scope = project_enrichment(enrichment, codec_limits=store.codec_limits,
+        capability_config=owner._base_config.get('autoresearch', {}))
     completed_names = {cohort['config'].name for cohort in completed}
     for cohort in getattr(owner, 'cohorts', []):
         ledger = cohort['ledger']
@@ -358,7 +359,9 @@ def _prepare_research_inputs(owner, session, source_data, source_digest, fetch_e
         _require_no_decision_effects(owner, session)
         if reasons:
             _verify_first_research_hold(owner, session, source_digest, reasons, deadline)
-            enrichment = {'research_hold_reasons': list(reasons)}
+            from .enrichment_capabilities import declaration
+            enrichment = {**declaration(owner._base_config.get('autoresearch', {}), []),
+                'research_hold_reasons': list(reasons)}
         else:
             _check_deadline(deadline)
             enrichment = fetch_enrichment()

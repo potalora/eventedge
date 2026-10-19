@@ -156,6 +156,8 @@ config=_build_config(SimpleNamespace(block_tickers=''))
 print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
                   'regulation_retrieval_policy':config['autoresearch']['regulation_retrieval_policy'],
                   'noaa_delivery_policy':config['autoresearch'].get('noaa_delivery_policy'),
+                  'enrichment_capability_policy':config['autoresearch'].get('enrichment_capability_policy'),
+                  'retired_enrichment_capabilities':config['autoresearch'].get('retired_enrichment_capabilities'),
                   'source_configuration':source_configuration_fingerprint(config)}))
 '''
         result = subprocess.run([str(self.python),'-c',code],cwd=self.repo,env=env,
@@ -180,7 +182,10 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     The snapshot commit has its own identity. No source-repository Git writes,
     remotes, user configuration, real credentials or production state are used.
     """
-    if profile_variant not in {'retained_production', 'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4', 'stabilization_v1'}:
+    stabilization_profiles = {'stabilization_v1': 'stabilization-v1.json',
+                              'stabilization_v2': 'stabilization-v2.json'}
+    stabilization = profile_variant in stabilization_profiles
+    if profile_variant not in {'retained_production', 'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4', *stabilization_profiles}:
         raise ValueError('unsupported acceptance profile variant')
     base = Path(tmp_path).resolve() / 'scheduled'
     repo = base / 'repo'
@@ -212,10 +217,10 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     git('worktree', 'add', '--detach', str(worktree), commit)
     state = repo/'data/generations'/GENERATION
     state.mkdir(parents=True)
-    original_body = ((ROOT/'config/profiles/stabilization-v1.json')
-                     if profile_variant == 'stabilization_v1' else PROFILE).read_bytes()
+    original_body = ((ROOT/'config/profiles'/stabilization_profiles[profile_variant])
+                     if stabilization else PROFILE).read_bytes()
     original_sha = sha(original_body)
-    if profile_variant != 'stabilization_v1':
+    if not stabilization:
         assert original_sha == ORIGINAL_SHA
     original = json.loads(original_body)
     candidate = deepcopy(original)
@@ -261,7 +266,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
         'scope': 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct'})
     auth_path.chmod(0o600)
     ar['chatgpt_plan_auth_path'] = str(auth_path)
-    if profile_variant == 'stabilization_v1':
+    if stabilization:
         # Freeze the same inert contact header used by the external HTTP fixture;
         # reporting must reconstruct the effective source configuration exactly.
         ar['edgar_user_agent'] = 'Offline acceptance fixture fixture@example.invalid'
@@ -291,7 +296,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
         ('autoresearch', 'bounded_document_registry', 0, 'attachments', 0, 'sha256'),
         ('autoresearch', 'bounded_document_registry', 0, 'attachments', 0, 'source_sha256'),
         ('autoresearch', 'bounded_document_registry', 0, 'decision_scope', 'original_sha256')}
-    if profile_variant == 'stabilization_v1':
+    if stabilization:
         allowed_paths = {path for path in allowed_paths if 'bounded_document_registry' not in path}
         allowed_paths.add(('autoresearch', 'edgar_user_agent'))
     assert {tuple(row['path']) for row in substitutions} == allowed_paths
@@ -314,7 +319,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
                 'inert cot_reports availability module; real native archive parser',
                 'HTTPX/HTTPX2 physical SSE response', 'synthetic plan-auth grant', 'synthetic local document bytes'],
              'scope': 'constructed external IO and document bytes; real internal shell/clock/ledger pipeline'}
-    if profile_variant == 'stabilization_v1':
+    if stabilization:
         audit['external_fixtures'].remove('synthetic local document bytes')
         audit['scope'] = 'constructed external IO; exact stabilization profile; real internal shell/clock/ledger pipeline'
     _json(base/'substitution-audit.json', audit)

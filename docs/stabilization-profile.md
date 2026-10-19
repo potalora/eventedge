@@ -1,6 +1,6 @@
 # Sixteen-book stabilization profile
 
-`config/profiles/stabilization-v1.json` is a prospective paper-trading profile for
+`config/profiles/stabilization-v2.json` is a prospective paper-trading profile for
 four horizons and four portfolio sizes. It requires a new generation and direct
 deployment authorization. This PR does not deploy it or activate schedules.
 
@@ -29,6 +29,21 @@ These declarations bind the frozen profile and health evidence. Unknown disable
 reasons, missing health rows, model holds or incomplete staging cannot qualify as
 successful supported work. `workflow_complete` describes the supported workflow;
 `research_coverage_complete` remains false for the declared exclusions.
+
+The v2 profile also retires optional commodity futures-curve enrichment because
+the adapter has no supported maturity-identified curve evidence. This is an
+explicit acquisition exclusion for a new generation. It leaves commodity
+signals and the supported profile, short-interest and factor enrichment intact.
+No provider failure is relabeled as a retirement. Missing supported enrichment,
+model holds and failures still prevent clean continuity.
+
+The retirement binds the frozen configuration, metric epoch, source identity,
+public configuration and exclusion digest. Immutable decision inputs retain its
+exact scope, including sessions with no affected symbols. Canonical reports
+reconstruct the projection from those inputs and compare all sixteen committee
+records and staging clocks before accepting `supported_enrichment_complete`.
+Full research coverage remains false. The retained v1 profile and historical
+inputs keep their original curve behavior and failure classifications.
 
 ## Source and restart boundaries
 

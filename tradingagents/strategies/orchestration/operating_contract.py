@@ -12,6 +12,7 @@ import re
 
 from . import filing_research_policy as filing
 from . import source_lifecycle_policy as lifecycle
+from . import enrichment_capabilities as enrichment_capabilities
 
 POLICY = 'supported_sixteen_books_v1'
 HORIZONS = ('30d', '3m', '6m', '1y')
@@ -47,6 +48,14 @@ def configured(config):
     if value is not None and value != POLICY:
         raise ValueError('invalid_stabilization_profile')
     return value == POLICY
+
+
+def _exclusion_scope(ar, declarations):
+    scope = {'declarations': declarations, 'disabled_strategy_capabilities': CAPABILITY_EXCLUSIONS}
+    if enrichment_capabilities.configured(ar):
+        scope.update(enrichment_capability_policy=ar['enrichment_capability_policy'],
+            retired_enrichment_capabilities=ar['retired_enrichment_capabilities'])
+    return scope
 
 
 def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingProfile:
@@ -90,7 +99,7 @@ def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingPr
         return OperatingProfile(POLICY, profile_sha256, ROSTER,
             {h: f'{policy}:health:{h}' for h in HORIZONS}, names,
             tuple(name for name in names if name not in EXCLUSIONS), dict(EXCLUSIONS),
-            lifecycle._digest({'declarations': scope, 'disabled_strategy_capabilities': CAPABILITY_EXCLUSIONS}), config, policy)
+            lifecycle._digest(_exclusion_scope(ar, scope)), config, policy)
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ValueError('invalid_stabilization_profile') from None
 
@@ -103,6 +112,12 @@ def configure_strategies(strategies, config):
     """
     if config.get('stabilization_profile_policy') != POLICY:
         return list(strategies)
+    try:
+        if (enrichment_capabilities.configured(config)
+                and config.get('research_resilience_policy') != 'dependency_isolation_v1'):
+            raise ValueError()
+    except ValueError:
+        raise ValueError('invalid_stabilization_profile') from None
     if (config.get('disabled_strategy_capabilities') != CAPABILITY_EXCLUSIONS
             or config.get('retired_sources') != {'regulations': {
                 'reason': EXCLUSIONS['regulatory_pipeline'], 'strategies': ['regulatory_pipeline']}}
@@ -240,9 +255,9 @@ def evaluate_completion(profile: OperatingProfile, facts: dict) -> dict:
         filing_scope = filing.declared_scope(payload, config=profile.config['autoresearch'])
         retirement_scope = lifecycle.declared_scope(payload, profile.config['autoresearch'],
             configure_strategies(get_paper_trade_strategies(), profile.config['autoresearch']))
-        require(lifecycle._digest({'declarations': {filing.DECLARATION_KEY: filing_scope,
-            lifecycle.DECLARATION_KEY: retirement_scope},
-            'disabled_strategy_capabilities': CAPABILITY_EXCLUSIONS}) == profile.exclusion_scope_sha256, 'exclusion_scope_invalid')
+        require(lifecycle._digest(_exclusion_scope(profile.config['autoresearch'], {
+            filing.DECLARATION_KEY: filing_scope, lifecycle.DECLARATION_KEY: retirement_scope}))
+            == profile.exclusion_scope_sha256, 'exclusion_scope_invalid')
     except (ValueError, TypeError, KeyError):
         filing_scope = retirement_scope = None
         reasons.add('exclusion_scope_invalid')
@@ -294,11 +309,24 @@ def evaluate_completion(profile: OperatingProfile, facts: dict) -> dict:
     committees = facts.get('committees', {})
     require(type(committees) is dict and tuple(sorted(committees)) == profile.roster, 'committee_roster_invalid')
     optional_enrichment_failure = False
+    retired_enrichment = enrichment_capabilities.configured(profile.config['autoresearch'])
+    accepted_enrichment_scope = facts.get('enrichment_scope')
+    if retired_enrichment:
+        try:
+            optional_enrichment_failure = not enrichment_capabilities.supported_complete(
+                accepted_enrichment_scope, profile.config['autoresearch'])
+        except (ValueError, TypeError, KeyError):
+            reasons.add('enrichment_scope_invalid')
     for document in committees.values():
         status = document.get('status', {}) if isinstance(document, dict) else {}
-        optional_enrichment_failure = optional_enrichment_failure or bool(status.get('enrichment_failures')) or (
-            isinstance(status.get('research_enrichment_scope'), dict)
-            and status['research_enrichment_scope'].get('research_coverage_complete') is False)
+        optional_enrichment_failure = optional_enrichment_failure or bool(status.get('enrichment_failures'))
+        if retired_enrichment:
+            require(isinstance(accepted_enrichment_scope, dict)
+                and status.get('research_enrichment_scope') == accepted_enrichment_scope, 'enrichment_scope_invalid')
+        else:
+            optional_enrichment_failure = optional_enrichment_failure or (
+                isinstance(status.get('research_enrichment_scope'), dict)
+                and status['research_enrichment_scope'].get('research_coverage_complete') is False)
         require(status.get('status') in {'no_candidates', 'selected', 'abstained'}
             and status.get('model_coverage') == {'complete': True} and not _held(status), 'committee_incomplete')
     unresolved = report.get('sources', {}).get('unresolved', [])
@@ -314,4 +342,6 @@ def evaluate_completion(profile: OperatingProfile, facts: dict) -> dict:
         'coverage_excluded': True, 'research_coverage_complete': False,
         'declared_exclusions': dict(sorted(profile.declared_exclusions.items())),
         'disabled_strategy_capabilities': deepcopy(CAPABILITY_EXCLUSIONS),
+        **({'retired_enrichment_capabilities': deepcopy(profile.config['autoresearch']['retired_enrichment_capabilities'])}
+            if retired_enrichment else {}),
         'reason_codes': sorted(reasons)}
