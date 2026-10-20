@@ -13,6 +13,7 @@ import re
 from . import filing_research_policy as filing
 from . import source_lifecycle_policy as lifecycle
 from . import enrichment_capabilities as enrichment_capabilities
+from . import congress_audit_continuity as congress_continuity
 
 POLICY = 'supported_sixteen_books_v1'
 HORIZONS = ('30d', '3m', '6m', '1y')
@@ -55,6 +56,8 @@ def _exclusion_scope(ar, declarations):
     if enrichment_capabilities.configured(ar):
         scope.update(enrichment_capability_policy=ar['enrichment_capability_policy'],
             retired_enrichment_capabilities=ar['retired_enrichment_capabilities'])
+    if congress_continuity.configured(ar):
+        scope[congress_continuity.KEY] = ar[congress_continuity.KEY]
     return scope
 
 
@@ -113,6 +116,7 @@ def configure_strategies(strategies, config):
     if config.get('stabilization_profile_policy') != POLICY:
         return list(strategies)
     try:
+        congress_continuity.configured(config)
         if (enrichment_capabilities.configured(config)
                 and config.get('research_resilience_policy') != 'dependency_isolation_v1'):
             raise ValueError()
@@ -332,16 +336,32 @@ def evaluate_completion(profile: OperatingProfile, facts: dict) -> dict:
     unresolved = report.get('sources', {}).get('unresolved', [])
     require(source_scope is not None and all(optional_source_failure(item, payload, failed_required) for item in unresolved)
         and not report.get('source_health_failures'), 'required_source_failed')
+    audit_warnings = []
+    continuity_unresolved = unresolved
+    if congress_continuity.configured(profile.config['autoresearch']):
+        try:
+            warning = congress_continuity.warning_for_source(payload.get('congress'),
+                profile.config['autoresearch'], session, source.get('acquired_at'))
+            if warning is not None:
+                expected = {'provider': 'congress', 'reason_code': 'invalid_response', 'http_status': None}
+                require(unresolved.count(expected) == 1 and report.get('outcome') == 'degraded'
+                    and report.get('input_coverage_valid') is False, 'congress_audit_diagnostics_invalid')
+                audit_warnings.append(warning)
+                continuity_unresolved = [item for item in unresolved if item != expected]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            reasons.add('congress_audit_invalid')
     complete = not reasons
     return {'version': POLICY, 'generation_id': generation, 'generation_commit': commit,
         'profile_sha256': profile.profile_sha256, 'session': session, 'epoch_id': epoch,
         'exclusion_scope_sha256': profile.exclusion_scope_sha256,
         'supported_profile_complete': complete, 'workflow_complete': complete,
-        'continuity_eligible': complete and not unresolved and not optional_enrichment_failure,
+        'continuity_eligible': complete and not continuity_unresolved and not optional_enrichment_failure,
         'supported_research_complete': complete,
         'coverage_excluded': True, 'research_coverage_complete': False,
         'declared_exclusions': dict(sorted(profile.declared_exclusions.items())),
         'disabled_strategy_capabilities': deepcopy(CAPABILITY_EXCLUSIONS),
         **({'retired_enrichment_capabilities': deepcopy(profile.config['autoresearch']['retired_enrichment_capabilities'])}
             if retired_enrichment else {}),
+        **({'audit_warnings': audit_warnings}
+            if congress_continuity.configured(profile.config['autoresearch']) else {}),
         'reason_codes': sorted(reasons)}

@@ -1445,6 +1445,12 @@ def render_operational_report(report: dict) -> str:
             + '; full research coverage: false (declared exclusions).'])
         if completion['reason_codes']:
             lines.append('Completion blockers: ' + ', '.join(completion['reason_codes']) + '.')
+        for warning in completion.get('audit_warnings', []):
+            lines.append('Congress audit warning: publisher snapshot generated at '
+                + warning['publisher_generated_at'] + '; '
+                + str(warning['house_missing_filings']) + ' House filings missing. '
+                'The verified snapshot is within 48 hours at acquisition. Paper continuity permits '
+                'this display-only gap; source coverage remains incomplete.')
     if report.get('disabled_strategies'):
         lines.extend(['', 'Policy exclusions: ' + ', '.join(f'{name} ({reason})' for name, reason in sorted(report['disabled_strategies'].items())) + '.'])
     if report['sources'].get('filing_comparison_scope'):

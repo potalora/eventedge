@@ -158,6 +158,7 @@ print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
                   'noaa_delivery_policy':config['autoresearch'].get('noaa_delivery_policy'),
                   'enrichment_capability_policy':config['autoresearch'].get('enrichment_capability_policy'),
                   'retired_enrichment_capabilities':config['autoresearch'].get('retired_enrichment_capabilities'),
+                  'congress_audit_continuity_policy':config['autoresearch'].get('congress_audit_continuity_policy'),
                   'source_configuration':source_configuration_fingerprint(config)}))
 '''
         result = subprocess.run([str(self.python),'-c',code],cwd=self.repo,env=env,
@@ -183,7 +184,8 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
     remotes, user configuration, real credentials or production state are used.
     """
     stabilization_profiles = {'stabilization_v1': 'stabilization-v1.json',
-                              'stabilization_v2': 'stabilization-v2.json'}
+                              'stabilization_v2': 'stabilization-v2.json',
+                              'stabilization_v3': 'stabilization-v3.json'}
     stabilization = profile_variant in stabilization_profiles
     if profile_variant not in {'retained_production', 'government_copy_v2', 'government_copy_v3', 'fresh_generation_v3_v4', *stabilization_profiles}:
         raise ValueError('unsupported acceptance profile variant')

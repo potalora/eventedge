@@ -215,6 +215,8 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     ar = dict(config.get('autoresearch', {}))
     from .enrichment_capabilities import configured as enrichment_configured
     enrichment_configured(ar)
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(ar)
     credentials = {
         'fmp_api_key': 'FMP_API_KEY', 'fred_api_key': 'FRED_API_KEY',
         'finnhub_api_key': 'FINNHUB_API_KEY', 'regulations_api_key': 'REGULATIONS_API_KEY',
@@ -256,6 +258,8 @@ def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
     """
     from .enrichment_capabilities import configured as enrichment_configured
     enrichment_configured(dict(config.get('autoresearch', {})))
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(dict(config.get('autoresearch', {})))
     effective = dict(config)
     effective.pop('decision_shadow', None)
     omitted = _SOURCE_CREDENTIALS | {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
@@ -268,6 +272,8 @@ def public_source_configuration_declaration(config: Mapping[str, Any]) -> dict:
     ar = config.get('autoresearch', {})
     from .enrichment_capabilities import configured as enrichment_configured
     enrichment_configured(dict(ar))
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(dict(ar))
     if ar.get('stabilization_profile_policy') != 'supported_sixteen_books_v1':
         return {}
     import re

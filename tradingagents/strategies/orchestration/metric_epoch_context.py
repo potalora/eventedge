@@ -61,6 +61,7 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "stabilization_profile_policy",
         "enrichment_capability_policy",
         "retired_enrichment_capabilities",
+        "congress_audit_continuity_policy",
     }
 )
 _NESTED_POLICY_KEYS = {
@@ -175,6 +176,7 @@ def _validate_execution_policy_schema(policy: object) -> None:
         "signal_return_basis", "benchmark_return_basis", "research_resilience_policy",
         "source_capability_policy", "stabilization_profile_policy",
         "enrichment_capability_policy", "retired_enrichment_capabilities",
+        "congress_audit_continuity_policy",
     }
     missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
@@ -183,6 +185,12 @@ def _validate_execution_policy_schema(policy: object) -> None:
         )
     from .enrichment_capabilities import configured as enrichment_configured
     enrichment_configured(policy)
+    if "congress_audit_continuity_policy" in policy:
+        from .congress_audit_continuity import POLICY as CONGRESS_CONTINUITY_POLICY
+        if (type(policy['congress_audit_continuity_policy']) is not str
+                or policy['congress_audit_continuity_policy'] != CONGRESS_CONTINUITY_POLICY
+                or policy.get('stabilization_profile_policy') != 'supported_sixteen_books_v1'):
+            raise ValueError('invalid_congress_audit_continuity_policy')
     if "research_resilience_policy" in policy:
         from .research_resilience import configured
         if not configured(policy):
@@ -346,6 +354,12 @@ def build_epoch_context(
     }
     if len(enrichment_policies) > 1:
         raise ValueError("cohort enrichment capability policies conflict")
+    congress_policies = {
+        row.execution_policy.get("congress_audit_continuity_policy")
+        for row in sorted_policies
+    }
+    if len(congress_policies) > 1:
+        raise ValueError("cohort congress audit continuity policies conflict")
     policy_document = [asdict(policy) for policy in sorted_policies]
     behavior_hash = stable_id(
         "metric_behavior",
@@ -359,6 +373,9 @@ def build_epoch_context(
         not isinstance(reason, str) or not reason.strip() for reason in disabled.values()
     ):
         raise ValueError("invalid disabled strategy policy")
+    if (any(value is not None for value in congress_policies)
+            and disabled.get('congressional_trades') != 'display_audit_only_v1'):
+        raise ValueError('invalid_congress_audit_continuity_policy')
     # Preserve legacy document hashes when no exclusion was specified.
     config_hash = (
         stable_id("metric_configuration", policy_document, {"disabled_strategies": dict(sorted(disabled.items()))})

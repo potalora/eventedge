@@ -12,7 +12,7 @@ from scheduled_acceptance.harness import ROOT, create_harness
 pytestmark = pytest.mark.scheduled_acceptance
 
 
-@pytest.mark.parametrize("variant", ["stabilization_v1", "stabilization_v2"])
+@pytest.mark.parametrize("variant", ["stabilization_v1", "stabilization_v2", "stabilization_v3"])
 def test_stabilization_harness_retains_exact_policy_and_model_routes(tmp_path, variant):
     harness = create_harness(tmp_path, profile_variant=variant)
     source = ROOT / "config/profiles" / (variant.replace("_", "-") + ".json")
@@ -35,7 +35,7 @@ def test_stabilization_harness_retains_exact_policy_and_model_routes(tmp_path, v
     assert proof["regulation_retrieval_policy"] is None
     assert proof["blocked_tickers"] == ["GOOGL", "GOOG"]
     assert proof["noaa_delivery_policy"] == "ghcnd_yearly_v1"
-    if variant == "stabilization_v2":
+    if variant in {"stabilization_v2", "stabilization_v3"}:
         assert fixture["autoresearch"]["enrichment_capability_policy"] == "optional_enrichment_retirement_v1"
         assert fixture["autoresearch"]["retired_enrichment_capabilities"] == {
             "commodity_futures_curves": "maturity_identified_curve_evidence_unavailable"}
@@ -83,10 +83,19 @@ def _complete(harness, session, *, continuity=True):
         assert all(any(row["session"] == session and
                        (row["valid"] if table == "account_snapshots" else row["completed_at"])
                        for row in rows) for rows in books.values())
-    if harness.audit["profile_variant"] == "stabilization_v2":
+    if harness.audit["profile_variant"] in {"stabilization_v2", "stabilization_v3"}:
         _assert_accepted_retirement_scope(harness, session)
         if continuity:
-            assert report["outcome"] == "clean", report
+            if harness.audit["profile_variant"] == "stabilization_v3":
+                assert report["outcome"] == "degraded", report
+                assert report["input_coverage_valid"] is False
+                assert report["sources"]["unresolved"] == [
+                    {"provider": "congress", "reason_code": "invalid_response", "http_status": None}]
+                warning, = completion["audit_warnings"]
+                assert warning["house_missing_filings"] == 1
+                assert warning["policy"] == "recent_snapshot_warning_v1"
+            else:
+                assert report["outcome"] == "clean", report
     return report
 
 
@@ -119,10 +128,11 @@ def _assert_accepted_retirement_scope(harness, session):
         assert not current[0].get("enrichment_failures")
 
 
-@pytest.mark.parametrize("variant", ["stabilization_v1", "stabilization_v2"])
+@pytest.mark.parametrize("variant", ["stabilization_v1", "stabilization_v2", "stabilization_v3"])
 def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_replay(tmp_path, variant):
     harness = create_harness(tmp_path, profile_variant=variant)
-    first = harness.run("2026-10-14T22:00:00+00:00")
+    fault = "congress_recent_audit_gap" if variant == "stabilization_v3" else None
+    first = harness.run("2026-10-14T22:00:00+00:00", fault=fault)
     assert first.returncode == 0, first.stdout + first.stderr
     _complete(harness, "2026-10-14")
     intents = harness.book_rows("order_intents")
@@ -130,7 +140,7 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
     assert all(any(row["side"] == "buy" and row["requested_qty"] > 0 and row["eligible_session"] == "2026-10-15"
                    for row in rows) for rows in intents.values())
     assert all(not rows for rows in harness.book_rows("fills").values())
-    second = harness.run("2026-10-15T22:00:00+00:00")
+    second = harness.run("2026-10-15T22:00:00+00:00", fault=fault)
     assert second.returncode == 0, second.stdout + second.stderr
     _complete(harness, "2026-10-15")
     for name, rows in harness.book_rows("fills").items():
@@ -167,7 +177,7 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
                     ("fills", "cash_events", "account_snapshots", "staging_runs", "order_intents", "committee_decisions")}
     before_inputs = {str(path): path.read_bytes() for path in (harness.state / "source_inputs").rglob("*.json")}
     before_io = [row for row in trace if row["kind"] in {"http", "sdk", "model"}]
-    repeat = harness.run("2026-10-15T22:05:00+00:00")
+    repeat = harness.run("2026-10-15T22:05:00+00:00", fault=fault)
     assert repeat.returncode == 0, repeat.stdout + repeat.stderr
     assert {table: harness.book_rows(table) for table in before_books} == before_books
     assert all(Path(path).read_bytes() == body for path, body in before_inputs.items())
@@ -184,7 +194,7 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
     assert all(row["workflow_complete"] and row["operational_continuity_complete"]
                and row["accounting_complete"] and row["staging_complete"]
                for row in readiness["sessions"]), readiness
-    if variant == "stabilization_v2":
+    if variant in {"stabilization_v2", "stabilization_v3"}:
         _reject_locally_valid_scope_substitution(harness, before_io)
 
 
