@@ -322,7 +322,10 @@ class MultiStrategyEngine:
         from .filing_research_policy import configured as filing_research_disabled
         filing_research_disabled(self.ar_config)
         from .research_resilience import configured as research_resilience_configured
-        research_resilience_configured(self.ar_config)
+        resilience = research_resilience_configured(self.ar_config)
+        from .enrichment_capabilities import configured as enrichment_capability_configured
+        if enrichment_capability_configured(self.ar_config) and not resilience:
+            raise ValueError('invalid_enrichment_capability_policy: research projection required')
         from .research_resilience import capability_configured
         capability_configured(self.ar_config)
         from .congress_policy import configured
@@ -1004,7 +1007,8 @@ class MultiStrategyEngine:
             from .research_resilience import validate_projection, validate_signal, validate_retained_signal, project_enrichment
             from .source_inputs import source_codec_limits
             exit_data = validate_projection(self, data, shared_regime)
-            enrichment, enrichment_scope = project_enrichment(enrichment, codec_limits=source_codec_limits(self.config))
+            enrichment, enrichment_scope = project_enrichment(enrichment, codec_limits=source_codec_limits(self.config),
+                capability_config=self.ar_config)
             strategy_sources = {strategy.name: strategy.data_sources for strategy in self.paper_trade_strategies}
             for signal in shared_signals:
                 if signal.get('journal_only') or signal.get('metadata', {}).get('non_actionable_reason'):
@@ -1582,7 +1586,8 @@ class MultiStrategyEngine:
             if research_authority is not None:
                 decision_status['research_authority'] = research_authority
                 decision_status['research_enrichment_scope'] = enrichment_scope
-                if not enrichment_scope['research_coverage_complete']:
+                from .enrichment_capabilities import supported_complete
+                if not supported_complete(enrichment_scope, self.ar_config):
                     decision_status['degraded'] = True
             failures = _enrichment_failures(original_enrichment or {})
             if failures:

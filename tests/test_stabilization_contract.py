@@ -29,6 +29,29 @@ def test_frozen_profile_has_exact_supported_scope():
     assert contract.config['autoresearch']['noaa_delivery_policy'] == 'ghcnd_yearly_v1'
 
 
+def test_new_profile_binds_exact_enrichment_retirement_without_changing_strategies():
+    from tradingagents.strategies.orchestration.operating_contract import profile_contract
+    raw = PROFILE.with_name('stabilization-v2.json').read_bytes()
+    newer = profile_contract(json.loads(raw), profile_sha256=hashlib.sha256(raw).hexdigest())
+    older = profile()
+    assert newer.roster == older.roster and newer.strategies == older.strategies
+    assert newer.supported_strategies == older.supported_strategies
+    assert newer.exclusion_scope_sha256 != older.exclusion_scope_sha256
+
+
+@pytest.mark.parametrize('mutation', [
+    {'enrichment_capability_policy': 'unknown'},
+    {'retired_enrichment_capabilities': {'profiles': 'not_needed'}},
+    {'enrichment_capability_policy': None},
+])
+def test_new_profile_rejects_invalid_retirement(mutation):
+    from tradingagents.strategies.orchestration.operating_contract import profile_contract
+    config = json.loads(PROFILE.with_name('stabilization-v2.json').read_bytes())
+    config['autoresearch'].update(mutation)
+    with pytest.raises(ValueError, match='stabilization_profile'):
+        profile_contract(config, profile_sha256='a' * 64)
+
+
 @pytest.mark.parametrize('change', [
     lambda a: a['disabled_strategies'].update(earnings_call='anything'),
     lambda a: a['disabled_strategies'].update(insider_activity='arbitrary_denial'),

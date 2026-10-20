@@ -10,8 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Preserve a finite margin around the complete supported-profile gate.
-    timeout-minutes: 75
+    # Include both retained and fresh-profile acceptance with a finite margin.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,7 +48,7 @@ jobs:
   test-openbb:
     runs-on: ubuntu-latest
     # Preserve the same bounded acceptance in the pinned optional-SDK environment.
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

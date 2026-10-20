@@ -213,6 +213,10 @@ def configuration_fingerprint(config: Mapping[str, Any]) -> str:
 def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horizon: bool = False) -> str:
     """Bind effective credential fallbacks without saving credentials in documents."""
     ar = dict(config.get('autoresearch', {}))
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(ar)
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(ar)
     credentials = {
         'fmp_api_key': 'FMP_API_KEY', 'fred_api_key': 'FRED_API_KEY',
         'finnhub_api_key': 'FINNHUB_API_KEY', 'regulations_api_key': 'REGULATIONS_API_KEY',
@@ -252,6 +256,10 @@ def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
     fingerprint. This additional declaration is retained inside the existing
     accepted payload so historical completion can verify public behavior.
     """
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(dict(config.get('autoresearch', {})))
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(dict(config.get('autoresearch', {})))
     effective = dict(config)
     effective.pop('decision_shadow', None)
     omitted = _SOURCE_CREDENTIALS | {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
@@ -262,6 +270,10 @@ def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
 def public_source_configuration_declaration(config: Mapping[str, Any]) -> dict:
     """Generation-bound, secret-free facts; never a new authority/success flag."""
     ar = config.get('autoresearch', {})
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(dict(ar))
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(dict(ar))
     if ar.get('stabilization_profile_policy') != 'supported_sixteen_books_v1':
         return {}
     import re

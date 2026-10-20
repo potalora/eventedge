@@ -59,6 +59,9 @@ _EXECUTION_POLICY_KEYS = frozenset(
         "research_resilience_policy",
         "source_capability_policy",
         "stabilization_profile_policy",
+        "enrichment_capability_policy",
+        "retired_enrichment_capabilities",
+        "congress_audit_continuity_policy",
     }
 )
 _NESTED_POLICY_KEYS = {
@@ -171,13 +174,23 @@ def _validate_execution_policy_schema(policy: object) -> None:
         "portfolio_policy", "price_source_policy", "benchmark_price_source_policy",
         "risk_discipline", "carrying_cost_clock", "corporate_action_terms", "daily_loss_basis",
         "signal_return_basis", "benchmark_return_basis", "research_resilience_policy",
-        "source_capability_policy", "stabilization_profile_policy"
+        "source_capability_policy", "stabilization_profile_policy",
+        "enrichment_capability_policy", "retired_enrichment_capabilities",
+        "congress_audit_continuity_policy",
     }
     missing = (_EXECUTION_POLICY_KEYS - optional) - actual
     if missing:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
         )
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(policy)
+    if "congress_audit_continuity_policy" in policy:
+        from .congress_audit_continuity import POLICY as CONGRESS_CONTINUITY_POLICY
+        if (type(policy['congress_audit_continuity_policy']) is not str
+                or policy['congress_audit_continuity_policy'] != CONGRESS_CONTINUITY_POLICY
+                or policy.get('stabilization_profile_policy') != 'supported_sixteen_books_v1'):
+            raise ValueError('invalid_congress_audit_continuity_policy')
     if "research_resilience_policy" in policy:
         from .research_resilience import configured
         if not configured(policy):
@@ -261,6 +274,7 @@ def _validate_execution_policy_schema(policy: object) -> None:
         *_NESTED_POLICY_KEYS,
         "benchmark_symbols",
         "portfolio_policy",
+        "retired_enrichment_capabilities",
     }
     for key, value in policy.items():
         if key in nested_keys:
@@ -334,6 +348,18 @@ def build_epoch_context(
     }
     if len(source_versions) > 1:
         raise ValueError("cohort price source policies conflict")
+    enrichment_policies = {
+        row.execution_policy.get("enrichment_capability_policy")
+        for row in sorted_policies
+    }
+    if len(enrichment_policies) > 1:
+        raise ValueError("cohort enrichment capability policies conflict")
+    congress_policies = {
+        row.execution_policy.get("congress_audit_continuity_policy")
+        for row in sorted_policies
+    }
+    if len(congress_policies) > 1:
+        raise ValueError("cohort congress audit continuity policies conflict")
     policy_document = [asdict(policy) for policy in sorted_policies]
     behavior_hash = stable_id(
         "metric_behavior",
@@ -347,6 +373,9 @@ def build_epoch_context(
         not isinstance(reason, str) or not reason.strip() for reason in disabled.values()
     ):
         raise ValueError("invalid disabled strategy policy")
+    if (any(value is not None for value in congress_policies)
+            and disabled.get('congressional_trades') != 'display_audit_only_v1'):
+        raise ValueError('invalid_congress_audit_continuity_policy')
     # Preserve legacy document hashes when no exclusion was specified.
     config_hash = (
         stable_id("metric_configuration", policy_document, {"disabled_strategies": dict(sorted(disabled.items()))})

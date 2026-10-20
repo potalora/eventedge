@@ -80,6 +80,18 @@ def test_missing_health_cannot_be_clean():
     assert summarize_cohort_results(result, SESSION.isoformat()).outcome == 'degraded'
 
 
+@pytest.mark.parametrize('status,expected', [
+    ({'status': 'selected', 'degraded': True, 'model_coverage': {'complete': True},
+      'enrichment_failures': [{'operation': 'profiles'}]}, 'optional enrichment incomplete'),
+    ({'status': 'failed', 'degraded': True, 'model_coverage': {'complete': False}}, 'committee decision unavailable'),
+])
+def test_degradation_label_distinguishes_enrichment_from_model_failure(status, expected):
+    state, results = state_with_health()
+    result = state.finalize(results)
+    result['book-30d'].update(degraded=True, committee_decision_status=status)
+    assert summarize_cohort_results(result, SESSION.isoformat()).degradation_label == expected
+
+
 def test_contradictory_source_health_carrier_is_rejected():
     state, results = state_with_health(failed=True)
     result = state.finalize(results)

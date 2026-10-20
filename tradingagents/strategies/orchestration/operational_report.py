@@ -1233,7 +1233,93 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose)
                 facts['committees'][name] = document
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             diagnose('accepted_committee_invalid', name)
+    try:
+        from .enrichment_capabilities import configured as enrichment_configured
+        if enrichment_configured(profile.config['autoresearch']):
+            facts['enrichment_scope'] = _accepted_enrichment_scope(
+                state, profile, report, source_envelope, facts['committees'])
+    except (OSError, sqlite3.Error, LedgerConflictError, ValueError, TypeError, KeyError, AttributeError):
+        diagnose('accepted_enrichment_invalid')
     return facts
+
+
+def _accepted_enrichment_scope(state, profile, report, source_envelope, committees):
+    """Reconstruct optional scope from accepted inputs and all native book bindings.
+
+    The source envelope supplies its original credential-sensitive identity.
+    Neither current credentials nor a committee's claimed success can establish
+    the accepted source, eligibility, enrichment, or publication clock.
+    """
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    from . import decision_clock as clock
+    from .research_resilience import project_enrichment
+    from .source_inputs import source_codec_limits
+    from ..execution.session_activity import POLICY as ELIGIBILITY_POLICY, _validate_frozen
+
+    session = date.fromisoformat(report['session'])
+    epoch = report['epoch_id']
+    config, ar = profile.config, profile.config['autoresearch']
+    identity = source_envelope['identity']
+    if (any(identity.get(key) != report[field] for key, field in (
+            ('generation', 'generation_id'), ('session', 'session'), ('commit', 'generation_commit')))
+            or tuple(sorted(committees)) != tuple(sorted(profile.roster))
+            or len(profile.roster) != 16):
+        raise ValueError('accepted enrichment identity or committee roster mismatch')
+    store = SourceInputStore(state / 'source_cache', accepted_dir=state / 'source_inputs/decision_inputs',
+        **source_codec_limits(config))
+    source = source_envelope['payload']
+    source_digest = source_envelope['digest']
+    clock._require_research_source(store, source, source_digest)
+    purpose = ('research-historical-decision-inputs-v1' if clock.policy(config) == clock.HISTORICAL
+        else 'prospective-decision-inputs-v1')
+    accepted = store.load_frozen({**identity, 'purpose': purpose})
+
+    with ExitStack() as stack:
+        cohorts, protected = [], set()
+        for name in profile.roster:
+            connection = stack.enter_context(_database(state / name / 'portfolio.db'))
+            ledger = PortfolioLedger.__new__(PortfolioLedger)
+            ledger._connection, ledger.cohort_id = connection, name
+            economic_context = ledger.session_execution_context(session)
+            if economic_context is None or economic_context['epoch_id'] != epoch:
+                raise ValueError('accepted enrichment lacks bound accounting context')
+            market = json.loads(economic_context['economic_inputs_json'])['market']
+            if tuple(market['required_tickers']) != economic_context['required_tickers']:
+                raise ValueError('accepted enrichment protected accounting scope mismatch')
+            protected.update(economic_context['required_tickers'])
+            protected.update(row['symbol'] for row in market['benchmarks'])
+            if (not ledger.staging_completed(session, epoch, profile.ledger_policy_id)
+                    or ledger.committee_decision(session, epoch, profile.ledger_policy_id) != committees[name]):
+                raise ValueError('accepted enrichment committee differs from native book')
+            cohorts.append({'ledger': ledger, 'config': SimpleNamespace(name=name, horizon=name.split('_')[1]),
+                'engine': SimpleNamespace(ar_config=ar)})
+
+        eligibility = None
+        if ar.get('new_entry_eligibility_policy') == ELIGIBILITY_POLICY:
+            metrics = MetricStore.open_existing(state / 'metrics_v2.sqlite3')
+            binding = metrics.read_candidate_signal_identity_binding(epoch, session)
+            if binding is None or binding.epoch_id != epoch or binding.session != session:
+                raise ValueError('accepted enrichment lacks candidate identity binding')
+            candidates = {row['ticker'] for row in binding.identities} - protected
+            eligibility_store = SourceInputStore(state / 'source_cache',
+                accepted_dir=state / 'source_inputs/new_entry_eligibility', **store.codec_limits)
+            eligibility = eligibility_store.load_frozen({**identity, 'policy': ELIGIBILITY_POLICY})
+            if eligibility is not None:
+                _validate_frozen(eligibility, session, candidates, sorted(protected),
+                    source.get('equity_universe', {}).get('snapshot'))
+        eligibility_digest = clock._decision_digest(store, eligibility)
+        owner = SimpleNamespace(_base_config=config, _epoch_id=epoch, cohorts=cohorts)
+        enrichment, context = clock._validate_research_inputs(owner, session, store, accepted,
+            source, source_digest, eligibility_digest, completed=cohorts)
+        for cohort in cohorts:
+            staging = cohort['ledger'].read_policy_session_context(session)
+            if (staging is None or staging['cohort_id'] != cohort['config'].name
+                    or staging['epoch_id'] != epoch or staging['session'] != session
+                    or staging['context'].get('decision_clock') != context):
+                raise ValueError('accepted enrichment differs from staging decision clock')
+        _, scope = project_enrichment(enrichment, codec_limits=store.codec_limits, capability_config=ar)
+        return scope
 
 
 def _validate_committee_content(connection, name, profile, report, document, accepted_signals):
@@ -1359,6 +1445,12 @@ def render_operational_report(report: dict) -> str:
             + '; full research coverage: false (declared exclusions).'])
         if completion['reason_codes']:
             lines.append('Completion blockers: ' + ', '.join(completion['reason_codes']) + '.')
+        for warning in completion.get('audit_warnings', []):
+            lines.append('Congress audit warning: publisher snapshot generated at '
+                + warning['publisher_generated_at'] + '; '
+                + str(warning['house_missing_filings']) + ' House filings missing. '
+                'The verified snapshot is within 48 hours at acquisition. Paper continuity permits '
+                'this display-only gap; source coverage remains incomplete.')
     if report.get('disabled_strategies'):
         lines.extend(['', 'Policy exclusions: ' + ', '.join(f'{name} ({reason})' for name, reason in sorted(report['disabled_strategies'].items())) + '.'])
     if report['sources'].get('filing_comparison_scope'):

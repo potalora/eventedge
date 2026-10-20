@@ -965,19 +965,29 @@ class CohortOrchestrator:
 
         Returns dict with profiles, short_interest, factors for signal tickers.
         """
-        enrichment: dict[str, Any] = {}
-
+        from .enrichment_capabilities import configured, declaration
+        from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
+        ar = getattr(self, '_base_config', {}).get('autoresearch', {})
+        retired_curves = configured(ar)
         tickers = sorted({s.get("ticker", "") for s in signals if s.get("ticker")})
+        enrichment: dict[str, Any] = declaration(ar, {
+            ETF_TO_FUTURES_UNDERLYING[ticker] for ticker in tickers if ETF_TO_FUTURES_UNDERLYING.get(ticker)})
         if not tickers:
             return enrichment
 
         first_engine = self.cohorts[0]["engine"]
         registry = getattr(first_engine, "registry", None)
         if registry is None:
+            if retired_curves:
+                enrichment['errors'] = {'openbb': {'reason_code': 'provider_error',
+                    'error': 'OpenBB enrichment unavailable'}}
             return enrichment
 
         openbb_source = registry.get("openbb")
         if openbb_source is None or not openbb_source.is_available():
+            if retired_curves:
+                enrichment['errors'] = {'openbb': {'reason_code': 'provider_error',
+                    'error': 'OpenBB enrichment unavailable'}}
             return enrichment
 
         # Native profile batches preserve every ticker and explicit failures.
@@ -1005,12 +1015,8 @@ class CohortOrchestrator:
             errors["factors"] = factors
 
         # Fetch commodity futures curves for commodity signals
-        from tradingagents.strategies.modules.commodity_macro import (
-            ETF_TO_FUTURES_UNDERLYING,
-        )
-
         commodity_tickers = [t for t in tickers if t in ETF_TO_FUTURES_UNDERLYING]
-        if commodity_tickers:
+        if commodity_tickers and not retired_curves:
             curves = {}
             for ticker in commodity_tickers:
                 underlying = ETF_TO_FUTURES_UNDERLYING.get(ticker)

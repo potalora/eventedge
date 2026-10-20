@@ -2,6 +2,8 @@
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
+import subprocess
 
 import pytest
 
@@ -10,9 +12,10 @@ from scheduled_acceptance.harness import ROOT, create_harness
 pytestmark = pytest.mark.scheduled_acceptance
 
 
-def test_stabilization_harness_retains_exact_policy_and_model_routes(tmp_path):
-    harness = create_harness(tmp_path, profile_variant="stabilization_v1")
-    source = ROOT / "config/profiles/stabilization-v1.json"
+@pytest.mark.parametrize("variant", ["stabilization_v1", "stabilization_v2", "stabilization_v3"])
+def test_stabilization_harness_retains_exact_policy_and_model_routes(tmp_path, variant):
+    harness = create_harness(tmp_path, profile_variant=variant)
+    source = ROOT / "config/profiles" / (variant.replace("_", "-") + ".json")
     assert harness.audit["original_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert harness.audit["candidate_profile_sha256"] == harness.audit["original_sha256"]
     assert harness.audit["policy_overrides"] == []
@@ -32,6 +35,12 @@ def test_stabilization_harness_retains_exact_policy_and_model_routes(tmp_path):
     assert proof["regulation_retrieval_policy"] is None
     assert proof["blocked_tickers"] == ["GOOGL", "GOOG"]
     assert proof["noaa_delivery_policy"] == "ghcnd_yearly_v1"
+    if variant in {"stabilization_v2", "stabilization_v3"}:
+        assert fixture["autoresearch"]["enrichment_capability_policy"] == "optional_enrichment_retirement_v1"
+        assert fixture["autoresearch"]["retired_enrichment_capabilities"] == {
+            "commodity_futures_curves": "maturity_identified_curve_evidence_unavailable"}
+        assert proof["enrichment_capability_policy"] == "optional_enrichment_retirement_v1"
+        assert proof["retired_enrichment_capabilities"] == fixture["autoresearch"]["retired_enrichment_capabilities"]
 
 
 def _complete(harness, session, *, continuity=True):
@@ -74,12 +83,56 @@ def _complete(harness, session, *, continuity=True):
         assert all(any(row["session"] == session and
                        (row["valid"] if table == "account_snapshots" else row["completed_at"])
                        for row in rows) for rows in books.values())
+    if harness.audit["profile_variant"] in {"stabilization_v2", "stabilization_v3"}:
+        _assert_accepted_retirement_scope(harness, session)
+        if continuity:
+            if harness.audit["profile_variant"] == "stabilization_v3":
+                assert report["outcome"] == "degraded", report
+                assert report["input_coverage_valid"] is False
+                assert report["sources"]["unresolved"] == [
+                    {"provider": "congress", "reason_code": "invalid_response", "http_status": None}]
+                warning, = completion["audit_warnings"]
+                assert warning["house_missing_filings"] == 1
+                assert warning["policy"] == "recent_snapshot_warning_v1"
+            else:
+                assert report["outcome"] == "clean", report
     return report
 
 
-def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_replay(tmp_path):
-    harness = create_harness(tmp_path, profile_variant="stabilization_v1")
-    first = harness.run("2026-10-14T22:00:00+00:00")
+def _assert_accepted_retirement_scope(harness, session):
+    """Reconstruct the shared receipt from immutable enrichment, across all books."""
+    from tradingagents.strategies.orchestration.research_resilience import project_enrichment, digest
+    from tradingagents.strategies.orchestration.source_inputs import SourceInputStore, source_codec_limits
+    ar = json.loads(harness.profile.read_text())["autoresearch"]
+    limits = source_codec_limits({"autoresearch": ar})
+    accepted = [SourceInputStore.decode(path.read_text(), **limits)
+                for path in (harness.state / "source_inputs/decision_inputs").glob("*.json")]
+    accepted = [row for row in accepted if row["identity"]["session"] == session]
+    assert len(accepted) == 1
+    original = accepted[0]["payload"]["enrichment"]
+    _, scope = project_enrichment(original, capability_config=ar, codec_limits=limits)
+    assert scope["original_sha256"] == accepted[0]["payload"]["research_binding"]["enrichment_digest"]
+    assert scope["original_sha256"] == digest(original, codec_limits=limits)
+    assert scope["supported_enrichment_complete"] is True
+    assert scope["research_coverage_complete"] is False
+    assert scope["order_authority"] is False
+    assert scope["declared_exclusions"]["retired_capabilities"] == {
+        "commodity_futures_curves": "maturity_identified_curve_evidence_unavailable"}
+    decisions = harness.book_rows("committee_decisions")
+    assert len(decisions) == 16
+    for rows in decisions.values():
+        current = [json.loads(row["payload_json"])["status"] for row in rows if row["session"] == session]
+        assert len(current) == 1
+        assert current[0]["research_enrichment_scope"] == scope
+        assert current[0]["degraded"] is False
+        assert not current[0].get("enrichment_failures")
+
+
+@pytest.mark.parametrize("variant", ["stabilization_v1", "stabilization_v2", "stabilization_v3"])
+def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_replay(tmp_path, variant):
+    harness = create_harness(tmp_path, profile_variant=variant)
+    fault = "congress_recent_audit_gap" if variant == "stabilization_v3" else None
+    first = harness.run("2026-10-14T22:00:00+00:00", fault=fault)
     assert first.returncode == 0, first.stdout + first.stderr
     _complete(harness, "2026-10-14")
     intents = harness.book_rows("order_intents")
@@ -87,7 +140,7 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
     assert all(any(row["side"] == "buy" and row["requested_qty"] > 0 and row["eligible_session"] == "2026-10-15"
                    for row in rows) for rows in intents.values())
     assert all(not rows for rows in harness.book_rows("fills").values())
-    second = harness.run("2026-10-15T22:00:00+00:00")
+    second = harness.run("2026-10-15T22:00:00+00:00", fault=fault)
     assert second.returncode == 0, second.stdout + second.stderr
     _complete(harness, "2026-10-15")
     for name, rows in harness.book_rows("fills").items():
@@ -124,7 +177,7 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
                     ("fills", "cash_events", "account_snapshots", "staging_runs", "order_intents", "committee_decisions")}
     before_inputs = {str(path): path.read_bytes() for path in (harness.state / "source_inputs").rglob("*.json")}
     before_io = [row for row in trace if row["kind"] in {"http", "sdk", "model"}]
-    repeat = harness.run("2026-10-15T22:05:00+00:00")
+    repeat = harness.run("2026-10-15T22:05:00+00:00", fault=fault)
     assert repeat.returncode == 0, repeat.stdout + repeat.stderr
     assert {table: harness.book_rows(table) for table in before_books} == before_books
     assert all(Path(path).read_bytes() == body for path, body in before_inputs.items())
@@ -141,6 +194,82 @@ def test_exact_stabilization_profile_two_sessions_positive_fills_and_zero_io_rep
     assert all(row["workflow_complete"] and row["operational_continuity_complete"]
                and row["accounting_complete"] and row["staging_complete"]
                for row in readiness["sessions"]), readiness
+    if variant in {"stabilization_v2", "stabilization_v3"}:
+        _reject_locally_valid_scope_substitution(harness, before_io)
+
+
+def _reject_locally_valid_scope_substitution(harness, before_io):
+    """A valid retirement declaration cannot replace the accepted acquisition."""
+    from tradingagents.strategies.orchestration.enrichment_capabilities import (
+        declaration, DECLARATION_KEY, supported_complete)
+    ar = json.loads(harness.profile.read_text())["autoresearch"]
+    path = sorted(harness.state.glob("horizon_*/portfolio.db"))[0]
+    with sqlite3.connect(path) as connection:
+        original = connection.execute("SELECT payload_json FROM committee_decisions WHERE session=?",
+                                      ("2026-10-15",)).fetchone()[0]
+        document = json.loads(original)
+        scope = document["status"]["research_enrichment_scope"]
+        assert scope["declared_exclusions"]["underlying_symbols"] == []
+        scope["declared_exclusions"] = declaration(ar, ["NG", "SI"])[DECLARATION_KEY]
+        assert supported_complete(scope, ar) is True
+        connection.execute("UPDATE committee_decisions SET payload_json=? WHERE session=?",
+            (json.dumps(document, sort_keys=True, separators=(",", ":")), "2026-10-15"))
+    try:
+        invalid = harness.readiness("2026-10-15", sessions=2)
+        assert invalid["ready"] is False and invalid["operational_continuity_complete"] is False, invalid
+        assert any(row.get("completion_reason_codes") for row in invalid["sessions"]), invalid
+    finally:
+        with sqlite3.connect(path) as connection:
+            connection.execute("UPDATE committee_decisions SET payload_json=? WHERE session=?",
+                               (original, "2026-10-15"))
+    restored = harness.readiness("2026-10-15", sessions=2)
+    assert restored["ready"] is True, restored
+    assert [row for row in harness.trace() if row["kind"] in {"http", "sdk", "model"}] == before_io
+
+
+def test_stabilization_v2_native_ng_si_collection_uses_physical_sdk_fixtures(tmp_path):
+    harness = create_harness(tmp_path, profile_variant="stabilization_v2")
+    # Establish only the constructed clock; this probe does not claim a screen,
+    # committee selection, scheduled run or point-in-time provider observation.
+    harness.effective_config_proof()
+    code = '''import json,os,sqlite3,sys
+from pathlib import Path
+from types import SimpleNamespace
+from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
+from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator
+from tradingagents.strategies.orchestration.research_resilience import project_enrichment
+config=json.loads(Path(sys.argv[1]).read_text())
+# Extend the external FINRA response cache, using its native schema. Every
+# normalization, batching, acquisition and retirement decision remains real.
+with sqlite3.connect(Path(os.environ['EVENTEDGE_ACCEPTANCE_BASE'])/'finra-response.db') as connection:
+ for index,symbol in enumerate(['SLV','UNG'],100):
+  connection.execute('INSERT INTO short_interest VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+   (index,symbol,symbol+' fund','N',1000,900,100000,0.01,11.1,100,'2026-10-13'))
+source=OpenBBSource(fmp_api_key='offline-dummy')
+owner=CohortOrchestrator.__new__(CohortOrchestrator)
+owner._base_config=config
+owner.cohorts=[{'engine':SimpleNamespace(registry={'openbb':source})}]
+original=owner._fetch_openbb_enrichment([{'ticker':'UNG'},{'ticker':'SLV'},{'ticker':'UNG'}])
+projected,scope=project_enrichment(original,capability_config=config['autoresearch'])
+print(json.dumps({'original':original,'projected':projected,'scope':scope}))
+'''
+    result = subprocess.run([str(harness.python), "-c", code, str(harness.profile)],
+                            cwd=harness.repo, env=harness.env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    value = json.loads(result.stdout)
+    assert value["scope"]["declared_exclusions"]["underlying_symbols"] == ["NG", "SI"]
+    assert value["scope"]["supported_enrichment_complete"] is True
+    assert value["scope"]["research_coverage_complete"] is False
+    assert not value["scope"]["excluded"]
+    assert "commodity_futures_curves" not in value["original"]
+    assert "errors" not in value["original"]
+    assert set(value["projected"]["profiles"]) == {"SLV", "UNG"}
+    assert set(value["projected"]["short_interest"]) == {"SLV", "UNG"}
+    assert value["projected"]["factors"]
+    trace = harness.trace()
+    assert not any(row["kind"] in {"forbidden_network", "unexpected_httpx", "http", "model"} for row in trace)
+    assert {row["endpoint"] for row in trace if row["kind"] == "sdk"} == {
+        "openbb.profile", "openbb.factors", "finra.prepare_data"}
 
 
 @pytest.mark.parametrize("fault, complete", [("fred_optional_payems_503", True),

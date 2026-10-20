@@ -358,12 +358,14 @@ def signal_document(signal: dict) -> dict:
         if key not in ('research_admission', 'retained_from_signal_id')}}
 
 
-def project_enrichment(original: dict, *, codec_limits=None) -> tuple[dict, dict]:
+def project_enrichment(original: dict, *, codec_limits=None, capability_config=None) -> tuple[dict, dict]:
     """Select healthy optional facts, retaining every original failure by hash."""
     from .source_inputs import successful_source
     operations = ('profiles', 'short_interest', 'factors', 'commodity_futures_curves')
     if not isinstance(original, dict) or not isinstance(original.get('errors', {}), dict):
         raise ValueError('invalid_research_enrichment')
+    from .enrichment_capabilities import declared_scope
+    retirement = declared_scope(original, {} if capability_config is None else capability_config)
     errors = original.get('errors', {})
     holds = original.get('research_hold_reasons', [])
     if (not isinstance(holds, list) or any(reason not in
@@ -395,11 +397,15 @@ def project_enrichment(original: dict, *, codec_limits=None) -> tuple[dict, dict
                 selected[symbol] = value
         if payload is not None:
             projected[operation] = {symbol: selected[symbol] for symbol in payload if symbol in selected}
-    return projected, {'version': 'research-enrichment-selection-v1', 'policy': POLICY,
+    receipt = {'version': 'research-enrichment-selection-v1', 'policy': POLICY,
         'original_sha256': digest(original, codec_limits=codec_limits),
         'projection_sha256': digest(projected, codec_limits=codec_limits),
         'excluded': excluded, 'hold_reasons': list(holds),
         'research_coverage_complete': not bool(excluded or holds), 'order_authority': False}
+    if retirement is not None:
+        receipt.update(version='research-enrichment-selection-v2', declared_exclusions=retirement,
+            supported_enrichment_complete=not bool(excluded or holds), research_coverage_complete=False)
+    return projected, receipt
 
 
 def bind_signal(signal, regime, strategy_sources, analysis_input_sha256, *, codec_limits=None):

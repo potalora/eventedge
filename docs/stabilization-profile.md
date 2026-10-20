@@ -1,6 +1,6 @@
 # Sixteen-book stabilization profile
 
-`config/profiles/stabilization-v1.json` is a prospective paper-trading profile for
+`config/profiles/stabilization-v3.json` is a prospective paper-trading profile for
 four horizons and four portfolio sizes. It requires a new generation and direct
 deployment authorization. This PR does not deploy it or activate schedules.
 
@@ -29,6 +29,38 @@ These declarations bind the frozen profile and health evidence. Unknown disable
 reasons, missing health rows, model holds or incomplete staging cannot qualify as
 successful supported work. `workflow_complete` describes the supported workflow;
 `research_coverage_complete` remains false for the declared exclusions.
+
+The v2 profile also retires optional commodity futures-curve enrichment because
+the adapter has no supported maturity-identified curve evidence. This is an
+explicit acquisition exclusion for a new generation. It leaves commodity
+signals and the supported profile, short-interest and factor enrichment intact.
+No provider failure is relabeled as a retirement. Missing supported enrichment,
+model holds and failures still prevent clean continuity.
+
+The retirement binds the frozen configuration, metric epoch, source identity,
+public configuration and exclusion digest. Immutable decision inputs retain its
+exact scope, including sessions with no affected symbols. Canonical reports
+reconstruct the projection from those inputs and compare all sixteen committee
+records and staging clocks before accepting `supported_enrichment_complete`.
+Full research coverage remains false. The retained v1 profile and historical
+inputs keep their original curve behavior and failure classifications.
+
+The v3 profile adds `congress_audit_continuity_policy=recent_snapshot_warning_v1`.
+Congress remains display/audit only, with trading signals and model context off.
+A publisher snapshot within the existing 48-hour freshness limit can qualify for
+paper continuity when the only audit discrepancy is missing House filings. The
+reader reconstructs the raw snapshot, verifies its integrity and acquisition,
+and requires the exact retained reconciliation diagnostic. Additional publisher
+filings, stale evidence, transport failures and malformed data remain blocking.
+Freshness is evaluated at the frozen source acquisition time so replay is stable.
+
+This allowance changes only continuity eligibility. Reports retain the missing
+filing count, raw unresolved diagnostic, incomplete source coverage and degraded
+overall outcome, and explicitly show a Congress audit warning. A qualifying
+readiness result with that warning does not claim complete audit coverage.
+All financial, model, supported-source and staging requirements still apply.
+The policy binds the profile, metric epoch, source configuration and exclusion
+scope; v1/v2 generations keep their original continuity requirements.
 
 ## Source and restart boundaries
 

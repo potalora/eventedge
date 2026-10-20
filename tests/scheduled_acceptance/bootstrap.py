@@ -269,6 +269,17 @@ def _install():
                 body = json.dumps(snapshot).encode()
             elif url.endswith('2026FD.ZIP'):
                 body = raw['house-2026FD.ZIP']
+                if fault == 'congress_recent_audit_gap':
+                    import io, zipfile
+                    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                        xml = archive.read('2026FD.xml').replace(b'</FinancialDisclosure>',
+                            b'<Member><DocID>99999</DocID><FilingType>P</FilingType>'
+                            b'<FilingDate>10/1/2026</FilingDate></Member></FinancialDisclosure>')
+                    buffer = io.BytesIO()
+                    with zipfile.ZipFile(buffer, 'w') as archive:
+                        archive.writestr('2026FD.xml', xml)
+                        archive.writestr('2026FD.txt', 'synthetic')
+                    body = buffer.getvalue()
             elif '/political_filings/' in url:
                 body = raw['filings-2026.parquet']
             elif '/political_trades/' in url:
