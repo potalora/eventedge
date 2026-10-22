@@ -896,7 +896,7 @@ openbb = [
 [package.metadata]
 requires-dist = [
     { name = "alpaca-py", specifier = ">=0.35.0" },
-    { name = "anthropic", specifier = ">=0.86.0" },
+    { name = "anthropic", specifier = ">=0.86.0,<2" },
     { name = "authlib", marker = "extra == 'chatgpt-plan'", specifier = ">=1.8.0,<2" },
     { name = "beautifulsoup4", specifier = ">=4.13.4,<5" },
     { name = "cot-reports", marker = "extra == 'commodities'" },
