@@ -524,12 +524,17 @@ def test_fred_actual_http_wrapper_retains_status_and_redacts_body(
 ):
     def transport(url, **options):
         series_id = options["params"]["series_id"]
+        response = requests.Response()
         if series_id == "CPIAUCSL":
-            response = _response({})
             response.status_code = 502
+            response._content = body
+            response.headers["Content-Type"] = "text/html" if body.startswith(b"<html>") else "application/xml"
             return response
-        return _response({"count": 1, "offset": 0, "limit": 100000, "observations": [
-            {"date": "2026-09-01", "value": "3.0", "realtime_start": "2026-10-01", "realtime_end": "2026-10-01"}]})
+        response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps({"count": 1, "offset": 0, "limit": 100000, "observations": [
+            {"date": "2026-09-01", "value": "3.0", "realtime_start": "2026-10-01", "realtime_end": "2026-10-01"}]}).encode()
+        return response
 
     monkeypatch.setattr(FREDSource, "_transport_get", staticmethod(transport))
     source = FREDSource(api_key="fixture-secret")

@@ -61,6 +61,54 @@ source to its actual consumer and records the deferred capabilities separately.
   its private-corpus gap remains explicit, so it does not claim full supported
   historical-source acceptance.
 
+## Broad suite results and fixture corrections
+
+The complete remaining non-live invocation finished with **9,597 passed,
+five skipped and four fixture failures** in 3,767.23 seconds. Three failures
+used older FRED response doubles without byte content; those now use real
+`requests.Response` bodies while retaining vintage, missing-value and safe-error
+assertions. The fourth still required CFTC acquisition and availability clocks
+to be identical; it now supplies an offline release calendar and verifies both
+the original acquisition and later publication-validation availability.
+
+All four failed cases passed after correction: the combined FRED/provider/runtime
+selection passed **115 tests**, and the CFTC/source/transport selections passed
+**189 tests**. Independent reviews found no issues. The five full-suite skips
+were three unavailable retained/private fixture cases, the optional-SDK import
+case in the local environment and a Linux-root cross-UID permission case. The
+installed-SDK check above separately exercised that SDK environment. The 28 new
+profile-name cases were added after this broad invocation collected its tests
+and passed in the 503-test repair selection. These overlapping runs are not a
+single clean full-suite invocation or additive test totals; no observed local
+test failure remains unresolved.
+
+The complete scheduled-workflow invocation initially passed 358 tests and failed
+four: the three exact stabilization-profile variants and the bounded native
+NG/SI fixture test. Its external-SDK fixtures still used an impossible FINRA
+October 13 settlement, omitted the native current-archive download interface,
+and supplied the old factor-field name. The corrected fixtures use the published
+September 30 cycle, native date/field shapes and explicit incomplete historical
+coverage. Unexpected archive downloads still fail.
+
+The third profile also needed an explicit response for its constructed missing
+House filing. That fixture now supplies synthetic PDF bytes only for its exact
+fictional URL and configured audit-gap scenario. The missing publisher ID,
+incomplete coverage and disabled signal/model/order authority remain unchanged;
+unconfigured URLs still fail. No production validators or timeouts were relaxed.
+
+After those corrections, all three exact profile variants passed their complete
+two-session, positive-fill, continuity/readiness and zero-I/O replay tests:
+v1 in 346.97 seconds, v2 in 389.86 seconds and v3 in 396.64 seconds. The two quick
+native-SDK/original-acquisition checks passed together in 9.76 seconds. Independent
+reviews found no issues and separately reproduced both quick checks. The 32
+new correction-refusal cases were added after the original scheduled invocation
+collected its tests; they passed in the 503-test repair selection above.
+
+The hosted standard and installed-OpenBB jobs on the first PR commit each
+passed 390 scheduled cases and failed the same four fixture cases. Their logs
+contained no additional failures. The updated PR triggers both hosted jobs
+again; their current outcome is available in the PR checks.
+
 ## Remaining qualification boundaries
 
 Congress still has a publisher reconciliation gap and unverified Senate/extracted
