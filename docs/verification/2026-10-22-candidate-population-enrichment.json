@@ -1,0 +1,190 @@
+{
+  "started_at": "2026-10-22T09:00:38.812416+00:00",
+  "finished_at": "2026-10-22T09:01:49.296725+00:00",
+  "all_probes_finished_at": "2026-10-22T09:01:49.874344+00:00",
+  "scope": "candidate_source_probe_not_deployed",
+  "production_read_only": true,
+  "model_calls": 0,
+  "candidate_identity": {
+    "head": "56bdf1929a58778c6c58f435f2ad5a2e4b5d1729",
+    "tracked_diff_sha256": "2b0926552f53c2f2c6a3ecd4062572cab19769eb1ced49d2ba5fb00bf8d25aeb",
+    "code_files_sha256": "7e8d186b742d7feca5b59d3d6d47b118a1828e8c67d07d33c78291a6543bb50b",
+    "scope": "candidate_development_source_probe_not_deployed"
+  },
+  "profile_sha256": "ecf94154a063fc1af5b160f51bb2a61acf8384f7a2571f47d41377d91a5b82a9",
+  "candidate_symbols": [
+    "AAPL",
+    "ADM",
+    "ASIC",
+    "BDN",
+    "CACI",
+    "CASH",
+    "DBA",
+    "MOO",
+    "SLV",
+    "UNG",
+    "UNH"
+  ],
+  "optional_population": [
+    "AAPL",
+    "ADM",
+    "ASIC",
+    "BDN",
+    "BIL",
+    "CACI",
+    "CASH",
+    "DBA",
+    "MOO",
+    "SLV",
+    "SPY",
+    "UNG",
+    "UNH",
+    "VT",
+    "VTI"
+  ],
+  "original_receipt_sha256": "570ff64c889ccaff5ca6a371ebfb2dbc0b84d85f8cf474fe0e6aa48ce0772b34",
+  "population_basis": "Direct observations of actual per-horizon strategy screen results, union governed benchmark/held/pending scope; no model calls.",
+  "preflight": {
+    "screen_ok": true,
+    "governed_ok": true,
+    "research_coverage_complete": false,
+    "screen_source_failures": [],
+    "screen_runtime_failures": [],
+    "governed_failures": [],
+    "declared_exclusions": {
+      "congressional_trades": "display_audit_only_v1",
+      "state_economics": "unsupported_state_event_proxy",
+      "insider_activity": "filing_research_disabled",
+      "filing_analysis": "filing_research_disabled",
+      "quantum_readiness": "filing_research_disabled",
+      "regulatory_pipeline": "regulatory_document_research_deferred_v1"
+    }
+  },
+  "optional": {
+    "profiles": {
+      "elapsed_seconds": 0.548,
+      "passed_symbols": [
+        "AAPL",
+        "ADM",
+        "BDN",
+        "BIL",
+        "CACI",
+        "CASH",
+        "DBA",
+        "MOO",
+        "SLV",
+        "SPY",
+        "UNG",
+        "UNH",
+        "VT",
+        "VTI"
+      ],
+      "errors": {
+        "ASIC": {
+          "error": "OpenBB profile classification unavailable or invalid [invalid_response]",
+          "reason_code": "invalid_response"
+        }
+      },
+      "classification": {
+        "AAPL": {
+          "name": "Apple Inc.",
+          "sector": "Technology"
+        },
+        "ADM": {
+          "name": "Archer-Daniels-Midland Company",
+          "sector": "Consumer Defensive"
+        },
+        "BDN": {
+          "name": "Brandywine Realty Trust",
+          "sector": "Real Estate"
+        },
+        "BIL": {
+          "name": "State Street SPDR Bloomberg 1-3 Month T-Bill ETF",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "CACI": {
+          "name": "CACI International Inc",
+          "sector": "Technology"
+        },
+        "CASH": {
+          "name": "Pathward Financial, Inc.",
+          "sector": "Financial Services"
+        },
+        "DBA": {
+          "name": "Invesco DB Agriculture Fund",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "MOO": {
+          "name": "VanEck Agribusiness ETF",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "SLV": {
+          "name": "iShares Silver Trust",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "SPY": {
+          "name": "State Street SPDR S&P 500 ETF Trust",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "UNG": {
+          "name": "United States Natural Gas Fund, LP",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "UNH": {
+          "name": "UnitedHealth Group Incorporated",
+          "sector": "Healthcare"
+        },
+        "VT": {
+          "name": "Vanguard Total World Stock Index Fund ETF Shares",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        },
+        "VTI": {
+          "name": "Vanguard Morningstar Total Stock Market ETF",
+          "asset_type": "ETF",
+          "corporate_sector_status": "not_applicable",
+          "lookthrough_sector_status": "unknown"
+        }
+      }
+    },
+    "short_interest": {
+      "elapsed_seconds": 0.03,
+      "passed_symbols": [
+        "AAPL",
+        "ADM",
+        "ASIC",
+        "BDN",
+        "BIL",
+        "CACI",
+        "CASH",
+        "DBA",
+        "MOO",
+        "SLV",
+        "SPY",
+        "UNG",
+        "UNH",
+        "VT",
+        "VTI"
+      ],
+      "errors": {},
+      "observed_dates": [
+        "2026-09-30"
+      ],
+      "historical_acquisition_complete": false,
+      "cache_state": "Current archive warmed by earlier isolated optional probe; not another cold-cache proof."
+    }
+  }
+}

@@ -10,11 +10,14 @@ import numpy as np
 class TestCFTCSource:
     """Tests for CFTCSource data source."""
 
-    def test_cftc_source_positioning(self):
+    def test_cftc_source_positioning(self, monkeypatch):
         """Mock COT data -> correct percentiles and direction signals."""
         from tradingagents.strategies.data_sources.cftc_source import CFTCSource
 
         source = CFTCSource()
+
+        monkeypatch.setattr("tradingagents.strategies.data_sources.cftc_source._publication_scope",
+            lambda *args: {"expected_observation_date": "2026-03-29"})
 
         # Build mock COT DataFrame with 52 weeks of data
         np.random.seed(42)

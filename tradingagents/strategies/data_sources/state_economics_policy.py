@@ -169,7 +169,7 @@ def validate_snapshot(snapshot):
     failures = coverage.get('failed_states')
     if (not isinstance(failures, dict) or set(snapshot['states']) & set(failures)
             or set(snapshot['states']) | set(failures) != set(STATES)
-            or any(reason not in {'invalid_response','timeout','transport_error','http_error','provider_error','batch_failure'} for reason in failures.values())
+            or any(reason not in {'invalid_response','timeout','transport_error','http_error','provider_error','provider_maintenance','batch_failure'} for reason in failures.values())
             or coverage != {'expected_states':51,'accepted_states':len(snapshot['states']),
                             'failed_states':failures,'complete':not failures}
             or type(coverage['complete']) is not bool or type(coverage['accepted_states']) is not int

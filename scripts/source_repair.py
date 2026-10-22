@@ -19,6 +19,7 @@ from tradingagents.strategies.orchestration.source_repair_intervention import (
     refresh_intervention_proposals,
 )
 from tradingagents.strategies.orchestration.source_repair import (
+    EvidenceQualificationError,
     MAX_REQUEST_BYTES,
     _Capture,
     current_repair_requests,
@@ -63,6 +64,9 @@ def main(argv=None):
             )
         print(json.dumps(result, sort_keys=True, allow_nan=False))
         return 0
+    except EvidenceQualificationError as error:
+        print('Source repair evidence unavailable: ' + error.reason_code + '.', file=sys.stderr)
+        return 2
     except RuntimeLockBusy:
         print(
             "Source intervention projection temporarily unavailable: runtime lock busy."

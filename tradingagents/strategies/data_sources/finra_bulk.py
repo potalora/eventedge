@@ -5,7 +5,7 @@ explicitly to the inspected native implementation; incompatible upgrades fail.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import importlib
 from importlib import metadata
@@ -17,6 +17,7 @@ import sqlite3
 
 from .fetch_errors import SourceFetchError, source_fetch_error
 from .request_policy import provider_timeout, provider_clock_time
+from .finra_schedule import correct_archive_dates, assess_archive_inventory
 
 VERSIONS = {"openbb-finra": "1.6.1", "openbb-core": "1.6.13"}
 ALIASES = {
@@ -51,7 +52,7 @@ def validated_acquisition(value):
     """Validate the precise credential-free durable schema and return an isolated copy."""
     if type(value) is not dict or set(value) != {"schema_version", "requested_count", "cached_count", "attempts", "population_sha256"}:
         raise ValueError("Invalid FINRA acquisition metadata")
-    if value["schema_version"] != 1 or type(value["schema_version"]) is not int:
+    if value["schema_version"] not in (1, 2) or type(value["schema_version"]) is not int:
         raise ValueError("Invalid FINRA acquisition metadata")
     if type(value["population_sha256"]) is not str or not re.fullmatch("[a-f0-9]{64}", value["population_sha256"]):
         raise ValueError("Invalid FINRA acquisition metadata")
@@ -65,10 +66,13 @@ def validated_acquisition(value):
             "missing_archive_dates_before", "required_archive_dates", "query_population_sha256",
             "prepare_started_at", "prepare_finished_at", "prepare_elapsed_seconds",
             "inventory_before_observed", "inventory_after_observed"}
+    if value['schema_version'] == 2:
+        keys |= {'acquired_at', 'archive_coverage'}
     for attempt in value["attempts"]:
         if type(attempt) is not dict or set(attempt) != keys:
             raise ValueError("Invalid FINRA acquisition metadata")
-        if type(attempt["status"]) is not str or (attempt["reason_code"] is not None and type(attempt["reason_code"]) is not str) or attempt["status"] not in ("success", "error") or attempt["reason_code"] not in REASONS | {None}:
+        statuses = ('success', 'partial', 'error') if value['schema_version'] == 2 else ('success', 'error')
+        if type(attempt["status"]) is not str or (attempt["reason_code"] is not None and type(attempt["reason_code"]) is not str) or attempt["status"] not in statuses or attempt["reason_code"] not in REASONS | {None}:
             raise ValueError("Invalid FINRA acquisition metadata")
         if (attempt["status"] == "success") != (attempt["reason_code"] is None):
             raise ValueError("Invalid FINRA acquisition metadata")
@@ -97,7 +101,7 @@ def validated_acquisition(value):
                     raise ValueError
             except (ValueError, TypeError):
                 raise ValueError("Invalid FINRA acquisition metadata") from None
-        if attempt["status"] == "success" and (
+        if attempt["status"] in ("success", "partial") and (
                 attempt["versions"] != VERSIONS or path is None or
                 attempt["rowset_sha256"] is None or attempt["query_population_sha256"] is None or
                 any(t is None for t in times) or not attempt["inventory_before_observed"] or
@@ -113,6 +117,35 @@ def validated_acquisition(value):
                 raise ValueError("Invalid FINRA acquisition metadata")
             if observed and attempt[missing_key] != sorted(set(attempt["required_archive_dates"]) - set(attempt[cached_key])):
                 raise ValueError("Invalid FINRA acquisition metadata")
+        if value['schema_version'] == 2:
+            acquired = attempt['acquired_at']
+            try:
+                acquired_time = datetime.fromisoformat(acquired) if acquired is not None else None
+                if acquired_time is not None and (acquired_time.tzinfo is None or acquired_time.utcoffset() is None
+                                                   or acquired_time.isoformat() != acquired):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise ValueError('Invalid FINRA acquisition metadata') from None
+            coverage = attempt['archive_coverage']
+            if coverage is None:
+                if attempt['inventory_after_observed'] or attempt['status'] in ('success', 'partial'):
+                    raise ValueError('Invalid FINRA acquisition metadata')
+            else:
+                try:
+                    if type(coverage) is not dict or acquired_time is None or not attempt['inventory_after_observed']:
+                        raise ValueError
+                    expected = assess_archive_inventory(
+                        attempt['required_archive_dates'], attempt['cached_archive_dates'],
+                        acquired_at=acquired_time, as_of=date.fromisoformat(coverage['effective_as_of']))
+                    if coverage != expected:
+                        raise ValueError
+                    if attempt['status'] in ('success', 'partial'):
+                        if not coverage['current_complete']:
+                            raise ValueError
+                        if (attempt['status'] == 'success') != coverage['historical_complete']:
+                            raise ValueError
+                except (ValueError, TypeError, KeyError, SourceFetchError):
+                    raise ValueError('Invalid FINRA acquisition metadata') from None
     return json.loads(json.dumps(value, allow_nan=False))
 
 
@@ -122,7 +155,7 @@ def new_attempt():
             "cached_archive_dates_before": [], "missing_archive_dates_before": [], "required_archive_dates": [],
             "query_population_sha256": None, "prepare_started_at": None, "prepare_finished_at": None,
             "prepare_elapsed_seconds": None, "inventory_before_observed": False,
-            "inventory_after_observed": False}
+            "inventory_after_observed": False, "acquired_at": None, "archive_coverage": None}
 
 
 def population_digest(symbols):
@@ -179,9 +212,12 @@ def cached_dates_before(path):
             conn.close()
 
 
-def acquire(symbols, attempt):
+def acquire(symbols, attempt, *, acquired_at=None, as_of=None):
     """Prepare once and completely read a bounded snapshot before transforming any symbol."""
     check_deadline()
+    acquired_at = acquired_at if acquired_at is not None else datetime.now(timezone.utc)
+    # The same captured wall clock governs archive requirements and row eligibility.
+    attempt['acquired_at'] = acquired_at.isoformat()
     try:
         versions = {name: metadata.version(name) for name in VERSIONS}
     except metadata.PackageNotFoundError:
@@ -193,22 +229,13 @@ def acquire(symbols, attempt):
     model = importlib.import_module("openbb_finra.models.equity_short_interest")
     fetcher = model.FinraShortInterestFetcher
     if (model.FinraShortInterestData.__alias_dict__ != ALIASES or
-            not all(callable(getattr(storage, name, None)) for name in ("prepare_data", "get_db_path", "get_short_interest_dates")) or
+            not all(callable(getattr(storage, name, None)) for name in ("get_data_from_date_and_store", "get_db_path", "get_short_interest_dates")) or
             not all(callable(getattr(fetcher, name, None)) for name in ("transform_query", "transform_data"))):
         raise invalid()
     check_deadline()
     path = Path(storage.get_db_path()).resolve()
     attempt["cache_path"] = str(path)
-    expected = storage.get_short_interest_dates()
-    if type(expected) is not list or len(expected) > MAX_DATES:
-        raise invalid()
-    expected_count = len(expected)
-    try:
-        expected = sorted({date.fromisoformat(f"{d[:4]}-{d[4:6]}-{d[6:]}").isoformat() for d in expected if type(d) is str and re.fullmatch(r"\d{8}", d)})
-        if len(expected) != expected_count:
-            raise ValueError
-    except (ValueError, TypeError):
-        raise invalid() from None
+    expected = correct_archive_dates(storage.get_short_interest_dates(), acquired_at=acquired_at, as_of=as_of)
     attempt["required_archive_dates"] = expected
     attempt["query_population_sha256"] = population_digest(symbols)
     before = cached_dates_before(path)
@@ -218,7 +245,29 @@ def acquire(symbols, attempt):
     check_deadline()
     attempt["prepare_started_at"] = provider_clock_time("openbb")
     try:
-        storage.prepare_data()
+        # Native prepare_data computes weekend-only dates, excludes the current
+        # month, and silently skips failed downloads. Reuse its native downloader
+        # for the required current cycle without mutating SDK globals. The
+        # native downloader populates its own cache. Historical backfill is not
+        # needed for current rows and cannot consume the query's deadline.
+        missing = set(expected) - set(before)
+        current = assess_archive_inventory(expected, before, acquired_at=acquired_at, as_of=as_of)['required_settlement_date']
+        for day in (current,) if current in missing else ():
+            check_deadline()
+            storage.get_data_from_date_and_store(day.replace('-', ''))
+            check_deadline()
+            if day == current:
+                # The native downloader silently returns on a missing archive.
+                # Do not spend the remaining deadline backfilling history when
+                # the required current cycle is already known to be unavailable.
+                refreshed = cached_dates_before(path)
+                if current not in refreshed:
+                    attempt['cached_archive_dates'] = refreshed
+                    attempt['missing_archive_dates'] = sorted(set(expected) - set(refreshed))
+                    attempt['inventory_after_observed'] = True
+                    attempt['archive_coverage'] = assess_archive_inventory(
+                        expected, refreshed, acquired_at=acquired_at, as_of=as_of)
+                    raise SourceFetchError('Required published FINRA archive unavailable', reason_code='provider_error')
     finally:
         attempt["prepare_finished_at"] = provider_clock_time("openbb")
         attempt["prepare_elapsed_seconds"] = attempt["prepare_finished_at"] - attempt["prepare_started_at"]
@@ -261,6 +310,10 @@ def acquire(symbols, attempt):
         attempt["cached_archive_dates"] = sorted(dates)
         attempt["missing_archive_dates"] = sorted(set(expected) - dates)
         attempt["inventory_after_observed"] = True
+        attempt['archive_coverage'] = assess_archive_inventory(
+            expected, attempt['cached_archive_dates'], acquired_at=acquired_at, as_of=as_of)
+        if not attempt['archive_coverage']['current_complete']:
+            raise SourceFetchError('Required published FINRA archive unavailable', reason_code='provider_error')
         check_deadline()
         query = "SELECT " + ",".join(COLUMNS) + " FROM short_interest WHERE symbolCode IN (" + ",".join("?" for _ in symbols) + ")"
         cursor = conn.execute(query, symbols)

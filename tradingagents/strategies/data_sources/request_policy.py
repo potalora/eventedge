@@ -226,12 +226,15 @@ def _retry_after(response):
     return max(0.0, delay) if math.isfinite(delay) else 0.0
 
 
-def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=()):
+def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=(),
+         response_validator=None):
+    if response_validator is not None and not callable(response_validator):
+        raise ValueError("invalid response validator")
     budget = _CURRENT.get()
     if budget is None or budget.provider != provider:
         with provider_budget(provider, time.monotonic() + 60):
             return _run(provider, operation, attempt, before_attempt=before_attempt,
-                        return_statuses=return_statuses)
+                        return_statuses=return_statuses, response_validator=response_validator)
     error = None
     attempts = 0
     response = None
@@ -258,6 +261,11 @@ def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=(
                         "http_status": status, "attempts": attempts, "recovered": False})
                     return response
                 raise SourceFetchError("Provider HTTP request failed", reason_code="http_error", http_status=status)
+            if response_validator is not None:
+                response_validator(response)
+                # Validation consumes the same acquisition deadline. A late
+                # result cannot become a successful request diagnostic.
+                provider_timeout(provider)
             budget.diagnostics.append({"provider": _safe_identity(provider), "operation": _safe_identity(operation),
                                        "reason_code": None, "http_status": status if isinstance(status, int) else None,
                                        "attempts": attempts, "recovered": attempts > 1})
@@ -272,7 +280,7 @@ def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=(
                     close()
                 except Exception:
                     pass  # Cleanup must not replace the provider failure.
-            retryable = error.reason_code in {"timeout", "transport_error"} or (
+            retryable = error.reason_code in {"timeout", "transport_error", "provider_maintenance"} or (
                 error.reason_code == "http_error" and error.http_status in _RETRY_STATUS)
             if not retryable or index + 1 >= budget.max_attempts:
                 break
@@ -290,7 +298,7 @@ def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=(
 
 
 def provider_request(provider, method, url, *, operation=None, transport=None,
-                     before_attempt=None, return_statuses=(), **kwargs):
+                     before_attempt=None, return_statuses=(), response_validator=None, **kwargs):
     """Request with bounded retries, retaining requests.get/post monkeypatches.
 
     transport optionally supplies a session's bound get/post for providers with
@@ -300,6 +308,10 @@ def provider_request(provider, method, url, *, operation=None, transport=None,
     return_statuses explicitly transfers selected non-retryable HTTP errors to
     the caller, which must bound the body read and close the response. It cannot
     disable transient retries or create a fresh deadline.
+    response_validator can reject an accepted response before success is
+    recorded. It returns None or raises a fixed SourceFetchError; a typed
+    provider_maintenance response uses bounded retries without changing its
+    actual HTTP status. Validation consumes the original acquisition deadline.
     """
     if (type(return_statuses) is not tuple or len(return_statuses) > 16
             or any(type(status) is not int or not 300 <= status <= 599
@@ -321,6 +333,8 @@ def provider_request(provider, method, url, *, operation=None, transport=None,
     options = {'return_statuses': return_statuses} if return_statuses else {}
     if before_attempt is not None:
         options['before_attempt'] = before_attempt
+    if response_validator is not None:
+        options['response_validator'] = response_validator
     return _run(provider, operation or method, attempt, **options)
 
 

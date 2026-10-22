@@ -60,7 +60,7 @@ _SCREEN_SOURCES = frozenset({
 })
 _SOURCE_FAILURE_REASONS = frozenset({
     "timeout", "transport_error", "http_error", "invalid_response",
-    "provider_error", "batch_failure", "deadline_exhausted",
+    "provider_error", "provider_maintenance", "batch_failure", "deadline_exhausted",
 })
 _SOURCE_FAILURE_KEYS = frozenset({
     "source", "reason_code", "http_status", "attempts", "operation_count",
@@ -104,7 +104,8 @@ def canonical_screen_source_failures(value: object) -> list[dict[str, Any]] | No
             not isinstance(source, str) or source not in _SCREEN_SOURCES
             or not isinstance(reason, str) or reason not in _SOURCE_FAILURE_REASONS
             or (status is not None and not (
-                type(status) is int and 400 <= status <= 599
+                type(status) is int and (400 <= status <= 599 or
+                    (source == 'fred' and reason == 'provider_maintenance' and status == 200))
             ))
             or type(row["attempts"]) is not int or not 0 <= row["attempts"] <= 5
             or type(row["operation_count"]) is not int
@@ -132,7 +133,8 @@ def _screen_source_failure(source: str, payload: object) -> dict[str, Any]:
         raise ValueError("invalid preflight source request diagnostics")
 
     def failed_status(value: object) -> int | None:
-        if type(value) is int and 400 <= value <= 599:
+        if type(value) is int and (400 <= value <= 599 or
+                (source == 'fred' and reason == 'provider_maintenance' and value == 200)):
             return value
         return None
 

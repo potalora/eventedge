@@ -1,0 +1,102 @@
+{
+  "native_identity_probe": {
+    "reviewed_at": "2026-10-22T08:49:38.627335+00:00",
+    "production_read_only": true,
+    "model_calls": 0,
+    "versions": {
+      "openbb-yfinance": "1.6.3",
+      "openbb-core": "1.6.13",
+      "yfinance": "1.7.0"
+    },
+    "rows": [
+      {
+        "symbol": "SPY",
+        "name": "State Street SPDR S&P 500 ETF Trust",
+        "issue_type": "ETF",
+        "sector": null,
+        "industry_category": null,
+        "market_cap": null,
+        "currency": "USD",
+        "stock_exchange": "PCX"
+      },
+      {
+        "symbol": "GLD",
+        "name": "SPDR Gold Shares",
+        "issue_type": "ETF",
+        "sector": null,
+        "industry_category": null,
+        "market_cap": null,
+        "currency": "USD",
+        "stock_exchange": "PCX"
+      },
+      {
+        "symbol": "VTI",
+        "name": "Vanguard Morningstar Total Stock Market ETF",
+        "issue_type": "ETF",
+        "sector": null,
+        "industry_category": null,
+        "market_cap": null,
+        "currency": "USD",
+        "stock_exchange": "PCX"
+      }
+    ]
+  },
+  "candidate_adapter_probe": {
+    "reviewed_at": "2026-10-22T08:53:46.100892+00:00",
+    "production_read_only": true,
+    "candidate_snapshot": true,
+    "model_calls": 0,
+    "versions": {
+      "openbb-yfinance": "1.6.3",
+      "openbb-core": "1.6.13",
+      "yfinance": "1.7.0"
+    },
+    "profiles": {
+      "AAPL": {
+        "market_cap": 5020252110848,
+        "name": "Apple Inc.",
+        "sector": "Technology",
+        "industry": "Consumer Electronics"
+      },
+      "OMC": {
+        "market_cap": 22084849664,
+        "name": "Omnicom Group Inc.",
+        "sector": "Communication Services",
+        "industry": "Advertising Agencies"
+      },
+      "SPY": {
+        "market_cap": null,
+        "name": "State Street SPDR S&P 500 ETF Trust",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "GLD": {
+        "market_cap": null,
+        "name": "SPDR Gold Shares",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "DE": {
+        "market_cap": 171627347968,
+        "name": "Deere & Company",
+        "sector": "Industrials",
+        "industry": "Farm & Heavy Construction Machinery"
+      },
+      "VTI": {
+        "market_cap": null,
+        "name": "Vanguard Morningstar Total Stock Market ETF",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      }
+    },
+    "errors": {},
+    "elapsed_seconds": 4.829
+  },
+  "candidate_source_sha256": {
+    "tradingagents/strategies/data_sources/openbb_source.py": "9313dd5ba7b1b0a4879c6dce4c65c4e5e4e8111ba10b34aa046e8aecfccc8abb",
+    "tradingagents/strategies/trading/portfolio_committee.py": "6441eff0f2cf35babbec966cd0df63d7e73b8360879fdc50fc3759f842bf430d"
+  }
+}

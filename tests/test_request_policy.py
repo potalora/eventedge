@@ -227,3 +227,143 @@ def test_success_response_remains_caller_owned(monkeypatch):
     with p.provider_budget('alpaca', 10, clock=clock, sleep=clock.sleep, limits=()):
         assert p.provider_request('alpaca', 'GET', 'https://offline.test') is success
     assert not closed
+
+
+def _maintenance_validator(reply):
+    if getattr(reply, 'maintenance', False):
+        raise SourceFetchError('Provider maintenance response',
+                               reason_code='provider_maintenance',
+                               http_status=reply.status_code)
+
+
+def test_semantic_maintenance_recovers_inside_original_request_budget(monkeypatch):
+    p, clock, calls, closed, events = policy(), Clock(), [], [], []
+    maintenance = SimpleNamespace(status_code=200, headers={'Retry-After': '2'},
+        maintenance=True, close=lambda: closed.append('maintenance'))
+    success = SimpleNamespace(status_code=200, headers={},
+        close=lambda: closed.append('success'))
+    replies = iter([maintenance, success])
+
+    def get(*args, **kwargs):
+        calls.append(kwargs)
+        assert p.current_provider_deadline('fred') == 5
+        return next(replies)
+
+    monkeypatch.setattr(requests, 'get', get)
+    with p.provider_budget('fred', 5, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), diagnostics=events):
+        assert p.provider_request('fred', 'GET', 'https://private?key=SECRET',
+            operation='UNRATE', response_validator=_maintenance_validator) is success
+    assert calls == [{'timeout': 5}, {'timeout': 3}]
+    assert clock.waits == [2]
+    assert closed == ['maintenance']
+    assert events == [dict(provider='fred', operation='UNRATE', reason_code=None,
+                           http_status=200, attempts=2, recovered=True)]
+    assert 'SECRET' not in str(events)
+
+
+def test_persistent_semantic_maintenance_retains_real_status_and_attempts(monkeypatch):
+    p, clock, closed, events = policy(), Clock(), [], []
+    replies = [SimpleNamespace(status_code=200, headers={}, maintenance=True,
+        close=lambda i=i: closed.append(i)) for i in range(3)]
+    monkeypatch.setattr(requests, 'get', lambda *args, **kwargs: replies.pop(0))
+    with p.provider_budget('fred', 10, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), diagnostics=events):
+        with pytest.raises(SourceFetchError) as caught:
+            p.provider_request('fred', 'GET', 'https://offline', operation='UNRATE',
+                               response_validator=_maintenance_validator)
+    assert (caught.value.reason_code, caught.value.http_status, caught.value.attempts) == (
+        'provider_maintenance', 200, 3)
+    assert clock.waits == [.5, 1]
+    assert closed == [0, 1, 2]
+    assert events == [dict(provider='fred', operation='UNRATE',
+        reason_code='provider_maintenance', http_status=200, attempts=3, recovered=False)]
+
+
+def test_maintenance_retry_and_later_operation_share_exhausted_deadline(monkeypatch):
+    p, clock, calls, closed, events = policy(), Clock(), [], [], []
+
+    def get(*args, **kwargs):
+        calls.append(kwargs)
+        clock.now += .8
+        return SimpleNamespace(status_code=200, headers={'Retry-After': '1'},
+            maintenance=True, close=lambda: closed.append(True))
+
+    monkeypatch.setattr(requests, 'get', get)
+    with p.provider_budget('fred', 1, clock=clock, sleep=clock.sleep,
+                           random_fn=lambda: 0, limits=(), diagnostics=events):
+        with pytest.raises(SourceFetchError) as first:
+            p.provider_request('fred', 'GET', 'https://offline', operation='UNRATE',
+                               response_validator=_maintenance_validator)
+        clock.now = 1
+        with pytest.raises(SourceFetchError) as later:
+            p.provider_request('fred', 'GET', 'https://offline', operation='PAYEMS',
+                               response_validator=_maintenance_validator)
+    assert first.value.reason_code == 'provider_maintenance'
+    assert first.value.http_status == 200 and first.value.attempts == 1
+    assert later.value.reason_code == 'timeout' and later.value.attempts == 0
+    assert len(calls) == 1 and closed == [True] and clock.waits == []
+    assert [event['reason_code'] for event in events] == ['provider_maintenance', 'timeout']
+
+
+def test_response_validation_cannot_accept_success_after_deadline(monkeypatch):
+    p, clock, closed, events = policy(), Clock(), [], []
+    monkeypatch.setattr(requests, 'get', lambda *args, **kwargs:
+        SimpleNamespace(status_code=200, headers={}, close=lambda: closed.append(True)))
+
+    def late_validator(reply):
+        clock.now = 1
+
+    with p.provider_budget('fred', 1, clock=clock, sleep=clock.sleep,
+                           limits=(), diagnostics=events):
+        with pytest.raises(SourceFetchError) as caught:
+            p.provider_request('fred', 'GET', 'https://offline',
+                               response_validator=late_validator)
+    assert caught.value.reason_code == 'timeout' and caught.value.attempts == 1
+    assert closed == [True]
+    assert events == [dict(provider='fred', operation='get', reason_code='timeout',
+                           http_status=None, attempts=1, recovered=False)]
+
+
+def test_ordinary_invalid_response_validation_is_not_retried(monkeypatch):
+    p, clock, closed, events = policy(), Clock(), [], []
+    monkeypatch.setattr(requests, 'get', lambda *args, **kwargs:
+        SimpleNamespace(status_code=200, headers={}, close=lambda: closed.append(True)))
+
+    def invalid_validator(reply):
+        raise SourceFetchError('Invalid provider contract', reason_code='invalid_response')
+
+    with p.provider_budget('fred', 10, clock=clock, sleep=clock.sleep,
+                           limits=(), diagnostics=events):
+        with pytest.raises(SourceFetchError) as caught:
+            p.provider_request('fred', 'GET', 'https://offline',
+                               response_validator=invalid_validator)
+    assert caught.value.reason_code == 'invalid_response' and caught.value.attempts == 1
+    assert clock.waits == [] and closed == [True]
+    assert events[0]['reason_code'] == 'invalid_response'
+
+
+@pytest.mark.parametrize('status,returned', [(404, (404,)), (401, ())])
+def test_response_validator_does_not_override_http_status_policy(monkeypatch, status, returned):
+    p, clock, validated = policy(), Clock(), []
+    reply = response(status)
+    monkeypatch.setattr(requests, 'get', lambda *args, **kwargs: reply)
+    with p.provider_budget('fred', 10, clock=clock, sleep=clock.sleep, limits=()):
+        if returned:
+            assert p.provider_request('fred', 'GET', 'https://offline',
+                return_statuses=returned, response_validator=validated.append) is reply
+        else:
+            with pytest.raises(SourceFetchError) as caught:
+                p.provider_request('fred', 'GET', 'https://offline',
+                    response_validator=validated.append)
+            assert caught.value.reason_code == 'http_error'
+    assert validated == []
+
+
+@pytest.mark.parametrize('validator', [False, 'invalid', 1])
+def test_noncallable_response_validator_is_rejected_before_dispatch(monkeypatch, validator):
+    dispatched = []
+    monkeypatch.setattr(requests, 'get', lambda *args, **kwargs: dispatched.append(True))
+    with pytest.raises(ValueError, match='response validator'):
+        policy().provider_request('fred', 'GET', 'https://offline', response_validator=validator)
+    assert dispatched == []

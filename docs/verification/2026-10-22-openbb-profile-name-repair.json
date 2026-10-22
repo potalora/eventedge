@@ -1,0 +1,189 @@
+{
+  "native_identity_probe": {
+    "reviewed_at": "2026-10-22T09:03:16.197790+00:00",
+    "requested_symbol": "ASIC",
+    "production_read_only": true,
+    "model_calls": 0,
+    "versions": {
+      "openbb-yfinance": "1.6.3",
+      "openbb-core": "1.6.13",
+      "yfinance": "1.7.0"
+    },
+    "rows": [
+      {
+        "symbol": "ASIC",
+        "name": null,
+        "issue_type": "EQUITY",
+        "sector": "Financial Services",
+        "industry_category": "Insurance - Property & Casualty",
+        "market_cap": 1335723520,
+        "currency": "USD",
+        "stock_exchange": "NYQ"
+      }
+    ],
+    "provider_raw_selected": {
+      "symbol": "ASIC",
+      "longName": null,
+      "shortName": "Ategrity Specialty Insurance Co",
+      "quoteType": "EQUITY",
+      "sector": "Financial Services",
+      "industry": "Insurance - Property & Casualty",
+      "marketCap": 1335723520,
+      "currency": "USD",
+      "exchange": "NYQ"
+    },
+    "elapsed_seconds": 5.686
+  },
+  "candidate_adapter_probe": {
+    "reviewed_at": "2026-10-22T09:10:52.454005+00:00",
+    "production_read_only": true,
+    "candidate_snapshot": true,
+    "model_calls": 0,
+    "versions": {
+      "openbb-yfinance": "1.6.3",
+      "openbb-core": "1.6.13",
+      "yfinance": "1.7.0"
+    },
+    "profiles": {
+      "AAPL": {
+        "market_cap": 5020252110848,
+        "name": "Apple Inc.",
+        "sector": "Technology",
+        "industry": "Consumer Electronics"
+      },
+      "ADM": {
+        "market_cap": 38248312832,
+        "name": "Archer-Daniels-Midland Company",
+        "sector": "Consumer Defensive",
+        "industry": "Farm Products"
+      },
+      "ASIC": {
+        "market_cap": 1335723520,
+        "name": "Ategrity Specialty Insurance Co",
+        "sector": "Financial Services",
+        "industry": "Insurance - Property & Casualty",
+        "name_source": "yfinance.quoteResponse.shortName",
+        "name_fallback": "native_long_name_missing"
+      },
+      "BDN": {
+        "market_cap": 466332896,
+        "name": "Brandywine Realty Trust",
+        "sector": "Real Estate",
+        "industry": "REIT - Office"
+      },
+      "CACI": {
+        "market_cap": 13776446464,
+        "name": "CACI International Inc",
+        "sector": "Technology",
+        "industry": "Information Technology Services"
+      },
+      "CASH": {
+        "market_cap": 1541383424,
+        "name": "Pathward Financial, Inc.",
+        "sector": "Financial Services",
+        "industry": "Banks - Regional"
+      },
+      "DBA": {
+        "market_cap": null,
+        "name": "Invesco DB Agriculture Fund",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "MOO": {
+        "market_cap": null,
+        "name": "VanEck Agribusiness ETF",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "SLV": {
+        "market_cap": null,
+        "name": "iShares Silver Trust",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "UNG": {
+        "market_cap": null,
+        "name": "United States Natural Gas Fund, LP",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "UNH": {
+        "market_cap": 374297034752,
+        "name": "UnitedHealth Group Incorporated",
+        "sector": "Healthcare",
+        "industry": "Healthcare Plans"
+      },
+      "SPY": {
+        "market_cap": null,
+        "name": "State Street SPDR S&P 500 ETF Trust",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "GLD": {
+        "market_cap": null,
+        "name": "SPDR Gold Shares",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      },
+      "DE": {
+        "market_cap": 171627347968,
+        "name": "Deere & Company",
+        "sector": "Industrials",
+        "industry": "Farm & Heavy Construction Machinery"
+      },
+      "VTI": {
+        "market_cap": null,
+        "name": "Vanguard Morningstar Total Stock Market ETF",
+        "asset_type": "ETF",
+        "corporate_sector_status": "not_applicable",
+        "lookthrough_sector_status": "unknown"
+      }
+    },
+    "errors": {},
+    "request_diagnostics": [
+      {
+        "provider": "openbb",
+        "operation": "equity_profile",
+        "reason_code": null,
+        "http_status": null,
+        "attempts": 1,
+        "recovered": false
+      },
+      {
+        "provider": "openbb",
+        "operation": "equity_profile_name",
+        "reason_code": null,
+        "http_status": null,
+        "attempts": 1,
+        "recovered": false
+      },
+      {
+        "provider": "openbb",
+        "operation": "equity_profile",
+        "reason_code": null,
+        "http_status": null,
+        "attempts": 1,
+        "recovered": false
+      }
+    ],
+    "elapsed_seconds": 5.321
+  },
+  "candidate_source_sha256": {
+    "tradingagents/strategies/data_sources/openbb_source.py": "704d3630ed3a3d32b5a77e563f90166b60563b921751b89042caddef69f2a646"
+  },
+  "inspected_sdk_contract": {
+    "openbb-yfinance": "1.6.3",
+    "native_name_alias": "longName",
+    "native_projection_omits": "shortName",
+    "yfinance": "1.7.0",
+    "raw_helper": "YfData.get_raw_json",
+    "endpoint": "https://query1.finance.yahoo.com/v7/finance/quote",
+    "identity_note": "Validate raw quoteResponse.result identity directly; Ticker.get_info overwrites returned symbol during merge."
+  }
+}

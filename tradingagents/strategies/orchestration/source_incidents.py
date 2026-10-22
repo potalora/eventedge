@@ -16,7 +16,7 @@ _PROVIDERS = frozenset({'alpaca', 'edgar', 'fred', 'finnhub', 'congress', 'regul
     'courtlistener', 'noaa', 'usda', 'drought_monitor', 'usaspending', 'cftc',
     'yfinance', 'openbb', 'bounded_documents', 'equity_universe'})
 _REASONS = frozenset({'timeout', 'transport_error', 'http_error', 'invalid_response',
-    'provider_error', 'batch_failure', 'missing_source_evidence'})
+    'provider_error', 'provider_maintenance', 'batch_failure', 'missing_source_evidence'})
 _FIELDS = {'provider', 'status', 'observation', 'reason_code', 'http_status',
     'first_failed_session', 'last_failed_session', 'consecutive_failed_sessions'}
 _SAFE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}')

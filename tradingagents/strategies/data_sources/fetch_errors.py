@@ -22,6 +22,7 @@ _REASON_CODES = frozenset(
         "http_error",
         "invalid_response",
         "provider_error",
+        "provider_maintenance",
         "batch_failure",
     }
 )

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from test_finra_bulk import native, raw as finra_row
 
 
 # ---------------------------------------------------------------------------
@@ -216,26 +217,16 @@ class TestEquityInsiderTrading:
 # ---------------------------------------------------------------------------
 
 class TestEquityShortInterest:
-    def test_short_interest_success(self, source, mock_obb):
-        mock_obb.equity.shorts.short_interest.return_value = _make_obbject([{
-            "settlement_date": "2026-03-15",
-            "symbol": "AAPL",
-            "current_short_position": 120_000_000,
-            "previous_short_position": 115_000_000,
-            "average_daily_volume": 80_000_000,
-            "days_to_cover": 1.5,
-            "short_percent_of_float": 0.98,
-        }])
-        with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({
-                "method": "equity_short_interest",
-                "ticker": "AAPL",
-            })
+    def test_short_interest_success(self, native):
+        native.add([finra_row('AAPL', currentShortPositionQuantity=120_000_000,
+                              previousShortPositionQuantity=115_000_000,
+                              averageDailyVolumeQuantity=80_000_000, daysToCoverQuantity=1.5)])
+        result = native.source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
 
         assert result["short_interest"] == 120_000_000
-        assert result["short_pct_of_float"] == 0.98
+        assert result["short_pct_of_float"] is None
         assert result["days_to_cover"] == 1.5
-        assert result["date"] == "2026-03-15"
+        assert result["date"] == "2026-09-30"
         # Flat dict, not wrapped in records array
         assert "records" not in result
 
@@ -244,10 +235,11 @@ class TestEquityShortInterest:
             result = source.fetch({"method": "equity_short_interest"})
         assert "error" in result
 
-    def test_short_interest_api_error(self, source, mock_obb):
-        mock_obb.equity.shorts.short_interest.side_effect = Exception("FINRA down")
-        with patch.object(source, "_get_obb", return_value=mock_obb):
-            result = source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
+    def test_short_interest_api_error(self, native):
+        def unavailable():
+            raise ConnectionError('FINRA unavailable')
+        native.prepare_hook = unavailable
+        result = native.source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
         assert "error" in result
 
 
@@ -412,7 +404,8 @@ class TestFactorsFamaFrench:
         mock_obb.famafrench.factors.return_value = _make_obbject([])
         with patch.object(source, "_get_obb", return_value=mock_obb):
             result = source.fetch({"method": "factors_fama_french"})
-        assert result == {"factors": {}, "history": {}}
+        assert result["reason_code"] == "invalid_response"
+        assert "error" in result
 
     def test_fama_french_api_error(self, source, mock_obb):
         mock_obb.famafrench.factors.side_effect = Exception("dataset unavailable")

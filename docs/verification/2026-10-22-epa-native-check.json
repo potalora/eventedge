@@ -1,0 +1,175 @@
+{
+  "reason_code": "batch_failure",
+  "started_at": "2026-10-22T08:52:16.498563+00:00",
+  "finished_at": "2026-10-22T08:52:30.105271+00:00",
+  "elapsed_seconds": 13.607,
+  "production_read_only": true,
+  "model_calls": 0,
+  "source_code_sha256": "519a99aa4e022d585b97eb6eca3a9e1e948b94a936e931723d02bbce979ad75c",
+  "scope": "candidate_epa_material_source_qualification_no_policy_activation",
+  "source_graph_valid": true,
+  "discovery_coverage": {
+    "mode": "exhaustive_window",
+    "complete": true,
+    "samples": {
+      "EPA": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "agency": "EPA",
+        "posted_date_from": "2026-10-07",
+        "posted_date_to": "2026-10-21",
+        "pages": 1,
+        "total": 12235,
+        "has_next": true,
+        "termination": "older_than_window"
+      }
+    },
+    "as_of": "2026-10-21"
+  },
+  "content_coverage": {
+    "discovery_complete": true,
+    "content_complete": false,
+    "required_rows": 9,
+    "complete_rows": 8,
+    "failed_rows": 1,
+    "consumed_bytes": 503053,
+    "reserved_bytes": 0,
+    "byte_limit": 33554432,
+    "byte_budget_exhausted": false,
+    "policy": "complete_document_text_v1",
+    "retrieval_policy": "verified_government_copy_v2",
+    "manifest_sha256": "5753ec45a52feafc99ab066e4ae0fa14f8035400fe83698398d9461581cd0167",
+    "evidence_sha256": {
+      "EPA-R09-OAR-2026-5581-0001": "b64d8e28a08feddd47ebc6c800a9d1514b1416464a3e9772f986804006b0bb92",
+      "EPA-R10-OAR-2026-4291-0013": "53780c861c2044a283678404f4dc27f7c7730c9ecad6dd60a42930c521203fc2",
+      "EPA-R09-OAR-2026-5119-0001": "4878f019ed2f74f50645419ed4e293a4ba0e7e036866f97ae474615f7dfe341e",
+      "EPA-R09-OAR-2024-0600-0017": "bd4826ff05ee0cf1a418231042940c9602419be04dd2550ef581e8184efd0098",
+      "EPA-HQ-OAR-2024-0505-0951": "79fe3c65f34a39001a0f697ec27c9d1ef789e217cb5aca7421a6568055b7750e",
+      "EPA-HQ-OPPT-2026-7327-0001": "14e20e971d1f622bcb71984eacbdb536e951898644102c424bb5424087f983eb",
+      "EPA-R09-OAR-2026-4654-0001": "86192f78279481e05b611a5669376f501d4239653e6da687b7b836bd0f9e5f3d",
+      "EPA-R03-OAR-2026-6205-0001": "62a8b43cd532ff0117d75cc2677d57467b8e7c731ea860bdcccc0c988524de21"
+    },
+    "failed_document_ids": [
+      "EPA-HQ-OW-1998-9208-0001"
+    ]
+  },
+  "documents": [
+    {
+      "document_id": "EPA-HQ-OW-1998-9208-0001",
+      "status": "failed"
+    },
+    {
+      "document_id": "EPA-R09-OAR-2026-5581-0001",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-R10-OAR-2026-4291-0013",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-R09-OAR-2026-5119-0001",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-R09-OAR-2024-0600-0017",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-HQ-OAR-2024-0505-0951",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-HQ-OPPT-2026-7327-0001",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-R09-OAR-2026-4654-0001",
+      "status": "complete"
+    },
+    {
+      "document_id": "EPA-R03-OAR-2026-6205-0001",
+      "status": "complete"
+    }
+  ],
+  "failure_codes": {
+    "EPA-HQ-OW-1998-9208-0001": {
+      "code": "http_error",
+      "reason_code": "http_error",
+      "http_status": 403
+    }
+  },
+  "complete_originals": {
+    "EPA-R09-OAR-2026-5581-0001": {
+      "units": 1,
+      "text_sha256": [
+        "9e8091ca92eb075fda31c609fad042bb4eb6f0a137f713ad7de7d7a94b3f1979"
+      ],
+      "body_sha256": [
+        "06fafb8d4a9469d77c5eb1661bc3e83c9f6538129e811cfe051ca6dd4c91775a"
+      ]
+    },
+    "EPA-R10-OAR-2026-4291-0013": {
+      "units": 1,
+      "text_sha256": [
+        "79c64b6f02dad33291b585b1efc0028c9a8db26bef2274e01f9ff694ceccc4b9"
+      ],
+      "body_sha256": [
+        "8cbf1494967d45ba1621de6f9685251f7235e4efdc2b3b41687532e64a8248d2"
+      ]
+    },
+    "EPA-R09-OAR-2026-5119-0001": {
+      "units": 1,
+      "text_sha256": [
+        "5b5b2ba470ac043faaebe0158269e4a9a558b6935733f05f8d793737ab4aa332"
+      ],
+      "body_sha256": [
+        "9ae840874aba0058dc7c6e2181bdcf5d47d8fcca5cbd5f4f85c61d2571d7fe84"
+      ]
+    },
+    "EPA-R09-OAR-2024-0600-0017": {
+      "units": 1,
+      "text_sha256": [
+        "c711180c90021c2b10959763bff7a22ed2dbe2968490397e7f7df2e7403508c2"
+      ],
+      "body_sha256": [
+        "3405951beeccb04307e6b013fc9f62b1092e5fe17455135bcb50a716fa2f9d83"
+      ]
+    },
+    "EPA-HQ-OAR-2024-0505-0951": {
+      "units": 1,
+      "text_sha256": [
+        "624390c2958138cb247ed17cefaf3d184c75890a74683938203f737d297f760c"
+      ],
+      "body_sha256": [
+        "970b2c7630cc827134cce157526d58851950cc6efd25d59563bc8679b4c1b39f"
+      ]
+    },
+    "EPA-HQ-OPPT-2026-7327-0001": {
+      "units": 1,
+      "text_sha256": [
+        "fc97b8c5078ddfddd8cac64596aac967e4dc8128219a4e24c9009cdbd6650889"
+      ],
+      "body_sha256": [
+        "3145c9e5d77faac97fac805f104da99fba8d401b4878e31962422c19d4816a75"
+      ]
+    },
+    "EPA-R09-OAR-2026-4654-0001": {
+      "units": 1,
+      "text_sha256": [
+        "010f3efb1366fab5faec35d3a301319401b97c8d3450374466c6f4c0a29f6183"
+      ],
+      "body_sha256": [
+        "8f43a1e79e76df86c569231a04511c0159dbec74e273c5d753c25cc2c6084210"
+      ]
+    },
+    "EPA-R03-OAR-2026-6205-0001": {
+      "units": 1,
+      "text_sha256": [
+        "1ffbb31eb47b0e41dd4f68af8a1146ea365f65a40d62038a44e10ac8bffb43e4"
+      ],
+      "body_sha256": [
+        "d6e539b965ecb7a10e31f9e7f9f09a96afa82c8a3a989a2ea7e4e5abb77dc27a"
+      ]
+    }
+  }
+}

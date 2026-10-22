@@ -56,6 +56,8 @@ def audit_scope(data, config, session, *, now=None, replay=False):
         raise ValueError('missing_congress_audit_snapshot')
     from tradingagents.strategies.data_sources.congress_disclosure_audit import validate_audit_snapshot, audit_summary
     bound = {key: payload[key] for key in ('audit_snapshot', 'coverage')}
+    if 'house_originals' in payload:
+        bound['house_originals'] = payload['house_originals']
     end = date.fromisoformat(session)
     validate_audit_snapshot(bound, date_filed_after=(end - timedelta(days=30)).isoformat(),
         date_filed_before=session, now=now, **({'max_evidence_age_seconds': None} if replay else {}))

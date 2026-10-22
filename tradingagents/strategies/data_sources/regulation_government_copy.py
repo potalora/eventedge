@@ -40,7 +40,7 @@ _EMAIL = re.compile(
     r'<span class="__cf_email__" data-cfemail="(?P<span>[0-9a-f]+)">'
     r'\[email&#160;protected\]</span></a>')
 _ANCHOR = re.compile(r'<a href="(?P<href>[^"<>]*)">(?P<text>[^<>]*)</a>', re.S)
-_INF = re.compile(r'<INF>(?P<value>[0-9]{1,6}(?:\.[0-9]{1,6})?|X)</INF>')
+_INF = re.compile(r'<INF>(?P<value>[0-9]{1,6}(?:\.[0-9]{1,6})?,?|X)</INF>')
 _SUP = re.compile(r'<SUP>(?P<value>[0-9]{1,6}(?: [0-9]{1,6}){0,15})</SUP>')
 _ENTITY = re.compile(r'&(?P<value>#[xX][0-9a-fA-F]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);')
 
@@ -260,6 +260,23 @@ def _sec_plan(raw_detail, crosswalk_receipt):
         _fail('invalid_regulation_government_crosswalk')
 
 
+def _epa_multiple_parts(value):
+    """Recognize complete printed EPA citations without dropping any part.
+
+    Keep the exact catalogue string for matching against the official body.
+    Ranges, duplicate parts, unsupported punctuation and inferred parts do not
+    establish the same authority as the publisher's literal citation.
+    """
+    if type(value) is not str or not value.startswith('40 CFR Parts '):
+        return False
+    raw = value.removeprefix('40 CFR Parts ')
+    parts = re.findall(r'[1-9][0-9]{0,5}', raw)
+    if not 2 <= len(parts) <= 16 or len(set(parts)) != len(parts):
+        return False
+    expected = ' and '.join(parts) if len(parts) == 2 else ', '.join(parts[:-1]) + ', and ' + parts[-1]
+    return raw == expected
+
+
 def government_copy_plan(raw_detail: bytes, *, retrieval_policy=POLICY, crosswalk_receipt=None) -> dict:
     """Bind exactly one publisher URL to strict original FR notice metadata."""
     if type(retrieval_policy) is not str or retrieval_policy not in POLICIES:
@@ -303,7 +320,9 @@ def government_copy_plan(raw_detail: bytes, *, retrieval_policy=POLICY, crosswal
         if declared_count is not None and (type(declared_count) is not int or declared_count not in valid_counts):
             _fail('invalid_regulation_government_identity')
         cfr = attrs['cfrPart']
-        if type(cfr) is not str or not re.fullmatch(r'[1-9][0-9]? CFR Part [1-9][0-9]{0,5}', cfr):
+        if (type(cfr) is not str or not (
+                re.fullmatch(r'[1-9][0-9]? CFR Part [1-9][0-9]{0,5}', cfr)
+                or agency == 'EPA' and _epa_multiple_parts(cfr))):
             _fail('invalid_regulation_government_identity')
         if attrs.get('withdrawn') is not False or attrs.get('restrictReason') or attrs.get('restrictReasonType'):
             _fail('invalid_regulation_government_identity')
@@ -556,8 +575,9 @@ def _notice_identity(title, text, identity, crosswalk=None):
     if agency == 'EPA':
         authority = (r'ENVIRONMENTAL PROTECTION AGENCY\n\n' + re.escape(identity['cfr_part'])
             + r'\n\n\[' + re.escape(identity['docket_id'])
-            + r'(?:; [A-Za-z0-9-]+)?\](?:\nRIN (?P<rin>[0-9]{4}-[A-Z0-9]{4}))?\n\n')
-        agency_line = r'Environmental Protection Agency \(EPA\)\.'
+            + r'(?:[;,] FRL-[0-9]{1,8}(?:\.[0-9]{1,3})?-[A-Za-z0-9-]{1,32})?\]'
+            + r'(?:\nRIN (?P<rin>[0-9]{4}-[A-Z0-9]{4}))?\n\n')
+        agency_line = r'(?:U\.S\. )?Environmental Protection Agency \(EPA\)\.'
         action = r'Proposed rule\.|Notice of availability; opportunity for public comment\.'
     elif agency == 'FDA':
         authority = (r'DEPARTMENT OF HEALTH AND HUMAN SERVICES\n\nFood and Drug Administration\n\n'

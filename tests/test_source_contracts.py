@@ -279,6 +279,8 @@ def test_cftc_missing_required_commodity_preserves_existing_positioning(monkeypa
     source=CFTCSource()
     frame=pd.DataFrame({COL_MARKET:[COMMODITY_CODES['gold']]*4,COL_DATE:['2026-09-01','2026-09-08','2026-09-15','2026-09-22'],COL_MM_LONG:[10,20,30,40],COL_MM_SHORT:[1,2,3,4]})
     monkeypatch.setattr(source,'_fetch_raw_report',lambda *a,**kw:frame)
+    monkeypatch.setattr('tradingagents.strategies.data_sources.cftc_source._publication_scope',
+        lambda *args: {'expected_observation_date':'2026-09-22'})
     result=source.fetch({'method':'cot_positioning','commodities':['gold','silver'],'lookback_weeks':4})
     assert result.get('error')
     assert result['gold']['net_position']==36

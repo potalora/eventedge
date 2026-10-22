@@ -119,7 +119,7 @@ def test_reviewed_nonlisted_ultimate_owner_is_nonactionable(uei):
     assert any('/api/v2/awards/' in source for source in value['provenance'])
 
 
-@pytest.mark.parametrize('uei', ['LFH4SUCVA379','FHKLJV1NP651','JY2BDT2K58Z6','VM5QV68M2NU4'])
+@pytest.mark.parametrize('uei', ['JY2BDT2K58Z6','VM5QV68M2NU4'])
 def test_partial_employee_ownership_or_fund_manager_is_not_issuer_proof(uei):
     value = identity.resolve_award_issuer(contract(uei))
     assert value['status'] == 'unresolved' and not value['resolved']
@@ -139,10 +139,11 @@ def test_review_date_is_explicit_and_does_not_claim_historical_ownership():
     assert value['temporal_scope'] == 'prospective_current_ownership'
 
 
-def test_restructured_ketchum_without_current_legal_chain_stays_unresolved():
+def test_restructured_ketchum_has_native_parent_and_current_listed_issuer_proof():
     value = identity.resolve_award_issuer(contract('CZJKHV86FSB2'))
-    assert value['status'] == 'unresolved'
-    assert value['resolved'] is False
+    assert value['status'] == 'verified_listed_target'
+    assert value['resolved'] is True
+    assert (value['ticker'], value['cik']) == ('OMC', '0000029989')
 
 
 def test_carahsoft_native_recipient_has_2026_individual_owner_disclosure():

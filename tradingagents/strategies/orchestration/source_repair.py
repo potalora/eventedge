@@ -66,6 +66,16 @@ _ATTEMPT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,186}\.json")
 REPAIR_REASONS = _REASONS - {"missing_source_evidence"}
 
 
+class EvidenceQualificationError(ValueError):
+    """Fixed missing-history qualification; never permission to weaken proof."""
+    def __init__(self, reason_code):
+        if reason_code not in {'missing_origin_evidence', 'missing_session_evidence',
+                               'acquisition_session_mismatch'}:
+            raise ValueError('unknown source repair evidence qualification')
+        self.reason_code = reason_code
+        super().__init__('Source repair evidence unavailable: ' + reason_code)
+
+
 def _now(now=None):
     value = datetime.now(timezone.utc) if now is None else now
     if (
@@ -633,7 +643,11 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
                         + ".json"
                     )
                 )
-                raw = capture.read(relative)
+                try:
+                    raw = capture.read(relative)
+                except FileNotFoundError:
+                    raise EvidenceQualificationError('missing_origin_evidence'
+                        if day == origin_boundary else 'missing_session_evidence') from None
                 envelope = SourceInputStore.decode(
                     raw.decode(),
                     max_bytes=MAX_FILE_BYTES,
@@ -674,7 +688,7 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
                 from zoneinfo import ZoneInfo
 
                 if acquired.astimezone(ZoneInfo("America/New_York")).date() != day:
-                    raise ValueError("source evidence acquisition session mismatch")
+                    raise EvidenceQualificationError('acquisition_session_mismatch')
                 target = stage / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(raw)

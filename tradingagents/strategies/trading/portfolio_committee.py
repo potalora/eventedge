@@ -731,7 +731,11 @@ class PortfolioCommittee:
         factors = enrichment.get("factors", {})
 
         if profiles:
-            sector_lines = [f"  {t}: {p.get('sector', '?')}" for t, p in sorted(profiles.items())]
+            sector_lines = [
+                (f"  {t}: asset type ETF; corporate sector not applicable; look-through sector unknown"
+                 if p.get("asset_type") == "ETF" else f"  {t}: {p.get('sector', '?')}")
+                for t, p in sorted(profiles.items())
+            ]
             enrichment_str += "\nSector classification:\n" + "\n".join(sector_lines)
         if short_interest:
             si_lines = []
