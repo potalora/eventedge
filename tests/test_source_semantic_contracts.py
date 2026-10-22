@@ -223,6 +223,8 @@ def test_cftc_valid_positioning_survives_invalid_report_sibling(monkeypatch):
                           COL_MM_LONG: [10, 20, 30, 40, float('inf')], COL_MM_SHORT: [0] * 5})
     monkeypatch.setattr('tradingagents.strategies.data_sources.cftc_source._annual_report', lambda *a: frame)
     source = CFTCSource()
+    monkeypatch.setattr('tradingagents.strategies.data_sources.cftc_source._publication_scope',
+        lambda *args: {'expected_observation_date':'2026-10-01'})
     with provider_budget('cftc', 100, clock=lambda: 0, sleep=lambda _: None, limits=()):
         with pytest.raises(SourceFetchError) as exc:
             source._dispatch_cot_positioning({'commodities': ['gold'],'lookback_weeks':4})

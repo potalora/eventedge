@@ -417,6 +417,15 @@ def fetch_audit_snapshot(*, date_filed_after, date_filed_before, absolute_deadli
                                     now=_utcnow(),max_evidence_age_seconds=max_snapshot_age_seconds)
             provider_timeout('congress')
             if not payload['coverage']['complete']:
+                from .congress_house_originals import capture_house_originals
+                # Keep publisher v1 bytes, rows, reconciliation and hash exact.
+                # Originals use the same deadline/physical request and byte cap;
+                # failures remain supplementary evidence, never repaired rows.
+                def original(url, limit):
+                    return provider_call('congress', 'house_original', lambda: _download(url,
+                        limit=limit, revision='', shard=False, state=state))
+                payload['house_originals'] = capture_house_originals(payload['audit_snapshot'],
+                    download=original, now=_utcnow)
                 raise SourceFetchError('Congress audit House filing reconciliation gap',
                     reason_code='invalid_response', partial_data=payload)
             return payload
@@ -439,7 +448,7 @@ def validate_audit_snapshot(payload, *, date_filed_after, date_filed_before, now
                             max_evidence_age_seconds=MAX_AGE_SECONDS):
     """Reconstruct full typed rows and provenance; structural replay can omit age."""
     try:
-        _require(isinstance(payload,dict) and set(payload)-{'audit_snapshot','coverage','_request_diagnostics'} == set())
+        _require(isinstance(payload,dict) and set(payload)-{'audit_snapshot','coverage','_request_diagnostics','house_originals'} == set())
         snapshot = payload['audit_snapshot']
         _require(isinstance(snapshot,dict) and snapshot.get('content_sha256') == _snapshot_digest(snapshot))
         expected = _assemble(snapshot['raw_artifacts'],revision=snapshot['publisher']['revision'],
@@ -455,6 +464,9 @@ def validate_audit_snapshot(payload, *, date_filed_after, date_filed_before, now
                 _require((check-_aware(snapshot['acquired_at'])).total_seconds() <= max_evidence_age_seconds)
                 _require((check-_aware(snapshot['publisher']['last_source_check_at'])).total_seconds() <= max_evidence_age_seconds)
                 _require((check-_aware(snapshot['publisher']['generated_at'])).total_seconds() <= max_evidence_age_seconds)
+        if 'house_originals' in payload:
+            from .congress_house_originals import validate_house_originals
+            validate_house_originals(payload['house_originals'], snapshot, now=check)
         return snapshot
     except (ValueError,TypeError,KeyError,OverflowError,zipfile.BadZipFile,ElementTree.ParseError):
         raise ValueError('invalid_congress_audit_snapshot') from None
@@ -463,7 +475,7 @@ def validate_audit_snapshot(payload, *, date_filed_after, date_filed_before, now
 def audit_summary(payload):
     """Compact canonical display/report limits, never a signal summary."""
     snapshot = payload['audit_snapshot']; scope = snapshot['scope_evidence']
-    return canonical_audit_summary({'policy':POLICY,'mode':'display_audit_only','signals_enabled':False,
+    summary = {'policy':POLICY,'mode':'display_audit_only','signals_enabled':False,
         'model_context_enabled':False,'content_sha256':snapshot['content_sha256'],
         'revision':snapshot['publisher']['revision'],'acquired_at':snapshot['acquired_at'],
         'publisher_generated_at':snapshot['publisher']['generated_at'],
@@ -474,7 +486,12 @@ def audit_summary(payload):
         'house_additional_filings':len(scope['house_reconciliation']['additional_ids']),
         'senate_coverage':scope['senate_coverage'],'extraction':scope['extraction'],
         'historical_availability':scope['historical_availability'],
-        'stock_disclosure_complete':False,'status':payload['coverage']['status']})
+        'stock_disclosure_complete':False,'status':payload['coverage']['status']}
+    if 'house_originals' in payload:
+        from .congress_house_originals import validate_house_originals, originals_summary
+        validate_house_originals(payload['house_originals'], snapshot)
+        summary['house_originals'] = originals_summary(payload['house_originals'])
+    return canonical_audit_summary(summary)
 
 
 def canonical_audit_summary(summary):
@@ -485,7 +502,7 @@ def canonical_audit_summary(summary):
             'printed_row_count','house_matched_filings','house_missing_filings',
             'house_additional_filings','senate_coverage','extraction','historical_availability',
             'stock_disclosure_complete','status'}
-        _require(isinstance(summary,dict) and set(summary) == fields)
+        _require(isinstance(summary,dict) and set(summary) - {'house_originals'} == fields)
         _require(summary['policy'] == POLICY and summary['mode'] == 'display_audit_only'
             and summary['signals_enabled'] is False and summary['model_context_enabled'] is False
             and summary['stock_disclosure_complete'] is False
@@ -513,6 +530,14 @@ def canonical_audit_summary(summary):
                      and summary['house_matched_filings'] == counts['house'])
         else:
             _require(summary['house_missing_filings'] > 0 or summary['house_additional_filings'] > 0)
+        if 'house_originals' in summary:
+            from .congress_house_originals import canonical_originals_summary
+            originals = canonical_originals_summary(summary['house_originals'])
+            diagnostic = originals['publisher_diagnostics']
+            _require(diagnostic['missing_house_filings'] == summary['house_missing_filings']
+                and diagnostic['additional_house_filings'] == summary['house_additional_filings']
+                and diagnostic['generated_at'] == summary['publisher_generated_at']
+                and _aware(originals['completed_at']) >= acquired)
         return _json(_canonical(summary))
     except (ValueError,TypeError,KeyError,OverflowError):
         raise ValueError('invalid_congress_audit_summary') from None

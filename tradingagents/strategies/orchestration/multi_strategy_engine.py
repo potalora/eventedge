@@ -2391,7 +2391,7 @@ class MultiStrategyEngine:
             raise ValueError("Finnhub PQC universe must be a list of nonempty symbols")
         pqc_tickers = sorted({symbol.strip().upper() for symbol in pqc_tickers})
 
-        def admit(records, budget, population, identity_fn, rank_fn):
+        def admit(records, budget, population, identity_fn, rank_fn, *, excluded_reason=None):
             """Retain every fetched/query row before a deterministic request cap."""
             entries = []
             for record in records:
@@ -2409,6 +2409,7 @@ class MultiStrategyEngine:
             for _, record, row, valid in sorted(entries, key=lambda item: item[0]):
                 reason = ("invalid_source_identity" if not valid else
                           "duplicate_source_identity" if row["discovery_id"] in seen else
+                          excluded_reason if excluded_reason is not None else
                           "acquisition_budget" if budget is not None and len(selected) >= budget else "admitted")
                 seen.add(row["discovery_id"])
                 row = dict(row, reason=reason)
@@ -2517,6 +2518,7 @@ class MultiStrategyEngine:
                             "year": e.get("year"),
                             "quarter": e.get("quarter"),
                             "transcript_text": news_text,
+                            "text_source": "earnings_news",
                             "eps_actual": e.get("epsActual"),
                             "eps_estimate": e.get("epsEstimate"),
                             "revenue_actual": e.get("revenueActual"),
@@ -2567,9 +2569,13 @@ class MultiStrategyEngine:
         pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
         pqc_news = []
         queries = [{"symbol": symbol, "from": date_from, "to": date_to} for symbol in pqc_tickers]
+        pqc_disabled = bool(getattr(self, 'ar_config', {}).get('disabled_strategies', {}).get('quantum_readiness'))
         pqc_selected, manifests["pqc_news"] = admit(queries, budgets["pqc_symbol_budget"],
-            "declared_pqc_query_universe", lambda query: query, lambda query: (query["symbol"],))
+            "declared_pqc_query_universe", lambda query: query, lambda query: (query["symbol"],),
+            excluded_reason='strategy_disabled' if pqc_disabled else None)
         manifests["pqc_news"].update(policy="symbol_ascending_v1", keyword_filter=pqc_kw)
+        if pqc_disabled:
+            manifests['pqc_news'].update(consumer='quantum_readiness', exclusion_reason='strategy_disabled')
         manifests["pqc_articles"] = []
         for query, discovery in pqc_selected:
             symbol = query["symbol"]

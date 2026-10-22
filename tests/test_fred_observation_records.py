@@ -152,3 +152,76 @@ def test_native_snapshot_requires_complete_pagination_and_realtime_metadata(monk
     install_pages(monkeypatch, [payload])
     with pytest.raises(SourceFetchError, match="invalid_response"):
         FREDSource("offline").fetch_series("TXUR", "2026-07-01", "2026-10-11")
+
+
+MAINTENANCE_HTML = b"""<!doctype html><html><head>
+<title>Site Maintenance | St. Louis Fed</title></head>
+<body><h1>We'll be back soon.</h1></body></html>"""
+
+
+def install_responses(monkeypatch, bodies):
+    from tradingagents.strategies.data_sources.request_policy import provider_budget
+    calls = []
+    def transport(url, **options):
+        response = requests.Response()
+        response.status_code = 200
+        response.headers['Content-Type'] = 'text/html' if bodies[len(calls)].startswith(b'<') else 'application/json'
+        response._content = bodies[len(calls)]
+        calls.append(response)
+        return response
+    monkeypatch.setattr(FREDSource, '_transport_get', staticmethod(transport))
+    return calls, provider_budget('fred', 60, clock=lambda: 0, sleep=lambda _: None,
+                                  random_fn=lambda: 0, limits=())
+
+
+def test_branded_maintenance_retries_before_success_and_keeps_real_http_status(monkeypatch, caplog):
+    calls, budget = install_responses(monkeypatch, [MAINTENANCE_HTML] * 3)
+    source = FREDSource('SECRET_API_KEY')
+    with budget as diagnostics, pytest.raises(SourceFetchError) as caught:
+        source.fetch_series('UNRATE', '2026-07-01', '2026-10-11')
+    error = caught.value
+    assert (error.reason_code, error.http_status, error.attempts) == ('provider_maintenance', 200, 3)
+    assert error.failed_operations == {'UNRATE': 'provider_maintenance'}
+    assert error.failed_http_statuses == {'UNRATE': 200}
+    assert len(calls) == 3 and not source._cache
+    assert diagnostics == [{'provider': 'fred', 'operation': 'UNRATE', 'reason_code': 'provider_maintenance',
+                           'http_status': 200, 'attempts': 3, 'recovered': False}]
+    assert 'SECRET_API_KEY' not in str(error) + caplog.text + json.dumps(diagnostics)
+
+
+def test_maintenance_then_valid_page_recovers_with_same_vintage(monkeypatch):
+    valid = json.dumps({'count': 1, 'offset': 0, 'limit': 100000,
+                       'observations': [row('2026-08-01', '4.4')]}).encode()
+    calls, budget = install_responses(monkeypatch, [MAINTENANCE_HTML, valid])
+    with budget as diagnostics:
+        result = FREDSource('offline').fetch_series('UNRATE', '2026-07-01', '2026-10-11')
+    assert result.to_list() == [4.4]
+    assert result.attrs['vintage_date'] == '2026-10-11'
+    assert len(calls) == 2
+    assert diagnostics[0]['recovered'] and diagnostics[0]['attempts'] == 2
+
+
+@pytest.mark.parametrize('body', [b'<html>Maintenance</html>', b'{broken', b'{"observations": {}}'])
+def test_unrecognized_html_or_invalid_json_is_terminal_not_maintenance(monkeypatch, body):
+    calls, budget = install_responses(monkeypatch, [body])
+    with budget as diagnostics, pytest.raises(SourceFetchError) as caught:
+        FREDSource('offline').fetch_series('UNRATE', '2026-07-01', '2026-10-11')
+    assert caught.value.reason_code == 'invalid_response'
+    assert len(calls) == 1 and diagnostics[0]['reason_code'] == 'invalid_response'
+
+
+def test_history_preserves_maintenance_retry_evidence(monkeypatch):
+    _, budget = install_responses(monkeypatch, [MAINTENANCE_HTML] * 3)
+    with budget, pytest.raises(SourceFetchError) as caught:
+        FREDSource('offline').fetch_observation_history('TXUR', '2026-07-01', '2026-08-01', as_of='2026-10-11')
+    assert (caught.value.reason_code, caught.value.attempts) == ('provider_maintenance', 3)
+    assert caught.value.failed_http_statuses == {'TXUR': 200}
+
+
+def test_batch_keeps_independent_maintenance_operation_evidence(monkeypatch):
+    _, budget = install_responses(monkeypatch, [MAINTENANCE_HTML] * 6)
+    with budget, pytest.raises(SourceFetchError) as caught:
+        FREDSource('offline').fetch_multi_series(['UNRATE', 'PAYEMS'], '2026-07-01', '2026-10-11')
+    assert caught.value.failed_operations == {'UNRATE': 'provider_maintenance', 'PAYEMS': 'provider_maintenance'}
+    assert caught.value.failed_http_statuses == {'UNRATE': 200, 'PAYEMS': 200}
+    assert caught.value.attempts == 3

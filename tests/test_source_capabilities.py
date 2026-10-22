@@ -44,6 +44,21 @@ def project(payload):
     return rr.project_sources({'fred': payload}, ('fred',), capability_policy=POLICY)
 
 
+def test_typed_maintenance_survives_frozen_capability_validation(tmp_path):
+    source = FREDSource('offline')
+    def unavailable(sid, *args, **kwargs):
+        raise SourceFetchError('FRED provider maintenance', reason_code='provider_maintenance',
+                               http_status=200, attempts=3)
+    source.fetch_series = unavailable
+    payload = engine(tmp_path, source)._fetch_fred_data('2026-09-01', '2026-10-06')
+    frozen = SourceInputStore.decode(SourceInputStore.encode(payload))
+    selected, scope = project(frozen)
+    assert 'fred' not in selected
+    assert scope['capabilities']['fred.vix']['status'] == 'excluded'
+    outcomes = frozen['_capability_acquisition']['groups']['economic_indicators']['outcomes']
+    assert all(row['reason'] == 'provider_maintenance' and row['http_status'] == 200 for row in outcomes.values())
+
+
 def test_optional_payroll_failure_keeps_shared_regime_and_original(tmp_path):
     original = fred_payload(tmp_path, ['PAYEMS']); before = SourceInputStore.encode(original)
     selected, scope = project(original)

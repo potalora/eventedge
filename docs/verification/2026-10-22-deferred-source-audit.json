@@ -1,0 +1,605 @@
+{
+  "checked_at": "2026-10-22T08:34:45.125287+00:00",
+  "production_generation": "gen_023",
+  "production_commit": "56bdf1929a58778c6c58f435f2ad5a2e4b5d1729",
+  "production_read_only": true,
+  "model_calls": 0,
+  "scope": "bounded_deferred_source_access_and_document_integrity_no_policy_activation",
+  "observations": {
+    "sec_submissions_history_originals": {
+      "status": "passed",
+      "submissions": {
+        "status": 200,
+        "bytes": 163778,
+        "sha256": "c24afa8dfdd359593f193c737a5af2d49f172f81fe83b7019d7d7e2e3fc2cb5f",
+        "content_type": "application/json",
+        "recent_rows": 1001,
+        "cik_matches": true,
+        "archive_descriptors": 1
+      },
+      "archive": {
+        "status": 200,
+        "bytes": 205532,
+        "sha256": "9abd1c93ebd0c6ec5965e7dac865bfd0beca776a322a357b0de0963aca31fa13",
+        "content_type": "application/json",
+        "rows": 1268,
+        "descriptor_rows": 1268,
+        "count_matches": true
+      },
+      "documents": [
+        {
+          "form": "10-K",
+          "accession": "0000320193-25-000079",
+          "filing_date": "2025-10-31",
+          "url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm",
+          "status": 200,
+          "bytes": 1520323,
+          "sha256": "dc4f28c5b4eb82b192154630e4e97f338e50d378e02a1d4a042b53876adcade6",
+          "content_type": "text/html",
+          "visible_characters": 220666,
+          "inline_xbrl_nodes": 1170,
+          "image_references": 2,
+          "issuer_name_present": true
+        },
+        {
+          "form": "8-K",
+          "accession": "0000320193-26-000018",
+          "filing_date": "2026-07-30",
+          "url": "https://www.sec.gov/Archives/edgar/data/320193/000032019326000018/aapl-20260730.htm",
+          "status": 200,
+          "bytes": 38465,
+          "sha256": "19f9467871d6c75b1ada817bfc9517039cbfa738d458a73a35f6a7626b10e218",
+          "content_type": "text/html",
+          "visible_characters": 3964,
+          "inline_xbrl_nodes": 44,
+          "image_references": 1,
+          "issuer_name_present": true
+        },
+        {
+          "form": "4",
+          "accession": "0001140361-26-040127",
+          "filing_date": "2026-10-19",
+          "url": "https://www.sec.gov/Archives/edgar/data/320193/000114036126040127/form4.xml",
+          "status": 200,
+          "bytes": 23004,
+          "sha256": "63d65b6e17d6566bbdccfdb96db267169bc6984a0e552bb363c87739b9cc8dac",
+          "content_type": "text/xml",
+          "root_tag": "ownershipDocument",
+          "issuer_cik_matches": true,
+          "transaction_count": 11
+        }
+      ]
+    },
+    "regulations_EPA": {
+      "status": "failed",
+      "reason_code": "batch_failure",
+      "http_status": null,
+      "exception_type": "SourceFetchError",
+      "discovered_rows": 9,
+      "discovery_coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "samples": {
+          "EPA": {
+            "mode": "exhaustive_window",
+            "complete": true,
+            "agency": "EPA",
+            "posted_date_from": "2026-10-07",
+            "posted_date_to": "2026-10-21",
+            "pages": 1,
+            "total": 12235,
+            "has_next": true,
+            "termination": "older_than_window"
+          }
+        },
+        "as_of": "2026-10-21"
+      },
+      "content_coverage": {
+        "discovery_complete": true,
+        "content_complete": false,
+        "required_rows": 9,
+        "complete_rows": 4,
+        "failed_rows": 5,
+        "consumed_bytes": 374094,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false
+      },
+      "document_ids": [
+        "EPA-HQ-OW-1998-9208-0001",
+        "EPA-R09-OAR-2026-5581-0001",
+        "EPA-R10-OAR-2026-4291-0013",
+        "EPA-R09-OAR-2026-5119-0001",
+        "EPA-R09-OAR-2024-0600-0017",
+        "EPA-HQ-OAR-2024-0505-0951",
+        "EPA-HQ-OPPT-2026-7327-0001",
+        "EPA-R09-OAR-2026-4654-0001",
+        "EPA-R03-OAR-2026-6205-0001"
+      ],
+      "failure_codes": {
+        "EPA-HQ-OW-1998-9208-0001": {
+          "code": "http_error",
+          "reason_code": "http_error",
+          "http_status": 403
+        },
+        "EPA-R09-OAR-2026-5581-0001": {
+          "code": "invalid_regulation_government_identity",
+          "reason_code": "provider_error",
+          "http_status": null
+        },
+        "EPA-R10-OAR-2026-4291-0013": {
+          "code": "invalid_regulation_government_identity",
+          "reason_code": "http_error",
+          "http_status": 403
+        },
+        "EPA-R09-OAR-2026-5119-0001": {
+          "code": "unsupported_regulation_government_markup",
+          "reason_code": "provider_error",
+          "http_status": null
+        },
+        "EPA-HQ-OAR-2024-0505-0951": {
+          "code": "invalid_regulation_government_identity",
+          "reason_code": "http_error",
+          "http_status": 403
+        }
+      }
+    },
+    "regulations_FDA": {
+      "status": "passed",
+      "discovered_rows": 1,
+      "discovery_coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "samples": {
+          "FDA": {
+            "mode": "exhaustive_window",
+            "complete": true,
+            "agency": "FDA",
+            "posted_date_from": "2026-10-07",
+            "posted_date_to": "2026-10-21",
+            "pages": 1,
+            "total": 1295,
+            "has_next": true,
+            "termination": "older_than_window"
+          }
+        },
+        "as_of": "2026-10-21"
+      },
+      "content_coverage": {
+        "discovery_complete": true,
+        "content_complete": true,
+        "required_rows": 1,
+        "complete_rows": 1,
+        "failed_rows": 0,
+        "consumed_bytes": 113408,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false
+      },
+      "document_ids": [
+        "FDA-2025-D-6952-0001"
+      ],
+      "corpus_documents": 1,
+      "corpus_units": 1
+    },
+    "regulations_FTC": {
+      "status": "passed",
+      "discovered_rows": 1,
+      "discovery_coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "samples": {
+          "FTC": {
+            "mode": "exhaustive_window",
+            "complete": true,
+            "agency": "FTC",
+            "posted_date_from": "2026-10-07",
+            "posted_date_to": "2026-10-21",
+            "pages": 1,
+            "total": 321,
+            "has_next": true,
+            "termination": "older_than_window"
+          }
+        },
+        "as_of": "2026-10-21"
+      },
+      "content_coverage": {
+        "discovery_complete": true,
+        "content_complete": true,
+        "required_rows": 1,
+        "complete_rows": 1,
+        "failed_rows": 0,
+        "consumed_bytes": 97661,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false
+      },
+      "document_ids": [
+        "FTC-2026-1618-0001"
+      ],
+      "corpus_documents": 1,
+      "corpus_units": 1
+    },
+    "regulations_SEC": {
+      "status": "failed",
+      "reason_code": "batch_failure",
+      "http_status": null,
+      "exception_type": "SourceFetchError",
+      "discovered_rows": 2,
+      "discovery_coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "samples": {
+          "SEC": {
+            "mode": "exhaustive_window",
+            "complete": true,
+            "agency": "SEC",
+            "posted_date_from": "2026-10-07",
+            "posted_date_to": "2026-10-21",
+            "pages": 1,
+            "total": 479,
+            "has_next": true,
+            "termination": "older_than_window"
+          }
+        },
+        "as_of": "2026-10-21"
+      },
+      "content_coverage": {
+        "discovery_complete": true,
+        "content_complete": false,
+        "required_rows": 2,
+        "complete_rows": 1,
+        "failed_rows": 1,
+        "consumed_bytes": 570597,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false
+      },
+      "document_ids": [
+        "SEC-2026-6502-0001",
+        "SEC-2026-6404-0001"
+      ],
+      "failure_codes": {
+        "SEC-2026-6502-0001": {
+          "code": "invalid_regulation_government_identity",
+          "reason_code": "http_error",
+          "http_status": 403
+        }
+      }
+    },
+    "regulations_DOL": {
+      "status": "passed",
+      "discovered_rows": 0,
+      "discovery_coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "samples": {
+          "DOL": {
+            "mode": "exhaustive_window",
+            "complete": true,
+            "agency": "DOL",
+            "posted_date_from": "2026-10-07",
+            "posted_date_to": "2026-10-21",
+            "pages": 1,
+            "total": 60,
+            "has_next": false,
+            "termination": "older_than_window"
+          }
+        },
+        "as_of": "2026-10-21"
+      },
+      "content_coverage": {
+        "discovery_complete": true,
+        "content_complete": true,
+        "required_rows": 0,
+        "complete_rows": 0,
+        "failed_rows": 0,
+        "consumed_bytes": 59237,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false
+      },
+      "document_ids": [],
+      "corpus_documents": 0,
+      "corpus_units": 0
+    },
+    "regulations_CFPB": {
+      "status": "passed",
+      "discovered_rows": 0,
+      "discovery_coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "samples": {
+          "CFPB": {
+            "mode": "exhaustive_window",
+            "complete": true,
+            "agency": "CFPB",
+            "posted_date_from": "2026-10-07",
+            "posted_date_to": "2026-10-21",
+            "pages": 1,
+            "total": 185,
+            "has_next": true,
+            "termination": "older_than_window"
+          }
+        },
+        "as_of": "2026-10-21"
+      },
+      "content_coverage": {
+        "discovery_complete": true,
+        "content_complete": true,
+        "required_rows": 0,
+        "complete_rows": 0,
+        "failed_rows": 0,
+        "consumed_bytes": 89999,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false
+      },
+      "document_ids": [],
+      "corpus_documents": 0,
+      "corpus_units": 0
+    }
+  },
+  "SEC_correction_detail": {
+    "detail": {
+      "agencyId": "SEC",
+      "frDocNum": "C1-2026-20360",
+      "postedDate": "2026-10-20T04:00:00Z",
+      "docketId": null,
+      "cfrPart": null,
+      "startEndPage": null,
+      "pageCount": 0,
+      "documentType": "Proposed Rule",
+      "withdrawn": false,
+      "restrictReason": null,
+      "restrictReasonType": null,
+      "title": "Interval Fund Modernization: Expansion of Multiple Share Class to Registered Closed-End Management Investment Companies and Business Development Companies"
+    },
+    "detail_sha256": "1b0c2e949418140dab1a147ade503733c6ec51a6df9386ac06e788018188df17",
+    "plan": "invalid_regulation_government_identity",
+    "government_body": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-20/html/C1-2026-20360.htm",
+      "bytes": 1297,
+      "sha256": "948e3657db5050058de4e79de927147a7d3e3d96f32a8be4f55dff159a29a286",
+      "title": "Federal Register, Volume 91 Issue 201 (Tuesday, October 20, 2026)",
+      "text_characters": 1199,
+      "document_number_present": true,
+      "graphics_markers": 0,
+      "cfrPart": null
+    }
+  },
+  "EPA_failure_details": {
+    "EPA-HQ-OW-1998-9208-0001": {
+      "detail_sha256": "1eae15175725ab4bd33920e01fe8d2a514e250c0db4860811821fcf7bfcf1c9e",
+      "attributes": {
+        "agencyId": "EPA",
+        "frDocNum": "97\u20135879",
+        "postedDate": "2026-10-21T04:00:00Z",
+        "docketId": "EPA-HQ-OW-1998-9208",
+        "cfrPart": null,
+        "startEndPage": "11270 - 11281",
+        "pageCount": 12,
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "restrictReason": null,
+        "restrictReasonType": null
+      },
+      "resources": [
+        {
+          "role": "primary",
+          "format": "pdf",
+          "url": "https://downloads.regulations.gov/EPA-HQ-OW-1998-9208-0001/content.pdf"
+        }
+      ],
+      "attachments": [],
+      "government_plan_status": "invalid_regulation_government_identity",
+      "government_body": {
+        "reason_code": "http_error",
+        "http_status": 302
+      }
+    },
+    "EPA-R09-OAR-2026-5581-0001": {
+      "detail_sha256": "81389acd1d63106fea88aa2c3359db465e9eb4b6ba207dd660aa08ce02104caa",
+      "attributes": {
+        "agencyId": "EPA",
+        "frDocNum": "2026-21287",
+        "postedDate": "2026-10-19T04:00:00Z",
+        "docketId": "EPA-R09-OAR-2026-5581",
+        "cfrPart": "40 CFR Part 52",
+        "startEndPage": "66043 - 66048",
+        "pageCount": 6,
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "restrictReason": null,
+        "restrictReasonType": null
+      },
+      "resources": [
+        {
+          "role": "primary",
+          "format": "pdf",
+          "url": "https://downloads.regulations.gov/EPA-R09-OAR-2026-5581-0001/content.pdf"
+        },
+        {
+          "role": "primary",
+          "format": "html",
+          "url": "https://downloads.regulations.gov/EPA-R09-OAR-2026-5581-0001/content.html"
+        }
+      ],
+      "attachments": [],
+      "government_plan_status": "passed",
+      "government_body": {
+        "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-19/html/2026-21287.htm",
+        "bytes": 39918,
+        "sha256": "8eafa45f82faccc0316862c060cb0b7c8d4c5b47ce004078cac34d9bc3c7e131",
+        "title": "Federal Register, Volume 91 Issue 200 (Monday, October 19, 2026)",
+        "document_number_present": true,
+        "tag_names": [
+          "INF",
+          "a",
+          "body",
+          "bullet",
+          "head",
+          "html",
+          "pre",
+          "script",
+          "span",
+          "title"
+        ]
+      },
+      "pre_text_status": "passed",
+      "notice_identity_status": "invalid_regulation_government_identity"
+    },
+    "EPA-R10-OAR-2026-4291-0013": {
+      "detail_sha256": "acc0683325f7979fff8675f157b4fa2e02801d4397880ba5fb392d66cfbc5223",
+      "attributes": {
+        "agencyId": "EPA",
+        "frDocNum": "2026-21383",
+        "postedDate": "2026-10-19T04:00:00Z",
+        "docketId": "EPA-R10-OAR-2026-4291",
+        "cfrPart": "40 CFR Parts 60, 61, and 63",
+        "startEndPage": "66058 - 66062",
+        "pageCount": 5,
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "restrictReason": null,
+        "restrictReasonType": null
+      },
+      "resources": [
+        {
+          "role": "primary",
+          "format": "pdf",
+          "url": "https://downloads.regulations.gov/EPA-R10-OAR-2026-4291-0013/content.pdf"
+        },
+        {
+          "role": "primary",
+          "format": "html",
+          "url": "https://downloads.regulations.gov/EPA-R10-OAR-2026-4291-0013/content.html"
+        }
+      ],
+      "attachments": [],
+      "government_plan_status": "invalid_regulation_government_identity",
+      "government_body": {
+        "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-19/html/2026-21383.htm",
+        "bytes": 34219,
+        "sha256": "f2aac9de9d8f1d1ab9c334a751608f668607df4d0abc91db5fcdc935e5e29646",
+        "title": "Federal Register, Volume 91 Issue 200 (Monday, October 19, 2026)",
+        "document_number_present": true,
+        "tag_names": [
+          "a",
+          "body",
+          "head",
+          "html",
+          "pre",
+          "script",
+          "span",
+          "title"
+        ]
+      }
+    },
+    "EPA-R09-OAR-2026-5119-0001": {
+      "detail_sha256": "25ce37adc1086c3b662c37d5525db10ba584ea5e20d9c141f855bc73d4f528c4",
+      "attributes": {
+        "agencyId": "EPA",
+        "frDocNum": "2026-21288",
+        "postedDate": "2026-10-19T04:00:00Z",
+        "docketId": "EPA-R09-OAR-2026-5119",
+        "cfrPart": "40 CFR Part 52",
+        "startEndPage": "66048 - 66058",
+        "pageCount": 11,
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "restrictReason": null,
+        "restrictReasonType": null
+      },
+      "resources": [
+        {
+          "role": "primary",
+          "format": "pdf",
+          "url": "https://downloads.regulations.gov/EPA-R09-OAR-2026-5119-0001/content.pdf"
+        },
+        {
+          "role": "primary",
+          "format": "html",
+          "url": "https://downloads.regulations.gov/EPA-R09-OAR-2026-5119-0001/content.html"
+        }
+      ],
+      "attachments": [],
+      "government_plan_status": "passed",
+      "government_body": {
+        "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-19/html/2026-21288.htm",
+        "bytes": 83856,
+        "sha256": "45d42e5f68398e2a63c2c36488314bd66b36f1a1e66f44d90032ec2d1315d6bf",
+        "title": "Federal Register, Volume 91 Issue 200 (Monday, October 19, 2026)",
+        "document_number_present": true,
+        "tag_names": [
+          "INF",
+          "SUP",
+          "a",
+          "body",
+          "bullet",
+          "head",
+          "html",
+          "pre",
+          "script",
+          "span",
+          "title"
+        ]
+      },
+      "pre_text_status": "unsupported_regulation_government_markup"
+    },
+    "EPA-HQ-OAR-2024-0505-0951": {
+      "detail_sha256": "5e00d8f39fbd4bb1155fff9ef0646c7cddf8f3f6d2df9bda1968c2f806d2a244",
+      "attributes": {
+        "agencyId": "EPA",
+        "frDocNum": "2026-21155",
+        "postedDate": "2026-10-16T04:00:00Z",
+        "docketId": "EPA-HQ-OAR-2024-0505",
+        "cfrPart": "40 CFR Parts 80 and 1090",
+        "startEndPage": "65699 - 65711",
+        "pageCount": 13,
+        "documentType": "Proposed Rule",
+        "withdrawn": false,
+        "restrictReason": null,
+        "restrictReasonType": null
+      },
+      "resources": [
+        {
+          "role": "primary",
+          "format": "pdf",
+          "url": "https://downloads.regulations.gov/EPA-HQ-OAR-2024-0505-0951/content.pdf"
+        },
+        {
+          "role": "primary",
+          "format": "html",
+          "url": "https://downloads.regulations.gov/EPA-HQ-OAR-2024-0505-0951/content.html"
+        }
+      ],
+      "attachments": [],
+      "government_plan_status": "invalid_regulation_government_identity",
+      "government_body": {
+        "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-16/html/2026-21155.htm",
+        "bytes": 94740,
+        "sha256": "04d01be779285ee17dc5263636db94f28344729235f7402489d4f133b9ee4567",
+        "title": "Federal Register, Volume 91 Issue 199 (Friday, October 16, 2026)",
+        "document_number_present": true,
+        "tag_names": [
+          "a",
+          "body",
+          "bullet",
+          "head",
+          "html",
+          "pre",
+          "script",
+          "span",
+          "title"
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "SEC sample covers one issuer, one selected archive and three documents; not full marketwide acquisition, material graphics/model qualification or comparative analysis.",
+    "DOL/CFPB discovery returned no documents in the selected window; body parsing not exercised.",
+    "Regulatory correction, historical repost, multiple CFR parts, agency spelling and notation variants remain unsupported by the inspected active-generation adapter.",
+    "Raw originals were acquired at the actual October22 clock, not proven available at a historical decision cutoff."
+  ]
+}

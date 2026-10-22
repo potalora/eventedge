@@ -30,7 +30,7 @@ FRED_GROUPS = {'credit_spreads': ['BAMLH0A0HYM2', 'BAMLC0A4CBBB'],
 YAHOO_TICKERS = ['SPY', 'SHY', 'TLT', 'DBA', 'WEAT', 'CORN', 'MOO', 'SOYB', 'ADM', 'BG', 'CTVA', 'DE', 'FMC',
     'KRE', 'IWN', 'XRT', 'IYR', 'XHB', 'ITB', 'VNQ', 'SOXX', 'XLI', 'XLRE', 'LMT', 'RTX', 'NOC', 'GD', 'BA',
     'LHX', 'LDOS', 'SAIC', 'BAH', 'PLTR', 'KTOS', 'CACI', 'HEI', 'TDG']
-_REASONS = {'timeout', 'transport_error', 'http_error', 'invalid_response', 'provider_error', 'batch_failure'}
+_REASONS = {'timeout', 'transport_error', 'http_error', 'invalid_response', 'provider_error', 'provider_maintenance', 'batch_failure'}
 
 
 def capability_configured(config):

@@ -1,0 +1,245 @@
+{
+  "started_at": "2026-10-22T08:46:27.160510+00:00",
+  "finished_at": "2026-10-22T08:47:37.304935+00:00",
+  "elapsed_seconds": 70.14,
+  "scope": "candidate_source_probe_not_deployed",
+  "reference_generation": "gen_023",
+  "candidate_identity": {
+    "head": "56bdf1929a58778c6c58f435f2ad5a2e4b5d1729",
+    "tracked_diff_sha256": "cb85c0be10a458377263ae55ca0902aea4f027367641501684bb69abe2ae8ce1",
+    "code_files_sha256": "ffed1c9c129b430481193284e384eb4ee9293b4e1bf47d4056cad23997e50e04",
+    "scope": "candidate_development_source_probe_not_deployed"
+  },
+  "profile_sha256": "ecf94154a063fc1af5b160f51bb2a61acf8384f7a2571f47d41377d91a5b82a9",
+  "production_read_only": true,
+  "model_calls": 0,
+  "original_receipt_sha256": "f09fa4fa7d56605ce24a80f201b5e71566016f025577abebb95b7114101e4471",
+  "preflight": {
+    "trading_date": "2026-10-21",
+    "fetched_sources": [
+      "cftc",
+      "congress",
+      "courtlistener",
+      "drought_monitor",
+      "edgar",
+      "equity_universe",
+      "finnhub",
+      "fred",
+      "noaa",
+      "openbb",
+      "usaspending",
+      "usda",
+      "yfinance"
+    ],
+    "screen_ok": true,
+    "governed_ok": true,
+    "screen_source_failures": [],
+    "screen_runtime_failures": [],
+    "governed_failures": [],
+    "governed_tickers": [
+      "BIL",
+      "SPY",
+      "VT",
+      "VTI"
+    ],
+    "state_status": "ready",
+    "research_coverage_complete": false,
+    "declared_exclusions": {
+      "congressional_trades": "display_audit_only_v1",
+      "state_economics": "unsupported_state_event_proxy",
+      "insider_activity": "filing_research_disabled",
+      "filing_analysis": "filing_research_disabled",
+      "quantum_readiness": "filing_research_disabled",
+      "regulatory_pipeline": "regulatory_document_research_deferred_v1"
+    },
+    "disabled_strategy_capabilities": {
+      "commodity_macro": {
+        "regulations": "regulatory_document_research_deferred_v1"
+      }
+    }
+  },
+  "source_status": {
+    "cftc": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "congress": {
+      "status": "excluded",
+      "reason": "recorded_source_failure",
+      "present": true
+    },
+    "courtlistener": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "drought_monitor": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "edgar": {
+      "status": "excluded",
+      "reason": "recorded_source_failure",
+      "present": true
+    },
+    "equity_universe": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "finnhub": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "fred": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "noaa": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "openbb": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "regulations": {
+      "status": "excluded",
+      "reason": "missing_source",
+      "present": false
+    },
+    "usaspending": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "usda": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    },
+    "yfinance": {
+      "status": "usable",
+      "reason": null,
+      "present": true
+    }
+  },
+  "sources": {
+    "equity_universe": {
+      "error": null,
+      "request_count": 1,
+      "coverage": {
+        "complete": true,
+        "mode": "complete_asset_master",
+        "returned": 33574
+      }
+    },
+    "openbb": {
+      "error": null,
+      "request_count": 0
+    },
+    "yfinance": {
+      "error": null,
+      "request_count": 2,
+      "counts": {
+        "prices": 37
+      }
+    },
+    "finnhub": {
+      "error": null,
+      "request_count": 25,
+      "counts": {
+        "transcripts": 10,
+        "disruption_news": 1153,
+        "supply_chains": 7,
+        "coverage": 5
+      }
+    },
+    "courtlistener": {
+      "error": null,
+      "request_count": 2,
+      "counts": {
+        "dockets": 28,
+        "coverage": 21
+      }
+    },
+    "fred": {
+      "error": null,
+      "request_count": 9
+    },
+    "congress": {
+      "error": "Congress audit House filing reconciliation gap [invalid_response]",
+      "request_count": 7,
+      "coverage": {
+        "policy": "display_audit_only_v1",
+        "mode": "display_audit_only",
+        "status": "partial_audit_gap",
+        "complete": false,
+        "acquisition_complete": true,
+        "integrity_valid": true,
+        "house_ids_reconciled": false,
+        "stock_disclosure_complete": false,
+        "senate_coverage": "publisher_only_unverified"
+      }
+    },
+    "noaa": {
+      "error": null,
+      "request_count": 3
+    },
+    "usda": {
+      "error": null,
+      "request_count": 3
+    },
+    "drought_monitor": {
+      "error": null,
+      "request_count": 2,
+      "counts": {
+        "states": 10
+      }
+    },
+    "edgar": {
+      "error": "filing_research_disabled",
+      "request_count": 0
+    },
+    "usaspending": {
+      "error": null,
+      "request_count": 2,
+      "coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "returned": 37,
+        "date_from": "2026-09-21",
+        "date_to": "2026-10-21",
+        "pages": 1,
+        "date_type": "new_awards_only",
+        "amount_basis": "cumulative_award_obligations"
+      },
+      "attribution": {
+        "crosswalk_version": "reviewed_2026-10-22",
+        "counts": {
+          "verified_listed_target": 10,
+          "verified_no_listed_target": 26,
+          "unresolved": 1
+        },
+        "attribution_complete": false,
+        "verified_listed_scope_complete": true
+      }
+    },
+    "cftc": {
+      "error": null,
+      "request_count": 3
+    }
+  },
+  "limitations": [
+    "Fresh forward diagnostic for the reference session; not historical availability proof.",
+    "Read-only source/preflight validation with no models, orders, accepted-state writes or deployment.",
+    "OpenBB preflight marker does not acquire committee enrichment; separate optional-source probe does.",
+    "Congress publisher discrepancy and one unresolved USAspending recipient remain explicit."
+  ]
+}

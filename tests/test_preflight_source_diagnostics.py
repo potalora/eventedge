@@ -62,6 +62,20 @@ def test_semantic_failure_after_http_success_survives_wire_and_result():
     assert "secret_url" not in json.dumps(result)
 
 
+def test_fred_maintenance_http_200_survives_safe_wire():
+    from tradingagents.strategies.orchestration.preflight import _screen_source_failure
+    payload = {'_coverage': {'reason_code': 'provider_maintenance'},
+               '_request_diagnostics': [{'reason_code': 'provider_maintenance', 'http_status': 200, 'attempts': 3}]}
+    row = _screen_source_failure('fred', payload)
+    assert row == {'source': 'fred', 'reason_code': 'provider_maintenance', 'http_status': 200,
+                   'attempts': 3, 'operation_count': 1}
+    wire = {'ok': False, 'preflight_mode': 'screen', 'screen_ok': False,
+            'screen_failure_count': 1, 'screen_source_failures': [row]}
+    assert normalize_preflight_report(wire, mode='screen', trading_date='2026-10-07') is not None
+    row['source'] = 'noaa'
+    assert normalize_preflight_report(wire, mode='screen', trading_date='2026-10-07') is None
+
+
 @pytest.mark.parametrize("mode", ["screen", "all"])
 @pytest.mark.parametrize("failed", [False, True])
 def test_clean_and_failed_native_wire_round_trip(mode, failed, monkeypatch):

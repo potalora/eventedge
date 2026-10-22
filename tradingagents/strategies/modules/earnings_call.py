@@ -1,14 +1,9 @@
-"""P1+P2: Earnings call transcript analysis.
+"""Earnings-event research using numerical surprises and sourced news.
 
-P1 — Earnings Call Tone & Deception Detection (Cohen et al. 2012):
-Detects hedging language, unusual Q&A evasion, tone shifts between
-prepared remarks and Q&A. Negative tone in Q&A predicts -2.7% drift.
-
-P2 — Cross-Referencing Guidance Revisions:
-Compares current call guidance to prior quarters and analyst consensus.
-Detects stealth downgrades (lowering without flagging).
-
-Data source: Finnhub (earnings_call_transcripts endpoint).
+The active Finnhub path supplies the earnings calendar and admitted company-news
+summaries. It does not acquire complete call transcripts, Q&A or prior-quarter
+comparators. Those capabilities require separately supplied original evidence;
+the analyzer selects its prompt from the explicit text_source identity.
 """
 
 from __future__ import annotations
@@ -23,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class EarningsCallStrategy:
-    """Paper-trade strategy analyzing earnings call transcripts via LLM."""
+    """Paper-trade earnings research with explicitly identified text evidence."""
 
     name = "earnings_call"
     track = "paper_trade"
@@ -54,9 +49,8 @@ class EarningsCallStrategy:
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
         """Screen for recent earnings events and generate candidates.
 
-        Produces up to two candidates per event:
-        1. EPS surprise candidate (backtestable, quantitative)
-        2. Text analysis candidate (paper_only, needs LLM)
+        Combines numerical EPS surprise and available text into one candidate
+        per fiscal event. News remains identified as earnings_news.
 
         Expects data["finnhub"]["transcripts"] = list of dicts with
         {symbol, year, quarter, transcript_text, text_source,
@@ -167,8 +161,9 @@ class EarningsCallStrategy:
 
     def build_propose_prompt(self, context: dict) -> str:
         current = context.get("current_params", self.get_default_params())
-        return f"""You are optimizing an Earnings Call analysis strategy that uses LLM
-to detect tone shifts, deception, and guidance revisions in transcripts.
+        return f"""You are optimizing an earnings-event strategy using numerical EPS
+surprises and LLM analysis of earnings-news summaries. The active source does
+not supply call Q&A or prior-quarter transcripts; do not assume those inputs.
 
 Investment horizon: 30 days. Post-earnings drift is documented over 2-3 weeks.
 Exiting after 7 days leaves money on the table. Target 15-20 day holds to

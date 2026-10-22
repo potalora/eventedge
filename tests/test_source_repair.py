@@ -666,9 +666,34 @@ def test_export_fails_closed_without_origin_evidence(evidence):
         + ".json"
     )
     previous.unlink()
-    with pytest.raises(OSError):
+    with pytest.raises(ValueError) as error:
         api().export_repair_evidence(root, request, output, now=NOW)
+    assert error.value.reason_code == 'missing_origin_evidence'
     assert not output.exists()
+
+
+def test_export_names_acquisition_session_qualification_without_weakening_it(evidence):
+    from tradingagents.strategies.orchestration.source_inputs import SourceInputStore
+    root, request, source, manifest_path, output = evidence
+    envelope = SourceInputStore.decode(source.read_text())
+    envelope['acquired_at'] = datetime(2026, 10, 5, 22, tzinfo=timezone.utc)
+    source.write_text(SourceInputStore.encode(envelope))
+    with pytest.raises(ValueError) as error:
+        api().export_repair_evidence(root, request, output, now=NOW)
+    assert error.value.reason_code == 'acquisition_session_mismatch'
+    assert not output.exists()
+
+
+def test_repair_cli_exposes_only_fixed_qualification_reason(tmp_path, monkeypatch, capsys):
+    from scripts import source_repair
+    request = tmp_path / ('a'*64 + '.json'); request.write_text('{}')
+    monkeypatch.setattr(source_repair, 'validate_repair_request', lambda raw: {'incident_id': 'a'*64})
+    def unavailable(*args, **kwargs):
+        raise api().EvidenceQualificationError('missing_origin_evidence')
+    monkeypatch.setattr(source_repair, 'export_repair_evidence', unavailable)
+    assert source_repair.main(['export', '--repo-root', str(tmp_path), '--request-file', str(request),
+        '--output-dir', str(tmp_path/'bundle')]) == 2
+    assert capsys.readouterr().err == 'Source repair evidence unavailable: missing_origin_evidence.\n'
 
 
 def test_missing_runtime_lock_is_never_created_by_repair_export(evidence):

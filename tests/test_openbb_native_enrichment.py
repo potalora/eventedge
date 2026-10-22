@@ -4,6 +4,7 @@ from types import SimpleNamespace as N
 
 import pytest
 
+from test_finra_bulk import native, raw as finra_row
 from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
 from tradingagents.strategies.data_sources.request_policy import provider_budget
 from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator
@@ -24,12 +25,30 @@ def short_row(**changes):
     return N(**(fields | changes))
 
 
-def source_with(profile_call=None, rows=None):
+def source_with(profile_call=None):
     source = OpenBBSource(fmp_api_key="offline")
-    source._obb = N(equity=N(profile=profile_call,
-                            shorts=N(short_interest=lambda **_: N(results=rows))),
+    source._obb = N(equity=N(profile=profile_call),
                     famafrench=N(factors=lambda **_: N(results=[])))
     return source
+
+
+@pytest.fixture
+def finra_source(native, monkeypatch):
+    """Exercise scalar/bulk admission with controlled native transform output.
+
+    A real temporary SQLite read and native-shaped query/model validation run
+    first. Replacing the returned rows at the transform boundary preserves
+    malformed, optional-field and conflicting-response normalizer cases.
+    """
+    from tradingagents.strategies.data_sources import openbb_source
+    monkeypatch.setattr(openbb_source, 'acquisition_time', lambda: '2026-10-22T12:00:00+00:00')
+    native.add([finra_row('AAPL')])
+    def install(rows):
+        def transform(query, result):
+            result[:] = rows
+        native.transform_hook = transform
+        return native.source
+    return install
 
 
 def test_profiles_batch_size_order_mapping_and_scalar_cache_reuse():
@@ -112,21 +131,21 @@ def test_profile_sdk_failure_retains_all_symbols_and_safe_reason():
     [short_row(settlement_date="2021-07-15", current_short_position=100), short_row()],
     [short_row(), short_row(settlement_date="2021-07-15", current_short_position=100)],
 ])
-def test_finra_latest_native_dated_row_is_order_independent(rows):
-    result = source_with(rows=rows).fetch({"method": "equity_short_interest", "ticker": "AAPL"})
+def test_finra_latest_native_dated_row_is_order_independent(rows, finra_source):
+    result = finra_source(rows).fetch({"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["date"] == "2026-09-30"
     assert result["short_interest"] == 400
     assert result["days_to_cover"] == 4.0
 
 
-def test_finra_native_zero_coverage_is_authoritative():
-    result = source_with(rows=[short_row(avg_daily_volume=0, days_to_cover=0)]).fetch(
+def test_finra_native_zero_coverage_is_authoritative(finra_source):
+    result = finra_source([short_row(avg_daily_volume=0, days_to_cover=0)]).fetch(
         {"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["days_to_cover"] == 0
 
 
-def test_finra_missing_coverage_uses_actual_volume_field():
-    result = source_with(rows=[short_row(avg_daily_volume=40, days_to_cover=None)]).fetch(
+def test_finra_missing_coverage_uses_actual_volume_field(finra_source):
+    result = finra_source([short_row(avg_daily_volume=40, days_to_cover=None)]).fetch(
         {"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["days_to_cover"] == 10
 
@@ -141,18 +160,20 @@ def test_finra_missing_coverage_uses_actual_volume_field():
     [short_row(days_to_cover=None, avg_daily_volume=0)],
     [short_row(days_to_cover=None, avg_daily_volume=None)],
 ])
-def test_finra_invalid_or_conflicting_response_fails_without_caching(rows):
-    source = source_with(rows=rows)
+def test_finra_invalid_or_conflicting_response_fails_without_caching(rows, finra_source):
+    source = finra_source(rows)
     result = source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
     assert "error" in result
-    source._obb.equity.shorts.short_interest = lambda **_: N(results=[short_row()])
+    assert result['reason_code'] == 'invalid_response'
+    assert 'equity_short_interest|AAPL' not in source._cache
+    finra_source([short_row()])
     recovered = source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
     assert recovered["short_interest"] == 400
     assert recovered["date"] == "2026-09-30"
 
 
-def test_finra_identical_latest_duplicates_are_accepted():
-    result = source_with(rows=[short_row(), short_row()]).fetch(
+def test_finra_identical_latest_duplicates_are_accepted(finra_source):
+    result = finra_source([short_row(), short_row()]).fetch(
         {"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["days_to_cover"] == 4
 
@@ -164,16 +185,17 @@ def test_orchestrator_keeps_population_order_and_optional_failure_evidence(monke
         calls.append(kwargs["symbol"])
         return N(results=[profile(s) for s in reversed(kwargs["symbol"].split(",")) if s != "T03"])
 
-    source = source_with(native, [short_row(symbol="wrong")])
+    source = source_with(native)
     monkeypatch.setattr(source, "is_available", lambda: True)
     # Keep this orchestration test independent of installed provider versions.
     # The guarded bulk adapter and real-shaped history validation have dedicated tests.
     def short_batch(symbols):
-        results = {symbol: source.fetch({"method": "equity_short_interest", "ticker": symbol})
+        from tradingagents.strategies.data_sources.finra_bulk import population_digest
+        results = {symbol: {'error': 'Mismatched FINRA symbol', 'reason_code': 'invalid_response'}
                    for symbol in symbols}
         return {"short_interest": {}, "errors": results,
-                "acquisition": {"schema_version": 1, "requested_count": len(symbols),
-                                "cached_count": 0, "attempts": [], "population_sha256": "a"*64}}
+                "acquisition": {"schema_version": 2, "requested_count": len(symbols),
+                                "cached_count": 0, "attempts": [], "population_sha256": population_digest(symbols)}}
     monkeypatch.setattr(source, "fetch_short_interest", short_batch)
     owner = object.__new__(CohortOrchestrator)
     owner.cohorts = [{"engine": N(registry={"openbb": source})}]
@@ -217,37 +239,38 @@ def test_full_866_profile_population_is_accounted_for():
     assert [ticker for batch in calls for ticker in batch] == tickers
 
 
-def test_finra_legacy_volume_alias_only_supplies_explicit_missing_coverage():
+def test_finra_legacy_volume_alias_only_supplies_explicit_missing_coverage(finra_source):
     row = short_row(days_to_cover=None)
     del row.avg_daily_volume
     row.average_daily_volume = 80
-    result = source_with(rows=[row]).fetch({"method": "equity_short_interest", "ticker": "AAPL"})
+    result = finra_source([row]).fetch({"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["days_to_cover"] == 5
 
 
-def test_finra_missing_float_percentage_remains_unknown():
-    result = source_with(rows=[short_row()]).fetch(
+def test_finra_missing_float_percentage_remains_unknown(finra_source):
+    result = finra_source([short_row()]).fetch(
         {"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["short_pct_of_float"] is None
 
 
 @pytest.mark.parametrize("percentage", [0, 150.0])
-def test_finra_observed_float_percentage_retained_without_artificial_cap(percentage):
-    result = source_with(rows=[short_row(short_percent_of_float=percentage)]).fetch(
+def test_finra_observed_float_percentage_retained_without_artificial_cap(percentage, finra_source):
+    result = finra_source([short_row(short_percent_of_float=percentage)]).fetch(
         {"method": "equity_short_interest", "ticker": "AAPL"})
     assert result["short_pct_of_float"] == percentage
 
 
 @pytest.mark.parametrize("percentage", [-1, float("nan"), float("inf"), True])
-def test_finra_invalid_float_percentage_fails_without_cache(percentage):
-    source = source_with(rows=[short_row(short_percent_of_float=percentage)])
+def test_finra_invalid_float_percentage_fails_without_cache(percentage, finra_source):
+    source = finra_source([short_row(short_percent_of_float=percentage)])
     assert "error" in source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})
-    source._obb.equity.shorts.short_interest = lambda **_: N(results=[short_row(short_percent_of_float=0)])
+    assert 'equity_short_interest|AAPL' not in source._cache
+    finra_source([short_row(short_percent_of_float=0)])
     assert source.fetch({"method": "equity_short_interest", "ticker": "AAPL"})["short_pct_of_float"] == 0
 
 
-def test_finra_latest_unknown_and_observed_zero_are_conflicting_evidence():
-    result = source_with(rows=[short_row(), short_row(short_percent_of_float=0)]).fetch(
+def test_finra_latest_unknown_and_observed_zero_are_conflicting_evidence(finra_source):
+    result = finra_source([short_row(), short_row(short_percent_of_float=0)]).fetch(
         {"method": "equity_short_interest", "ticker": "AAPL"})
     assert "error" in result
 

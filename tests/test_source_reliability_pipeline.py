@@ -75,6 +75,9 @@ class TransportFixture:
         self.calls[url.split("?")[0]] += 1
         params = kwargs.get("params") or {}
         self.request_trace.append((url, dict(params)))
+        if url.endswith('/CommitmentsofTraders/ReleaseSchedule/index.htm'):
+            from test_cftc_freshness import calendar
+            return self.response(calendar(self.session.year))
         if url.startswith('https://cftc.gov/files/dea/history/fut_disagg_txt_'):
             year = int(url.rsplit('_', 1)[1].removesuffix('.zip'))
             archive = io.BytesIO()
@@ -332,6 +335,7 @@ def pipeline(monkeypatch, tmp_path):
         monkeypatch.setattr(module, "current_session_date", lambda:fixture.now.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat())
         if hasattr(module, "acquisition_time"):
             monkeypatch.setattr(module, "acquisition_time", lambda:fixture.now.isoformat())
+    monkeypatch.setattr('tradingagents.strategies.data_sources.openbb_source.acquisition_time', lambda:fixture.now.isoformat())
     from tradingagents.strategies.execution import price_source
     monkeypatch.setattr(price_source, "datetime", FixedDatetime)
     monkeypatch.setenv("EVENTEDGE_SOURCE_CACHE_DIR", str(tmp_path / "source_cache"))

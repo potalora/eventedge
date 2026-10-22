@@ -125,7 +125,7 @@ def test_original_native_50_awards_remain_unchanged_with_exact_reviewed_partitio
     payload=fetch(rows)
     assert 'error' not in payload
     scope=payload['coverage']['attribution_scope']
-    assert scope['counts']=={'verified_listed_target':14,'verified_no_listed_target':13,'unresolved':23}
+    assert scope['counts']=={'verified_listed_target':15,'verified_no_listed_target':28,'unresolved':7}
     assert len(scope['awards'])==50 and len({r['award_key'] for r in scope['awards']})==50
     assert len({r['recipient_uei'] for r in scope['awards']})==40
     assert payload['data']['contracts']==original and rows==original

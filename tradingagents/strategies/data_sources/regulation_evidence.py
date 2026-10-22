@@ -165,6 +165,14 @@ def detail_plan(row, raw, *, observed_at):
                 fail('invalid_regulation_identity')
             identity[public] = value
         _stamp(identity['posted_date'])
+        # A correction is a separate publication whose meaning depends on the
+        # original notice. The current primary/attachment inventory cannot bind
+        # a cross-notice original, correction chain and their availability.
+        # Refuse it even if its own download succeeds; a complete correction
+        # body alone must never imply a complete original regulatory rule.
+        if (isinstance(attributes.get('frDocNum'), str)
+                and re.fullmatch(r'C[1-9][0-9]{0,2}-20[0-9]{2}-[0-9]{5}', attributes['frDocNum'])):
+            fail('unsupported_regulation_correction_dependency')
         docket = attributes.get('docketId')
         if (docket is not None and (type(docket) is not str or not _ID.fullmatch(docket))
                 or row.get('docket_id') not in (None, '', docket)):

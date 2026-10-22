@@ -57,29 +57,46 @@ def _install_openbb():
         if not connection.execute('SELECT COUNT(*) FROM short_interest').fetchone()[0]:
             for index,symbol in enumerate(SYMBOLS):
                 connection.execute('INSERT INTO short_interest VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                    (index,symbol,symbol+' Corporation','N',1000,900,100000,0.01,11.1,100,'2026-10-13'))
+                    # Sep30 is the published current cycle at the constructed
+                    # Oct14/15 clock; Oct13 is not a FINRA settlement cycle.
+                    (index,symbol,symbol+' Corporation','N',1000,900,100000,0.01,11.1,100,'2026-09-30'))
     def profile(symbol, **kwargs):
         trace('sdk', endpoint='openbb.profile', symbols=symbol)
         return SimpleNamespace(results=[SimpleNamespace(symbol=s, sector='Technology',industry_category='Semiconductors',
             market_cap=1e12,name=s+' Corporation',long_description='Constructed external SDK profile') for s in symbol.split(',')])
     def factors(**kwargs):
         trace('sdk', endpoint='openbb.factors')
-        return SimpleNamespace(results=[SimpleNamespace(date='2026-09-30',mkt=0.01,smb=0.0,hml=0.0,rmw=0.0,cma=0.0,rf=0.001)])
+        fields = dict(date=clock_module.date(2026,9,30),mkt_rf=0.01,smb=0.0,hml=0.0,rf=0.001)
+        if kwargs.get('factor') == '5_factors':
+            fields.update(rmw=0.0,cma=0.0)
+        return SimpleNamespace(results=[SimpleNamespace(**fields)])
     obb = ModuleType('openbb')
     obb.obb = SimpleNamespace(user=SimpleNamespace(credentials=SimpleNamespace()),
         equity=SimpleNamespace(profile=profile),famafrench=SimpleNamespace(factors=factors))
     sys.modules['openbb'] = obb
     storage = ModuleType('openbb_finra.utils.data_storage')
     storage.get_db_path = lambda: str(db)
-    storage.get_short_interest_dates = lambda: ['20261013']
+    storage.get_short_interest_dates = lambda: ['20260915','20260930']
     storage.prepare_data = lambda: trace('sdk',endpoint='finra.prepare_data')
+    def download(compact):
+        trace('sdk',endpoint='finra.get_data_from_date_and_store',settlement_date=compact)
+        # The constructed current response is already cached. Detect accidental
+        # history backfill or refresh rather than touching real SDK transport.
+        raise AssertionError('Unexpected FINRA archive download in warm-cache fixture')
+    storage.get_data_from_date_and_store = download
     class Fetcher:
         @staticmethod
         def transform_query(value):
             return SimpleNamespace(symbol=value['symbol'])
         @staticmethod
         def transform_data(query, rows):
-            return [SimpleNamespace(**{key:row[alias] for key,alias in ALIASES.items()}) for row in rows]
+            trace('sdk',endpoint='finra.transform_data',symbols=query.symbol)
+            results = []
+            for row in rows:
+                fields = {key:row[alias] for key,alias in ALIASES.items()}
+                fields['settlement_date'] = clock_module.date.fromisoformat(fields['settlement_date'])
+                results.append(SimpleNamespace(**fields))
+            return results
     model = ModuleType('openbb_finra.models.equity_short_interest')
     model.FinraShortInterestFetcher = Fetcher
     model.FinraShortInterestData = type('FinraShortInterestData',(),{'__alias_dict__':ALIASES})
@@ -257,6 +274,17 @@ def _install():
         if url.endswith('/v2/assets'):
             return fixture.response([{'class':'us_equity','symbol':symbol,'exchange':'NASDAQ',
                 'status':'active','tradable':True} for symbol in SYMBOLS])
+        if (fault == 'congress_recent_audit_gap'
+                and url == 'https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/99999.pdf'):
+            # Constructed transport bytes, never an actual official filing or
+            # publisher row. The missing publisher ID and audit warning remain.
+            assert method.lower() == 'get' and kwargs['stream'] is True and kwargs['allow_redirects'] is False
+            body = b'%PDF-1.4\nexplicit synthetic scheduled House original fixture\n%%EOF\n'
+            trace('fixture_body',boundary='synthetic_house_original_pdf',url=url,
+                  sha256=hashlib.sha256(body).hexdigest(),bytes=len(body))
+            result = fixture.response(body,headers={'Content-Length':str(len(body)),'Content-Type':'application/pdf'})
+            result.url = url
+            return result
         if 'huggingface.co' in url or url.endswith('2026FD.ZIP'):
             from test_congress_disclosure_audit import synthetic_raw
             raw = synthetic_raw()

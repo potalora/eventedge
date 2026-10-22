@@ -227,6 +227,61 @@ def _reject_locally_valid_scope_substitution(harness, before_io):
     assert [row for row in harness.trace() if row["kind"] in {"http", "sdk", "model"}] == before_io
 
 
+def test_stabilization_v3_original_fixture_retains_publisher_gap_and_no_authority(tmp_path):
+    harness = create_harness(tmp_path, profile_variant="stabilization_v3")
+    harness.effective_config_proof()
+    scenario = json.loads(harness.scenario_path.read_text())
+    scenario["fault"] = "congress_recent_audit_gap"
+    harness.scenario_path.write_text(json.dumps(scenario))
+    code = '''import json,os,time,requests
+from pathlib import Path
+from tradingagents.strategies.data_sources.congress_disclosure_audit import fetch_audit_snapshot
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+from tradingagents.strategies.data_sources.request_policy import provider_budget
+deadline=time.monotonic()+20
+with provider_budget('congress',deadline) as diagnostics:
+ try:
+  fetch_audit_snapshot(date_filed_after='2026-09-14',date_filed_before='2026-10-14',absolute_deadline=deadline)
+ except SourceFetchError as error:
+  result={'reason_code':error.reason_code,'payload':error.partial_data,'diagnostics':list(diagnostics)}
+ else:
+  raise AssertionError('Publisher gap must remain incomplete')
+base='https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2026/'
+for url in [base+'99998.pdf',base+'99999.pdf']:
+ if url.endswith('99999.pdf'):
+  path=Path(os.environ['EVENTEDGE_ACCEPTANCE_SCENARIO'])
+  scenario=json.loads(path.read_text());scenario['fault']=None;path.write_text(json.dumps(scenario))
+ try:
+  requests.get(url,stream=True,allow_redirects=False,timeout=1)
+ except AssertionError:
+  pass
+ else:
+  raise AssertionError('Unconfigured original URL/fault must stay blocked')
+print(json.dumps(result))
+'''
+    result = subprocess.run([str(harness.python), "-c", code], cwd=harness.repo,
+                            env=harness.env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    value = json.loads(result.stdout)
+    assert value["reason_code"] == "invalid_response"
+    payload = value["payload"]
+    assert payload["coverage"]["complete"] is False
+    assert payload["audit_snapshot"]["scope_evidence"]["house_reconciliation"]["missing_ids"] == ["99999"]
+    originals = payload["house_originals"]
+    assert originals["status"] == "originals_captured"
+    assert originals["publisher_diagnostics"]["missing_house_filings"] == 1
+    assert originals["publisher_diagnostics"]["publisher_coverage_complete"] is False
+    assert all(originals[key] is False for key in ["signals_enabled", "model_context_enabled", "order_authority"])
+    document, = originals["documents"]
+    assert document["doc_id"] == "99999" and document["status"] == "original_only"
+    assert len(value["diagnostics"]) == 6
+    assert value["diagnostics"][-1] == {"provider": "congress", "operation": "house_original",
+        "reason_code": None, "http_status": None, "attempts": 1, "recovered": False}
+    trace = harness.trace()
+    assert not any(row["kind"] in {"forbidden_network", "unexpected_httpx", "model"} for row in trace)
+    assert len([row for row in trace if row.get("boundary") == "synthetic_house_original_pdf"]) == 1
+
+
 def test_stabilization_v2_native_ng_si_collection_uses_physical_sdk_fixtures(tmp_path):
     harness = create_harness(tmp_path, profile_variant="stabilization_v2")
     # Establish only the constructed clock; this probe does not claim a screen,
@@ -244,7 +299,7 @@ config=json.loads(Path(sys.argv[1]).read_text())
 with sqlite3.connect(Path(os.environ['EVENTEDGE_ACCEPTANCE_BASE'])/'finra-response.db') as connection:
  for index,symbol in enumerate(['SLV','UNG'],100):
   connection.execute('INSERT INTO short_interest VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-   (index,symbol,symbol+' fund','N',1000,900,100000,0.01,11.1,100,'2026-10-13'))
+   (index,symbol,symbol+' fund','N',1000,900,100000,0.01,11.1,100,'2026-09-30'))
 source=OpenBBSource(fmp_api_key='offline-dummy')
 owner=CohortOrchestrator.__new__(CohortOrchestrator)
 owner._base_config=config
@@ -266,10 +321,16 @@ print(json.dumps({'original':original,'projected':projected,'scope':scope}))
     assert set(value["projected"]["profiles"]) == {"SLV", "UNG"}
     assert set(value["projected"]["short_interest"]) == {"SLV", "UNG"}
     assert value["projected"]["factors"]
+    assert value["projected"]["factors"]["observation_date"] == "2026-09-30"
+    assert value["projected"]["factors"]["Mkt-RF"] == 0.01
+    assert {row["date"] for row in value["projected"]["short_interest"].values()} == {"2026-09-30"}
+    acquisition, = value["original"]["short_interest_acquisition"]["attempts"]
+    assert acquisition["archive_coverage"]["current_complete"] is True
+    assert acquisition["archive_coverage"]["historical_complete"] is False
     trace = harness.trace()
     assert not any(row["kind"] in {"forbidden_network", "unexpected_httpx", "http", "model"} for row in trace)
     assert {row["endpoint"] for row in trace if row["kind"] == "sdk"} == {
-        "openbb.profile", "openbb.factors", "finra.prepare_data"}
+        "openbb.profile", "openbb.factors", "finra.transform_data"}
 
 
 @pytest.mark.parametrize("fault, complete", [("fred_optional_payems_503", True),

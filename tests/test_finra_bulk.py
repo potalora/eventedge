@@ -75,6 +75,7 @@ def native(tmp_path, monkeypatch):
                 state.transform_hook(query, result)
             return result
     storage = N(prepare_data=prepare,get_db_path=lambda:path,
+                get_data_from_date_and_store=lambda compact: prepare(),
                 get_short_interest_dates=lambda:['20260915','20260930'])
     model = N(FinraShortInterestFetcher=Fetcher,FinraShortInterestData=NativeShape)
     original_import = importlib.import_module
@@ -99,7 +100,7 @@ def fetch(native, symbols):
     return native.source.fetch_short_interest(symbols)
 
 
-def test_full_866_population_uses_one_prepare_and_one_full_field_query(native, monkeypatch):
+def test_cached_current_866_population_uses_no_download_and_one_full_field_query(native, monkeypatch):
     symbols=[f'T{i:04}' for i in range(866)]
     native.add([raw(s) for s in reversed(symbols)])
     before=hashlib.sha256(native.path.read_bytes()).hexdigest()
@@ -110,7 +111,7 @@ def test_full_866_population_uses_one_prepare_and_one_full_field_query(native, m
     monkeypatch.setattr(sqlite3,'connect',observed)
     result=fetch(native,symbols+[symbols[0]])
     assert list(result['short_interest'])==symbols and result['errors']=={}
-    assert native.prepare_calls==1 and len(native.transforms)==866
+    assert native.prepare_calls==0 and len(native.transforms)==866
     assert len([query for query in sql if 'WHERE symbolCode IN' in query])==1
     assert result['short_interest']['T0000']=={'short_interest':400.0,'short_pct_of_float':None,'days_to_cover':4.0,'date':'2026-09-30'}
     attempt=result['acquisition']['attempts'][0]
@@ -123,7 +124,7 @@ def test_all_866_missing_have_complete_partition_and_no_success_cache(native):
     symbols=[f'T{i:04}' for i in range(866)]
     result=fetch(native,symbols)
     assert result['short_interest']=={} and list(result['errors'])==symbols
-    assert native.prepare_calls==1 and len(native.transforms)==866
+    assert native.prepare_calls==1 and native.transforms==[]
     assert native.source._cache=={}
 
 
@@ -132,13 +133,13 @@ def test_partial_success_caches_same_scalar_keys_and_retries_only_missing(native
     first=fetch(native,['A','B','C'])
     assert list(first['short_interest'])==['A'] and set(first['errors'])=={'B','C'}
     assert native.source.fetch({'method':'equity_short_interest','ticker':'A'})==first['short_interest']['A']
-    assert native.prepare_calls==1
+    assert native.prepare_calls==0
     conn=sqlite3.connect(native.path);conn.execute('DELETE FROM short_interest WHERE symbolCode=?',('B',));conn.commit();conn.close()
     native.add([raw('B'),raw('C')]);native.transforms.clear()
     second=fetch(native,['A','B','C'])
     assert list(second['short_interest'])==['A','B','C'] and second['errors']=={}
     assert [symbol for symbol,_ in native.transforms]==['B','C']
-    fetch(native,['A','B','C']);assert native.prepare_calls==2
+    fetch(native,['A','B','C']);assert native.prepare_calls==0
 
 
 @pytest.mark.parametrize('rows',[
@@ -176,6 +177,8 @@ def test_unsupported_compatibility_fails_every_input_without_scalar_fallback(nat
     elif kind=='schema':
         conn=sqlite3.connect(native.path);conn.execute('ALTER TABLE short_interest ADD COLUMN unexpected TEXT');conn.close()
     else:
+        # Reach query-capacity validation rather than failing an absent archive.
+        native.add([raw('A')])
         original=sqlite3.connect
         def limited(*args,**kwargs):
             conn=original(*args,**kwargs);conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,1);return conn
@@ -198,14 +201,16 @@ def test_global_scan_bound_failure_never_publishes_valid_prefix(native,monkeypat
 
 @pytest.mark.parametrize('phase',['prepare','transform'])
 def test_late_phase_cannot_publish_or_reset_60_second_child_budget(native,phase):
-    clock=[0.0];native.add([raw('A'),raw('B')])
+    clock=[0.0]
+    native.add([raw('A',settlementDate='2026-09-15'),raw('B',settlementDate='2026-09-15')]
+               if phase=='prepare' else [raw('A'),raw('B')])
     if phase=='prepare':native.prepare_hook=lambda:clock.__setitem__(0,61)
     else:native.transform_hook=lambda *args:clock.__setitem__(0,61)
     with provider_budget('openbb',1000,clock=lambda:clock[0],sleep=lambda n:clock.__setitem__(0,clock[0]+n),limits=()):
         result=fetch(native,['A','B'])
     assert result['short_interest']=={} and set(result['errors'])=={'A','B'}
     assert all(x['reason_code']=='timeout' for x in result['errors'].values())
-    assert native.prepare_calls==1 and native.source._cache=={}
+    assert native.prepare_calls==(1 if phase=='prepare' else 0) and native.source._cache=={}
     attempt=result['acquisition']['attempts'][0]
     assert attempt['inventory_before_observed'] is True
     assert attempt['inventory_after_observed'] is (phase=='transform')
@@ -219,9 +224,10 @@ def test_expired_original_deadline_skips_prepare_and_keeps_every_input(native):
 
 
 def test_transient_prepare_retry_is_counted_and_uses_original_clock(native):
-    clock=[0.0];native.add([raw('A')])
+    clock=[0.0];native.add([raw('A',settlementDate='2026-09-15')])
     def prepare():
         if native.prepare_calls==1:raise requests.Timeout('PRIVATE credentials')
+        native.add([raw('A')])
     native.prepare_hook=prepare
     diagnostics=[]
     with provider_budget('openbb',100,clock=lambda:clock[0],sleep=lambda n:clock.__setitem__(0,clock[0]+n),
@@ -242,7 +248,7 @@ def test_orchestrator_keeps_full_population_and_acquisition_metadata(native,monk
     result=owner._fetch_openbb_enrichment([{'ticker':'B'},{'ticker':'A'},{'ticker':'A'}])
     assert list(result['short_interest'])==['A'] and set(result['errors']['short_interest'])=={'B'}
     assert result['short_interest_acquisition']['attempts'][0]['row_count']==1
-    assert native.prepare_calls==1
+    assert native.prepare_calls==0
     from tradingagents.strategies.orchestration.source_inputs import SourceInputStore
     envelope=SourceInputStore.decode(SourceInputStore.encode(result))
     assert envelope==result
@@ -344,7 +350,7 @@ def test_existing_empty_native_database_can_be_prepared(native):
     conn=sqlite3.connect(native.path);conn.execute('DROP TABLE short_interest');conn.close()
     def prepare():
         conn=sqlite3.connect(native.path)
-        conn.execute('CREATE TABLE short_interest ("index" INTEGER, symbolCode TEXT, issueName TEXT, marketClassCode TEXT, currentShortPositionQuantity INTEGER, previousShortPositionQuantity INTEGER, averageDailyVolumeQuantity INTEGER, daysToCoverQuantity REAL, changePercent REAL, changePreviousNumber INTEGER, settlementDate TEXT)')
+        conn.execute('CREATE TABLE IF NOT EXISTS short_interest ("index" INTEGER, symbolCode TEXT, issueName TEXT, marketClassCode TEXT, currentShortPositionQuantity INTEGER, previousShortPositionQuantity INTEGER, averageDailyVolumeQuantity INTEGER, daysToCoverQuantity REAL, changePercent REAL, changePreviousNumber INTEGER, settlementDate TEXT)')
         conn.commit();conn.close();native.add([raw('A')])
     native.prepare_hook=prepare
     result=fetch(native,['A'])
@@ -385,7 +391,7 @@ def test_durable_metadata_isolation_and_cached_call_identity(native):
     cached=fetch(native,['A'])
     assert cached['acquisition']['attempts']==[] and cached['acquisition']['cached_count']==1
     assert cached['acquisition']['population_sha256']==original['population_sha256']
-    assert native.prepare_calls==1
+    assert native.prepare_calls==0
 
 
 def test_actual_batch_caller_metadata_is_durable_on_later_different_acquisition(native,tmp_path):

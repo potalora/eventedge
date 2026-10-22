@@ -61,7 +61,7 @@ def warning_for_source(payload, config, session, acquired_at):
         _invalid()
     if 'audit_snapshot' not in payload:
         return None
-    if set(payload) - {'audit_snapshot', 'coverage', '_request_diagnostics', 'error', '_coverage'}:
+    if set(payload) - {'audit_snapshot', 'coverage', '_request_diagnostics', 'error', '_coverage', 'house_originals'}:
         _invalid()
     try:
         reference = date.fromisoformat(session) if type(session) is str else session
@@ -70,6 +70,8 @@ def warning_for_source(payload, config, session, acquired_at):
         frozen_at = _instant(acquired_at)
         from tradingagents.strategies.data_sources import congress_disclosure_audit as audit
         bound = {key: payload[key] for key in ('audit_snapshot', 'coverage')}
+        if 'house_originals' in payload:
+            bound['house_originals'] = payload['house_originals']
         snapshot = audit.validate_audit_snapshot(bound,
             date_filed_after=(reference - timedelta(days=30)).isoformat(),
             date_filed_before=reference.isoformat(), now=frozen_at)
@@ -79,7 +81,7 @@ def warning_for_source(payload, config, session, acquired_at):
         missing, additional = reconciliation['missing_ids'], reconciliation['additional_ids']
         if not missing or additional:
             return None
-        if (set(payload) != {'audit_snapshot', 'coverage', '_request_diagnostics', 'error', '_coverage'}
+        if (set(payload) - {'house_originals'} != {'audit_snapshot', 'coverage', '_request_diagnostics', 'error', '_coverage'}
                 or payload['error'] != _ERROR
                 or payload['_coverage'] != {'status': 'partial', 'reason_code': 'invalid_response',
                     'http_status': None, 'attempts': 0}
@@ -92,9 +94,15 @@ def warning_for_source(payload, config, session, acquired_at):
                 or snapshot['signals_enabled'] is not False or snapshot['model_context_enabled'] is not False):
             _invalid()
         diagnostics = payload['_request_diagnostics']
-        if type(diagnostics) is not list or len(diagnostics) != len(snapshot['raw_artifacts']):
+        count = len(snapshot['raw_artifacts'])
+        if type(diagnostics) is not list or len(diagnostics) < count:
             _invalid()
-        for row in diagnostics:
+        if 'house_originals' in payload:
+            from tradingagents.strategies.data_sources.congress_house_originals import validate_original_diagnostics
+            validate_original_diagnostics(diagnostics[count:], payload['house_originals'])
+        elif len(diagnostics) != count:
+            _invalid()
+        for row in diagnostics[:count]:
             # Native request_policy records the final successful operation once;
             # earlier transient attempts are represented by its recovered bit.
             # Five is that policy's hard retry bound, not a new retry allowance.

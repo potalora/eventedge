@@ -241,15 +241,20 @@ def test_native_responses_success_preserves_public_identity_and_client_headers()
 
 
 def test_fred_rest_contract_preserves_vintage_and_missing_marker(monkeypatch):
+    import requests
     from tradingagents.strategies.data_sources.fred_source import FREDSource
     observed = {}
     def transport(url, **options):
         observed.update(options)
-        return SimpleNamespace(status_code=200, headers={}, json=lambda: {
+        response = requests.Response()
+        response.status_code = 200
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps({
             "count":3,"offset":0,"limit":100000,"observations":[
             {"date":"2026-10-01","value":"4.0","realtime_start":"2026-10-07","realtime_end":"2026-10-07"},
             {"date":"2026-10-02","value":".","realtime_start":"2026-10-07","realtime_end":"2026-10-07"},
-            {"date":"2026-10-05","value":"5.0","realtime_start":"2026-10-07","realtime_end":"2026-10-07"}]})
+            {"date":"2026-10-05","value":"5.0","realtime_start":"2026-10-07","realtime_end":"2026-10-07"}]}).encode()
+        return response
     monkeypatch.setattr(FREDSource, "_transport_get", staticmethod(transport))
     result = FREDSource(api_key="private-test-key").fetch_series("UNRATE", "2026-10-01", "2026-10-06", as_of="2026-10-07")
     assert result.iloc[0] == 4 and result.iloc[2] == 5

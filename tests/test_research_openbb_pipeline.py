@@ -50,7 +50,7 @@ def test_openbb_available_research_freezes_every_enrichment_before_16_book_repla
     first, first_wire, _ = _run(pipeline)
     assert first['outcome'] == ('failed' if interrupted else 'degraded' if factor_failure else 'clean')
     assert calls and {name for name, _ in calls} == {'profiles', 'factors'}
-    assert native.prepare_calls == 1 and native.queries == [{'symbol': 'NVDA'}]
+    assert native.prepare_calls == 0 and native.queries == [{'symbol': 'NVDA'}]
     frozen = accepted_input_bytes(config)
     assert any(name.startswith('decision_inputs/') for name in frozen)
     before = deepcopy((fixture.calls, fixture.model_calls, calls, native.prepare_calls, native.queries))

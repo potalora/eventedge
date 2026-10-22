@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -95,6 +96,29 @@ class FREDSource:
         except ValueError:
             return False
 
+    @staticmethod
+    def _validate_observation_response(response):
+        """Recognize the provider's branded maintenance page before success.
+
+        Only this small, explicit HTML signature is transient. Arbitrary HTML,
+        malformed JSON and missing observations remain invalid responses.
+        Provider bodies and credential-bearing request URLs never enter errors.
+        """
+        content_type = response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+        body = response.content
+        if content_type == 'text/html' and len(body) <= 128 * 1024:
+            html = body.decode('utf-8', errors='replace')
+            if (re.search(r'<title>\s*Site Maintenance\s*\|\s*St\.\s*Louis Fed\s*<', html, re.I)
+                    and re.search(r'we[\x27\u2019]ll\s+be\s+back\s+soon', html, re.I)):
+                raise SourceFetchError('FRED provider maintenance', reason_code='provider_maintenance',
+                                       http_status=response.status_code)
+        try:
+            payload = response.json()
+        except ValueError:
+            raise SourceFetchError('FRED observations invalid', reason_code='invalid_response') from None
+        if not isinstance(payload, dict) or not isinstance(payload.get('observations'), list):
+            raise SourceFetchError('FRED observations invalid', reason_code='invalid_response')
+
     def _get_observation_records(self, series_id, **params):
         """Exhaust declared pages under the existing shared provider deadline.
 
@@ -105,6 +129,7 @@ class FREDSource:
         for _ in range(1000):
             response = provider_request("fred", "get", self._base_url, operation=series_id,
                 transport=self._transport_get,
+                response_validator=self._validate_observation_response,
                 params={"api_key": self._api_key, "series_id": series_id, "file_type": "json",
                         **params, "offset": offset, "limit": 100000},
                 timeout=provider_timeout("fred"))
@@ -203,7 +228,8 @@ class FREDSource:
         except Exception as exc:
             classified = source_fetch_error("FRED history fetch failed", exc)
             raise SourceFetchError("FRED history fetch failed", reason_code=classified.reason_code,
-                http_status=classified.http_status, failed_operations={series_id: classified.reason_code}) from None
+                http_status=classified.http_status, failed_operations={series_id: classified.reason_code},
+                failed_http_statuses={series_id: classified.http_status}, attempts=classified.attempts) from None
 
     def fetch_series(
         self, series_id: str, start: str, end: str, *, as_of: str | None = None
@@ -234,6 +260,8 @@ class FREDSource:
                 "FRED series fetch failed", reason_code=classified.reason_code,
                 http_status=classified.http_status,
                 failed_operations={series_id: classified.reason_code},
+                failed_http_statuses={series_id: classified.http_status},
+                attempts=classified.attempts,
                 partial_data=classified.partial_data,
             )
             logger.error("%s", safe_error)
@@ -246,10 +274,12 @@ class FREDSource:
         results: dict[str, pd.Series] = {}
         failures: dict[str, str] = {}
         http_statuses: dict[str, int] = {}
+        attempts = 0
         for sid in series_ids:
             try:
                 results[sid] = self.fetch_series(sid, start, end, as_of=as_of)
             except SourceFetchError as exc:
+                attempts = max(attempts, exc.attempts)
                 if isinstance(exc.partial_data.get(sid), pd.Series):
                     results[sid] = exc.partial_data[sid]
                 failures[sid] = exc.reason_code
@@ -260,6 +290,7 @@ class FREDSource:
                 "FRED series fetch failed", reason_code="batch_failure",
                 failed_operations=failures, failed_http_statuses=http_statuses,
                 partial_data=results,
+                attempts=attempts,
             )
             # Exhaustive adapter evidence is distinct from bounded diagnostics.
             error.complete_operation_outcomes = {sid: 'failed' if sid in failures else 'complete'

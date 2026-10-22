@@ -31,6 +31,19 @@ def test_terminal_failure_requires_repair_immediately(reason, status):
     assert result['alerts'][0]['kind'] == 'opened'
 
 
+def test_maintenance_remains_transient_and_recovers_only_on_fresh_accepted_session():
+    first = failure(reason='provider_maintenance', status=200)
+    initial = assess(first)
+    assert initial['open_incidents'][0]['reason_code'] == 'provider_maintenance'
+    assert initial['open_incidents'][0]['status'] == 'degraded'
+    assert initial['open_incidents'][0]['http_status'] == 200
+    current = report('2026-10-07', {'fred': 'success'})
+    result = assess(current, first)
+    assert result['history_status'] == 'available'
+    assert result['open_incidents'] == []
+    assert [alert['kind'] for alert in result['alerts']] == ['recovered']
+
+
 def test_three_distinct_sessions_escalate_and_repeat_is_identical():
     first = failure(); assess(first)
     second = failure('2026-10-07'); assess(second, first)

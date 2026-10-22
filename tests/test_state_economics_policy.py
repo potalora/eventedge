@@ -99,6 +99,18 @@ def test_single_failed_or_empty_state_is_explicit_incomplete_coverage():
     assert result['coverage']['failed_states']=={'TX':'invalid_response'}
 
 
+def test_provider_maintenance_is_valid_explicit_state_coverage_failure():
+    from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+    class Source:
+        def fetch_observation_history(self, *args, **kwargs):
+            raise SourceFetchError('FRED maintenance', reason_code='provider_maintenance', http_status=200)
+    result = policy().acquire_states(Source(), '2025-04-01', '2026-10-11')
+    coverage = policy().validate_snapshot(result)
+    assert coverage['complete'] is False and coverage['accepted_states'] == 0
+    assert len(coverage['failed_states']) == 51
+    assert set(coverage['failed_states'].values()) == {'provider_maintenance'}
+
+
 def test_release_clock_identity_exact_prior_month_and_no_bootstrap_stale_events():
     module=policy(); result=snapshot(); events=module.release_events(result,lookback_days=7)
     assert len(events)==51

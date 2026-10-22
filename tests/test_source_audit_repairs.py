@@ -107,7 +107,19 @@ def test_noaa_session_does_not_globally_replace_socket_connector(monkeypatch):
 
 def test_cftc_rolling_lookback_and_acquisition_availability(monkeypatch):
     import tradingagents.strategies.data_sources.cftc_source as mod
+    from test_cftc_freshness import calendar
     monkeypatch.setattr(mod, 'current_session_date', lambda: '2026-01-31', raising=False)
+    clocks = iter(['2026-01-31T12:00:00+00:00', '2026-01-31T12:00:01+00:00',
+                   '2026-01-31T12:00:02+00:00', '2026-01-31T12:00:03+00:00'])
+    monkeypatch.setattr(mod, 'acquisition_time', lambda: next(clocks))
+    schedule_calls = []
+    def schedule(provider, method, url, **kwargs):
+        assert (provider, method, url) == ('cftc', 'GET', mod.RELEASE_SCHEDULE_URL)
+        assert kwargs['operation'] == 'release_schedule'
+        schedule_calls.append(url)
+        return NS(content=calendar().encode(), close=lambda: None)
+    monkeypatch.setattr(mod, 'provider_request', schedule)
+    monkeypatch.setattr(mod, '_archive_get', lambda *a, **k: pytest.fail('unexpected CFTC network'))
     years = []
     options = []
     def annual(year, *spec):
@@ -116,12 +128,21 @@ def test_cftc_rolling_lookback_and_acquisition_availability(monkeypatch):
         dates = pd.date_range('2025-02-04', periods=48, freq='7D') if year == 2025 else pd.date_range('2026-01-06', periods=4, freq='7D')
         return pd.DataFrame({mod.COL_MARKET:[mod.COMMODITY_CODES['gold']]*len(dates),mod.COL_DATE:dates.strftime('%Y-%m-%d'),mod.COL_MM_LONG:[200]*48 if year==2025 else [10,20,30,100],mod.COL_MM_SHORT:[0]*len(dates)})
     monkeypatch.setattr(mod, '_annual_report', annual)
-    row = mod.CFTCSource().fetch({'commodities':['gold'],'lookback_weeks':52,'as_of':'2026-01-31'})['gold']
+    result = mod.CFTCSource().fetch({'commodities':['gold'],'lookback_weeks':52,'as_of':'2026-01-31'})
+    assert 'error' not in result
+    row = result['gold']
     assert set(years) >= {2025,2026}
     assert options == [('fut_disagg_txt_', 'f_year.txt') for _ in years]
     assert row['percentile'] == round(3/52,4) and row['lookback_observations'] == 52
     assert row['observation_date'] == '2026-01-27'
-    assert row['available_at'] == row['acquired_at'] and row['available_at'] > row['observation_date']
+    assert schedule_calls == [mod.RELEASE_SCHEDULE_URL]
+    assert result['coverage']['complete'] is True
+    assert result['coverage']['expected_release_at'] == '2026-01-30T15:30:00-05:00'
+    assert result['coverage']['archive_acquired_at'] == row['acquired_at'] == '2026-01-31T12:00:00+00:00'
+    assert result['coverage']['publication_assessed_at'] == '2026-01-31T12:00:01+00:00'
+    assert row['available_at'] == '2026-01-31T12:00:03+00:00'
+    assert row['available_at'] > row['acquired_at'] > row['observation_date']
+    assert row['availability_basis'] == 'forward_publication_validation_time'
 
 
 @pytest.mark.parametrize('provider', ['cftc','noaa','drought_monitor','usda'])

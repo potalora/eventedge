@@ -1,0 +1,138 @@
+{
+  "started_at": "2026-10-22T09:01:14.196258+00:00",
+  "production_read_only": true,
+  "model_calls": 0,
+  "window": {
+    "from": "2025-10-21",
+    "to": "2026-10-21"
+  },
+  "agencies": {
+    "DOL": {
+      "coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "agency": "DOL",
+        "posted_date_from": "2025-10-21",
+        "posted_date_to": "2026-10-21",
+        "pages": 1,
+        "total": 60,
+        "has_next": false,
+        "termination": "older_than_window"
+      },
+      "discovered_rows": 0,
+      "selected_row": null,
+      "selection_rule": "latest eligible row in descending publisher posted-date order"
+    },
+    "CFPB": {
+      "coverage": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "agency": "CFPB",
+        "posted_date_from": "2025-10-21",
+        "posted_date_to": "2026-10-21",
+        "pages": 1,
+        "total": 185,
+        "has_next": true,
+        "termination": "older_than_window"
+      },
+      "discovered_rows": 6,
+      "selected_row": {
+        "document_id": "CFPB-2026-0018-0001",
+        "title": "Request for Information: Promoting Access to Mortgage Credit",
+        "agency_id": "CFPB",
+        "document_type": "Proposed Rule",
+        "posted_date": "2026-07-09T04:00:00Z",
+        "comment_end_date": "2026-08-11T03:59:59Z",
+        "summary": "",
+        "docket_id": "CFPB-2026-0018"
+      },
+      "selection_rule": "latest eligible row in descending publisher posted-date order"
+    }
+  },
+  "finished_at": "2026-10-22T09:02:23.490251+00:00",
+  "scope": "at_most_one_latest_notice_per_agency_from_explicit_year_window_not_current_corpus",
+  "body_started_at": "2026-10-22T09:02:22.205193+00:00",
+  "candidate_code_sha256": {
+    "regulation_government_copy": "519a99aa4e022d585b97eb6eca3a9e1e948b94a936e931723d02bbce979ad75c",
+    "regulation_evidence": "8259ff46e6b85891d95a5cff1a9b8ff1d1f4b14abcd72d183e989b43f59e2187"
+  },
+  "body_observations": {
+    "DOL": {
+      "status": "no_eligible_notice_in_explicit_window",
+      "complete_body_qualification_exercised": false
+    },
+    "CFPB": {
+      "selected_row": {
+        "document_id": "CFPB-2026-0018-0001",
+        "title": "Request for Information: Promoting Access to Mortgage Credit",
+        "agency_id": "CFPB",
+        "document_type": "Proposed Rule",
+        "posted_date": "2026-07-09T04:00:00Z",
+        "comment_end_date": "2026-08-11T03:59:59Z",
+        "summary": "",
+        "docket_id": "CFPB-2026-0018"
+      },
+      "discovery_complete": false,
+      "scope": "one_actual_notice_not_a_complete_year_or_current_window",
+      "source_reason_code": "batch_failure",
+      "source_graph_valid": true,
+      "content_coverage": {
+        "discovery_complete": false,
+        "content_complete": false,
+        "required_rows": 1,
+        "complete_rows": 0,
+        "failed_rows": 1,
+        "consumed_bytes": 3933,
+        "reserved_bytes": 0,
+        "byte_limit": 33554432,
+        "byte_budget_exhausted": false,
+        "policy": "complete_document_text_v1",
+        "retrieval_policy": "verified_government_copy_v2",
+        "manifest_sha256": "bd55fa4b52a322e7c3e88329a624f907e4743e152542a329d1d165b712cdd0a2",
+        "evidence_sha256": {},
+        "failed_document_ids": [
+          "CFPB-2026-0018-0001"
+        ]
+      },
+      "failure_codes": {
+        "CFPB-2026-0018-0001": {
+          "code": "unsupported_regulation_government_notice",
+          "reason_code": "http_error",
+          "http_status": 403
+        }
+      },
+      "complete_originals": {},
+      "retrieval_attempts": {
+        "CFPB-2026-0018-0001": [
+          {
+            "http_status": 403,
+            "url": "https://downloads.regulations.gov/CFPB-2026-0018-0001/content.html",
+            "bytes": 919,
+            "sha256": "7791e15ad03d24361183ab761e3661f077f2cc2a54fe6527c84dfe4fac279a36"
+          }
+        ]
+      },
+      "detail_identity": {
+        "agencyId": "CFPB",
+        "documentType": "Proposed Rule",
+        "postedDate": "2026-07-09T04:00:00Z",
+        "frDocNum": "2026-13834",
+        "startEndPage": "42382 - 42386",
+        "cfrPart": "12 CFR Parts 1024 and 1026",
+        "pageCount": 0,
+        "withdrawn": false
+      },
+      "official_body_diagnostic": {
+        "url": "https://www.govinfo.gov/content/pkg/FR-2026-07-09/html/2026-13834.htm",
+        "http_status": 200,
+        "bytes": 39785,
+        "sha256": "3288a7d133f103d19307e58f1cd98440b147f9911b2bb54ea99391511f08cae5",
+        "title": "Federal Register, Volume 91 Issue 130 (Thursday, July 9, 2026)",
+        "visible_characters": 38666,
+        "fr_number_present": true,
+        "docket_id_present": true,
+        "accepted_by_source": false
+      }
+    }
+  }
+}
