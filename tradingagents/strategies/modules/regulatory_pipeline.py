@@ -71,6 +71,7 @@ class RegulatoryPipelineStrategy:
             if not rule.get("document_id"):
                 continue
             agency = rule.get("agency_id", "")
+            linked = reg_data.get('regulation_evidence', {}).get('publication_policy') == 'linked_publications_v1'
             # No agency filter — all agencies can move sectors
 
             candidates.append(
@@ -79,12 +80,19 @@ class RegulatoryPipelineStrategy:
                     date=date,
                     direction="short",  # Regulation typically bearish for affected
                     score=0.5,
+                    journal_only=bool(linked and rule.get('publication_kind') == 'historical_repost'),
                     metadata={
                         "document_id": rule.get("document_id", ""),
                         "title": rule.get("title", ""),
                         "agency_id": agency,
                         "summary": '' if evidence_policy else rule.get("summary", "")[:2000],
                         "posted_date": rule.get("posted_date", ""),
+                        **({'regulation_publication_policy': 'linked_publications_v1',
+                            'available_at': rule.get('available_at'),
+                            'publication_kind': rule.get('publication_kind'),
+                            **({'non_actionable_reason': 'historical_regulatory_repost'}
+                                if rule.get('publication_kind') == 'historical_repost' else {})}
+                           if linked else {}),
                         "needs_llm_analysis": True,
                         "analysis_type": "regulation",
                         **({'regulation_evidence_policy': evidence_policy,

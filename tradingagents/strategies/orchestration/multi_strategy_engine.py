@@ -315,6 +315,8 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from .regulation_publication_policy import validate_configuration as publication_configured
+        publication_configured(self.config)
         from ..data_sources.regulation_graphics_grid import configured as graphics_execution_configured
         graphics_execution_configured(self.config)
         from ..data_sources.regulation_assessment import configured as regulation_assessment_configured
@@ -476,9 +478,11 @@ class MultiStrategyEngine:
                 for source in scope_errors):
             raise ValueError('invalid_scoped_source_evidence')
         from .regulation_inputs import validate_regulation_policy
+        from .regulation_publication_policy import source_required as publication_source_required
         regulation_source_scope = None
         try:
-            regulation_source_scope = validate_regulation_policy(data, self.ar_config)
+            if publication_source_required(self.ar_config, self.paper_trade_strategies) or 'regulations' in data:
+                regulation_source_scope = validate_regulation_policy(data, self.ar_config)
         except ValueError:
             if resilience:
                 raise
@@ -2240,6 +2244,9 @@ class MultiStrategyEngine:
         for s in self.paper_trade_strategies:
             needed_sources.update(s.data_sources)
         needed_sources.difference_update(self.ar_config.get("retired_sources", {}))
+        from .regulation_publication_policy import source_required as publication_source_required
+        if not publication_source_required(self.ar_config, self.paper_trade_strategies):
+            needed_sources.discard('regulations')
 
         available = set(self.registry.available_sources())
         if self.ar_config.get('bounded_document_research_policy') is not None:
@@ -2641,6 +2648,8 @@ class MultiStrategyEngine:
                if self.ar_config.get('regulation_evidence_policy') is not None else {}),
             **({'retrieval_policy': self.ar_config['regulation_retrieval_policy']}
                if self.ar_config.get('regulation_retrieval_policy') is not None else {}),
+            **({'publication_policy': self.ar_config['regulation_publication_policy']}
+               if self.ar_config.get('regulation_publication_policy') is not None else {}),
         )
         result["proposed_rules"] = list(rules)
         if hasattr(rules, "coverage"):
@@ -3385,17 +3394,23 @@ class MultiStrategyEngine:
                 )
             elif analysis_type == "insider_activity":
                 cluster_type = c.metadata.get("cluster_type", "")
+                form4_options = {}
+                if 'form4_context' in c.metadata or 'form4_evidence_policy' in c.metadata:
+                    from .form4_inputs import form4_analysis_inputs
+                    form4_options['form4_context'] = form4_analysis_inputs(c, filing_data, universe)
                 if cluster_type == "buy_cluster":
                     llm_result = analyzer.analyze_insider_context(
                         c.metadata.get("filings", []),
                         c.ticker,
                         regime_context=regime_context,
+                        **form4_options,
                     )
                 elif cluster_type == "sell_pattern":
                     llm_result = analyzer.analyze_10b5_1_plan(
                         c.metadata.get("filings", []),
                         c.ticker,
                         regime_context=regime_context,
+                        **form4_options,
                     )
             elif analysis_type == "filing_change":
                 llm_result = analyzer.analyze_filing_change(

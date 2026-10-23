@@ -548,14 +548,23 @@ def _regulation_transport_recoveries(payload: dict, validated_scope: dict | None
         return {}, False
     graph = payload['regulation_evidence']
     proofs = []
-    for evidence in graph['corpus'].values():
+    from .regulation_publication_policy import SOURCE_VERSION
+    linked = graph.get('version') == SOURCE_VERSION
+    documents = graph['publication_nodes'] if linked else graph['corpus']
+    for evidence in documents.values():
         for unit in evidence['units']:
-            if 'primary_failure' in unit:
-                proofs.append((unit['primary_failure']['http_status'], {
+            failure = unit.get('primary_failure')
+            if linked:
+                attempt = evidence['capture']['primary_attempt']
+                failure = (attempt if unit['role'] == 'primary' and 'government_copy' in unit
+                    and attempt['resource_id'] == unit['resource_id']
+                    and attempt['http_status'] in (403, 404, 410) else None)
+            if failure is not None:
+                proofs.append((failure['http_status'], {
                     'policy': graph['retrieval_policy'],
                     'manifest_sha256': graph['manifest_sha256'],
                     'resource_id': unit['resource_id'], 'unit_id': unit['unit_id'],
-                    'primary_receipt_sha256': unit['primary_failure']['receipt']['sha256'],
+                    'primary_receipt_sha256': failure['receipt']['sha256'],
                     'government_receipt_sha256': unit['receipt']['sha256']}))
     events = payload.get('_request_diagnostics', [])
     if not proofs or not events:
@@ -579,7 +588,7 @@ def _regulation_transport_recoveries(payload: dict, validated_scope: dict | None
     return recovered, False
 
 
-def _sources(state: Path, generation: str, session: str, commit: str, diagnose, *, retained_sources=None, operating_profile=None) -> dict:
+def _sources(state: Path, generation: str, session: str, commit: str, diagnose, *, retained_sources=None, operating_profile=None, frozen_config=None) -> dict:
     result = {'recovered':[], 'unresolved':[], 'observations':{}}
     slot = configuration_fingerprint({'generation':generation,'session':session})
     path = state / 'source_inputs' / (slot+'.json')
@@ -645,10 +654,8 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
             result['filing_attribution_scope'] = attribution_scope
         regulation_graph = envelope['payload'].get('regulations', {}).get('regulation_evidence')
         from .regulation_inputs import validate_regulation_policy
-        regulation_config = ({'regulation_evidence_policy': regulation_graph.get('policy')}
-                             if isinstance(regulation_graph, dict) else {})
-        if isinstance(regulation_graph, dict) and 'retrieval_policy' in regulation_graph:
-            regulation_config['regulation_retrieval_policy'] = regulation_graph['retrieval_policy']
+        from .regulation_publication_policy import source_configuration
+        regulation_config = source_configuration(regulation_graph, frozen_config)
         regulation_scope = validate_regulation_policy(envelope['payload'], regulation_config)
         regulation_recoveries, regulation_mismatch = _regulation_transport_recoveries(
             envelope['payload'].get('regulations', {}), regulation_scope)
@@ -872,7 +879,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         ]
         report['preflight_runtime_observations'] = _preflight_runtime_observations(attempts, generation, session)
         retained_sources = {}
-        report['sources'] = _sources(state,generation,session,commit,diagnose, retained_sources=retained_sources, operating_profile=operating_profile)
+        report['sources'] = _sources(state,generation,session,commit,diagnose, retained_sources=retained_sources,
+            operating_profile=operating_profile, frozen_config=frozen_profile)
         completion_source = retained_sources.get('_completion_source_envelope')
         disabled = report['sources'].get('declared_exclusions', {})
         from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
@@ -961,19 +969,23 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                     from .generation_config import read_generation_config
                     _, profile, _ = read_generation_config(metadata['config_file'], metadata['config_sha256'])
                     profile_ar = profile.get('autoresearch', {})
-                    if (profile_ar.get('regulation_assessment_policy') is not None
+                    if (profile_ar.get('regulation_publication_policy') is not None
+                            or expected_regulation.get('publication_policy') is not None
+                            or profile_ar.get('regulation_assessment_policy') is not None
                             or 'graphics_execution_policy' in profile_ar
                             or 'regulation_prompt_budget_policy' in profile_ar
                             or 'regulation_graphics_model_policy' in profile_ar):
                         from ..data_sources.regulation_assessment import configured as assessment_configured
                         assessment_configured(profile_ar)
                         if (profile_ar.get('regulation_evidence_policy') != expected_regulation['policy']
-                                or profile_ar.get('regulation_retrieval_policy') != expected_regulation.get('retrieval_policy')):
+                                or profile_ar.get('regulation_retrieval_policy') != expected_regulation.get('retrieval_policy')
+                                or profile_ar.get('regulation_publication_policy') != expected_regulation.get('publication_policy')):
                             raise ValueError('frozen regulation policy differs from source')
                     if 'graphics_execution_policy' in profile_ar or 'regulation_graphics_model_policy' in profile_ar:
                         from ..data_sources.regulation_graphics_grid import configured as graphics_configured
                         graphics_configured(profile)
-                    for key in ('regulation_assessment_policy', 'graphics_execution_policy', 'regulation_prompt_budget_policy',
+                    for key in ('regulation_publication_policy', 'decision_clock_policy',
+                            'regulation_assessment_policy', 'graphics_execution_policy', 'regulation_prompt_budget_policy',
                             'regulation_graphics_model_policy'):
                         if profile_ar.get(key) is not None:
                             assessment_config[key] = profile_ar[key]

@@ -24,6 +24,7 @@ BASE_URL = "https://api.regulations.gov/v4"
 _RATE_DELAY = 0.5  # Conservative rate limiting
 MAX_REGULATION_SOURCE_BYTES = 32 * 1024**2
 _CONTENT_BUDGET = ContextVar('regulations_content_bytes', default=None)
+_PUBLICATION_DISCOVERY_TRACE = ContextVar('regulations_publication_discovery_trace', default=None)
 
 
 def _check_source_publication(payload):
@@ -176,6 +177,13 @@ class RegulationsSource:
                         raise SourceFetchError("Regulations request failed", reason_code="http_error", http_status=response.status_code)
                     raw = _read_response(response, 32*1024*1024-used_bytes)
                     used_bytes += len(raw)
+                    trace = _PUBLICATION_DISCOVERY_TRACE.get()
+                    if trace is not None:
+                        from .regulation_evidence import original_receipt
+                        trace.append({'agency_id': agency_id, 'page': page,
+                            'page_size': page_size, 'receipt': original_receipt(raw,
+                                observed_at=datetime.now(timezone.utc).isoformat(),
+                                url=BASE_URL + '/documents')})
                     data = _page_json(raw)
                     provider_timeout("regulations")
                 finally:
@@ -244,11 +252,18 @@ class RegulationsSource:
         agencies: list[str] | None = None,
         days_back: int = 30,
         *, as_of: str | None = None, evidence_policy: str | None = None,
-        retrieval_policy: str | None = None,
+        retrieval_policy: str | None = None, publication_policy: str | None = None,
     ) -> list[dict]:
         """Get recently proposed rules, optionally filtered by agency."""
         from datetime import datetime, timedelta
 
+        if publication_policy is not None:
+            from .regulation_publications import PUBLICATION_POLICY, acquire_publication_rules
+            if (type(publication_policy) is not str or publication_policy != PUBLICATION_POLICY
+                    or evidence_policy != 'complete_document_text_v1'):
+                raise ValueError('invalid_regulation_publication_policy')
+            return acquire_publication_rules(self, agencies, days_back, as_of=as_of,
+                                             retrieval_policy=retrieval_policy)
         if retrieval_policy is not None:
             from .regulation_government_copy import POLICIES as RETRIEVAL_POLICIES
             if (type(retrieval_policy) is not str or retrieval_policy not in RETRIEVAL_POLICIES
@@ -259,11 +274,11 @@ class RegulationsSource:
             if evidence_policy != POLICY:
                 raise ValueError('invalid_regulation_evidence_policy')
             if current_provider_deadline('regulations') is None:
-                from .regulation_government_copy import POLICY_V3
+                from .regulation_government_copy import GRAPHICS_POLICIES
                 # V3's retained graphic corpus adds up to 128 paced requests.
                 # The current 98 assets alone require 49 seconds at the fixed
                 # provider rate; an outer owner can still impose a tighter cap.
-                seconds = 180 if retrieval_policy == POLICY_V3 else 60
+                seconds = 180 if retrieval_policy in GRAPHICS_POLICIES else 60
                 with provider_budget('regulations', time.monotonic() + seconds):
                     return self.get_recent_proposed_rules(agencies, days_back, as_of=as_of,
                                                          evidence_policy=evidence_policy, retrieval_policy=retrieval_policy)
@@ -420,7 +435,7 @@ class RegulationsSource:
                                         and attempt['http_status'] in {403, 404, 410}):
                                     raise
                                 from .regulation_government_copy import (
-                                    POLICY_V3, EXTENDED_POLICIES, MAX_GRAPHIC_BYTES,
+                                    GRAPHICS_POLICIES, EXTENDED_POLICIES, MAX_GRAPHIC_BYTES,
                                     government_copy_plan, government_crosswalk_url, extract_government_copy,
                                     government_graphics_plan,
                                 )
@@ -469,7 +484,7 @@ class RegulationsSource:
                                             if metadata_attempt:
                                                 retrieval_attempts.append({'resource_id': rid, **metadata_attempt})
                                         government_copies[rid]['crosswalk_receipt'] = metadata_attempt['receipt']
-                                if retrieval_policy == POLICY_V3 and government_plan['identity']['agency_id'] == 'SEC':
+                                if retrieval_policy in GRAPHICS_POLICIES and government_plan['identity']['agency_id'] == 'SEC':
                                     graphics_plan = government_graphics_plan(raw_detail, body,
                                         retrieval_policy=retrieval_policy, crosswalk_receipt=crosswalk_receipt,
                                         check=lambda: provider_timeout('regulations'))
@@ -559,6 +574,8 @@ class RegulationsSource:
             as_of=params.get("as_of"),
             evidence_policy=params.get('evidence_policy'),
             retrieval_policy=params.get('retrieval_policy'),
+            **({'publication_policy': params['publication_policy']}
+               if params.get('publication_policy') is not None else {}),
         )
         result = collection_envelope(rules)
         if hasattr(rules, 'regulation_evidence'):

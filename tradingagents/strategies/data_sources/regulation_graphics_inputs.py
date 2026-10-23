@@ -9,7 +9,11 @@ def graphics_assets(evidence):
     research conclusion. No caller-provided transcript certifies these bytes.
     """
     from .regulation_evidence import validate_regulation_evidence, receipt_bytes
-    validate_regulation_evidence(evidence)
+    if evidence.get('version') == 'regulation-publication-analysis-v1':
+        from .regulation_publications import validate_analysis_view
+        validate_analysis_view(evidence)
+    else:
+        validate_regulation_evidence(evidence)
     assets, seen = [], set()
     try:
         for unit in evidence['units']:

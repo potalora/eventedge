@@ -1,0 +1,43 @@
+{
+  "source": "official_sec_original_ownership_xml",
+  "files": [
+    {
+      "filename": "aapl_original.xml",
+      "accession": "0001140361-26-040127",
+      "issuer_cik": "0000320193",
+      "filing_date": "2026-10-19",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000114036126040127/form4.xml",
+      "observed_at": "2026-10-22T23:23:53.980605+00:00",
+      "bytes": 23004,
+      "sha256": "63d65b6e17d6566bbdccfdb96db267169bc6984a0e552bb363c87739b9cc8dac",
+      "http_status": 200,
+      "transformations": []
+    },
+    {
+      "filename": "aapl_amendment.xml",
+      "accession": "0000320193-22-000078",
+      "issuer_cik": "0000320193",
+      "filing_date": "2022-08-22",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019322000078/wf-form4a_166120817922787.xml",
+      "observed_at": "2026-10-22T23:24:32.548075+00:00",
+      "bytes": 5992,
+      "sha256": "1b4a83867095a90eba3f3745af7273192351593e33bf9139e7892c93ecd01976",
+      "http_status": 200,
+      "transformations": []
+    },
+    {
+      "filename": "berkshire_joint.xml",
+      "accession": "0001193125-26-414744",
+      "issuer_cik": "0000920760",
+      "filing_date": "2026-10-05",
+      "source_url": "https://www.sec.gov/Archives/edgar/data/1067983/000119312526414744/ownership.xml",
+      "observed_at": "2026-10-22T23:24:32.724775+00:00",
+      "bytes": 35817,
+      "sha256": "41d9d7da61ce8e63d6f23e185f3ea1039e289574f99613db415c227e5c2adc4a",
+      "http_status": 200,
+      "transformations": [],
+      "metadata_source_url": "https://data.sec.gov/submissions/CIK0001067983.json",
+      "metadata_source_sha256": "ab313de3258a0251e6f41c0398573a0c5a94618fd2f67b9cf1d136f3eaad9da2"
+    }
+  ]
+}

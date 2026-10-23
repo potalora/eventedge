@@ -620,12 +620,19 @@ Analyze material changes and return JSON.""" + self._regime_suffix(regime_contex
         form4_filings: list[dict],
         ticker: str,
         regime_context: dict | None = None,
+        *, form4_context: dict | None = None,
     ) -> dict[str, Any]:
         """P4: Assess insider buy conviction from Form 4 filing context.
 
         Returns dict with: direction, conviction (0-1), cluster_size,
         notable_insiders, rationale.
         """
+        if form4_context is not None:
+            from ..orchestration.form4_inputs import prepare_form4_request
+            request = prepare_form4_request(form4_context, ticker=ticker,
+                cluster_type='buy_cluster', regime_context=regime_context)
+            result = self._call_llm(request['system'], request['user'], role='bounded')
+            return _parse_json_response(result) if result else {}
         system = """You are analyzing SEC Form 4 insider transaction filings.
 
 Key fields in each filing:
@@ -669,6 +676,7 @@ Analyze insider trading patterns and return JSON.""" + self._regime_suffix(regim
         form4_filings: list[dict],
         ticker: str,
         regime_context: dict | None = None,
+        *, form4_context: dict | None = None,
     ) -> dict[str, Any]:
         """P7: Detect 10b5-1 plan red flags from Form 4 data.
 
@@ -678,6 +686,12 @@ Analyze insider trading patterns and return JSON.""" + self._regime_suffix(regim
         Returns dict with: direction, conviction (0-1), red_flags (list),
         rationale.
         """
+        if form4_context is not None:
+            from ..orchestration.form4_inputs import prepare_form4_request
+            request = prepare_form4_request(form4_context, ticker=ticker,
+                cluster_type='sell_pattern', regime_context=regime_context)
+            result = self._call_llm(request['system'], request['user'], role='bounded')
+            return _parse_json_response(result) if result else {}
         system = """You are analyzing SEC Form 4 filings for 10b5-1 trading plan red flags.
 Red flags include: plans adopted shortly before material announcements,
 frequent plan modifications or terminations, sales clustering at price peaks,

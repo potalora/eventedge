@@ -85,6 +85,13 @@ class InsiderActivityStrategy:
         """
         edgar_data = data.get("edgar", {})
         form4s = edgar_data.get("form4", {})
+        qualified = 'form4_qualification' in edgar_data
+        if qualified:
+            from ..data_sources.form4_evidence import validate_form4_window
+            qualification = validate_form4_window(edgar_data['form4_qualification'])
+            form4s = {}
+            for row in qualification['admitted_transactions']:
+                form4s.setdefault(row['ticker'], []).append(row)
 
         if not form4s:
             return []
@@ -109,8 +116,9 @@ class InsiderActivityStrategy:
                     continue
                 identity = (owner, f.get("transaction_id") or (_source_filing_key(f), f.get("transaction_date"), f.get("transaction_code"), shares, price))
                 unique.setdefault(identity, f)
-            buys = [f for f in unique.values() if f.get("open_market") is True and f.get("transaction_type") == "buy" and f.get("transaction_code") == "P" and f.get("acquired_disposed") == "A"]
-            sells = [f for f in unique.values() if f.get("open_market") is True and f.get("transaction_type") == "sell" and f.get("transaction_code") == "S" and f.get("acquired_disposed") == "D"]
+            economic_flag = 'economic_purchase_sale' if qualified else 'open_market'
+            buys = [f for f in unique.values() if f.get(economic_flag) is True and f.get("transaction_type") == "buy" and f.get("transaction_code") == "P" and f.get("acquired_disposed") == "A"]
+            sells = [f for f in unique.values() if f.get(economic_flag) is True and f.get("transaction_type") == "sell" and f.get("transaction_code") == "S" and f.get("acquired_disposed") == "D"]
 
             # Skip if no parsed transaction data — metadata-only filings
             # aren't actionable (LLM can't distinguish buys from awards)
@@ -126,8 +134,8 @@ class InsiderActivityStrategy:
                     f.get("shares", 0) * f.get("price_per_share", 0) for f in buys
                 )
 
-                # Score: cluster size × officer bonus × open-market premium, normalized to [0, 1]
-                open_market = [f for f in buys if f.get("transaction_code") == "P"]
+                # Qualified purchase codes carry no exchange-execution premium.
+                open_market = [] if qualified else [f for f in buys if f.get("transaction_code") == "P"]
                 raw = (
                     len(unique_buyers)
                     * (1.5 if officer_buys else 1.0)
@@ -149,8 +157,10 @@ class InsiderActivityStrategy:
                             "officer_buys": len(officer_buys),
                             "total_shares": total_shares,
                             "total_value": round(total_value, 2),
-                            "open_market_buys": len(open_market),
-                            "filings": buys[:5],
+                            **({'economic_purchase_count': len(buys),
+                                'exchange_execution_status': 'unknown'} if qualified
+                               else {'open_market_buys': len(open_market)}),
+                            "filings": buys if qualified else buys[:5],
                             "filing_keys": sorted(
                                 _source_filing_key(filing)
                                 for filing in buys
@@ -199,7 +209,7 @@ class InsiderActivityStrategy:
                             "unique_sellers": len(unique_sellers),
                             "officer_sells": len(officer_sells),
                             "total_sell_shares": total_sell_shares,
-                            "filings": sells[:5],
+                            "filings": sells if qualified else sells[:5],
                             "filing_keys": sorted(
                                 _source_filing_key(filing)
                                 for filing in sells
@@ -225,6 +235,14 @@ class InsiderActivityStrategy:
                 )
 
         for candidate in candidates:
+            if qualified:
+                from ..orchestration.form4_inputs import make_form4_context
+                from ..data_sources.form4_evidence import POLICY
+                candidate.metadata.update(form4_evidence_policy=POLICY,
+                    form4_context=make_form4_context(qualification, ticker=candidate.ticker,
+                        cluster_type=candidate.metadata['cluster_type']),
+                    non_actionable_reason='form4_qualification_only')
+                candidate.journal_only = True
             if not candidate.metadata.get("deterministic_evidence_complete"):
                 candidate.journal_only = True
                 candidate.metadata["non_actionable_reason"] = "incomplete_insider_inputs"

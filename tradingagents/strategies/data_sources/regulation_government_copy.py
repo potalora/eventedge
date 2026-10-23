@@ -18,8 +18,10 @@ from urllib.parse import urlsplit
 POLICY = 'verified_government_copy_v1'
 POLICY_V2 = 'verified_government_copy_v2'
 POLICY_V3 = 'verified_government_copy_v3'
-POLICIES = frozenset({POLICY, POLICY_V2, POLICY_V3})
-EXTENDED_POLICIES = frozenset({POLICY_V2, POLICY_V3})
+POLICY_V4 = 'verified_government_copy_v4'
+POLICIES = frozenset({POLICY, POLICY_V2, POLICY_V3, POLICY_V4})
+EXTENDED_POLICIES = frozenset({POLICY_V2, POLICY_V3, POLICY_V4})
+GRAPHICS_POLICIES = frozenset({POLICY_V3, POLICY_V4})
 MAX_GRAPHICS = 128
 MAX_GRAPHIC_BYTES = 2 * 1024**2
 _GRAPHIC_MARKER = re.compile(r'(?m)^[ \t]*\[GRAPHIC\] \[TIFF OMITTED\] (TP[0-9]{2}[A-Z]{2}[0-9]{2}\.[0-9]{3})[ \t]*$')
@@ -104,7 +106,7 @@ def _graphics_plan(proof, crosswalk_receipt):
 
 def government_graphics_plan(raw_detail, raw_body, *, retrieval_policy, crosswalk_receipt, check=None):
     """Inventory alone never certifies a complete corpus or semantic reading."""
-    if retrieval_policy != POLICY_V3:
+    if retrieval_policy not in GRAPHICS_POLICIES:
         _fail('unsupported_regulation_government_graphics')
     proof = _copy_text(raw_detail, raw_body, retrieval_policy=retrieval_policy,
         crosswalk_receipt=crosswalk_receipt, check=check)
@@ -167,8 +169,8 @@ def extract_government_copy(raw_detail, raw_body, *, check=None, retrieval_polic
     from .regulation_evidence import receipt_bytes
     proof = _copy_text(raw_detail, raw_body, check=check, retrieval_policy=retrieval_policy,
         crosswalk_receipt=crosswalk_receipt)
-    plan = _graphics_plan(proof, crosswalk_receipt) if retrieval_policy == POLICY_V3 else []
-    if graphics_receipts is not None and (retrieval_policy != POLICY_V3 or type(graphics_receipts) is not dict):
+    plan = _graphics_plan(proof, crosswalk_receipt) if retrieval_policy in GRAPHICS_POLICIES else []
+    if graphics_receipts is not None and (retrieval_policy not in GRAPHICS_POLICIES or type(graphics_receipts) is not dict):
         _fail('invalid_regulation_government_graphics')
     receipts = {} if graphics_receipts is None else graphics_receipts
     if set(receipts) != {row['graphic_id'] for row in plan}:
@@ -290,9 +292,11 @@ def government_copy_plan(raw_detail: bytes, *, retrieval_policy=POLICY, crosswal
         attrs = item['attributes']
         docid, docket = item['id'], attrs['docketId']
         agency = attrs.get('agencyId')
-        if agency == 'SEC' and retrieval_policy == POLICY_V3:
+        if agency == 'SEC' and retrieval_policy in GRAPHICS_POLICIES:
             return _sec_plan(raw_detail, crosswalk_receipt)
         allowed = {'EPA'} if retrieval_policy == POLICY else {'EPA', 'FDA', 'FTC'}
+        if retrieval_policy == POLICY_V4:
+            allowed.add('CFPB')
         if agency not in allowed:
             _fail('unsupported_regulation_government_notice')
         frnum, posted, pages = attrs['frDocNum'], attrs['postedDate'], attrs['startEndPage']
@@ -321,8 +325,9 @@ def government_copy_plan(raw_detail: bytes, *, retrieval_policy=POLICY, crosswal
             _fail('invalid_regulation_government_identity')
         cfr = attrs['cfrPart']
         if (type(cfr) is not str or not (
-                re.fullmatch(r'[1-9][0-9]? CFR Part [1-9][0-9]{0,5}', cfr)
-                or agency == 'EPA' and _epa_multiple_parts(cfr))):
+                agency != 'CFPB' and (re.fullmatch(r'[1-9][0-9]? CFR Part [1-9][0-9]{0,5}', cfr)
+                    or agency == 'EPA' and _epa_multiple_parts(cfr))
+                or agency == 'CFPB' and cfr == '12 CFR Parts 1024 and 1026')):
             _fail('invalid_regulation_government_identity')
         if attrs.get('withdrawn') is not False or attrs.get('restrictReason') or attrs.get('restrictReasonType'):
             _fail('invalid_regulation_government_identity')
@@ -354,6 +359,15 @@ def government_copy_plan(raw_detail: bytes, *, retrieval_policy=POLICY, crosswal
                         last_page=last, page_count=count, cfr_part=cfr)
         if retrieval_policy in EXTENDED_POLICIES:
             identity['catalogue_page_count'] = declared_count
+        if agency == 'CFPB':
+            # The demonstrated catalogue uses a colon where the original says
+            # "Regarding". Preserve and bind both titles by this exact prefix
+            # transformation; unrelated titles never establish identity.
+            title = attrs.get('title')
+            prefix = 'Request for Information: '
+            if type(title) is not str or not title.startswith(prefix) or not title[len(prefix):].strip():
+                _fail('invalid_regulation_government_identity')
+            identity['notice_title'] = 'Request for Information Regarding ' + title[len(prefix):]
         return {'url': 'https://www.govinfo.gov/content/pkg/FR-' + posted[:10] + '/html/' + frnum + '.htm',
                 'identity': identity}
     except (KeyError, TypeError, UnicodeError, RecursionError, OverflowError, json.JSONDecodeError):
@@ -365,7 +379,7 @@ def government_copy_plan(raw_detail: bytes, *, retrieval_policy=POLICY, crosswal
 
 
 def government_crosswalk_url(raw_detail, *, retrieval_policy=POLICY):
-    if retrieval_policy == POLICY_V3:
+    if retrieval_policy in GRAPHICS_POLICIES:
         try:
             if json.loads(raw_detail)['data']['attributes'].get('agencyId') == 'SEC':
                 _, identity = _sec_detail(raw_detail)
@@ -596,6 +610,12 @@ def _notice_identity(title, text, identity, crosswalk=None):
             + r'\n\n\[(?P<release>[^\[\]]{1,512})\]\nRIN (?P<rin>[0-9]{4}-[A-Z0-9]{4})\n\n')
         agency_line = r'Securities and Exchange Commission\.'
         action = r'Proposed rule\.'
+    elif agency == 'CFPB':
+        authority = (r'CONSUMER FINANCIAL PROTECTION BUREAU\n\n' + re.escape(identity['cfr_part'])
+            + r'\n\n\[Docket No\. ' + re.escape(identity['docket_id'])
+            + r'\](?:\nRIN (?P<rin>[0-9]{4}-[A-Z0-9]{4}))?\n\n')
+        agency_line = r'Consumer Financial Protection Bureau\.'
+        action = r'Notice; request for information\.'
     else:
         _fail('unsupported_regulation_government_notice')
     gap = r'  ?' if agency == 'SEC' else ' '
@@ -603,6 +623,8 @@ def _notice_identity(title, text, identity, crosswalk=None):
         r'(?:={10,}\n)?-{10,}\n\n' + authority + r'(?P<heading>[^\[<>]+?)\n\nAGENCY:' + gap
         + agency_line + r'\n\nACTION:' + gap + r'(?P<action>' + action + r')\n', text[notice_start:])
     if preamble is None or not preamble['heading'].strip():
+        _fail('invalid_regulation_government_identity')
+    if agency == 'CFPB' and ' '.join(preamble['heading'].split()) != identity['notice_title']:
         _fail('invalid_regulation_government_identity')
     if agency == 'SEC':
         release = ' '.join(re.sub(r'-\n(?=[A-Za-z0-9])', '-', preamble['release']).split())
@@ -625,9 +647,10 @@ def _notice_identity(title, text, identity, crosswalk=None):
         _fail('invalid_regulation_government_identity')
     headers = re.findall(r'\[FR Doc No:[^\n]*\]', text)
     footers = re.findall(r'\[FR Doc\.[^\n]*\]', text)
+    billing = '4810-AM-P' if agency == 'CFPB' else r'[0-9]{4}-[0-9]{2}-[A-Z]'
     footer = re.search(r'\n\[FR Doc\. ' + re.escape(identity['fr_document_number'])
         + r' Filed ([0-9]{1,2})-([0-9]{1,2})-([0-9]{2}); ([0-9]{1,2}):([0-9]{2}) (am|pm)\]\n'
-        r'BILLING CODE [0-9]{4}-[0-9]{2}-[A-Z]\n*\Z', text)
+        r'BILLING CODE ' + billing + r'\n*\Z', text)
     if len(headers) != 1 or len(footers) != 1 or footer is None:
         _fail('invalid_regulation_government_boundary')
     try:
@@ -716,7 +739,9 @@ def _copy_text(raw_detail: bytes, raw_body: bytes, *, check=None, retrieval_poli
             'source_codepoint_end': wrapper.end('script'), 'src': _SCRIPT_SRC})
     notice_metadata = _notice_identity(wrapper['title'], text, plan['identity'], crosswalk)
     _check(check)
-    result = {**plan, 'text': text, 'extraction_version': EXTRACTION_VERSION if retrieval_policy == POLICY else 'govinfo-fr-pre-v3' if retrieval_policy == POLICY_V3 else 'govinfo-fr-pre-v2',
+    result = {**plan, 'text': text, 'extraction_version': {
+            POLICY: EXTRACTION_VERSION, POLICY_V2: 'govinfo-fr-pre-v2',
+            POLICY_V3: 'govinfo-fr-pre-v3', POLICY_V4: 'govinfo-fr-pre-v4'}[retrieval_policy],
             'transformations': transformations, 'notice_metadata': notice_metadata,
             'representation': 'preserves_preformatted_layout'}
     if crosswalk_receipt is not None:
