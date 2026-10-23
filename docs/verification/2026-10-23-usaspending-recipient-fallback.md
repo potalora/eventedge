@@ -52,6 +52,12 @@ empty HTTP 200, exhausted deadlines, oversized bodies, future/tampered evidence,
 and unrelated or duplicated transport failures. A 503 retry ending in 404 is
 tested through the real request policy and report recovery.
 
+Failed fallback observations also pass through the full sixteen-book pipeline
+and immutable replay, including a mixed population with one successful recipient
+proof and one failed lookup. The source remains degraded with no fallback recovery
+claim, while the report remains valid. Partial failed observations are preserved;
+they do not acquire the authority of a verified proof.
+
 Recorded response bodies use explicitly synthetic ordered acquisition clocks
 when replayed; the investigation did not request the endpoints in the final
 adapter's order. This replay is not represented as a fresh live fallback.

@@ -601,15 +601,55 @@ def _award_recipient_transport_recoveries(payload: dict, *, session: str) -> tup
         return {}, False
     data = payload.get('data')
     records = data.get('contracts', []) if isinstance(data, dict) else []
-    if not isinstance(records, list) or not any(
-            isinstance(row, dict) and (row.get('recipient_identity_status') == 'native_recipient_verified'
-                or 'recipient_identity_evidence' in row) for row in records):
+    proof_rows = [row for row in records if isinstance(row, dict)
+                  and (row.get('recipient_identity_status') == 'native_recipient_verified'
+                       or 'recipient_identity_evidence' in row)] if isinstance(records, list) else []
+    if not proof_rows:
+        return {}, False
+    from ..data_sources.award_recipient_evidence import (
+        canonical_json_sha256, detail_request_operation, validate_recipient_fallback,
+    )
+    error = payload.get('error')
+    coverages = (payload.get('coverage'), data.get('coverage'))
+    if (isinstance(error, str) and error.strip() and 'award_attribution_policy' not in payload
+            and not any(isinstance(coverage, dict) and 'attribution_scope' in coverage
+                        for coverage in coverages)):
+        # A failed acquisition retains observations, including partial captures.
+        # These confer no source-scope or transport-recovery authority. Mixed
+        # populations must still replay every row that claims recipient success.
+        from urllib.parse import quote
+        operations = set()
+        try:
+            for row in proof_rows:
+                if row.get('recipient_identity_status') == 'native_recipient_verified':
+                    validate_recipient_fallback(row)
+                elif (row.get('recipient_identity_status') != 'lookup_failed'
+                        or row.get('parent_recipient_uei') != ''
+                        or not isinstance(row.get('recipient_identity_evidence'), dict)):
+                    raise ValueError('invalid failed award recipient observation')
+                evidence = row['recipient_identity_evidence']
+                detail = evidence.get('detail_attempt')
+                if isinstance(detail, dict) and isinstance(detail.get('url'), str):
+                    operations.add(detail_request_operation(detail['url']))
+                key = row.get('generated_internal_id') or row.get('internal_id')
+                if type(key) in (str, int):
+                    operations.add(detail_request_operation(
+                        'https://api.usaspending.gov/api/v2/awards/' + quote(str(key), safe='') + '/'))
+        except SourceFetchError as failure:
+            raise ValueError('award recipient evidence invalid') from failure
+        events = payload.get('_request_diagnostics', [])
+        if not isinstance(events, list):
+            raise ValueError('award recipient diagnostics invalid')
+        for event in events:
+            if (isinstance(event, dict) and isinstance(event.get('operation'), str)
+                    and event['operation'] in operations and event.get('http_status') == 404
+                    and event.get('recovered') is not False):
+                raise ValueError('award recipient original transport failure changed')
         return {}, False
     try:
         scope = validate_attribution_scope(payload, session=session)
     except SourceFetchError as error:
         raise ValueError('award recipient evidence invalid') from error
-    from ..data_sources.award_recipient_evidence import canonical_json_sha256, detail_request_operation
     proofs = {}
     for row in records:
         if row.get('recipient_identity_status') != 'native_recipient_verified':

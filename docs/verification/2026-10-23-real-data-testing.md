@@ -51,7 +51,7 @@ alone.
 
 | Layer | Evidence and acceptance | Failure remains visible |
 | --- | --- | --- |
-| Fresh acquisition | Cold, bounded acquisition of the complete configured population on adjacent completed sessions; record every award and every page through explicit terminal evidence. Compare additions, removals and changed identities, not just counts. | Missing detail, unresolved ownership, incomplete pagination and deadline exhaustion cannot disappear through sampling or an old cache. |
+| Fresh acquisition | Bounded acquisition with a fresh local adapter on adjacent query sessions; record every award and every page reported by the configured query through explicit terminal evidence. Compare additions, removals and changed identities, not just counts. | Missing detail, unresolved ownership, incomplete pagination and deadline exhaustion cannot disappear through sampling or an old local cache. Provider caching and correlated omissions remain limitations. |
 | HTTP adapter replay | Replay retained provider bodies/statuses through the real adapter at the transport boundary, with unexpected requests rejected. Include search → detail/fallback → normalization → frozen source output. | A successful parsed-row fixture alone cannot certify transport selection, response shape, pagination or fallback behavior. |
 | Pure validation replay | Independently rebuild the frozen evidence's validity and attribution from retained inputs without HTTP, SDK or model access. Recompute bindings and coverage rather than trust supplied success flags. | Tampered or missing evidence must lose authority even when a stored status says verified. |
 | Native integration | On the intended runtime and exact candidate/configuration, run the bounded full four-horizon × four-size workload in isolated scratch state with real providers and actual configured models, then validate source/analysis coverage, every committee/staging outcome, reports and immutable completed-session replay. | Source-only checks, model smoke tests, simulated committees and sixteen valid empty ledgers do not establish a complete native research/staging run. |
@@ -109,8 +109,8 @@ and server dates where supplied.
 For this repair, `scripts/check_usaspending_source.py` implements the bounded
 USAspending capture/replay evidence manifest, with a nonzero exit on missing or
 invalid required evidence. Reuse the existing native launch/report/replay receipts
-for full-workload acceptance. The focused manifest and separate native receipts
-provide these bindings:
+for full-workload acceptance. Combined acceptance requires the following
+bindings; the focused checker alone does not establish them all:
 
 - Exact candidate commit, configuration digest, runtime identity and policy
   versions; artifact paths and recomputed digests, not operator-supplied booleans.
@@ -122,6 +122,14 @@ provide these bindings:
 - Full native sixteen-book result, actual model-call/committee census,
   staging/report validation, replay result, deadlines/remaining workers and
   unchanged production checkout/manifest/state evidence.
+
+The focused manifest records the originating commit, dirty-worktree status,
+Python/requests versions and attribution policy. It does not bind the full
+generation configuration or require the current checkout to match a historical
+capture. That is intentional for historical replay, which grants no deployment
+authority. The separate native acceptance receipts must bind and verify the
+exact clean candidate, full configuration and intended runtime before deployment;
+those receipts remain pending for this repair.
 
 Keep offline, native snapshot and continuity verdicts separate. Recompute the
 latest completed session with the real clock when admitting a fresh native run;
@@ -148,6 +156,11 @@ order through the same adapter and independently validates the frozen scope.
 Artifact hashes, normalized populations, policy digests and safe request
 diagnostics must match. Replay changes no retained files and uses the recorded
 clock for metadata validation, so old evidence does not become a fresh snapshot.
+A fresh local adapter does not bypass the provider's caches. Agreement across
+these query windows cannot detect an award omitted from every response. The
+checker does not automatically compare sort directions or certify the provider's
+underlying database completeness; the retained sort-direction probe is separate
+diagnostic evidence.
 
 Only explicitly unread retry responses (429/500/502/503/504, closed before any
 body read) may retain status/order with `body_state=intentionally_unconsumed_retry`,
@@ -195,3 +208,19 @@ verdict without modifying their existing manifests or receipts. The portable
 regression retains all 38/37 native award-key/date/amount projections with the
 original payload digests; complete HTTP-layer tests separately verify that
 inconsistent populations remain retained and nonaccepted.
+
+## Failure paths must survive the full report and replay
+
+The broad non-live suite found a reporting regression that the initial successful
+fallback tests missed. An unsuccessful fallback correctly retained partial
+observations and marked the source failed, but the new report helper incorrectly
+required a successful attribution scope for those observations. This turned a
+valid degraded run into an invalid report.
+
+Keep the existing unknown-recipient full-pipeline case and the new mixed-population
+case: one corroborated recipient and one failed lookup, through all sixteen books,
+source health, report generation and immutable replay. Partial failed observations
+remain evidence of failure; they grant no source recovery. Any row claiming
+verification must still pass the independent proof validator, and forged success
+scopes or recovered 404 flags must fail. Test this distinction for each future
+fallback so adding recovery cannot break the reporting of legitimate failures.
