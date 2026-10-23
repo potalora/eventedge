@@ -104,7 +104,8 @@ def prepare_request(evidence, *, target_bindings=(), regime_context=None, graphi
     from .regulation_prompt_budget import POLICY as BUDGET_POLICY
     if prompt_budget_policy not in (None, BUDGET_POLICY):
         fail('prompt_budget_policy')
-    validate_regulation_evidence(evidence)
+    from .regulation_publications import validate_material
+    validate_material(evidence)
     from .regulation_graphics_inputs import graphics_assets
     from .regulation_graphics import MAX_ASSETS, replay_graphics_receipt, augment_batch_context
     assets = graphics_assets(evidence)
@@ -257,10 +258,28 @@ Never invent a bridge, ticker, printed fact, or a negative applicability conclus
             projected['text_annotations'] = annotations
         request_units.append(projected)
     request_units.extend(graphic_units)
+    publication = {}
+    if evidence.get('version') == 'regulation-publication-analysis-v1':
+        bundle = evidence['bundle']
+        publication = {'publication_bundle': {
+            'version': bundle['version'], 'publication_kind': bundle['publication_kind'],
+            'available_at': bundle['available_at'], 'edges': bundle['edges'],
+            'execution_authority': bundle['execution_authority'],
+            'rendition_basis': 'current_publisher_renditions_acquired_forward_not_historical_as_published',
+            'publications': [{'node_ref': ref, 'kind': node['kind'], 'identity': node['identity'],
+                'catalogue_identity': node['catalogue_identity'],
+                'unit_ids': [u['unit_id'] for u in node['units']]}
+                for ref, node in evidence['publication_nodes'].items()]}}
+        system += '''\nThe supplied publication bundle retains original, correction and repost identities separately.
+Read all nodes and corrections together. Original text is the publisher rendition acquired
+at the retained clock, potentially already amended; it is not proved knowable on the
+original publication day. Do not silently rewrite, merge or double count notices.
+A historical repost has no fresh-rule execution authority. Cite every supplied unit.
+'''
     user = _json({'contract_version': version, 'identity': evidence['identity'],
         'evidence_sha256': evidence['manifest_sha256'], 'resources': evidence['resources'],
         'units': request_units, 'target_bindings': list(targets.values()),
-        'regime_context': regime_context})
+        'regime_context': regime_context, **publication})
     if prompt_budget_policy is None and len(system.encode('utf-8')) + len(user.encode('utf-8')) > MAX_PROMPT_BYTES:
         fail('prompt_limit')
     provenance = {'contract_version': version, 'document_id': evidence['identity']['document_id'],

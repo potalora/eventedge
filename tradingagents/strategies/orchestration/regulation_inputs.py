@@ -12,6 +12,8 @@ def validate_regulation_policy(data, config):
     try:
         policy = config.get('regulation_evidence_policy')
         retrieval = config.get('regulation_retrieval_policy')
+        from .regulation_publication_policy import configured as publication_configured
+        linked = publication_configured(config)
         from ..data_sources.regulation_assessment import configured as assessment_configured
         assessment_configured(config)
         # This ar-only boundary binds a finite replay version. Native model and
@@ -27,6 +29,9 @@ def validate_regulation_policy(data, config):
             raise ValueError('invalid regulation retrieval policy')
         source = data.get('regulations', {})
         graph = source.get('regulation_evidence')
+        if graph is not None and (graph.get('publication_policy') != (
+                config.get('regulation_publication_policy') if linked else None)):
+            raise ValueError('regulation publication policy differs from configured scope')
         if graph is not None and graph.get('retrieval_policy') != retrieval:
             raise ValueError('regulation retrieval policy differs from configured scope')
         labeled = any(any(key in row for key in ('regulation_evidence_ref',
@@ -81,6 +86,13 @@ def regulation_analysis_inputs(candidate, shared_data, universe):
                  'regulation_evidence_status', 'regulation_failure')) for row in rows):
             raise ValueError('invalid_regulation_source')
         evidence = source['regulation_evidence']['corpus'][ref]
+        if source['regulation_evidence'].get('publication_policy') == 'linked_publications_v1':
+            from ..data_sources.regulation_publications import analysis_view
+            if (metadata.get('regulation_publication_policy') != 'linked_publications_v1'
+                    or metadata.get('available_at') != evidence['available_at']
+                    or metadata.get('publication_kind') != evidence['publication_kind']):
+                raise ValueError('invalid_regulation_source')
+            evidence = analysis_view(source, ref)
         company_map = shared_data.get('edgar', {}).get('company_tickers', {})
         # SEC identity and universe membership do not prove rule applicability.
         # No automatic prose-derived issuer bridge is supported by this policy.

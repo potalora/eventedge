@@ -1,0 +1,42 @@
+{
+  "scope": "unaltered_official_public_responses_no_credentials",
+  "retention_clock_basis": "fixture_file_write_time_not_publication_time",
+  "files": {
+    "regulation_linked_original_metadata.json": {
+      "url": "https://www.federalregister.gov/api/v1/documents/2026-20360.json",
+      "bytes": 37553,
+      "sha256": "71b141526f4b7b53167f22679e47c34d8764238cad33ff3e09cb4b6e52f6ff72",
+      "retained_at": "2026-10-22T23:31:08.997003+00:00"
+    },
+    "regulation_linked_correction_metadata.json": {
+      "url": "https://www.federalregister.gov/api/v1/documents/C1-2026-20360.json",
+      "bytes": 3056,
+      "sha256": "3fe4a76fe0c7a3c117f86bc691c8d95c91e1534f4e0f5ff8f0a6dc5134f3b439",
+      "retained_at": "2026-10-22T23:31:08.999003+00:00"
+    },
+    "regulation_linked_archived_metadata.json": {
+      "url": "https://www.federalregister.gov/api/v1/documents/97-5879.json",
+      "bytes": 3957,
+      "sha256": "73a21e2d083ccb529389db3956ceb7ae5aafb1746012ed5e0d1a903188b7f3ca",
+      "retained_at": "2026-10-22T23:31:09.001003+00:00"
+    },
+    "regulation_linked_archived_body.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-1997-03-11/html/97-5879.htm",
+      "bytes": 80480,
+      "sha256": "ddf0e71c7e12b17e7eb8e40545f82f7dadbed54110366afa4f3ef856ff9ebe51",
+      "retained_at": "2026-10-22T23:31:09.003003+00:00"
+    },
+    "regulation_linked_archived_detail.json": {
+      "url": "https://api.regulations.gov/v4/documents/EPA-HQ-OW-1998-9208-0001?include=attachments",
+      "bytes": 3034,
+      "sha256": "1eae15175725ab4bd33920e01fe8d2a514e250c0db4860811821fcf7bfcf1c9e",
+      "retained_at": "2026-10-22T23:32:10.364081+00:00"
+    },
+    "regulation_linked_cfpb_metadata.json": {
+      "url": "https://www.federalregister.gov/api/v1/documents/2026-13834.json",
+      "bytes": 4050,
+      "sha256": "03683185c6a4a1fae4c4b6359ccc0c5518155b96634f576299a37ae4c1ef41a5",
+      "retained_at": "2026-10-22T23:39:33.226640+00:00"
+    }
+  }
+}

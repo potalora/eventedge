@@ -26,7 +26,8 @@ EXCLUSIONS = {'congressional_trades': 'display_audit_only_v1',
 CAPABILITY_EXCLUSIONS = {'commodity_macro': {'regulations': 'regulatory_document_research_deferred_v1'}}
 OFF = ('bounded_document_research_policy', 'bounded_document_decision_policy',
     'bounded_document_recognition_request_version', 'regulation_evidence_policy',
-    'regulation_retrieval_policy', 'regulation_assessment_policy', 'graphics_execution_policy',
+    'regulation_retrieval_policy', 'regulation_publication_policy',
+    'regulation_assessment_policy', 'graphics_execution_policy',
     'regulation_prompt_budget_policy', 'regulation_graphics_model_policy')
 
 

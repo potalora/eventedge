@@ -512,6 +512,9 @@ No failed or missing original can acquire a model or scope exemption here.
 """
     try:
         graph, rows = payload['regulation_evidence'], payload['proposed_rules']
+        if type(graph) is dict and graph.get('version') == 'regulation-publication-source-v1':
+            from .regulation_publications import validate_publication_source
+            return validate_publication_source(payload)
         retrieval_policy = _retrieval_policy(graph.get('retrieval_policy'))
         graph_keys = {'policy', 'corpus', 'acquisition_failures', 'rows', 'coverage', 'manifest_sha256'}
         if retrieval_policy is not None:
@@ -575,8 +578,8 @@ No failed or missing original can acquire a model or scope exemption here.
                 retained_bytes += len(raw)
             if retrieval_policy is not None:
                 attempts = failed['retrieval_attempts']
-                from .regulation_government_copy import POLICY_V2, POLICY_V3, MAX_GRAPHICS, MAX_GRAPHIC_BYTES
-                maximum_attempts = MAX_ATTACHMENTS + (3 + MAX_GRAPHICS if retrieval_policy == POLICY_V3
+                from .regulation_government_copy import POLICY_V2, GRAPHICS_POLICIES, MAX_GRAPHICS, MAX_GRAPHIC_BYTES
+                maximum_attempts = MAX_ATTACHMENTS + (3 + MAX_GRAPHICS if retrieval_policy in GRAPHICS_POLICIES
                     else 3 if retrieval_policy == POLICY_V2 else 2)
                 if type(attempts) is not list or len(attempts) > maximum_attempts:
                     fail('invalid_regulation_retrieval_attempt')
@@ -603,7 +606,7 @@ No failed or missing original can acquire a model or scope exemption here.
                             originals[rid] = attempt
                         elif url.startswith('https://img.federalregister.gov/'):
                             from .regulation_government_copy import government_graphics_plan
-                            if (retrieval_policy != POLICY_V3 or rid not in copies or rid not in crosswalks
+                            if (retrieval_policy not in GRAPHICS_POLICIES or rid not in copies or rid not in crosswalks
                                     or copies[rid]['http_status'] != 200 or copies[rid]['complete'] is not True
                                     or crosswalks[rid]['http_status'] != 200 or crosswalks[rid]['complete'] is not True
                                     or (rid, url) in graphics):

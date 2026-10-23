@@ -657,6 +657,122 @@ class EDGARSource:
             error.partial_data = {"form4_filings": enriched, "coverage": coverage}
             raise error from None
 
+    def get_form4_window_evidence(self, ticker: str, *, issuer_cik: str,
+            days_back: int, as_of: str, security_bindings: list,
+            absolute_deadline: float, request_cap: int = 12,
+            byte_cap: int = 16 * 1024 * 1024) -> dict:
+        """Explicit prospective qualification; never selected by the legacy caller.
+
+        All request attempts share one original deadline/cap, including retries.
+        Every metadata/XML body is retained; no model call or strategy opt-in.
+        """
+        import base64
+        import math
+        from datetime import timedelta
+        from .form4_evidence import (POLICY, MAX_BYTES, MAX_DOCUMENTS,
+            parse_form4_evidence, qualify_form4_window, decode_history_original,
+            validate_form4_acquisition, digest)
+        captured_originals = []
+        counts = {}
+        try:
+            cik = _history_cik(issuer_cik)
+            if (type(days_back) is not int or not 0 <= days_back <= 3660
+                    or not source_date(as_of) or len(as_of) != 10 or as_of > datetime.now(timezone.utc).date().isoformat()
+                    or type(request_cap) is not int or not 1 <= request_cap <= 100
+                    or type(byte_cap) is not int or not 1 <= byte_cap <= 16*1024*1024
+                    or type(absolute_deadline) not in (int, float) or not math.isfinite(absolute_deadline)
+                    or absolute_deadline <= time.monotonic() or not re.fullmatch(r'[A-Z][A-Z0-9.-]{0,14}', ticker)):
+                raise ValueError('invalid bounded Form4 settings')
+            cutoff = (datetime.fromisoformat(as_of)-timedelta(days=days_back)).date().isoformat()
+            deadline = min(absolute_deadline, current_provider_deadline('edgar') or absolute_deadline)
+            counts = {'requests': 0, 'source_bytes': 0, 'request_cap': request_cap, 'byte_cap': byte_cap}
+            def before_attempt():
+                if counts['requests'] >= request_cap:
+                    raise SourceFetchError('Form4 request cap exhausted', reason_code='invalid_response')
+            def transport(url, **options):
+                import requests
+                before_attempt()
+                counts['requests'] += 1
+                return requests.get(url, **options)
+            def acquire(url):
+                response = provider_request('edgar', 'GET', url, headers={'User-Agent': self._user_agent},
+                    timeout=provider_timeout('edgar'), stream=True, allow_redirects=False,
+                    operation='form4_qualification', before_attempt=before_attempt, transport=transport)
+                try:
+                    if response.status_code != 200 or response.url != url:
+                        raise SourceFetchError('Form4 original unavailable', reason_code='http_error', http_status=response.status_code)
+                    remaining = min(MAX_BYTES, byte_cap-counts['source_bytes'])
+                    if remaining <= 0:
+                        raise SourceFetchError('Form4 byte cap exhausted', reason_code='invalid_response')
+                    raw = read_bounded_response(response, provider='edgar', max_bytes=remaining)
+                    counts['source_bytes'] += len(raw)
+                    observed = datetime.now(timezone.utc).isoformat()
+                    captured_originals.append({'source_url': url, 'observed_at': observed,
+                        'original_base64': base64.b64encode(raw).decode('ascii'),
+                        'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)})
+                    provider_timeout('edgar')
+                    return raw, observed
+                finally:
+                    response.close()
+            originals = []
+            def metadata(url, role, descriptor=None):
+                raw, observed = acquire(url)
+                item = {'role': role, 'source_url': url, 'observed_at': observed,
+                    'original_base64': base64.b64encode(raw).decode('ascii'),
+                    'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
+                if descriptor is not None: item['descriptor'] = descriptor
+                originals.append(item)
+                return decode_history_original(item)
+            with provider_budget('edgar', deadline):
+                native = metadata(f'{SUBMISSIONS_BASE}/CIK{cik}.json', 'recent')
+                if _history_cik(str(native['cik'])) != cik:
+                    raise ValueError('issuer metadata mismatch')
+                rows = _history_rows(native['filings']['recent'])
+                descriptors = [_history_archive(cik, value) for value in native['filings']['files']]
+                if len(descriptors) > 1000 or len({value['name'] for value in descriptors}) != len(descriptors):
+                    raise ValueError('invalid archive inventory')
+                for descriptor in descriptors:
+                    if descriptor['filingFrom'] <= as_of and descriptor['filingTo'] >= cutoff:
+                        archive = _history_rows(metadata(f'{SUBMISSIONS_BASE}/{descriptor["name"]}', 'archive', descriptor))
+                        if len(archive) != descriptor['filingCount'] or any(not descriptor['filingFrom'] <= row['filing_date'] <= descriptor['filingTo'] for row in archive):
+                            raise ValueError('archive metadata mismatch')
+                        rows.extend(archive)
+                    if len(rows) > 100000: raise ValueError('metadata cap exhausted')
+                identities = {}
+                for row in rows:
+                    acc = row['accession_number']
+                    if acc in identities and identities[acc] != row: raise ValueError('conflicting accession')
+                    identities[acc] = row
+                selected = sorted((row for row in identities.values() if row['form'] in {'4', '4/A'}
+                    and cutoff <= row['filing_date'] <= as_of), key=lambda row: (row['filing_date'], row['accession_number']))
+                if len(selected) > MAX_DOCUMENTS: raise ValueError('document cap exhausted')
+                documents = []
+                for row in selected:
+                    filename = row['primary_document'].split('/')[-1]
+                    if not re.fullmatch(r'[A-Za-z0-9_.-]+\.xml', filename): raise ValueError('missing ownership document')
+                    url = f'https://www.sec.gov/Archives/edgar/data/{int(cik)}/{row["accession_number"].replace("-", "")}/{filename}'
+                    raw, observed = acquire(url)
+                    document = parse_form4_evidence(raw, accession=row['accession_number'], filing_date=row['filing_date'],
+                        issuer_cik=cik, source_url=url, observed_at=observed)
+                    if document['form'] != row['form']: raise ValueError('ownership form mismatch')
+                    documents.append(document)
+                window = qualify_form4_window(documents, security_bindings=security_bindings, date_from=cutoff, date_to=as_of)
+                envelope = {'policy': POLICY, 'ticker': ticker, 'issuer_cik': cik, 'window': window,
+                    'history_originals': originals, 'acquisition': counts,
+                    'coverage': {'discovery_complete': True, 'population': 'declared_issuer_form4_window',
+                        'ticker': ticker, 'issuer_cik': cik, 'matching_filings': len(selected), 'marketwide': False},
+                    'trading_authority': False}
+                envelope['acquisition_receipt_sha256'] = digest(envelope)
+                result = validate_form4_acquisition(envelope)
+                provider_timeout('edgar')
+                return result
+        except Exception as exc:
+            error = source_fetch_error('Bounded Form4 qualification incomplete', exc)
+            error.partial_data = {'form4_qualification': {'policy': POLICY,
+                'coverage': {'complete': False}, 'captured_originals': captured_originals,
+                'acquisition': dict(counts), 'trading_authority': False}}
+            raise error from None
+
     def _parse_form4_xml(
         self, cik: str, filing: dict[str, Any]
     ) -> list[dict[str, Any]]:

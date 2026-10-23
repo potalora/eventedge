@@ -245,7 +245,11 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                         raise ValueError('regulatory assessment source differs')
                     seen.add(docid)
                     assessment = row.get('assessment')
-                    attempt_assessment = _attempt(row, graph['corpus'].get(docid), universe, company_map,
+                    original = graph['corpus'].get(docid)
+                    if original is not None and graph.get('publication_policy') == 'linked_publications_v1':
+                        from ..data_sources.regulation_publications import analysis_view
+                        original = analysis_view(source, docid)
+                    attempt_assessment = _attempt(row, original, universe, company_map,
                         assessment_policy, graphics_execution_policy, prompt_budget_policy,
                         regulation_graphics_model_policy)
                     if assessment is None:
@@ -255,7 +259,8 @@ def validate_regulation_health(data, records, policy_ids, strategy_sources, conf
                             raise ValueError('missing regulatory failed attempt')
                         failed += 1
                         continue
-                    original = graph['corpus'][docid]
+                    if original is None:
+                        raise ValueError('regulatory publication bundle missing')
                     provenance = assessment['source_provenance']
                     bindings = validate_target_bindings(original, provenance['target_bindings'], universe, company_map)
                     request = prepare_request(original, target_bindings=bindings, regime_context=provenance['regime_context'],

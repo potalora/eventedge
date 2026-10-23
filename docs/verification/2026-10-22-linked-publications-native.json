@@ -1,0 +1,184 @@
+{
+  "scope": "explicit_named_publications_not_exhaustive_market_or_current_window",
+  "model_calls": 0,
+  "strategy_activation": false,
+  "source_scope": {
+    "discovery_complete": true,
+    "content_complete": true,
+    "required_rows": 3,
+    "complete_rows": 3,
+    "failed_rows": 0,
+    "consumed_bytes": 2503036,
+    "reserved_bytes": 0,
+    "byte_limit": 33554432,
+    "byte_budget_exhausted": false,
+    "policy": "complete_document_text_v1",
+    "retrieval_policy": "verified_government_copy_v4",
+    "publication_policy": "linked_publications_v1",
+    "manifest_sha256": "f2cae4038af07df34d5fa424716fc3040d5e4100084f4978382ed9513a2b3479",
+    "evidence_sha256": {
+      "SEC-2026-6502-0001": "cd60809e60a8af0fc603bcf03ab926faddfd611906d8edc31cd9a288b6545ccf",
+      "EPA-HQ-OW-1998-9208-0001": "9f2a63b769b885ba42b9f98b18f5c77a0e46822432082d1b64cdcd16dd0a257e",
+      "CFPB-2026-0018-0001": "164346a2d5f0616b651985f14aef76269647de9180ef0c8f45397011cffbaf30"
+    },
+    "failed_document_ids": []
+  },
+  "documents": [
+    {
+      "document_id": "SEC-2026-6502-0001",
+      "bundle_sha256": "cd60809e60a8af0fc603bcf03ab926faddfd611906d8edc31cd9a288b6545ccf",
+      "publication_kind": "correction",
+      "available_at": "2026-10-22T23:56:27.216674+00:00",
+      "execution_authority": "requires_separate_assessment_and_verified_target",
+      "text_units": 2,
+      "publications": [
+        {
+          "kind": "correction",
+          "identity": {
+            "fr_document_number": "C1-2026-20360",
+            "publication_date": "2026-10-20",
+            "agency_id": "SEC",
+            "title": "Interval Fund Modernization; Expansion of Multiple Share Class to Registered Closed-End Management Investment Companies and Business Development Companies",
+            "first_page": 66293,
+            "last_page": 66293,
+            "notice_action": "Correction"
+          },
+          "catalogue_identity": {
+            "document_id": "SEC-2026-6502-0001",
+            "title": "Interval Fund Modernization: Expansion of Multiple Share Class to Registered Closed-End Management Investment Companies and Business Development Companies",
+            "agency_id": "SEC",
+            "document_type": "Proposed Rule",
+            "posted_date": "2026-10-20T04:00:00Z",
+            "docket_id": null
+          }
+        },
+        {
+          "kind": "original",
+          "identity": {
+            "fr_document_number": "2026-20360",
+            "publication_date": "2026-10-05",
+            "agency_id": "SEC",
+            "title": "Interval Fund Modernization; Expansion of Multiple Share Class to Registered Closed-End Management Investment Companies and Business Development Companies",
+            "first_page": 63388,
+            "last_page": 63470,
+            "notice_action": "Proposed rule."
+          },
+          "catalogue_identity": {
+            "document_id": "SEC-2026-6187-0001",
+            "title": "Interval Fund Modernization: Expansion of Multiple Share Class to Registered Closed-End Management Investment Companies and Business Development Companies",
+            "agency_id": "SEC",
+            "document_type": "Proposed Rule",
+            "posted_date": "2026-10-05T04:00:00Z",
+            "docket_id": null
+          }
+        }
+      ],
+      "graphics": 34,
+      "recognition_requests_prepared": 9,
+      "final_assessment_request_prepared": false,
+      "recognition_preparation_basis": "base_source_batches_future_model_dependent_continuation_context_not_run",
+      "recognition_request_sha256": [
+        "45d3501b22d8058644183883e3b5d7da66d6eaddc2d2ea2612b499cbe485f12f",
+        "c898d064fe71ef36b94094600ea136852d4fffe24ea97d06fb1e51d96e3fd086",
+        "e106827033dba273f5d9ac7c50a4ec0832c5310430b430359374c8f85d85d98f",
+        "a37dfdde9e6d7d405745e5bad6e678bea5a5e8462b4c36e2fc74d1592a41f964",
+        "30f8699f52ab227350e34421bff7f9409d1a8af25eee91109d9b09c858544ec6",
+        "96cf25c508160e284637bfa67bd61ee3076d53d375a86e5a442c81663043bb15",
+        "4fd1a0bdf4eb2b92baa8029f6326259b0a47e0d302159546d2054faeb83a0652",
+        "e19fb9ad3b962a908289d18ec48e1e560c958c83cc6488464e8aa8dc6a263268",
+        "1672928ee2629dace11e7561ea4ee950ee7885593af81d98087b83b96ef39653"
+      ],
+      "remaining_requirement": "actual_graphics_recognition_and_independent_image_review_not_run"
+    },
+    {
+      "document_id": "EPA-HQ-OW-1998-9208-0001",
+      "bundle_sha256": "9f2a63b769b885ba42b9f98b18f5c77a0e46822432082d1b64cdcd16dd0a257e",
+      "publication_kind": "historical_repost",
+      "available_at": "2026-10-22T23:56:29.836914+00:00",
+      "execution_authority": "none",
+      "text_units": 1,
+      "publications": [
+        {
+          "kind": "archived_original",
+          "identity": {
+            "fr_document_number": "97-5879",
+            "publication_date": "1997-03-11",
+            "agency_id": "EPA",
+            "title": "Streamlining the State Sewage Sludge Management Regulations",
+            "first_page": 11270,
+            "last_page": 11281,
+            "notice_action": "Proposed rule."
+          },
+          "catalogue_identity": {
+            "document_id": "EPA-HQ-OW-1998-9208-0001",
+            "title": "Streamlining the State Sewage Sludge Management Regulations",
+            "agency_id": "EPA",
+            "document_type": "Proposed Rule",
+            "posted_date": "2026-10-21T04:00:00Z",
+            "docket_id": "EPA-HQ-OW-1998-9208"
+          }
+        }
+      ],
+      "graphics": 0,
+      "final_assessment_request_prepared": true,
+      "request_sha256": "49838ada4f2fc64e195ae94f21bbbf3770ebb9a3c91dc4e8f30c4715d0eb43b4",
+      "remaining_requirement": "semantic_model_assessment_not_run_and_no_verified_issuer_bridge"
+    },
+    {
+      "document_id": "CFPB-2026-0018-0001",
+      "bundle_sha256": "164346a2d5f0616b651985f14aef76269647de9180ef0c8f45397011cffbaf30",
+      "publication_kind": "original",
+      "available_at": "2026-10-22T23:56:32.341626+00:00",
+      "execution_authority": "requires_separate_assessment_and_verified_target",
+      "text_units": 1,
+      "publications": [
+        {
+          "kind": "original",
+          "identity": {
+            "fr_document_number": "2026-13834",
+            "publication_date": "2026-07-09",
+            "agency_id": "CFPB",
+            "title": "Request for Information Regarding Promoting Access to Mortgage Credit",
+            "first_page": 42382,
+            "last_page": 42386,
+            "notice_action": "Notice; request for information."
+          },
+          "catalogue_identity": {
+            "document_id": "CFPB-2026-0018-0001",
+            "title": "Request for Information: Promoting Access to Mortgage Credit",
+            "agency_id": "CFPB",
+            "document_type": "Proposed Rule",
+            "posted_date": "2026-07-09T04:00:00Z",
+            "docket_id": "CFPB-2026-0018"
+          }
+        }
+      ],
+      "graphics": 0,
+      "final_assessment_request_prepared": true,
+      "request_sha256": "ec7675a5e62110394b1b3b2cfbf3e78a3d115d1d41cbe145ceae02f3771b48b8",
+      "remaining_requirement": "semantic_model_assessment_not_run_and_no_verified_issuer_bridge"
+    }
+  ],
+  "source_complete": true,
+  "semantic_assessment_complete": false,
+  "publication_policy": "linked_publications_v1",
+  "retrieval_policy": "verified_government_copy_v4",
+  "code_sha256": {
+    "scripts/qualify_regulatory_publications.py": "555a78a0a9306a20ee8b5eeddef8afc1a8ef0610c517fd63df3c80ec1c7fb3a5",
+    "tradingagents/strategies/data_sources/regulation_publications.py": "243f417a0f420f848d8133c7f333adf3f3a5e89ad48b4d923f7418237e1a83b6",
+    "tradingagents/strategies/data_sources/regulations_source.py": "542e80c2aa6c89236bca018d0e628c7f84ab708979ec12a7456e6038feae4535",
+    "tradingagents/strategies/data_sources/regulation_evidence.py": "f66e3e73fa0eea5da8c56bd4453acb5cd42f151c59dec9cb89043dc708cf57f1",
+    "tradingagents/strategies/data_sources/regulation_government_copy.py": "926be78dbffaa04ccdfab730c2e0597183650b7015e7c712a6de0fb5e80eeb24",
+    "tradingagents/strategies/data_sources/regulation_assessment.py": "df327e060296b85860a85e949d13f44e73207aeb2270f32f7c010ad9ad3e6802",
+    "tradingagents/strategies/data_sources/regulation_graphics_inputs.py": "70abe72332b516a9381c0f1dee30b1f03d068a0a31647c6c01d2285aee8649de",
+    "tradingagents/strategies/data_sources/regulation_graphics.py": "8e93ffe3d956698e9ceba1a2b2cf6a739a6e0b5a64ce94d983982fbea177a320",
+    "tradingagents/strategies/orchestration/source_inputs.py": "493bd67d65c67599d115d66e7d2f4257e9465096b18a54f9edeeb514ddd6afad",
+    "tradingagents/strategies/orchestration/regulation_inputs.py": "8f92e4ec5241046dded94b2f05f25d49a3394aef209b69cccb253df97ed6181d",
+    "tradingagents/strategies/orchestration/regulation_validation.py": "538470c55694d72350e26005bd19941b1a9b6bba87743dd1bd44e1fb82810a0c",
+    "tradingagents/strategies/orchestration/event_identity.py": "b2175c5fea3b253ec46ed61d54e636c040fd75e839e36ffd6427343103c1e8d2",
+    "tradingagents/strategies/modules/regulatory_pipeline.py": "860e057d079a08295b4beef02178d286a200946ea608c75fea9efb6673f55407"
+  },
+  "replay_only": false,
+  "capture_sha256": "fc0f81950622fd26569fce0c5e078496d6977542af3710d7857aebfb2dec3085",
+  "checked_at": "2026-10-22T23:56:36.644789+00:00"
+}

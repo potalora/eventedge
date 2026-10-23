@@ -78,6 +78,8 @@ def _availability_timestamp(value: object, *, date_only: bool, field: str) -> da
 
 def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
     """Resolve when source evidence became available without using economic dates."""
+    if strategy == 'regulatory_pipeline' and metadata.get('regulation_publication_policy') == 'linked_publications_v1':
+        return _availability_timestamp(_required(metadata, 'available_at', strategy), date_only=False, field='available_at')
     if strategy == 'state_economics' and metadata.get('state_economics_policy') == 'state_unemployment_v1':
         return _availability_timestamp(_required(metadata, 'available_at', strategy), date_only=False, field='available_at')
     values: list[datetime] = []

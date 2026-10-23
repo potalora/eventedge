@@ -23,7 +23,8 @@ _CONFLICTS = {
     'congress': ('congress_disclosure_policy',),
     'courtlistener': ('courtlistener_scope_policy',),
     'usaspending': ('award_attribution_policy',),
-    'regulations': ('regulation_evidence_policy', 'regulation_retrieval_policy'),
+    'regulations': ('regulation_evidence_policy', 'regulation_retrieval_policy',
+                    'regulation_publication_policy'),
 }
 
 
