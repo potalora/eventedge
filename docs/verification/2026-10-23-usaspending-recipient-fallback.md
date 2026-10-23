@@ -56,9 +56,27 @@ Recorded response bodies use explicitly synthetic ordered acquisition clocks
 when replayed; the investigation did not request the endpoints in the final
 adapter's order. This replay is not represented as a fresh live fallback.
 A subsequent live check at 06:35 UTC found that the award detail had recovered
-upstream and returned 200. Its complete 37-award October 22 and 35-award
-October 23 query captures therefore exercised the normal path. Retained 404
-replay and current live acquisition establish distinct facts.
+upstream and returned 200. Its 37-award October 22 and 35-award October 23 query
+captures exhausted the reported pagination and exercised the normal path.
+Retained 404 replay and current live acquisition establish distinct facts.
+
+The later cross-window check failed: the Veterans award appeared in October 21
+and October 23 queries but was absent from October 22, despite its October 21
+base date belonging to the common windows. Changing only the October 22 query's
+sort direction returned 38 awards instead of 37. At 06:50 UTC both results had
+`Cache-Trace: hit-cache`; a prior `Cache-Control: no-cache` request still returned
+37. Another shared award's modification date also differed across windows.
+The provider's [search contract](https://github.com/fedspendingtransparency/usaspending-api/blob/master/usaspending_api/api_contracts/search_filters.md#award-search-time-period-object)
+defines the new-award bounds by the base transaction date. Its
+[cache implementation](https://github.com/fedspendingtransparency/usaspending-api/blob/master/usaspending_api/common/cache_decorator.py)
+explains the cache-trace header, but does not establish the deployed cache expiry
+or the underlying cause of these inconsistent bodies.
+
+Checker v2 separates valid individual acquisition, exact offline replay and
+shared-window consistency. The retained captures pass the first two and fail
+the third. Their original v1 success receipts remain unchanged and insufficient
+for deployment acceptance. The fallback does not repair a missing search row;
+changing a query to obtain a preferred result is not an established repair.
 
 See the [real-data testing protocol](2026-10-23-real-data-testing.md) for the
 repeatable capture/replay commands, clock and population comparisons, native

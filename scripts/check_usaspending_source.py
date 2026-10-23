@@ -28,7 +28,12 @@ from tradingagents.strategies.orchestration.decision_clock import latest_complet
 from tradingagents.strategies.orchestration.trading_calendar import is_session, next_session
 from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
 
-VERSION = 'usaspending-manual-capture-v1'
+VERSION = 'usaspending-manual-capture-v2'
+LEGACY_VERSION = 'usaspending-manual-capture-v1'
+STABLE_FIELDS = ('award_key', 'award_id', 'generated_internal_id', 'internal_id',
+                 'recipient_uei', 'recipient_id', 'recipient_name', 'base_obligation_date',
+                 'amount', 'agency', 'description', 'start_date', 'last_modified_date',
+                 'amount_basis', 'award_scope')
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -84,7 +89,9 @@ def capture_transport(captures):
         captures.append(entry)
         response = original(session, request, **kwargs)
         entry.update(response_started_at=utc_now().isoformat(), status=response.status_code,
-                     headers={k: response.headers[k] for k in ('Date', 'Content-Type') if k in response.headers})
+                     headers={k: response.headers[k] for k in
+                              ('Date', 'Content-Type', 'Cache-Trace', 'Cache-Control', 'Age',
+                               'ETag', 'Last-Modified', 'X-Cache') if k in response.headers})
         require(not response.history, 'redirected capture refused')
         if not kwargs.get('stream', False):
             entry['_body'].extend(response.content)
@@ -137,6 +144,33 @@ def population(payload, session):
             'coverage': payload['coverage']}
 
 
+def compare_windows(payloads, sessions):
+    """Compare common-date evidence; changes are inconsistencies, not cause diagnoses."""
+    require(len(payloads) == len(sessions) == 2)
+    start = max(date.fromisoformat(s) - timedelta(days=30) for s in sessions).isoformat()
+    end = min(sessions)
+    projected = []
+    for payload in payloads:
+        rows = payload['data']['contracts']
+        projected.append({r['award_key']: {field: r.get(field) for field in STABLE_FIELDS}
+                          for r in rows if start <= r['base_obligation_date'] <= end})
+    first, second = projected
+    only_first, only_second = sorted(first.keys() - second.keys()), sorted(second.keys() - first.keys())
+    changed = []
+    for key in sorted(first.keys() & second.keys()):
+        fields = [f for f in STABLE_FIELDS if first[key][f] != second[key][f]]
+        if fields:
+            changed.append({'award_key': key, 'fields': fields,
+                            'first': {f: first[key][f] for f in fields},
+                            'second': {f: second[key][f] for f in fields}})
+    consistent = not (only_first or only_second or changed)
+    return {'consistent': consistent, 'reason_code': None if consistent else 'inconsistent_shared_window_evidence',
+            'common_window': {'start': start, 'end': end},
+            'common_window_counts': [len(first), len(second)],
+            'only_in_first': only_first, 'only_in_second': only_second, 'changed_awards': changed,
+            'compared_fields': list(STABLE_FIELDS)}
+
+
 def git_identity():
     root = Path(__file__).resolve().parents[1]
     def git(*args):
@@ -166,8 +200,9 @@ def capture(sessions, output, *, budget_seconds=180, now=None, offline_limits=Fa
                 'runtime': {'python': sys.version.split()[0], 'requests': requests.__version__},
                 'response_started_at_semantics': 'Session.send return; headers for streams, consumed body for nonstreams',
                 **git_identity(), 'captures': [], 'sessions': [], 'files': [], 'capture_ok': False,
+                'acquisition_ok': False, 'population_consistent': None, 'population_consistency': None,
                 'response_byte_semantics': 'consumed decompressed entity bytes; not compressed wire bytes'}
-    captures, diagnostics = [], []
+    captures, diagnostics, payloads = [], [], []
     deadline = time.monotonic() + budget_seconds
     try:
         with provider_budget('usaspending', deadline, diagnostics=diagnostics,
@@ -175,6 +210,7 @@ def capture(sessions, output, *, budget_seconds=180, now=None, offline_limits=Fa
             for session in sessions:
                 first = len(captures)
                 payload = acquire(session)
+                payloads.append(payload)
                 require(time.monotonic() < deadline, 'shared source deadline exhausted')
                 name = f'payload-{session}.json'
                 manifest['files'].append(write_new(output, name, encoded(payload)))
@@ -186,10 +222,13 @@ def capture(sessions, output, *, budget_seconds=180, now=None, offline_limits=Fa
                     'payload_file': name, 'capture_start': first, 'capture_end': len(captures),
                     **population(payload, session)})
         require(captures and all(acceptable_capture(r) for r in captures), 'incomplete source capture')
-        manifest['capture_ok'] = True
+        manifest['capture_ok'] = manifest['acquisition_ok'] = True
     except Exception as exc:
         manifest['failure_class'] = type(exc).__name__
     finally:
+        if len(payloads) == 2:
+            comparison = compare_windows(payloads, sessions)
+            manifest.update(population_consistency=comparison, population_consistent=comparison['consistent'])
         for index, entry in enumerate(captures):
             data = bytes(entry.pop('_body'))
             name = f'response-{index:04d}.bin'
@@ -199,10 +238,17 @@ def capture(sessions, output, *, budget_seconds=180, now=None, offline_limits=Fa
         manifest.update(finished_at=utc_now().isoformat(), request_diagnostics=diagnostics)
         write_new(output, 'manifest.json', encoded(manifest))
     if not manifest['capture_ok']:
-        return {**manifest, 'ok': False}
-    result = replay(output)
+        return {**manifest, 'offline_replay_ok': False, 'ok': False}
+    try:
+        result = replay(output)
+    except Exception as exc:
+        result = {'acquisition_ok': True, 'offline_replay_ok': False,
+                  'population_consistent': manifest['population_consistent'],
+                  'population_consistency': manifest['population_consistency'],
+                  'ok': False, 'failure_class': type(exc).__name__}
     write_new(output, 'replay-result.json', encoded(result))
-    return {**manifest, 'ok': result['ok']}
+    return {**manifest, **{k: result[k] for k in
+            ('ok', 'acquisition_ok', 'offline_replay_ok', 'population_consistent', 'population_consistency')}}
 
 
 def read_verified(directory, name, files):
@@ -233,7 +279,8 @@ def replay(directory):
     require(not (directory / 'manifest.json').is_symlink())
     try:
         manifest = json.loads((directory / 'manifest.json').read_bytes())
-        require(manifest['version'] == VERSION and manifest['capture_ok'] is True and manifest['policy'] == POLICY)
+        require(manifest['version'] in {VERSION, LEGACY_VERSION}
+                and manifest['capture_ok'] is True and manifest['policy'] == POLICY)
         require(manifest['scope'] == 'manual_source_observation'
                 and manifest['incident_recovery_authority'] is False and manifest['production_mutations'] is False)
         recorded_now = datetime.fromisoformat(manifest['started_at'])
@@ -271,7 +318,7 @@ def replay(directory):
             if not kwargs.get('stream', False):
                 response._content, response._content_consumed = data, True
             return response
-        replay_diagnostics = []
+        replay_diagnostics, payloads = [], []
         with patch.object(requests.Session, 'send', send), provider_budget(
                 'usaspending', time.monotonic() + 300, limits=(), sleep=lambda seconds: None,
                 diagnostics=replay_diagnostics):
@@ -293,9 +340,19 @@ def replay(directory):
                 actual['data']['coverage'] = actual['coverage']
                 validate_attribution_scope(actual, session=session)
                 require(actual == expected, 'normalized whole-population replay mismatch')
+                payloads.append(expected)
         require(index == len(captures), 'unused captured requests')
         require(replay_diagnostics == manifest['request_diagnostics'], 'request diagnostics mismatch')
-        return {'version': VERSION, 'scope': 'offline_http_adapter_replay', 'ok': True,
+        comparison = compare_windows(payloads, manifest['queried_sessions'])
+        if manifest['version'] == VERSION:
+            require(manifest['acquisition_ok'] is True
+                    and manifest['population_consistency'] == comparison
+                    and manifest['population_consistent'] == comparison['consistent'],
+                    'population comparison evidence mismatch')
+        return {'version': VERSION, 'capture_version': manifest['version'],
+                'scope': 'offline_http_adapter_replay', 'ok': comparison['consistent'],
+                'acquisition_ok': True, 'offline_replay_ok': True,
+                'population_consistent': comparison['consistent'], 'population_consistency': comparison,
                 'incident_recovery_authority': False, 'queried_sessions': manifest['queried_sessions'],
                 'request_count': index, 'manifest_sha256': digest((directory / 'manifest.json').read_bytes())}
     except (KeyError, TypeError, OSError, json.JSONDecodeError, SourceFetchError) as exc:
@@ -315,7 +372,7 @@ def main():
         parser.error('capture requires two --session values and --output NEW_DIRECTORY')
     try:
         result = replay(args.replay) if args.replay else capture(args.session, args.output, budget_seconds=args.budget_seconds)
-        summary = {k: result[k] for k in ('scope', 'ok', 'incident_recovery_authority')}
+        summary = {k: result[k] for k in ('scope', 'ok', 'incident_recovery_authority', 'acquisition_ok', 'offline_replay_ok', 'population_consistent')}
         if not args.replay:
             summary.update(output=str(args.output), sessions=[{k: r[k] for k in
                 ('session', 'kind', 'population_count', 'counts')} for r in result['sessions']])

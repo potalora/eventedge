@@ -165,3 +165,33 @@ labeled diagnostic. A clean candidate commit capture, separate full native
 sixteen-book acceptance and subsequent ordinary-session observation remain
 required for their respective claims. The checker does not certify the native
 model workload, authorize deployment or close incidents.
+
+## Shared-window contradiction found by native testing
+
+The clean-commit October 23 captures exposed a second, separate acceptance gap.
+The October 21/22 queries returned 38/37 awards; October 22/23 returned 37/35.
+Award `CONT_AWD_36C24827C0008_3600_-NONE-_-NONE-` has an October 21 base obligation
+date and amount 63,117,507.88, so it belongs to both pairs' shared date ranges.
+It appeared in October 21 and October 23 query results and was absent from the
+October 22 result. Independently valid HTTP acquisition, per-window scope and
+exact offline replay did not establish a mutually consistent population. The
+old v1 `ok=true` verdict did not perform this comparison and is insufficient for
+combined acceptance. Retain that original receipt rather than rewriting it.
+
+Checker v2 therefore compares award membership within the intersection of the
+two query windows and checks native identifiers, recipient identity, economic
+fields and source modification dates. Natural entry/exit outside that shared
+interval is allowed. Acquisition clocks and computed issuer attribution are
+excluded. Changed source fields, including legitimate updates between requests,
+produce an explicit inconsistency requiring assessment; the checker does not
+infer a provider defect, indexing delay or recovery.
+
+The result separates `acquisition_ok`, `offline_replay_ok` and
+`population_consistent`; top-level `ok` requires all three. Contradictory windows
+retain both complete payloads, raw captures and comparison details, while the
+command exits unsuccessfully. Independent offline replay may still pass.
+Replaying old v1 captures applies the new comparison and returns the reassessed
+verdict without modifying their existing manifests or receipts. The portable
+regression retains all 38/37 native award-key/date/amount projections with the
+original payload digests; complete HTTP-layer tests separately verify that
+inconsistent populations remain retained and nonaccepted.
