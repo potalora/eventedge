@@ -8,6 +8,7 @@ import json
 from typing import Any
 
 from .award_identity import CROSSWALK_VERSION, native_uei, resolve_award_issuer
+from .award_recipient_evidence import validate_recipient_fallback
 from .fetch_errors import SourceFetchError, source_date, source_number, source_text
 
 POLICY = 'verified_listed_targets_v1'
@@ -70,7 +71,10 @@ def build_attribution_scope(records: list[dict], coverage: dict, *, session: str
         except (TypeError, ValueError):
             _require(False)
         status = row.get('recipient_identity_status')
-        _require(status in {'search_recipient', 'native_award_verified', 'missing_native_recipient'})
+        _require(status in {'search_recipient', 'native_award_verified', 'native_recipient_verified',
+                            'missing_native_recipient'})
+        if status == 'native_recipient_verified' or 'recipient_identity_evidence' in row:
+            validate_recipient_fallback(row)
         _require(all(not row.get(field) or native_uei(row[field]) == row[field]
                      for field in ('recipient_uei', 'parent_recipient_uei')))
         if status == 'native_award_verified':

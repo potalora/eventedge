@@ -1,7 +1,10 @@
 """Native recipient identity must survive source parsing and admission."""
 from unittest.mock import patch
+import io
+import json
 
 import pytest
+import requests
 
 from tradingagents.strategies.data_sources import usaspending_source as usa
 from tradingagents.strategies.data_sources.award_identity import resolve_award_issuer
@@ -9,14 +12,11 @@ from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 from tradingagents.strategies.modules.govt_contracts import GovtContractsStrategy
 
 
-class Response:
-    status_code = 200
-
+class Response(requests.Response):
     def __init__(self, body):
-        self.body = body
-
-    def json(self):
-        return self.body
+        super().__init__()
+        self.status_code = 200
+        self.raw = io.BytesIO(json.dumps(body).encode())
 
 
 def award(**changes):
