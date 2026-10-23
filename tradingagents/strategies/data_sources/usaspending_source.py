@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import logging
+import json
 import time
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
 from .award_identity import CROSSWALK_VERSION, native_uei, resolve_award_issuer
+from .award_recipient_evidence import (
+    RECIPIENT_FALLBACK_POLICY, canonical_json_sha256, detail_request_operation,
+    validate_recipient_fallback,
+)
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
 
 from .evidence import current_session_date, CoverageRecords, collection_envelope
-from .request_policy import provider_request, provider_budget, current_provider_deadline
+from .request_policy import (
+    provider_request, provider_budget, current_provider_deadline,
+    provider_timeout, read_bounded_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +262,7 @@ class USASpendingSource:
                         ),
                         "description": row.get("Description", ""),
                     }
-                self._enrich_recipient_identity(contract)
+                self._enrich_recipient_identity(contract, search_award=row)
                 results.append(contract)
             metadata = data.get('page_metadata', {})
             has_next = metadata.get('hasNext') if isinstance(metadata, dict) else None
@@ -281,7 +290,24 @@ class USASpendingSource:
                 "lookup_failures": sum(row.get("recipient_identity_status") == "lookup_failed" for row in records),
                 "crosswalk_version": CROSSWALK_VERSION}
 
-    def _enrich_recipient_identity(self, contract: dict) -> None:
+    @staticmethod
+    def _identity_response(response, *, method: str, url: str, request=None) -> dict:
+        """Retain bounded official JSON under the existing acquisition deadline."""
+        try:
+            raw = read_bounded_response(response, provider="usaspending", max_bytes=2 * 1024 * 1024)
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError("identity response invalid")
+            receipt = {"method": method, "url": url, "request": deepcopy(request),
+                       "status": response.status_code,
+                       "observed_at": datetime.now(timezone.utc).isoformat(),
+                       "body": body, "body_sha256": canonical_json_sha256(body)}
+            provider_timeout("usaspending")
+            return receipt
+        finally:
+            response.close()
+
+    def _enrich_recipient_identity(self, contract: dict, *, search_award: dict | None = None) -> None:
         """Bind parent identity to this award; failures retain unknown evidence."""
         contract["parent_recipient_uei"] = ""
         contract["recipient_identity_status"] = "search_recipient"
@@ -296,10 +322,15 @@ class USASpendingSource:
         native_key = contract.get("generated_internal_id") or contract.get("internal_id")
         url = f"{BASE_URL}awards/{quote(str(native_key), safe='')}/"
         try:
-            response = provider_request("usaspending", "GET", url, timeout=15)
-            if response.status_code != 200:
+            response = provider_request("usaspending", "GET", url, timeout=15, stream=True,
+                                        return_statuses=(404,), operation=detail_request_operation(url))
+            receipt = self._identity_response(response, method="GET", url=url)
+            if receipt["status"] == 404:
+                self._fallback_recipient_identity(contract, search_award=search_award, detail=receipt)
+                return
+            if receipt["status"] != 200:
                 raise ValueError("identity lookup unavailable")
-            detail = response.json()
+            detail = receipt["body"]
             recipient = detail.get("recipient") if isinstance(detail, dict) else None
             if not isinstance(recipient, dict):
                 raise ValueError("identity detail invalid")
@@ -323,6 +354,46 @@ class USASpendingSource:
             # Award acquisition remains complete. Attribution is separately
             # incomplete and cannot create an actionable issuer or guessed ID.
             contract["recipient_identity_status"] = "lookup_failed"
+
+    def _fallback_recipient_identity(self, contract: dict, *, search_award: dict | None,
+                                     detail: dict) -> None:
+        """Corroborate only the recipient; a profile parent is not award ownership."""
+        evidence = {"policy": RECIPIENT_FALLBACK_POLICY,
+                    "search_award": deepcopy(search_award), "detail_attempt": detail,
+                    "transaction_pages": []}
+        contract["recipient_identity_evidence"] = evidence
+        if (not isinstance(search_award, dict) or not contract.get("generated_internal_id")
+                or type(contract.get("internal_id")) is not int or contract["internal_id"] <= 0
+                or not contract.get("recipient_uei") or not contract.get("recipient_id")):
+            raise ValueError("recipient fallback native identifiers missing")
+        url = f"{BASE_URL}search/spending_by_transaction/"
+        for page in range(1, 11):
+            request = {"filters": {"award_type_codes": ["A", "B", "C", "D"],
+                        "award_unique_id": contract["generated_internal_id"]},
+                       "fields": ["Award ID", "Recipient Name", "Recipient UEI", "recipient_id",
+                                  "Action Date", "Transaction Amount", "Awarding Agency",
+                                  "Transaction Description"],
+                       "page": page, "limit": 10, "sort": "Transaction Amount", "order": "desc"}
+            response = provider_request("usaspending", "POST", url, json=request, timeout=15, stream=True)
+            receipt = self._identity_response(response, method="POST", url=url, request=request)
+            evidence["transaction_pages"].append(receipt)
+            body = receipt["body"]
+            rows, metadata = body.get("results"), body.get("page_metadata")
+            if (not isinstance(rows, list) or not rows or len(rows) > 10
+                    or not isinstance(metadata, dict) or type(metadata.get("hasNext")) is not bool):
+                raise ValueError("recipient fallback transaction population invalid")
+            if metadata["hasNext"] is False:
+                break
+        else:
+            raise ValueError("recipient fallback transaction population incomplete")
+        profile_url = f"{BASE_URL}recipient/{quote(contract['recipient_id'], safe='')}/?year=all"
+        response = provider_request("usaspending", "GET", profile_url, timeout=15, stream=True)
+        evidence["recipient_profile"] = self._identity_response(response, method="GET", url=profile_url)
+        contract.update(recipient_identity_status="native_recipient_verified",
+                        recipient_identity_source=profile_url)
+        validate_recipient_fallback(contract)
+        provider_timeout("usaspending")
+        contract["issuer_attribution"] = resolve_award_issuer(contract)
 
     def get_recent_large_contracts(
         self,

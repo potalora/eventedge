@@ -588,6 +588,68 @@ def _regulation_transport_recoveries(payload: dict, validated_scope: dict | None
     return recovered, False
 
 
+def _award_recipient_transport_recoveries(payload: dict, *, session: str) -> tuple[dict, bool]:
+    """Replay every new recipient proof before interpreting its retained failure.
+
+    Historical award payloads have no such proof and keep their old reporting.
+    New evidence must bind to the complete award scope, even when no matching
+    transport diagnostic exists.
+    """
+    from ..data_sources.award_attribution_policy import validate_attribution_scope
+    from ..data_sources.fetch_errors import SourceFetchError
+    if not isinstance(payload, dict):
+        return {}, False
+    data = payload.get('data')
+    records = data.get('contracts', []) if isinstance(data, dict) else []
+    if not isinstance(records, list) or not any(
+            isinstance(row, dict) and (row.get('recipient_identity_status') == 'native_recipient_verified'
+                or 'recipient_identity_evidence' in row) for row in records):
+        return {}, False
+    try:
+        scope = validate_attribution_scope(payload, session=session)
+    except SourceFetchError as error:
+        raise ValueError('award recipient evidence invalid') from error
+    from ..data_sources.award_recipient_evidence import canonical_json_sha256, detail_request_operation
+    proofs = {}
+    for row in records:
+        if row.get('recipient_identity_status') != 'native_recipient_verified':
+            continue
+        evidence = row['recipient_identity_evidence']
+        operation = detail_request_operation(evidence['detail_attempt']['url'])
+        if operation in proofs:
+            raise ValueError('duplicate award recipient proof operation')
+        proofs[operation] = {
+            'policy': evidence['policy'],
+            'award_attribution_scope_sha256': scope['scope_sha256'],
+            'award_key': row['award_key'],
+            'detail_body_sha256': evidence['detail_attempt']['body_sha256'],
+            'transaction_proof_sha256': canonical_json_sha256(evidence['transaction_pages']),
+            'recipient_profile_body_sha256': evidence['recipient_profile']['body_sha256']}
+    events = payload.get('_request_diagnostics', [])
+    if not isinstance(events, list):
+        raise ValueError('award recipient diagnostics invalid')
+    by_operation = {operation: [] for operation in proofs}
+    for index, event in enumerate(events):
+        if isinstance(event, dict) and isinstance(event.get('operation'), str) and event['operation'] in proofs:
+            if event.get('recovered') is not False:
+                raise ValueError('award recipient original transport failure changed')
+            by_operation[event['operation']].append((index, event))
+    recovered, mismatch = {}, False
+    fields = ('provider', 'operation', 'reason_code', 'http_status', 'recovered')
+    for operation, basis in proofs.items():
+        matches = by_operation[operation]
+        expected = ('usaspending', operation, 'http_error', 404, False)
+        if (len(matches) != 1 or tuple(matches[0][1].get(key) for key in fields) != expected
+                or type(matches[0][1].get('http_status')) is not int
+                or type(matches[0][1].get('attempts')) is not int
+                or not 1 <= matches[0][1]['attempts'] <= 5
+                or matches[0][1].get('recovered') is not False):
+            mismatch = True
+            continue
+        recovered[matches[0][0]] = basis
+    return recovered, mismatch
+
+
 def _sources(state: Path, generation: str, session: str, commit: str, diagnose, *, retained_sources=None, operating_profile=None, frozen_config=None) -> dict:
     result = {'recovered':[], 'unresolved':[], 'observations':{}}
     slot = configuration_fingerprint({'generation':generation,'session':session})
@@ -659,6 +721,8 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
         regulation_scope = validate_regulation_policy(envelope['payload'], regulation_config)
         regulation_recoveries, regulation_mismatch = _regulation_transport_recoveries(
             envelope['payload'].get('regulations', {}), regulation_scope)
+        award_recipient_recoveries, award_recipient_mismatch = _award_recipient_transport_recoveries(
+            envelope['payload'].get('usaspending', {}), session=session)
         if regulation_scope is not None:
             result['regulation_source_coverage'] = regulation_scope
             if retained_sources is not None:
@@ -731,6 +795,9 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
             if source == 'regulations' and regulation_mismatch:
                 result['unresolved'].append({'provider':source,'source':source,
                     'reason_code':'government_copy_diagnostics_mismatch','http_status':None})
+            if source == 'usaspending' and award_recipient_mismatch:
+                result['unresolved'].append({'provider':source,'source':source,
+                    'reason_code':'recipient_fallback_diagnostics_mismatch','http_status':None})
             for event_index, event in enumerate(payload.get('_request_diagnostics',[])):
                 if not isinstance(event,dict) or not all(_safe_id(event.get(key)) for key in ('provider','operation')) or event.get('reason_code') is not None and not _safe_id(event['reason_code']) or type(event.get('recovered')) is not bool or type(event.get('attempts')) is not int or not 0<=event['attempts']<=5:
                     raise ValueError('source diagnostics invalid')
@@ -745,6 +812,9 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                 if source == 'regulations' and event_index in regulation_recoveries:
                     safe.update(recovered=True, transport_recovered=event['recovered'],
                                 recovery_basis=regulation_recoveries[event_index])
+                if source == 'usaspending' and event_index in award_recipient_recoveries:
+                    safe.update(recovered=True, transport_recovered=False,
+                                recovery_basis=award_recipient_recoveries[event_index])
                 if safe['recovered']:
                     result['recovered'].append(safe)
                 elif safe['reason_code']!='success':
