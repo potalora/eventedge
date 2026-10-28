@@ -528,7 +528,16 @@ class PortfolioPolicy:
         for recommendation in recommendations:
             allowed, reason = self._max_allowed_weight(recommendation, working)
             weight = min(float(recommendation.position_size_pct), allowed)
-            if weight <= self._EPSILON:
+            trimmed = weight + self._EPSILON < float(
+                recommendation.position_size_pct
+            )
+            approved_weight = (
+                round(weight, 8)
+                if trimmed
+                else float(recommendation.position_size_pct)
+            )
+            # A positive cap residual can round to zero at approval precision.
+            if weight <= self._EPSILON or approved_weight <= self._EPSILON:
                 decisions.append(
                     PortfolioPolicyDecision(
                         recommendation.ticker,
@@ -541,16 +550,9 @@ class PortfolioPolicy:
                     )
                 )
                 continue
-            trimmed = weight + self._EPSILON < float(
-                recommendation.position_size_pct
-            )
             constrained = replace(
                 recommendation,
-                position_size_pct=(
-                    round(weight, 8)
-                    if trimmed
-                    else float(recommendation.position_size_pct)
-                ),
+                position_size_pct=approved_weight,
             )
             accepted.append(constrained)
             decisions.append(
