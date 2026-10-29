@@ -31,7 +31,22 @@ REQUIRED_SOURCES = frozenset(('equity_universe', 'openbb', 'yfinance', 'finnhub'
     'usaspending', 'cftc'))
 CAPTURE_HASHES = {
     'gen022-reference-20261015': 'd3bc2cbf66183b743c73fac459bef6ce99f004da630f6a181abf1e4ba31d3c13',
-    'native-reference-20261016': 'ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da'}
+    'native-reference-20261016': 'ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da',
+    'gen025-reference-20261026': 'cee58f5f87f70cf3100304ef098197a31ce06651b7f5e3dfbc5cc4ed318ce51f'}
+CURRENT_AWARD_CASE = 'gen025-reference-20261026'
+LEGACY_AWARD_CONTRACTS = {
+    'gen022-reference-20261015': {
+        'classification': 'obsolete_proof_rejection', 'crosswalk_version': 'reviewed_2026-10-10',
+        'current_crosswalk_version': 'reviewed_2026-10-22',
+        'retained_scope_sha256': '13c498d2d6b7561436f9cc8d110a1b61e01048caf35a05d298012f282082b095',
+        'current_scope_sha256': 'bea575dded4768a444658c26ad48309a4b5becf5993b117c3d237a6b2f1cecce',
+        'counts': {'verified_listed_target': 12, 'verified_no_listed_target': 12, 'unresolved': 23}},
+    'native-reference-20261016': {
+        'classification': 'obsolete_proof_rejection', 'crosswalk_version': 'reviewed_2026-10-10',
+        'current_crosswalk_version': 'reviewed_2026-10-22',
+        'retained_scope_sha256': 'cb4c451a3331a645435177c173af8ed8a9d919540dea274216700b60716b7f89',
+        'current_scope_sha256': 'be7176f9f3f590748b6194a5c66f4708ad72c7e12cb9a920feba9719a14a433d',
+        'counts': {'verified_listed_target': 9, 'verified_no_listed_target': 12, 'unresolved': 22}}}
 SIP_HASH = 'c32bc207ebf47afe1e9efc66fed2aa66b2178e86d55f9466c335881fd9555aa2'
 
 
@@ -118,7 +133,7 @@ def _read_regular(path, maximum, expected_size=None):
 
 def _validate_manifest(manifest):
     public, private = manifest['public_cases'], manifest['private_captures']
-    mandatory = {parent + '-' + source for parent in CAPTURE_HASHES
+    mandatory = {parent + '-' + source for parent in LEGACY_AWARD_CONTRACTS
                  for source in ('noaa', 'usda', 'drought_monitor', 'cftc')}
     mandatory.add('noaa-official-static-202010')
     if (manifest['schema_version'] != 1 or set(manifest['required_sources']) != REQUIRED_SOURCES
@@ -145,6 +160,13 @@ def _validate_manifest(manifest):
     for case in private:
         if (case['boundary'] != 'accepted_normalized_envelope'
                 or case['id'] in CAPTURE_HASHES and case['sha256'] != CAPTURE_HASHES[case['id']]):
+            raise AcceptanceError('invalid_manifest')
+        contract = case.get('expected', {}).get('award_contract', {})
+        if case['id'] in LEGACY_AWARD_CONTRACTS and contract != LEGACY_AWARD_CONTRACTS[case['id']]:
+            raise AcceptanceError('invalid_manifest')
+        if case['id'] == CURRENT_AWARD_CASE and (
+                contract.get('classification') != 'current_positive'
+                or contract.get('crosswalk_version') != 'reviewed_2026-10-22'):
             raise AcceptanceError('invalid_manifest')
     if (manifest['private_wire']['id'] != 'alpaca-sip-20261016'
             or manifest['private_wire']['source'] != 'alpaca_sip'
@@ -292,6 +314,54 @@ def _mutations(payloads, apis):
     return rows
 
 
+def _award_contract(payload, session, expected, apis):
+    """Check obsolete proof rejection separately from current positive proof.
+
+    The rebuilt legacy scope is diagnostic only. Never replace the original
+    proof, mutate its envelope, or pass recomputed evidence to a consumer.
+    """
+    from tradingagents.strategies.data_sources import award_attribution_policy as policy
+    from tradingagents.strategies.data_sources.award_identity import CROSSWALK_VERSION
+    from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+    retained = payload['coverage']['attribution_scope']
+    fingerprint = _sha(json.dumps({k: v for k, v in retained.items() if k != 'scope_sha256'},
+        sort_keys=True, separators=(',', ':'), allow_nan=False).encode())
+    if (retained.get('crosswalk_version') != expected['crosswalk_version']
+            or retained.get('scope_sha256') != expected['retained_scope_sha256']
+            or fingerprint != expected['retained_scope_sha256']
+            or retained.get('counts') != expected['counts']):
+        raise AcceptanceError('retained_award_proof_changed')
+    if expected['classification'] == 'current_positive':
+        validated = policy.validate_attribution_scope(payload, session=session)
+        if CROSSWALK_VERSION != expected['crosswalk_version'] or validated != retained:
+            raise AcceptanceError('current_award_proof_changed')
+        apis.add('validate_attribution_scope(current_positive)')
+        return {'classification': 'current_positive', 'current_proof_valid': True,
+                'crosswalk_version': CROSSWALK_VERSION, 'scope_sha256': fingerprint}
+    if expected['classification'] != 'obsolete_proof_rejection':
+        raise AcceptanceError('unknown_award_contract_expectation')
+    rebuilt = policy.build_attribution_scope(payload['data']['contracts'], payload['coverage'], session=session)
+    if (CROSSWALK_VERSION != expected['current_crosswalk_version']
+            or rebuilt.get('scope_sha256') != expected['current_scope_sha256']
+            or rebuilt.get('crosswalk_version') != expected['current_crosswalk_version']
+            or rebuilt == retained or payload['data'].get('coverage') != payload['coverage']):
+        raise AcceptanceError('unexpected_award_contract_rejection')
+    try:
+        policy.validate_attribution_scope(payload, session=session)
+    except SourceFetchError as error:
+        if str(error) != 'USASpending verified-target scope evidence invalid [invalid_response]':
+            raise
+    else:
+        raise AcceptanceError('obsolete_award_proof_accepted')
+    apis.add('validate_attribution_scope(obsolete_proof_rejected)')
+    return {'classification': 'obsolete_proof_rejection', 'current_proof_valid': False,
+            'retained_crosswalk_version': expected['crosswalk_version'],
+            'current_crosswalk_version': CROSSWALK_VERSION,
+            'retained_scope_sha256': fingerprint,
+            'diagnostic_current_scope_sha256': rebuilt['scope_sha256'],
+            'rejection_reason': 'invalid_response'}
+
+
 def _private_normalizers(data, envelope, apis, expected):
     import pandas as pd
     from tradingagents.strategies.orchestration.research_resilience import project_sources, CAPABILITY_POLICY
@@ -300,7 +370,6 @@ def _private_normalizers(data, envelope, apis, expected):
     from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
     from tradingagents.strategies.modules.earnings_call import EarningsCallStrategy
     from tradingagents.strategies.modules.commodity_macro import CommodityMacroStrategy
-    from tradingagents.strategies.data_sources.award_attribution_policy import validate_attribution_scope
     from tradingagents.strategies.data_sources.courtlistener_scope import validate_focused_litigation
     from tradingagents.strategies.orchestration.congress_policy import audit_scope, POLICY
     from tradingagents.strategies.orchestration.source_inputs import SourceInputStore
@@ -362,10 +431,10 @@ def _private_normalizers(data, envelope, apis, expected):
     if _candidate_digest(commodities) != expected['commodity_candidates_sha256']:
         raise AcceptanceError('retained_commodity_candidates_changed')
     apis.add('CommodityMacroStrategy.screen')
-    award = validate_attribution_scope(data['usaspending'], session=session)
-    if award != data['usaspending']['coverage']['attribution_scope']:
-        raise AcceptanceError('award_scope_consumer_changed')
-    apis.add('validate_attribution_scope')
+    award_contract = _award_contract(data['usaspending'], session, expected['award_contract'], apis)
+    retained_award = data['usaspending']['coverage']['attribution_scope']
+    if retained_award['attribution_complete'] != expected['award_attribution_complete']:
+        raise AcceptanceError('retained_award_completeness_changed')
     court = data['courtlistener']
     start = (date.fromisoformat(session) - timedelta(days=14)).isoformat()
     validated = validate_focused_litigation(court, expected_scope=court['coverage']['scope'],
@@ -399,7 +468,9 @@ def _private_normalizers(data, envelope, apis, expected):
             'actual_source_projection': actual_projection,
             'observed_noaa_error': bool(data['noaa'].get('error')),
             'edgar_observed_error': bool(data['edgar'].get('error')),
-            'usaspending_attribution_complete': award['attribution_complete'],
+            'award_contract': award_contract,
+            'usaspending_attribution_complete': (retained_award['attribution_complete']
+                if award_contract['current_proof_valid'] else None),
             'native_capabilities': {key: value['status'] for key, value in scope['capabilities'].items()},
             'represented_sources': sorted(name for name in data if not name.startswith('_')),
             'consumer_boundary': 'normalized captures / SDK frames; not reconstructed HTTP wires'}
@@ -543,7 +614,15 @@ def run_acceptance(manifest_path, public_data, *, private_corpus=None):
         and all(row['passed'] for row in report.get('public_weather_consumers', []))
         and not any(report['io_counters'].values()))
     report['full_supported_scope_passed'] = (report['public_scope_passed']
-        and bool(report['private_cases']) and not report['coverage_gaps'])
+        and bool(report['private_cases']) and not report['coverage_gaps']
+        and {row['id'] for row in report['private_cases']} ==
+            {case['id'] for case in manifest['private_captures']} | {manifest['private_wire']['id']}
+        and all(row['passed'] for row in report['private_cases'])
+        and any(row['id'] == CURRENT_AWARD_CASE
+            and row.get('award_contract', {}).get('classification') == 'current_positive'
+            and row['award_contract'].get('current_proof_valid') is True
+            and REQUIRED_SOURCES <= set(row.get('represented_sources', []))
+            for row in report['private_cases']))
     report['coverage_boundaries'] = {
         'public_sources': sorted({row['source'] for row in report['baseline_cases']}),
         'full_required_sources': manifest['required_sources'],

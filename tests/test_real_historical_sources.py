@@ -140,7 +140,7 @@ def test_verified_original_bytes_are_pinned_before_native_envelope_read(tmp_path
     monkeypatch.setattr(replay, '_read_fixture', replaced_after_hash)
     monkeypatch.setattr(SourceInputStore, '_read', inspect_native_read)
     replay._private_cases(manifest, tmp_path, set())
-    assert observed == [original, original]
+    assert observed == [original] * len(manifest['private_captures'])
 
 
 def test_candidate_contract_digest_includes_session_and_event_identity():
@@ -234,3 +234,117 @@ signal.setitimer(signal.ITIMER_REAL, 0)
     result = subprocess.run([sys.executable, '-B', '-c', code, str(changed), str(public)],
                             cwd=ROOT, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def _award_contract_control(monkeypatch, *, legacy):
+    """Synthetic boundary control; never represented as provider evidence."""
+    import hashlib
+    from historical import replay
+    from tradingagents.strategies.data_sources import award_attribution_policy as policy
+    from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+    def scope(version):
+        body = {'crosswalk_version': version, 'counts': {'unresolved': 1}, 'awards': []}
+        body['scope_sha256'] = hashlib.sha256(json.dumps(body, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+        return body
+    retained = scope('reviewed_2026-10-10' if legacy else 'reviewed_2026-10-22')
+    current = scope('reviewed_2026-10-22')
+    coverage = {'attribution_scope': retained}
+    payload = {'coverage': coverage, 'data': {'coverage': coverage, 'contracts': []}}
+    expected = {'classification': 'obsolete_proof_rejection' if legacy else 'current_positive',
+        'crosswalk_version': retained['crosswalk_version'],
+        'retained_scope_sha256': retained['scope_sha256'], 'counts': retained['counts']}
+    if legacy:
+        expected.update(current_crosswalk_version='reviewed_2026-10-22',
+                        current_scope_sha256=current['scope_sha256'])
+        def reject(*args, **kwargs):
+            raise SourceFetchError('USASpending verified-target scope evidence invalid',
+                                   reason_code='invalid_response')
+        monkeypatch.setattr(policy, 'validate_attribution_scope', reject)
+    else:
+        monkeypatch.setattr(policy, 'validate_attribution_scope', lambda *a, **kw: retained)
+    monkeypatch.setattr(policy, 'build_attribution_scope', lambda *a, **kw: current)
+    return replay, policy, payload, expected
+
+
+def test_obsolete_award_proof_is_rejected_explicitly_without_rewriting_original(monkeypatch):
+    import copy
+    replay, _, payload, expected = _award_contract_control(monkeypatch, legacy=True)
+    original = copy.deepcopy(payload)
+    result = replay._award_contract(payload, '2026-10-15', expected, set())
+    assert result['classification'] == 'obsolete_proof_rejection'
+    assert result['current_proof_valid'] is False
+    assert payload == original
+
+
+@pytest.mark.parametrize('change', ['unexpected_error', 'changed_original', 'changed_rebuild', 'accepted_old'])
+def test_obsolete_award_expectation_cannot_mask_other_failures(monkeypatch, change):
+    from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+    replay, policy, payload, expected = _award_contract_control(monkeypatch, legacy=True)
+    if change == 'unexpected_error':
+        def reject(*a, **kw):
+            raise SourceFetchError('different invalid evidence', reason_code='invalid_response')
+        monkeypatch.setattr(policy, 'validate_attribution_scope', reject)
+    elif change == 'changed_original':
+        payload['coverage']['attribution_scope']['counts'] = {'unresolved': 2}
+    elif change == 'changed_rebuild':
+        monkeypatch.setattr(policy, 'build_attribution_scope', lambda *a, **kw: {})
+    else:
+        monkeypatch.setattr(policy, 'validate_attribution_scope', lambda *a, **kw: payload['coverage']['attribution_scope'])
+    with pytest.raises((AcceptanceError, SourceFetchError)):
+        replay._award_contract(payload, '2026-10-15', expected, set())
+
+
+@pytest.mark.parametrize('corruption', ['validation_error', 'altered_scope'])
+def test_current_award_positive_requires_strict_validator_success(monkeypatch, corruption):
+    from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+    replay, policy, payload, expected = _award_contract_control(monkeypatch, legacy=False)
+    assert replay._award_contract(payload, '2026-10-26', expected, set())['current_proof_valid'] is True
+    if corruption == 'altered_scope':
+        payload['coverage']['attribution_scope']['counts'] = {'unresolved': 2}
+    else:
+        def reject(*a, **kw):
+            raise SourceFetchError('USASpending verified-target scope evidence invalid', reason_code='invalid_response')
+        monkeypatch.setattr(policy, 'validate_attribution_scope', reject)
+    with pytest.raises((SourceFetchError, AcceptanceError)):
+        replay._award_contract(payload, '2026-10-26', expected, set())
+
+
+def test_manifest_cannot_remove_or_relabel_current_positive_case(tmp_path):
+    manifest = json.loads(MANIFEST.read_text())
+    positive = [case for case in manifest['private_captures']
+                if case['expected'].get('award_contract', {}).get('classification') == 'current_positive']
+    assert len(positive) == 1
+    for relabel in (False, True):
+        changed = json.loads(MANIFEST.read_text())
+        if relabel:
+            next(c for c in changed['private_captures'] if c['id'] == positive[0]['id'])['expected']['award_contract']['classification'] = 'obsolete_proof_rejection'
+        else:
+            changed['private_captures'] = [c for c in changed['private_captures'] if c['id'] != positive[0]['id']]
+        path = tmp_path / 'manifest.json'
+        path.write_text(json.dumps(changed))
+        result = run_acceptance(path, PUBLIC)
+        assert result['full_supported_scope_passed'] is False
+        assert result['coverage_gaps'] == ['invalid_manifest']
+
+
+def test_full_scope_requires_current_positive_attribution_and_all_source_contracts(monkeypatch):
+    from historical import replay
+    required = sorted(replay.REQUIRED_SOURCES)
+    manifest = json.loads(MANIFEST.read_text())
+    base = {'id': replay.CURRENT_AWARD_CASE, 'passed': True,
+            'award_contract': {'classification': 'current_positive', 'current_proof_valid': True},
+            'represented_sources': required}
+    for missing in ('current_proof', 'source_contract'):
+        row = json.loads(json.dumps(base))
+        if missing == 'current_proof':
+            row['award_contract']['current_proof_valid'] = False
+        else:
+            row['represented_sources'].remove('usaspending')
+        rows = [{'id': case['id'], 'passed': True} for case in manifest['private_captures']
+                if case['id'] != replay.CURRENT_AWARD_CASE]
+        rows += [{'id': manifest['private_wire']['id'], 'passed': True}, row]
+        monkeypatch.setattr(replay, '_private_cases', lambda *a, _rows=rows, **kw: _rows)
+        report = run_acceptance(MANIFEST, PUBLIC, private_corpus=PUBLIC)
+        assert report['public_scope_passed'] is True
+        assert report['full_supported_scope_passed'] is False
