@@ -6,7 +6,8 @@
   "limitations": [
     "Public subset excludes licensed/private provider corpora; full source acceptance requires explicit external corpus.",
     "Accepted source envelopes are normalized observations, not captured provider HTTP bodies.",
-    "Acquisition, reference session, observation and as-of dates remain distinct; replay does not prove fresh health."
+    "Acquisition, reference session, observation and as-of dates remain distinct; replay does not prove fresh health.",
+    "Oct15/16 award proofs use reviewed_2026-10-10 and are required current-contract rejections, not healthy current attribution; Oct26 separately proves positive reviewed_2026-10-22 attribution over the original envelope."
   ],
   "private_captures": [
     {
@@ -14,6 +15,18 @@
       "bytes": 47869133,
       "expected": {
         "award_attribution_complete": false,
+        "award_contract": {
+          "classification": "obsolete_proof_rejection",
+          "counts": {
+            "unresolved": 23,
+            "verified_listed_target": 12,
+            "verified_no_listed_target": 12
+          },
+          "crosswalk_version": "reviewed_2026-10-10",
+          "current_crosswalk_version": "reviewed_2026-10-22",
+          "current_scope_sha256": "bea575dded4768a444658c26ad48309a4b5becf5993b117c3d237a6b2f1cecce",
+          "retained_scope_sha256": "13c498d2d6b7561436f9cc8d110a1b61e01048caf35a05d298012f282082b095"
+        },
         "commodity_candidates": 0,
         "commodity_candidates_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "congress_content_sha256": "0961060f1b23a27e1c3595738ea6d4692f62d9ce760b13c23d4c128358dacaba",
@@ -81,6 +94,18 @@
       "bytes": 22031228,
       "expected": {
         "award_attribution_complete": false,
+        "award_contract": {
+          "classification": "obsolete_proof_rejection",
+          "counts": {
+            "unresolved": 22,
+            "verified_listed_target": 9,
+            "verified_no_listed_target": 12
+          },
+          "crosswalk_version": "reviewed_2026-10-10",
+          "current_crosswalk_version": "reviewed_2026-10-22",
+          "current_scope_sha256": "be7176f9f3f590748b6194a5c66f4708ad72c7e12cb9a920feba9719a14a433d",
+          "retained_scope_sha256": "cb4c451a3331a645435177c173af8ed8a9d919540dea274216700b60716b7f89"
+        },
         "commodity_candidates": 0,
         "commodity_candidates_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "congress_content_sha256": "22a388f68dba82fb3e9be4b128d95e3d18a868059b8caca37d632097c23d4af1",
@@ -142,6 +167,84 @@
         "vintage_as_of": "2026-10-18"
       },
       "sha256": "ca57045c5c0a207856e6587a8e2ae4478904e4489607fc44bdabc53a716047da"
+    },
+    {
+      "boundary": "accepted_normalized_envelope",
+      "bytes": 21751583,
+      "expected": {
+        "award_attribution_complete": false,
+        "award_contract": {
+          "classification": "current_positive",
+          "counts": {
+            "unresolved": 1,
+            "verified_listed_target": 8,
+            "verified_no_listed_target": 17
+          },
+          "crosswalk_version": "reviewed_2026-10-22",
+          "retained_scope_sha256": "537464a4d55898a197f3768c154c32fd47ebb2467c8d10203cbc2ae7d59f7c2f"
+        },
+        "commodity_candidates": 0,
+        "commodity_candidates_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "congress_content_sha256": "e3806f9b4fdc881f05cc58b8e0cab0d8b48f7fbd15884d305e1f588d41952669",
+        "court_dockets": 20,
+        "court_evidence_sha256": "cf6eb257ec4f3018a5df91ff4b318e4ea1af3e7ca7b945a6322a4515c69d4b37",
+        "earnings_candidates": 4,
+        "earnings_candidates_sha256": "8dfa97a0309ebbae96bd5d519b8374f058171d59cf95c66369c80eeb8eec8d58",
+        "fred_series": 18,
+        "source_errors": {
+          "cftc": false,
+          "congress": false,
+          "courtlistener": false,
+          "drought_monitor": false,
+          "edgar": true,
+          "equity_universe": false,
+          "finnhub": false,
+          "fred": false,
+          "noaa": false,
+          "openbb": false,
+          "usaspending": false,
+          "usda": false,
+          "yfinance": false
+        },
+        "source_projection": {
+          "cftc": "usable",
+          "congress": "usable",
+          "courtlistener": "usable",
+          "drought_monitor": "usable",
+          "edgar": "excluded",
+          "equity_universe": "usable",
+          "finnhub": "usable",
+          "fred": "usable",
+          "noaa": "usable",
+          "openbb": "usable",
+          "usaspending": "usable",
+          "usda": "usable",
+          "yfinance": "usable"
+        },
+        "spy_last_session": "2026-10-23",
+        "spy_rows": 63,
+        "weather_candidates": 3,
+        "weather_candidates_sha256": "bff333c1c0d454bd69a42972681c4c7655bb30df074d91cf3a1d8a6d2fc647ca",
+        "weather_non_journal": 3,
+        "yahoo_frames": 37
+      },
+      "expected_grounding": "Counts, scope hash, source facts, and acquisition provenance are retained in the unmodified Oct26 envelope; its award counts/hash also match the canonical Oct26 operational report. Candidate hashes freeze deterministic native consumers at unchanged deployed e33cc9e code; no provider wire or fresh health claim.",
+      "id": "gen025-reference-20261026",
+      "path": "gen025-20261026-source-inputs.json",
+      "provenance": {
+        "acquired_at": "2026-10-26T22:02:35.472304+00:00",
+        "acquisition_started_at": "2026-10-26T22:01:41.027199+00:00",
+        "identity": {
+          "commit": "e33cc9eed38aa668dbde5f5e2844b7fbfb9391ac",
+          "configuration": "27114146ec5ae4fd57e7806ebe21de2076dffaecf60a2d1a747d07e2b31f5b12",
+          "generation": "gen_025",
+          "session": "2026-10-26"
+        },
+        "original_artifact_sha256": "cee58f5f87f70cf3100304ef098197a31ce06651b7f5e3dfbc5cc4ed318ce51f",
+        "reference_session": "2026-10-26",
+        "vintage_as_of": "2026-10-26"
+      },
+      "sha256": "cee58f5f87f70cf3100304ef098197a31ce06651b7f5e3dfbc5cc4ed318ce51f"
     }
   ],
   "private_wire": {

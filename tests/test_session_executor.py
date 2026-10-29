@@ -3264,6 +3264,53 @@ def _policy_enabled_staging_fixture(tmp_path):
     return ledger, engine, call
 
 
+def test_rounded_zero_policy_allocation_does_not_abort_other_staging(tmp_path):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    # The real fallback committee trims AAPL to 0.1, leaving a raw 3e-9
+    # strategy allocation for MSFT that rounds to zero at policy precision.
+    call["size_profile"] = replace(
+        call["size_profile"], max_strategy_exposure_pct=0.100000003
+    )
+    second = deepcopy(call["shared_signals"][0])
+    second.update(
+        ticker="MSFT", event_key="event-msft",
+        source_event_keys=("native-msft",), risk_tags=("event:msft",),
+        metadata={"event_key": "event-msft", "observed_at": "2026-07-31T19:30:00+00:00"},
+    )
+    call["shared_signals"].append(second)
+    call["data"]["_execution_reference_bars"]["MSFT"] = _bar("MSFT", FRIDAY)
+    call["enrichment"]["profiles"]["MSFT"] = {"sector": "Technology"}
+    call["annualized_volatility_evidence"] = {"AAPL": 0.31, "MSFT": 0.31}
+
+    try:
+        before = ledger.account_state()
+        result = engine.screen_and_stage(**call)
+
+        assert len(result["intents_staged"]) == 1
+        intents = ledger.pending_intents(MONDAY)
+        assert len(intents) == 1
+        assert intents[0].requested_qty == 4  # $500 approval / $101 reference close.
+        assert ledger.signals_for_intent(intents[0].intent_id)[0].ticker == "AAPL"
+        decisions = {row["ticker"]: row for row in ledger.read_policy_candidate_decisions()}
+        assert decisions["AAPL"]["decision"] == "trimmed"
+        assert decisions["AAPL"]["approved_weight"] == 0.1
+        assert decisions["MSFT"]["decision"] == "rejected"
+        assert decisions["MSFT"]["reason_codes"] == ("strategy:strategy",)
+        assert decisions["MSFT"]["approved_weight"] == 0.0
+        assert ledger.account_state() == before
+        assert ledger.read_fills() == []
+        manifests = ledger.read_policy_staging_audit_manifests()
+        assert len(manifests) == 1
+
+        replay = engine.screen_and_stage(**call)
+        assert replay["replayed"] is True
+        assert ledger.pending_intents(MONDAY) == intents
+        assert ledger.read_policy_staging_audit_manifests() == manifests
+        assert {row["ticker"]: row for row in ledger.read_policy_candidate_decisions()} == decisions
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize("zero_first", [True, False])
 @pytest.mark.parametrize("all_zero", [False, True])
 def test_zero_share_candidate_is_audited_without_aborting_other_staging(

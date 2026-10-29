@@ -95,7 +95,7 @@ def test_cached_pre_release_archive_cannot_hide_new_required_report(monkeypatch)
     source = install(monkeypatch, acquired='2026-10-23T19:31:00+00:00')
     frame = source._fetch_raw_report()
     frame.attrs['acquired_at'] = '2026-10-23T19:29:00+00:00'
-    del source._fetch_raw_report
+    monkeypatch.delattr(source, '_fetch_raw_report')
     source._cache['disaggregated_futures|52|2026-10-23|2026-10-23'] = frame
     result = fetch(source, '2026-10-23')
     assert result.get('error') and not successful_source(result)
@@ -107,7 +107,7 @@ def test_cached_unpublished_row_keeps_original_clock_and_later_availability(monk
     source = install(monkeypatch, latest='2026-10-20', acquired='2026-10-23T19:31:00+00:00')
     frame = source._fetch_raw_report()
     frame.attrs['acquired_at'] = '2026-10-23T19:29:00+00:00'
-    del source._fetch_raw_report
+    monkeypatch.delattr(source, '_fetch_raw_report')
     source._cache['disaggregated_futures|52|2026-10-23|2026-10-23'] = frame
     result = fetch(source, '2026-10-23')
     assert 'error' not in result
