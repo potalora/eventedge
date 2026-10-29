@@ -47,6 +47,12 @@ def raw(symbol='AAPL', **changes):
 def native(tmp_path, monkeypatch):
     # Fake dependency boundary intentionally mirrors complete native model fields.
     # No installed OpenBB preparation/refresh or provider operation is invoked.
+    from tradingagents.strategies.data_sources import evidence, openbb_source
+    # Fix the September archive publication context while preserving clocks
+    # explicitly supplied by broader pipeline or publication-boundary fixtures.
+    if openbb_source.acquisition_time is evidence.acquisition_time:
+        monkeypatch.setattr(openbb_source, 'acquisition_time',
+                            lambda: '2026-10-22T12:00:00+00:00')
     path = tmp_path/'finra.db'
     conn = sqlite3.connect(path)
     conn.execute('CREATE TABLE short_interest ("index" INTEGER, symbolCode TEXT, issueName TEXT, marketClassCode TEXT, currentShortPositionQuantity INTEGER, previousShortPositionQuantity INTEGER, averageDailyVolumeQuantity INTEGER, daysToCoverQuantity REAL, changePercent REAL, changePreviousNumber INTEGER, settlementDate TEXT)')

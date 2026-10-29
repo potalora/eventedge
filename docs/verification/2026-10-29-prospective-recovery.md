@@ -57,6 +57,15 @@ validator and all thirteen represented source contracts. Omitting or corrupting
 that capture fails full-scope acceptance. Accepted normalized captures do not
 establish native HTTP wire contracts; historical source failures remain failures.
 
+The broad suite also reproduced nineteen failures in the existing synthetic
+FINRA fixture after the real calendar advanced beyond October 27. Its September
+archives are valid for the fixture's October 22 acquisition context, while the
+current production calendar correctly requires the October 15 settlement. The
+shared fixture now pins only its default acquisition clock and preserves explicit
+pipeline/publication clocks. The isolated comparison across all fixture importers
+and calendar controls changed from 19 failed / 135 passed / 1 optional-SDK skip
+to 154 passed / 1 optional-SDK skip. Production freshness rules are unchanged.
+
 Before deployment, require the final candidate's public and private historical
 replays, scheduled workflow acceptance, remaining non-live suite, baseline and
 pinned optional-SDK CI, focused rounding/lifecycle regressions, and independent
