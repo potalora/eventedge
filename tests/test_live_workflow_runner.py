@@ -20,6 +20,12 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
 
 
+def _test_git_sha256():
+    # Unit fixtures explicitly provide a pin; production must get it from the
+    # supervisor's host-root ownership check outside the payload namespace.
+    return hashlib.sha256(Path('/usr/bin/git').read_bytes()).hexdigest()
+
+
 @pytest.fixture
 def candidate(tmp_path):
     root = tmp_path/'candidate'; root.mkdir()
@@ -242,7 +248,7 @@ def test_owned_startup_imports_candidate_and_does_not_load_dependency_pth(tmp_pa
     code="from tools.live_workflow.bootstrap import install; install()"
     (site/'owned.pth').write_text(str(dep)+'\n'+str(hook_root)+'\n'+'import os; exec('+repr(code)+')\n')
     config=tmp_path/'hook.json'; config.write_text(json.dumps({'candidate_repo':str(repo),'phase':'test',
-        'local_git':readonly_git_identity()}))
+        'local_git':readonly_git_identity(_test_git_sha256())}))
     env['EVENTEDGE_LIVE_CONFIG']=str(config)
     git(repo,'init','-q')
     # accepted-replay selects explicit no-IO installation rather than live hooks.
@@ -287,7 +293,7 @@ def test_no_io_guard_counts_forbidden_requests_without_network(monkeypatch,tmp_p
     for package in ('httpx2','curl_cffi'):
         monkeypatch.setitem(sys.modules,package,None)
     monkeypatch.delattr(sys,'_eventedge_replay_process_guard',raising=False)
-    attempts=Counter(); _forbid_io(attempts,repo=tmp_path,git_identity=readonly_git_identity())
+    attempts=Counter(); _forbid_io(attempts,repo=tmp_path,git_identity=readonly_git_identity(_test_git_sha256()))
     with pytest.raises(RuntimeError,match='network'):
         socket.create_connection(('invalid.example',443))
     assert attempts == {'network.create_connection':1}
@@ -326,7 +332,8 @@ def test_prepare_refuses_incompatible_python_before_any_application_call(candida
     site=tmp_path/'deps/lib/python9.9/site-packages'; site.mkdir(parents=True)
     args=Namespace(candidate_root=root,candidate_commit=commit,session='2026-10-30',destination=tmp_path/'campaign',
         profile_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),dependency_site=site,
-        dependency_sha256=dependency_fingerprint(site),python=str(Path(sys.executable).resolve()),python_version='9.9',
+        dependency_sha256=dependency_fingerprint(site),git_sha256=_test_git_sha256(),
+        python=str(Path(sys.executable).resolve()),python_version='9.9',
         observer_root=None,observer_commit=None,native_root=None,native_commit=None)
     called=[]; monkeypatch.setattr('tools.live_workflow.runner._child',lambda *a,**kw:called.append(a))
     with pytest.raises(AcceptanceError,match='incompatible_runtime_python'):
@@ -348,7 +355,8 @@ def test_prepare_allows_only_its_native_runtime_lock_among_new_operational_files
     root=tmp_path/'campaign'
     args=Namespace(candidate_root=source,candidate_commit=commit,session='2026-10-30',destination=root,
         profile_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),dependency_site=site,
-        dependency_sha256=dependency_fingerprint(site),python=str(Path(sys.executable).resolve()),python_version='9.9',
+        dependency_sha256=dependency_fingerprint(site),git_sha256=_test_git_sha256(),
+        python=str(Path(sys.executable).resolve()),python_version='9.9',
         observer_root=None,observer_commit=None,native_root=None,native_commit=None)
     # Stop before any application import; prepare has established clone policy.
     with pytest.raises(AcceptanceError,match='incompatible_runtime_python'):
@@ -825,7 +833,7 @@ def replay_git_guard(candidate,monkeypatch):
     # test; the subprocess guard itself deliberately persists across module loads.
     monkeypatch.delattr(sys,'_eventedge_replay_process_guard',raising=False)
     monkeypatch.setattr(subprocess,'Popen',subprocess.Popen)
-    return bootstrap,repo,runner.readonly_git_identity(),Counter()
+    return bootstrap,repo,runner.readonly_git_identity(_test_git_sha256()),Counter()
 
 
 def _canonical_git_command(repo):
@@ -933,6 +941,7 @@ def test_replay_guard_does_not_reset_local_read_limit_or_denied_attempts(replay_
 def test_readonly_git_identity_refuses_untrusted_binary_metadata(monkeypatch,defect):
     from types import SimpleNamespace
     from tools.live_workflow.runner import readonly_git_identity
+    expected=_test_git_sha256()
     original_symlink=Path.is_symlink
     original_lstat=Path.lstat
     def is_symlink(path):
@@ -947,7 +956,7 @@ def test_readonly_git_identity_refuses_untrusted_binary_metadata(monkeypatch,def
     monkeypatch.setattr(Path,'is_symlink',is_symlink)
     monkeypatch.setattr(Path,'lstat',lstat)
     with pytest.raises(AcceptanceError,match='symlink|git_binary'):
-        readonly_git_identity()
+        readonly_git_identity(expected)
 
 
 def test_replay_git_binary_pin_mismatch_denies_before_launch(replay_git_guard,monkeypatch):
@@ -981,3 +990,80 @@ def test_actual_native_canonical_lock_identity_runs_under_replay_gate(replay_git
         assert sys._eventedge_replay_process_guard['allowed']=={'canonical_git_common_dir':1}
     finally:
         sys.modules.pop(spec.name,None)
+
+
+@pytest.mark.parametrize('readonly,owner,pin_matches,accepted',[
+    (True,65534,True,True),
+    (False,65534,True,False),
+    (True,65533,True,False),
+    (True,65534,False,False),
+    (True,0,False,False),
+])
+def test_git_identity_mapped_owner_requires_external_pin_and_readonly_mount(
+        monkeypatch,readonly,owner,pin_matches,accepted):
+    import os
+    from types import SimpleNamespace
+    from tools.live_workflow import runner
+    expected=hashlib.sha256(Path('/usr/bin/git').read_bytes()).hexdigest()
+    if not pin_matches:expected='0'*64
+    original_lstat=Path.lstat
+    monkeypatch.setattr(Path,'lstat',lambda path:SimpleNamespace(st_mode=0o100755,st_uid=owner)
+        if path==Path('/usr/bin/git') else original_lstat(path))
+    monkeypatch.setattr(runner,'_kernel_overflow_uid',lambda:65534)
+    monkeypatch.setattr(os,'statvfs',lambda path:SimpleNamespace(f_flag=os.ST_RDONLY if readonly else 0))
+    if accepted:
+        assert runner.readonly_git_identity(expected)=={'path':'/usr/bin/git','sha256':expected}
+    else:
+        with pytest.raises(AcceptanceError,match='git_binary'):
+            runner.readonly_git_identity(expected)
+
+
+@pytest.mark.parametrize('value',[None,'','0'*63,'G'*64])
+def test_git_identity_cannot_discover_an_unpinned_binary(value):
+    from tools.live_workflow.runner import readonly_git_identity
+    with pytest.raises(AcceptanceError,match='git_binary_pin'):
+        readonly_git_identity(value)
+
+
+@pytest.mark.parametrize('value,expected',[
+    (b'65534\n',65534),(b'12345\n',12345),(b'x'*33,None),(b'-1\n',None),
+    (b'0\n',None),(b'4294967295\n',None),(b'65534\nextra',None),
+])
+def test_kernel_overflow_uid_uses_only_bounded_fixed_public_kernel_metadata(monkeypatch,value,expected):
+    from io import BytesIO
+    from tools.live_workflow.runner import _kernel_overflow_uid
+    def read_metadata(path,*args,**kwargs):
+        assert path==Path('/proc/sys/kernel/overflowuid') and args==('rb',)
+        return BytesIO(value)
+    monkeypatch.setattr(Path,'open',read_metadata)
+    if expected is None:
+        with pytest.raises(AcceptanceError,match='git_binary_overflow_uid'):
+            _kernel_overflow_uid()
+    else:
+        assert _kernel_overflow_uid()==expected
+
+
+def test_replay_guard_accepts_mapped_git_only_with_its_bound_external_pin(replay_git_guard,monkeypatch):
+    import os
+    from types import SimpleNamespace
+    from tools.live_workflow import runner
+    bootstrap,repo,identity,attempts=replay_git_guard
+    original_lstat=Path.lstat
+    monkeypatch.setattr(Path,'lstat',lambda path:SimpleNamespace(st_mode=0o100755,st_uid=65534)
+        if path==Path('/usr/bin/git') else original_lstat(path))
+    monkeypatch.setattr(runner,'_kernel_overflow_uid',lambda:65534)
+    monkeypatch.setattr(os,'statvfs',lambda path:SimpleNamespace(f_flag=os.ST_RDONLY))
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    result=subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    assert result.stdout.strip()==str(repo/'.git') and not attempts
+
+
+def test_prepare_requires_supervisor_supplied_git_pin_before_any_filesystem_work(capsys):
+    from tools.live_workflow.runner import main
+    args=['prepare']
+    for key in ('candidate-root','candidate-commit','profile-sha256','dependency-site','dependency-sha256',
+            'destination','session'):
+        args+=['--'+key,'dummy-unused-input']
+    with pytest.raises(SystemExit) as error:
+        main(args)
+    assert error.value.code==2 and '--git-sha256' in capsys.readouterr().err

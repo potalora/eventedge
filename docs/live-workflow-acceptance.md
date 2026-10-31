@@ -37,8 +37,17 @@ python scripts/run_live_workflow_acceptance.py prepare \
   --dependency-site /accepted/venv/lib/python3.12/site-packages \
   --dependency-sha256 VERIFIED_FINGERPRINT \
   --python /absolute/resolved/python3.12 --python-version 3.12 \
+  --git-sha256 ROOT_VERIFIED_GIT_SHA256 \
   --session 2026-10-30 --destination /private/new-campaign
 ```
+
+The trusted supervisor must verify the fixed `/usr/bin/git` is a regular,
+root-owned executable that is not writable by group or others before entering the user namespace, then
+supply its digest. Inside the namespace the tool requires that exact digest.
+An unmapped owner is accepted only when it equals the kernel's overflow UID and
+the file is on a read-only mount. The supervisor also verifies the mapped file's
+device and inode against the host file; an inside ownership number alone does
+not establish host ownership.
 
 Use the actual accepted frozen profile when it differs from the repository
 template, including its declared EDGAR contact. `--profile-file` selects those

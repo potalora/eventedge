@@ -289,7 +289,7 @@ def _install_process_guard(attempts, *, repo, git_identity):
             and not state['allowed'])
         if valid:
             try:
-                valid=readonly_git_identity()==state['identity']
+                valid=readonly_git_identity(state['identity']['sha256'])==state['identity']
             except (OSError,ValueError):
                 valid=False
         if not valid:
