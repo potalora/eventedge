@@ -31,6 +31,19 @@ def _test_uname_identity():
 
 
 @pytest.fixture
+def admitted_uname(monkeypatch):
+    """Delegation/order tests do not admit the hosted runner's binary layout."""
+    from tools.live_workflow import runner
+    identity=_test_uname_identity()
+    def verified(expected):
+        if expected!=identity['sha256']:
+            raise AcceptanceError('readonly_uname_binary_hash_mismatch')
+        return dict(identity)
+    monkeypatch.setattr(runner,'readonly_uname_identity',verified)
+    return identity
+
+
+@pytest.fixture
 def candidate(tmp_path):
     root = tmp_path/'candidate'; root.mkdir()
     git(root, 'init', '-q')
@@ -325,7 +338,7 @@ def test_ignored_extra_application_code_is_still_dirty(candidate):
         validate_candidate(root,commit)
 
 
-def test_prepare_refuses_incompatible_python_before_any_application_call(candidate,tmp_path,monkeypatch):
+def test_prepare_refuses_incompatible_python_before_any_application_call(candidate,tmp_path,monkeypatch,admitted_uname):
     from argparse import Namespace
     from tools.live_workflow.runner import prepare
     root,_=candidate
@@ -346,7 +359,7 @@ def test_prepare_refuses_incompatible_python_before_any_application_call(candida
     assert called == []
 
 
-def test_prepare_allows_only_its_native_runtime_lock_among_new_operational_files(candidate,tmp_path):
+def test_prepare_allows_only_its_native_runtime_lock_among_new_operational_files(candidate,tmp_path,admitted_uname):
     from argparse import Namespace
     from tools.live_workflow.runner import prepare
     source,_=candidate
@@ -1206,7 +1219,7 @@ print(json.dumps({'available':available,'attempted_calls':dict(sys._eventedge_re
         'allowed_local_process_calls':{'openbb_dependency_git_probe':2,'platform_uname_processor':1}}
 
 
-def test_uname_probe_requires_explicit_pin_and_has_one_separate_call(replay_git_guard):
+def test_uname_probe_requires_explicit_pin_and_has_one_separate_call(replay_git_guard,admitted_uname):
     bootstrap,repo,identity,attempts=replay_git_guard
     bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity,
         uname_identity=_test_uname_identity())
@@ -1244,7 +1257,7 @@ def test_uname_probe_rejects_unpinned_or_non_native_shapes(replay_git_guard,vari
     assert attempts=={'process':1} and not sys._eventedge_replay_process_guard['allowed']
 
 
-def test_uname_delegation_uses_fixed_binary_environment_and_fd_controls(replay_git_guard,monkeypatch):
+def test_uname_delegation_uses_fixed_binary_environment_and_fd_controls(replay_git_guard,monkeypatch,admitted_uname):
     bootstrap,repo,identity,attempts=replay_git_guard
     launches=[]
     monkeypatch.setattr(subprocess,'Popen',lambda *args,**kwargs:launches.append((args,kwargs)))
@@ -1291,3 +1304,127 @@ def test_hook_shape_is_selected_by_verified_contract_not_stripped_config(tmp_pat
     path.write_text(json.dumps(config))
     with pytest.raises(AcceptanceError,match='hook_configuration_changed'):
         _verify_hook_configuration(tmp_path,contract)
+
+
+def test_explicit_source_credential_selection_drops_every_unselected_ambient_value(tmp_path):
+    from tools.live_workflow.runner import selected_credential_environment
+    ambient={'FRED_API_KEY':'dummy-fred','ALPACA_API_KEY':'dummy-alpaca',
+        'OPENAI_API_KEY':'dummy-paid','TELEGRAM_BOT_TOKEN':'dummy-notification','HTTPS_PROXY':'dummy-proxy'}
+    selected=selected_credential_environment(['FRED_API_KEY'],ambient)
+    env=sanitized_environment(tmp_path,ambient,selected)
+    assert selected=={'FRED_API_KEY':'dummy-fred'}
+    assert env['FRED_API_KEY']=='dummy-fred'
+    assert all(key not in env for key in ambient if key!='FRED_API_KEY')
+    assert selected_credential_environment([],ambient)=={}
+
+
+@pytest.mark.parametrize('names,ambient,reason',[
+    (['FRED_API_KEY','FRED_API_KEY'],{'FRED_API_KEY':'dummy'},'duplicate'),
+    (['FRED_API_KEY'],{},'missing'),
+    (['FRED_API_KEY'],{'FRED_API_KEY':''},'missing'),
+    (['OPENAI_API_KEY'],{'OPENAI_API_KEY':'dummy'},'unapproved'),
+    (['FRED_API_KEY'],{'FRED_API_KEY':'dummy\ninvalid'},'invalid'),
+])
+def test_selected_source_credentials_fail_closed_without_disclosing_values(names,ambient,reason):
+    from tools.live_workflow.runner import selected_credential_environment
+    with pytest.raises(AcceptanceError,match=reason) as error:
+        selected_credential_environment(names,ambient)
+    assert all(value not in str(error.value) for value in ambient.values() if value)
+
+
+@pytest.mark.parametrize('selection',['same_selected','none_selected','wrong_selected'])
+def test_actual_native_frozen_source_identity_requires_the_same_selected_dummy_credentials(tmp_path,selection):
+    import os
+    candidate=os.environ.get('EVENTEDGE_TEST_CANDIDATE');site=os.environ.get('EVENTEDGE_TEST_DEPENDENCY_SITE')
+    if not candidate or not site:
+        pytest.skip('native frozen-source identity requires explicit candidate and accepted dependencies')
+    tool=Path(__file__).resolve().parents[1]
+    code='''import hashlib,json,os,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[1],sys.argv[2],sys.argv[3]]
+from tools.live_workflow.runner import selected_credential_environment,sanitized_environment
+from tradingagents.strategies.orchestration.source_inputs import SourceInputStore,source_configuration_fingerprint,SourceInputError
+root=Path(sys.argv[4]);mode=sys.argv[5]
+names=['FRED_API_KEY','ALPACA_API_KEY','ALPACA_SECRET_KEY']
+dummy={key:'controlled-dummy-'+key for key in names}
+os.environ.update(dummy)
+config={'autoresearch':{'equity_universe_policy':'us_exchange_listed_sip_v1'}}
+identity={'generation':'gen_001','session':'2026-10-30','commit':'a'*40,
+ 'configuration':source_configuration_fingerprint(config)}
+store=SourceInputStore(root/'cache',accepted_dir=root/'accepted')
+payload={'controlled':'offline fixture; not provider evidence'}
+store.freeze(identity,payload)
+path=next((root/'accepted').glob('*.json'));before=path.read_bytes()
+if mode=='wrong_selected':os.environ['FRED_API_KEY']='controlled-different-dummy'
+selected=selected_credential_environment(names if mode!='none_selected' else [])
+env=sanitized_environment(root,{},selected);os.environ.clear();os.environ.update(env)
+expected={**identity,'configuration':source_configuration_fingerprint(config)}
+try:
+ loaded=store.load_frozen(expected)
+ outcome='matched' if loaded==payload else 'unexpected_payload'
+except SourceInputError as error:
+ assert str(error)=='frozen source bundle rejected: source identity mismatch'
+ outcome='identity_mismatch'
+assert path.read_bytes()==before
+assert all(value.encode() not in before for value in dummy.values())
+print(json.dumps({'outcome':outcome,'selected_names':sorted(selected),'source_envelope_unchanged':True}))
+'''
+    env={'PATH':'/usr/bin:/bin','HOME':str(tmp_path),'LANG':'C.UTF-8'}
+    result=subprocess.run([sys.executable,'-I','-S','-B','-c',code,candidate,str(tool),site,str(tmp_path),selection],
+        env=env,cwd=tmp_path,capture_output=True,text=True,timeout=10)
+    assert result.returncode==0,result.stderr[-3000:]
+    observed=json.loads(result.stdout)
+    assert observed['outcome']==('matched' if selection=='same_selected' else 'identity_mismatch')
+    assert observed['selected_names']==([] if selection=='none_selected' else
+        ['ALPACA_API_KEY','ALPACA_SECRET_KEY','FRED_API_KEY'])
+    assert observed['source_envelope_unchanged'] is True
+
+
+def test_uname_production_identity_still_rejects_symlinks(monkeypatch):
+    from tools.live_workflow.runner import readonly_uname_identity
+    identity=_test_uname_identity();original=Path.is_symlink
+    monkeypatch.setattr(Path,'is_symlink',lambda path:True if path==Path('/usr/bin/uname') else original(path))
+    with pytest.raises(AcceptanceError,match='path_symlink'):
+        readonly_uname_identity(identity['sha256'])
+
+
+def test_selected_credential_logging_redaction_covers_direct_file_handlers(tmp_path,monkeypatch):
+    import logging
+    import os
+    from urllib.parse import quote_plus
+    from tools.live_workflow.bootstrap import _install_log_redaction
+    value='dummy selected source/value?private=redaction'
+    monkeypatch.setattr(os,'environ',{'FRED_API_KEY':value})
+    monkeypatch.setattr(logging.Formatter,'format',logging.Formatter.format)
+    _install_log_redaction()
+    path=tmp_path/'direct-native-file.log';handler=logging.FileHandler(path)
+    logger=logging.Logger('controlled-direct-handler');logger.addHandler(handler)
+    try:
+        logger.error('native direct file %s encoded %s',value,quote_plus(value))
+        handler.flush()
+    finally:
+        handler.close()
+    text=path.read_text()
+    assert value not in text and quote_plus(value) not in text
+    assert text.count('[REDACTED]')==2
+
+
+def test_normal_accepted_replay_forwards_only_explicit_selected_source_values(tmp_path,monkeypatch):
+    from argparse import Namespace
+    from tools.live_workflow import runner
+    monkeypatch.setenv('FRED_API_KEY','controlled-dummy-fred')
+    monkeypatch.setenv('OPENAI_API_KEY','controlled-dummy-paid')
+    monkeypatch.setattr(runner,'verify_contract',lambda root:({'reference_session':'2026-10-30'},{}))
+    monkeypatch.setattr(runner,'require_boundary',lambda *args,**kwargs:'0'*64)
+    calls=[]
+    def child(root,operation,**kwargs):
+        calls.append((operation,kwargs))
+        (root/'accepted-replay.json').write_text('{"controlled":"fixture"}')
+    monkeypatch.setattr(runner,'_child',child)
+    args=Namespace(root=tmp_path,session='2026-10-30',boundary_receipt=tmp_path/'unused',credential_env=['FRED_API_KEY'])
+    assert runner.accepted_replay(args)=={'controlled':'fixture'}
+    assert calls==[('accepted-replay',{'credentials':{'FRED_API_KEY':'controlled-dummy-fred'},
+        'timeout':120,'extra':('--session','2026-10-30')})]
+    attempt=(tmp_path/'replay-attempt.json').read_text()
+    assert json.loads(attempt)['credential_env_names']==['FRED_API_KEY']
+    assert 'controlled-dummy-fred' not in attempt and 'controlled-dummy-paid' not in attempt

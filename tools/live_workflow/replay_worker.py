@@ -21,6 +21,8 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for key in ('root','output-dir','session','contract-sha256','worker-sha256','uname-sha256'):
         parser.add_argument('--'+key,required=True)
+    parser.add_argument('--credential-env',action='append',default=[],metavar='SOURCE_NAME',
+        help='Explicit allowlisted source credential name; its existing value stays in memory only.')
     args=parser.parse_args(argv)
     # A base interpreter with -I -S is essential: the used campaign's immutable
     # venv .pth still belongs to the original recording and failed first replay.
@@ -44,6 +46,7 @@ def main(argv=None):
         raise RuntimeError('external_replay_deadline_exhausted')
     signal.signal(signal.SIGALRM,deadline);signal.setitimer(signal.ITIMER_REAL,115)
     try:
+        credentials=runner.selected_credential_environment(args.credential_env)
         # Verification is stdlib/tool-only. It intentionally precedes the strict
         # process gate because native checkout validation uses other local Git
         # identity reads. No application or dependency SDK has been imported.
@@ -60,14 +63,15 @@ def main(argv=None):
             'hook_config_sha256':hook_config_sha256,'dependency_sha256':contract['dependency_sha256'],
             'local_uname':uname_identity,
             'candidate_commit':contract['candidate_commit'],'session':args.session,
+            'credential_env_names':sorted(credentials),
             'native_lease_scope':'private_campaign_copy_only',
             'original_baseline_preservation':'parent_shared_lease_snapshot_and_postverification_required',
             'tool_sha256':{str(path.relative_to(tool_root)):runner.sha(path) for path in
                 (tool,tool.with_name('runner.py'),tool.with_name('bootstrap.py'))}}
         runner.private_json(output/'replay-attempt.json',identity)
-        # Drop every ambient credential/proxy/route before imports. Scratch HOME
-        # and caches are action-owned; frozen application paths stay unchanged.
-        env=runner.sanitized_environment(root,{},{})
+        # Only selected source credentials survive native identity checks; paid
+        # routes, model/notification tokens and proxies are dropped before imports.
+        env=runner.sanitized_environment(root,{},credentials)
         for name in ('home','cache','tmp','logs'):
             (output/name).mkdir(mode=0o700)
         env.update({'PATH':'/usr/bin:/bin','HOME':str(output/'home'),
@@ -77,6 +81,7 @@ def main(argv=None):
         os.environ.clear();os.environ.update(env)
         sys.path[:0]=[str(root/'repo'),contract['dependency_site']]
         from tools.live_workflow import bootstrap
+        bootstrap._install_log_redaction()
         attempts=bootstrap._replay_attempts()
         bootstrap._forbid_io(attempts,repo=root/'repo',git_identity=contract['local_git'],
             dependency_site=contract['dependency_site'],uname_identity=uname_identity)

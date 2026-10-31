@@ -165,11 +165,24 @@ python scripts/run_live_workflow_acceptance.py summary --root /private/new-campa
 
 python scripts/run_live_workflow_acceptance.py accepted-replay \
   --root /private/new-campaign --session 2026-10-30 \
-  --boundary-receipt /supervisor/offline-boundary.json
+  --boundary-receipt /supervisor/offline-boundary.json \
+  --credential-env ALPACA_API_KEY --credential-env ALPACA_SECRET_KEY \
+  --credential-env FRED_API_KEY --credential-env FINNHUB_API_KEY \
+  --credential-env COURTLISTENER_TOKEN --credential-env USDA_NASS_API_KEY
 ```
 
 The offline receipt uses the same shared fields and additionally requires
-`"kernel_network_denied": true`. A separate 120-second worker takes the real
+`"kernel_network_denied": true`. Select exactly the source credential names used
+for acquisition; the example shows the October 31 campaign's selection. The
+native accepted-input identity includes effective source credentials, so removing
+or changing them must fail validation. A trusted supervisor supplies the existing
+selected values only in memory. Names are recorded; values never enter command
+arguments, captures or receipts. Unselected ambient credentials are discarded.
+The model-auth directory remains inaccessible. Application logging is scrubbed
+before imports and the parent redacts stdout/stderr before persistent writes.
+Kernel network denial and all provider/model-call prohibitions remain active.
+
+A separate 120-second worker takes the real
 candidate runtime lease, makes a coherent SQLite-backup state copy (including
 committed WAL rows), and invokes the real cohort replay over accepted state.
 Provider, model, Requests/urllib/HTTPX/HTTPX2/curl, socket and arbitrary subprocess
@@ -200,11 +213,14 @@ output directory outside the copied campaign:
 /usr/bin/python3.12 -I -S /reviewed/tools/live_workflow/replay_worker.py \
   --root /original/campaign/path --output-dir /private/new-replay-output \
   --session 2026-10-30 --contract-sha256 ORIGINAL_CONTRACT_SHA256 \
-  --worker-sha256 REVIEWED_WORKER_SHA256 --uname-sha256 ROOT_VERIFIED_UNAME_SHA256
+  --worker-sha256 REVIEWED_WORKER_SHA256 --uname-sha256 ROOT_VERIFIED_UNAME_SHA256 \
+  --credential-env ALPACA_API_KEY --credential-env ALPACA_SECRET_KEY \
+  --credential-env FRED_API_KEY --credential-env FINNHUB_API_KEY \
+  --credential-env COURTLISTENER_TOKEN --credential-env USDA_NASS_API_KEY
 ```
 
 This internal worker requires the supervisor's kernel network denial, read-only
-tooling and dependencies, absent auth mount, process containment and snapshot
+tooling and dependencies, absent model-auth mount, process containment and snapshot
 checks. `-I -S` prevents execution of the retained virtualenv's recording hooks;
 the same accepted interpreter, dependencies and candidate code are loaded
 explicitly. Its receipt binds the original contract and hook hashes to the
@@ -279,3 +295,45 @@ answer for a changed prompt.
 
 Unit tests use dummy repositories, private SQLite WAL data and controlled local
 subprocesses. They read no credentials and contact no live providers or production.
+
+## October 31, 2026 execution evidence
+
+The successful disposable campaign used application commit
+`dba04fbaf7bee827f5c61d5d8431677c3d65cb10`, the accepted stabilization-v3 profile
+with original SHA256
+`ecf94154a063fc1af5b160f51bb2a61acf8384f7a2571f47d41377d91a5b82a9`, and the accepted
+Python 3.12 dependencies. Recording hooks came from tool commit
+`3ae155c892571e79073272f6ccd536f42b02dc3f`. The reference session was October 30;
+acquisition and execution occurred on October 31 under the actual clock and the
+candidate's prospective recovery guards. This was one isolated native workflow,
+not an ordinary production timer firing.
+
+| Check | Observed result |
+| --- | --- |
+| Native controller and independent report rebuild | Passed; all sixteen books clean, accounting/staging/evidence/source checks valid, canonical JSON and Markdown identical |
+| Recorded source calls | 358 completed responses across Requests, HTTPX and curl; no recorded transport exceptions or unfinished captures |
+| Live model calls | 39 completed: 8 thesis and 16 committee calls to GPT-6.1 Sol, plus 15 bounded calls to GPT-6 Luna; configured high reasoning retained |
+| Recorded-data edge matrix | 17 passed, 0 failed, 0 unexercised; adapter, model-helper and request-binding checks, each explicitly marked as component coverage |
+| Packaged observer and native whole-poll consumer | Ran with a fake delivery sink; correctly withheld the proposal because Saturday acquisition did not match the Friday report session's New York date; no notifications sent |
+| Accepted-state replay | Investigation retained separately; completion is not implied by the native or edge results |
+
+The native run retained eight handled Yahoo HTTP 401 responses and one HTTP 404;
+zero transport exceptions does not mean every HTTP response succeeded. Its report
+qualified the configured supported workflow while preserving declared research
+exclusions. The edge matrix does not establish seventeen complete workflow runs,
+cold acquisition replay, strategy-specific model parser coverage, actual timer
+execution, subsequent-session fills or multi-session continuity.
+
+Earlier failed campaigns remain preserved. They exposed a cleaned NOAA worker
+startup bug in the recording hook, an insufficient 64-task live sandbox limit,
+and replay restrictions on local Git/platform queries. The corrected live run
+used a 256-task bound. A later credential-free replay reached the native accepted
+input validator and failed because source identities bind the original source
+credential configuration. No captured envelope, identity or historical failure
+was rewritten to manufacture a pass.
+
+Private raw captures and operational receipts remain outside Git. The successful
+campaign is `eventedge-live-workflow-20261031-case-v4`; its primary, postcheck and
+separate replay supervisor directories retain exact code/configuration hashes,
+boundary probes, unit results and preservation receipts. Normal production
+session acceptance remains separate from these isolated tests.

@@ -200,6 +200,18 @@ def sanitized_environment(root, ambient=None, credentials=None):
     return env
 
 
+def selected_credential_environment(names,ambient=None):
+    """Select explicit source names only; never retain ambient routes or tokens."""
+    ambient=os.environ if ambient is None else ambient
+    names=list(names)
+    require(all(type(name) is str and name in CREDENTIAL_NAMES for name in names),'unapproved_credential_name')
+    require(len(names)==len(set(names)),'duplicate_credential_name')
+    require(all(name in ambient and ambient[name] for name in names),'explicit_credential_missing')
+    selected={name:ambient[name] for name in names}
+    sanitized_environment(Path('/nonexistent'),{},selected)
+    return selected
+
+
 def dependency_fingerprint(site):
     site=no_symlinks(site)
     require(site.is_dir(), 'dependency_site_missing')
@@ -491,10 +503,9 @@ def native(args):
     private_json(root/'native-attempt.json',{'claimed_at':datetime.now(timezone.utc).isoformat(),
         'boundary_sha256':boundary,'reference_session':args.session})
     credentials=read_credentials(args.credentials_json)
-    require(set(args.credential_env) <= CREDENTIAL_NAMES, 'unapproved_credential_name')
-    for name in args.credential_env:
-        require(name in os.environ and name not in credentials,'explicit_credential_missing_or_duplicate')
-        credentials[name]=os.environ[name]
+    selected=selected_credential_environment(args.credential_env)
+    require(not set(selected) & set(credentials),'duplicate_credential_name')
+    credentials.update(selected)
     sanitized_environment(root,{},credentials)
     # The actual shell dotenv remains empty; credential values are inherited only
     # in the narrow managed execution environment and are never written to tape.
@@ -598,10 +609,12 @@ def accepted_replay(args):
     root=no_symlinks(args.root); contract,row=verify_contract(root)
     boundary=require_boundary(root,args.boundary_receipt,offline=True)
     require(args.session == contract['reference_session'], 'reference_session_changed')
-    private_json(root/'replay-attempt.json',{'boundary_sha256':boundary,'session':args.session})
+    credentials=selected_credential_environment(args.credential_env)
+    private_json(root/'replay-attempt.json',{'boundary_sha256':boundary,'session':args.session,
+        'credential_env_names':sorted(credentials)})
     # The worker holds the real candidate runtime lease across snapshot, replay
     # and hash comparison; source/model/SDK/process attempts fail rather than use tape.
-    _child(root,'accepted-replay',timeout=120,extra=('--session',args.session))
+    _child(root,'accepted-replay',credentials=credentials,timeout=120,extra=('--session',args.session))
     verify_contract(root)
     return json.loads((root/'accepted-replay.json').read_text())
 
@@ -748,11 +761,11 @@ def main(argv=None):
     for entry in (run,replay):
         entry.add_argument('--root',required=True); entry.add_argument('--session',required=True)
         entry.add_argument('--boundary-receipt',required=True)
+        entry.add_argument('--credential-env',action='append',default=[],choices=sorted(CREDENTIAL_NAMES),
+            help='Explicit source credential NAME from the launcher; values are never serialized.')
     edges=sub.add_parser('edges')
     edges.add_argument('--root',required=True);edges.add_argument('--boundary-receipt',required=True)
     run.add_argument('--credentials-json')
-    run.add_argument('--credential-env',action='append',default=[],choices=sorted(CREDENTIAL_NAMES),
-        help='Read only this explicitly selected source credential from the supervisor environment; repeatable')
     summary=sub.add_parser('summary'); summary.add_argument('--root',required=True)
     fingerprint=sub.add_parser('fingerprint'); fingerprint.add_argument('--dependency-site',required=True)
     args=parser.parse_args(argv)

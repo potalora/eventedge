@@ -389,7 +389,7 @@ def _forbid_io(attempts, *, repo, git_identity, dependency_site=None, uname_iden
 
 
 def _accepted_replay(root, session, *, output_dir=None, dependency_site=None, uname_identity=None):
-    from .runner import (BOOKS,private_json,require,snapshot_state,state_inventory,native_inventory)
+    from .runner import (BOOKS,CREDENTIAL_NAMES,private_json,require,snapshot_state,state_inventory,native_inventory)
     from tradingagents.strategies.orchestration.runtime_lock import runtime_lock,canonical_runtime_lock_path
     from tradingagents.strategies.orchestration.generation_config import CONFIG_FILE_ENV,CONFIG_SHA_ENV
     from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator,build_default_cohorts
@@ -441,6 +441,7 @@ def _accepted_replay(root, session, *, output_dir=None, dependency_site=None, un
             'zero_attempted_calls':True,'attempted_calls':dict(attempts),
             'attempted_calls_scope':'forbidden_external_io_and_arbitrary_processes',
             'allowed_local_process_calls':dict(sys._eventedge_replay_process_guard['allowed']),
+            'credential_env_names':sorted(name for name in CREDENTIAL_NAMES if name in os.environ),
             'replayed_books':sorted(result),
             'all_logical_tables_identical':True,'accepted_inputs_identical':True,'native_artifacts_identical':True,
             'state_before_sha256':__import__('tools.live_workflow.runner',fromlist=['digest']).digest(before),
