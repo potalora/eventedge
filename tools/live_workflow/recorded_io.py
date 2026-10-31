@@ -32,7 +32,8 @@ _CONSUMED = set()
 _REPLAY_FAILURES = []
 _SECRET_KEYS = frozenset({'authorization', 'proxy_authorization', 'cookie', 'set_cookie', 'apikey', 'api_key', 'api_token', 'token', 'access_token', 'refresh_token', 'client_secret', 'password', 'secret', 'key', 'x_api_key', 'crumb', 'csrftoken', 'csrf_token', 'sessionid', 'session_id'})
 _PUBLIC_HEADERS = frozenset({'accept', 'content-type', 'range', 'if-modified-since', 'if-none-match'})
-_RESPONSE_HEADERS = frozenset({'content-type', 'content-length', 'content-encoding', 'date', 'etag', 'last-modified', 'retry-after', 'x-ratelimit-remaining'})
+_RESPONSE_HEADERS = frozenset({'content-type', 'content-length', 'content-encoding', 'date', 'etag', 'last-modified', 'retry-after', 'x-ratelimit-remaining',
+    'record-total', 'record-offset', 'record-limit', 'total-records-on-page'})
 
 
 class TapeError(RuntimeError):

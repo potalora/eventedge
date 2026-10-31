@@ -81,6 +81,18 @@ def test_public_request_drops_secrets_and_preserves_semantics():
     assert 'limit=10' in result['url']
 
 
+def test_finra_pagination_headers_survive_capture_and_exact_replay(tmp_path):
+    io=setup_tape(tmp_path)
+    headers={'Record-Total':'12','Record-Offset':'0','Record-Limit':'13',
+        'Total-Records-On-Page':'12','Set-Cookie':'PRIVATE','Authorization':'PRIVATE'}
+    io.finish_event(event(io),status=200,safe_headers=headers)
+    io=setup_tape(tmp_path,'offline_replay')
+    record=io.replay_event(boundary='sdk',operation='query',public_request={'symbol':'ABC'})
+    assert record['safe_headers'] == {'record-total':'12','record-offset':'0',
+        'record-limit':'13','total-records-on-page':'12'}
+    io.assert_replay_complete()
+
+
 def test_stream_capture_is_lazy_and_partial_is_failure(tmp_path):
     io = setup_tape(tmp_path)
     consumed = []
