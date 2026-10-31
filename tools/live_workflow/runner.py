@@ -315,7 +315,7 @@ def prepare(args):
     (repo/'.env').write_text(''); os.chmod(repo/'.env',0o600)
     (repo/'.git/info').mkdir(exist_ok=True)
     with (repo/'.git/info/exclude').open('a') as exclude:
-        exclude.write('\n/data/runtime_recovery/\n/data/source_cache/\n/data/dataflows_cache/\n/data/results/\n')
+        exclude.write('\n/data/runtime_recovery/\n/data/source_cache/\n/data/dataflows_cache/\n/data/results/\n/data/operational/eventedge-runtime.lock\n')
     env=sanitized_environment(root)
     subprocess.run([str(no_symlinks(args.python)),'-I','-m','venv','--without-pip',str(repo/'.venv')],
         env=env,check=True,capture_output=True,timeout=60)
@@ -553,6 +553,17 @@ def report_checks(report):
         'outcome':report.get('outcome','incomplete')}
 
 
+def native_acceptance_passed(result):
+    checks=result.get('checks',{})
+    reproduction=result.get('canonical_report_reproduction',{})
+    unfinished=result.get('recorded_boundary_coverage',{}).get('unfinished_reservations')
+    return (checks.get('outcome') == 'clean'
+        and all(checks.get(key) is True for key in ('sixteen_books','accounting','staging_complete',
+            'staging_valid','evidence_complete','source_completeness'))
+        and all(reproduction.get(key) is True for key in ('canonical_json_identical','canonical_markdown_identical'))
+        and type(unfinished) is int and unfinished == 0)
+
+
 def tape_coverage(root):
     from collections import Counter
     from .recorded_io import verify_tape
@@ -581,16 +592,75 @@ def tape_coverage(root):
         'cold_acquisition_replay_supported':'recorded boundaries only; not exercised by accepted-state replay'}
 
 
+def edge_coverage(root):
+    """Summarize only a completed matrix still bound to the immutable native tape."""
+    root=Path(root)
+    path=root/'edge-cases/matrix.json'
+    baseline={'status':'not_executed','whole_workflow_coverage':False}
+    if not path.exists() and not path.is_symlink():
+        return baseline
+    try:
+        from .edges import plan_edges
+        no_symlinks(path)
+        require(path.is_file() and path.stat().st_size <= 1024**2,'edge_matrix_size')
+        matrix=json.loads(path.read_bytes())
+        require(matrix['schema_version'] == 1 and matrix['lane'] == 'controlled_mutation'
+            and matrix['whole_workflow_coverage'] is False and matrix['immutable_parent_preserved'] is True,
+            'edge_matrix_claims')
+        plan=plan_edges(root/'tape')
+        identity=json.loads((root/'hook-config.json').read_bytes())['run_identity']
+        require(matrix['run_identity'] == plan['run_identity'] == identity
+            and matrix['parent_tape_sha256'] == plan['parent_tape_sha256'],'edge_matrix_identity')
+        require(re.fullmatch('[a-f0-9]{64}',matrix['boundary_receipt_sha256']) is not None
+            and re.fullmatch(r'net:\[[0-9]+\]',matrix['kernel_network_namespace']) is not None,
+            'edge_matrix_boundary')
+        cases=matrix['cases'];expected={row['case']:row for row in plan['cases']}
+        require(type(cases) is list and len(cases) == len(expected)
+            and {row['case'] for row in cases} == set(expected),'edge_matrix_roster')
+        counts={'pass':0,'fail':0,'unexercised':0};levels={}
+        for row in cases:
+            planned=expected[row['case']];status=row['status']
+            require(status in counts and row['whole_workflow_coverage'] is False
+                and row['level'] == planned['level'],'edge_matrix_case_claims')
+            require(status == 'unexercised' or planned['status'] == 'planned','edge_matrix_missing_parent')
+            for key in ('parent_event_id','parent_record_sha256','parent_kind','phase','occurrence','request_sha256'):
+                require(row.get(key) == planned.get(key),'edge_matrix_parent_binding')
+            counts[status]+=1
+            levels.setdefault(row['level'],{'pass':0,'fail':0,'unexercised':0})[status]+=1
+        require(matrix['counts'] == counts and all(type(value) is int for value in matrix['counts'].values()),
+            'edge_matrix_counts')
+        return {'status':'recorded','lane':'controlled_mutation','whole_workflow_coverage':False,
+            'artifact':'edge-cases/matrix.json','artifact_sha256':sha(path),'counts':counts,
+            'level_counts':dict(sorted(levels.items())),
+            'unexercised_cases':[{key:row[key] for key in ('case','level','reason') if key in row}
+                for row in cases if row['status'] == 'unexercised'],
+            'failed_cases':[{key:row[key] for key in ('case','level','reason') if key in row}
+                for row in cases if row['status'] == 'fail']}
+    except Exception:
+        # Untrusted/corrupt artifact text never replaces the visible coverage gap
+        # or enters a public exception message.
+        return {'status':'invalid','reason':'edge_matrix_invalid_or_stale','whole_workflow_coverage':False}
+
+
 def summarize(root):
     root=Path(root)
     report=json.loads((root/'native-report.json').read_text()) if (root/'native-report.json').exists() else {}
     reproduction=json.loads((root/'report-reproduction.json').read_text()) if (root/'report-reproduction.json').exists() else {}
     coverage=tape_coverage(root)
+    edges=edge_coverage(root)
+    gaps=['observer_sidecars_and_native_full_poll_require_external_composition_receipt',
+        'cold_acquisition_replay_not_executed','subsequent_session_fills_unobserved','timer_dispatch_unobserved']
+    if edges['status'] != 'recorded' or not (edges['counts']['pass']+edges['counts']['fail']):
+        gaps.append('controlled_mutations_not_executed')
+    if edges['status'] == 'invalid':
+        gaps.append('controlled_mutations_artifact_invalid')
+    elif edges['status'] == 'recorded':
+        if edges['counts']['unexercised']:
+            gaps.append('controlled_mutations_unexercised')
+        if edges['counts']['fail']:
+            gaps.append('controlled_mutations_failed')
     return {'deployed':False,'checks':report_checks(report),'canonical_report_reproduction':reproduction,
-        'recorded_boundary_coverage':coverage,
-        'coverage_gaps':['observer_sidecars_and_native_full_poll_require_external_composition_receipt',
-          'cold_acquisition_replay_not_executed','controlled_mutations_not_executed',
-          'subsequent_session_fills_unobserved','timer_dispatch_unobserved'],
+        'recorded_boundary_coverage':coverage,'controlled_mutations':edges,'coverage_gaps':gaps,
         'model_coverage':'inspect private tape by exact role/model/effort; absent roles remain unobserved',
         'native_lane':'real_clock_guarded_prospective_one_shot','auth_writes':'normal canonical shared refresh permitted'}
 
@@ -610,6 +680,8 @@ def main(argv=None):
     for entry in (run,replay):
         entry.add_argument('--root',required=True); entry.add_argument('--session',required=True)
         entry.add_argument('--boundary-receipt',required=True)
+    edges=sub.add_parser('edges')
+    edges.add_argument('--root',required=True);edges.add_argument('--boundary-receipt',required=True)
     run.add_argument('--credentials-json')
     run.add_argument('--credential-env',action='append',default=[],choices=sorted(CREDENTIAL_NAMES),
         help='Read only this explicitly selected source credential from the supervisor environment; repeatable')
@@ -619,7 +691,12 @@ def main(argv=None):
     if args.operation == 'prepare': result=prepare(args)
     elif args.operation == 'native': result=native(args)
     elif args.operation == 'accepted-replay': result=accepted_replay(args)
+    elif args.operation == 'edges':
+        from .edges import run_edges
+        result=run_edges(root=args.root,boundary_receipt=args.boundary_receipt)
     elif args.operation == 'fingerprint': result={'dependency_sha256':dependency_fingerprint(args.dependency_site)}
     else: result=summarize(args.root)
     print(json.dumps(result,sort_keys=True,allow_nan=False))
-    return 0
+    if args.operation == 'native':
+        return int(not native_acceptance_passed(result))
+    return int(result['counts']['fail'] > 0) if args.operation == 'edges' else 0

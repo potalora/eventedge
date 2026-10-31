@@ -316,6 +316,39 @@ def test_prepare_refuses_incompatible_python_before_any_application_call(candida
     assert called == []
 
 
+def test_prepare_allows_only_its_native_runtime_lock_among_new_operational_files(candidate,tmp_path):
+    from argparse import Namespace
+    from tools.live_workflow.runner import prepare
+    source,_=candidate
+    (source/'.gitignore').write_text('.venv/\n.env\n')
+    config=source/'config/profiles';config.mkdir(parents=True)
+    profile_path=config/'stabilization-v3.json';profile_path.write_text(json.dumps(profile()))
+    git(source,'add','.')
+    git(source,'-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','profile')
+    commit=git(source,'rev-parse','HEAD')
+    site=tmp_path/'deps/lib/python9.9/site-packages';site.mkdir(parents=True)
+    root=tmp_path/'campaign'
+    args=Namespace(candidate_root=source,candidate_commit=commit,session='2026-10-30',destination=root,
+        profile_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),dependency_site=site,
+        dependency_sha256=dependency_fingerprint(site),python=str(Path(sys.executable).resolve()),python_version='9.9',
+        observer_root=None,observer_commit=None,native_root=None,native_commit=None)
+    # Stop before any application import; prepare has established clone policy.
+    with pytest.raises(AcceptanceError,match='incompatible_runtime_python'):
+        prepare(args)
+    repo=root/'repo';operational=repo/'data/operational';operational.mkdir(parents=True)
+    (operational/'eventedge-runtime.lock').write_text('')
+    validate_candidate(repo,commit)
+    foreign=operational/'unexpected.json';foreign.write_text('{}')
+    with pytest.raises(AcceptanceError,match='dirty_candidate'):
+        validate_candidate(repo,commit)
+    foreign.unlink()
+    app=repo/'tradingagents';app.mkdir();(app/'unexpected.py').write_text('unexpected=True')
+    with (repo/'.git/info/exclude').open('a') as stream:
+        stream.write('/tradingagents/unexpected.py\n')
+    with pytest.raises(AcceptanceError,match='dirty_ignored_application_code'):
+        validate_candidate(repo,commit)
+
+
 def test_generation_prepare_calls_candidate_lifecycle_not_handwritten_manifest(tmp_path,monkeypatch):
     from dataclasses import dataclass
     from types import ModuleType
@@ -418,3 +451,173 @@ def test_native_inventory_rejects_escaped_configured_paths_and_directory_symlink
     (repo/'data').mkdir(); (repo/'data/source_cache').symlink_to(outside,target_is_directory=True)
     with pytest.raises(AcceptanceError,match='symlink'):
         native_inventory(repo)
+
+
+def edge_summary_fixture(root):
+    """Constructed private artifacts; never native campaign evidence."""
+    import importlib
+    from tools.live_workflow import recorded_io as tape
+    from tools.live_workflow.edges import plan_edges
+    importlib.reload(tape)
+    identity={'candidate_commit':'a'*40,'reference_session':'2026-10-30'}
+    tape.configure_tape(mode='live_record',tape_dir=root/'tape',run_identity=identity,phase='daily')
+    event=tape.reserve_event(boundary='http_decoded',operation='requests.send',public_request={
+        'method':'GET','url':'https://example.invalid/data','body':None,'headers':{}})
+    tape.finish_event(event,status=200)
+    (root/'hook-config.json').write_text(json.dumps({'run_identity':identity}))
+    plan=plan_edges(root/'tape')
+    cases=[]
+    for row in plan['cases']:
+        row=dict(row,status='unexercised',reason='constructed_unexercised')
+        if row['case']=='source_403':
+            row.update(status='pass',observed={'exception_type':'HTTPError','http_status':403})
+        elif row['case']=='source_429':
+            row.update(status='fail',observed={'returned':True})
+        cases.append(row)
+    matrix={**plan,'cases':cases,'immutable_parent_preserved':True,
+        'boundary_receipt_sha256':'b'*64,'kernel_network_namespace':'net:[12345]',
+        'edge_tooling_sha256':{'edges.py':'c'*64},
+        'counts':{'pass':1,'fail':1,'unexercised':15}}
+    (root/'edge-cases').mkdir()
+    return matrix
+
+
+def test_summary_keeps_mutation_gap_without_completed_matrix(tmp_path):
+    from tools.live_workflow.runner import summarize
+    matrix=edge_summary_fixture(tmp_path)
+    (tmp_path/'edge-cases/plan.json').write_text(json.dumps(matrix))
+    result=summarize(tmp_path)
+    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+    assert result['controlled_mutations']['status']=='not_executed'
+
+
+def test_summary_reports_bound_matrix_counts_levels_and_remaining_gaps(tmp_path):
+    from tools.live_workflow.runner import summarize
+    matrix=edge_summary_fixture(tmp_path)
+    (tmp_path/'edge-cases/matrix.json').write_text(json.dumps(matrix))
+    result=summarize(tmp_path)
+    observed=result['controlled_mutations']
+    assert observed['status']=='recorded' and observed['whole_workflow_coverage'] is False
+    assert observed['counts']=={'pass':1,'fail':1,'unexercised':15}
+    assert observed['level_counts']['http_transport']=={'pass':1,'fail':1,'unexercised':1}
+    assert len(observed['unexercised_cases'])==15
+    assert observed['failed_cases'][0]['case']=='source_429'
+    assert 'controlled_mutations_not_executed' not in result['coverage_gaps']
+    assert 'controlled_mutations_unexercised' in result['coverage_gaps']
+    assert 'controlled_mutations_failed' in result['coverage_gaps']
+    assert 'cold_acquisition_replay_not_executed' in result['coverage_gaps']
+
+
+@pytest.mark.parametrize('corrupt',[
+    lambda m:m.update(lane='native_observation'),
+    lambda m:m.update(whole_workflow_coverage=True),
+    lambda m:m.update(immutable_parent_preserved=False),
+    lambda m:m['run_identity'].update(candidate_commit='d'*40),
+    lambda m:m.update(parent_tape_sha256='d'*64),
+    lambda m:m['counts'].update(**{'pass':17}),
+    lambda m:m['cases'][0].update(status='planned'),
+    lambda m:m['cases'][1].update(phase='wrong-phase'),
+    lambda m:m['cases'][1].update(level='native_finra_adapter'),
+    lambda m:m['cases'].pop(),
+])
+def test_summary_rejects_stale_or_overclaimed_edge_matrix(tmp_path,corrupt):
+    from tools.live_workflow.runner import summarize
+    matrix=edge_summary_fixture(tmp_path);corrupt(matrix)
+    (tmp_path/'edge-cases/matrix.json').write_text(json.dumps(matrix))
+    result=summarize(tmp_path)
+    assert result['controlled_mutations']['status']=='invalid'
+    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+    assert 'controlled_mutations_artifact_invalid' in result['coverage_gaps']
+
+
+def test_summary_all_unexercised_matrix_does_not_claim_mutation_execution(tmp_path):
+    from tools.live_workflow.runner import summarize
+    matrix=edge_summary_fixture(tmp_path)
+    for row in matrix['cases']:
+        row.update(status='unexercised',reason='missing_eligible_native_parent_capture')
+    matrix['counts']={'pass':0,'fail':0,'unexercised':17}
+    (tmp_path/'edge-cases/matrix.json').write_text(json.dumps(matrix))
+    result=summarize(tmp_path)
+    assert result['controlled_mutations']['status']=='recorded'
+    assert result['controlled_mutations']['counts']=={'pass':0,'fail':0,'unexercised':17}
+    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+
+
+def test_summary_invalid_json_matrix_remains_visible_failure(tmp_path):
+    from tools.live_workflow.runner import summarize
+    edge_summary_fixture(tmp_path)
+    (tmp_path/'edge-cases/matrix.json').write_text('{')
+    result=summarize(tmp_path)
+    assert result['controlled_mutations']['status']=='invalid'
+    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+
+
+@pytest.mark.parametrize('failures',[0,1])
+def test_edges_cli_preserves_offline_arguments_and_failure_exit(tmp_path,monkeypatch,capsys,failures):
+    from tools.live_workflow import edges,runner
+    root=tmp_path/'campaign';receipt=tmp_path/'offline-boundary.json'
+    def controlled_run(*,root: str,boundary_receipt: str):
+        assert root==str(tmp_path/'campaign')
+        assert boundary_receipt==str(receipt)
+        return {'counts':{'pass':1-failures,'fail':failures,'unexercised':16},
+            'whole_workflow_coverage':False,'immutable_parent_preserved':True}
+    monkeypatch.setattr(edges,'run_edges',controlled_run)
+    code=runner.main(['edges','--root',str(root),'--boundary-receipt',str(receipt)])
+    assert code==failures
+    result=json.loads(capsys.readouterr().out)
+    assert result['counts']['fail']==failures
+    assert result['whole_workflow_coverage'] is False
+
+
+def native_summary_fixture():
+    return {'checks':{'sixteen_books':True,'accounting':True,'staging_complete':True,
+        'staging_valid':True,'evidence_complete':True,'source_completeness':True,'outcome':'clean'},
+        'canonical_report_reproduction':{'canonical_json_identical':True,'canonical_markdown_identical':True},
+        'recorded_boundary_coverage':{'unfinished_reservations':0,'observed_failures':2,
+            'unobserved_model_roles':['bounded','committee','thesis']}}
+
+
+@pytest.mark.parametrize('field',[
+    ('checks','sixteen_books'),('checks','accounting'),('checks','staging_complete'),
+    ('checks','staging_valid'),('checks','evidence_complete'),('checks','source_completeness'),
+    ('canonical_report_reproduction','canonical_json_identical'),
+    ('canonical_report_reproduction','canonical_markdown_identical'),
+    ('recorded_boundary_coverage','unfinished_reservations'),
+])
+def test_native_cli_rejects_incomplete_acceptance_evidence_without_discarding_observation(tmp_path,monkeypatch,capsys,field):
+    from tools.live_workflow import runner
+    result=native_summary_fixture()
+    result[field[0]][field[1]]=1 if field[1]=='unfinished_reservations' else False
+    monkeypatch.setattr(runner,'native',lambda args:result)
+    code=runner.main(['native','--root',str(tmp_path),'--session','2026-10-30',
+        '--boundary-receipt',str(tmp_path/'boundary.json')])
+    assert code==1
+    assert json.loads(capsys.readouterr().out)==result
+
+
+def test_native_cli_allows_natural_unobserved_roles_and_retained_prior_failures(tmp_path,monkeypatch,capsys):
+    from tools.live_workflow import runner
+    result=native_summary_fixture()
+    monkeypatch.setattr(runner,'native',lambda args:result)
+    assert runner.main(['native','--root',str(tmp_path),'--session','2026-10-30',
+        '--boundary-receipt',str(tmp_path/'boundary.json')])==0
+    assert json.loads(capsys.readouterr().out)==result
+
+
+@pytest.mark.parametrize('outcome',['failed','degraded'])
+def test_native_cli_preserves_failed_or_degraded_outcome_precedence(tmp_path,monkeypatch,capsys,outcome):
+    from tools.live_workflow import runner
+    result=native_summary_fixture();result['checks']['outcome']=outcome
+    monkeypatch.setattr(runner,'native',lambda args:result)
+    code=runner.main(['native','--root',str(tmp_path),'--session','2026-10-30',
+        '--boundary-receipt',str(tmp_path/'boundary.json')])
+    assert code==1
+    assert json.loads(capsys.readouterr().out)==result
+
+
+def test_summary_cli_remains_informational_when_native_checks_fail(tmp_path,monkeypatch,capsys):
+    from tools.live_workflow import runner
+    result=native_summary_fixture();result['checks']['source_completeness']=False
+    monkeypatch.setattr(runner,'summarize',lambda root:result)
+    assert runner.main(['summary','--root',str(tmp_path)])==0
+    assert json.loads(capsys.readouterr().out)==result

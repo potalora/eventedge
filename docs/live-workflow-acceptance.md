@@ -21,6 +21,9 @@ Python must not silently stand in for that runtime. Fingerprinting hashes all
 installed non-bytecode file contents, including native libraries and metadata.
 It may take time for a large dependency tree. Source and clone code must be clean;
 ignored untracked application code is also refused. The destination must not exist.
+The disposable clone locally excludes the candidate's generated
+`data/operational/eventedge-runtime.lock`; other new operational files and
+untracked application code still fail clean-candidate validation.
 
 ```sh
 python scripts/run_live_workflow_acceptance.py fingerprint \
@@ -171,6 +174,51 @@ accounting/staging validity, source completeness and recorded model role/model/
 effort calls. Interrupted reservations and unobserved roles remain visible.
 Natural empty sources, no candidates, abstention and zero intents/fills are valid
 observations, never reasons to inject success or force a model call.
+The `native` command exits successfully only with a `clean` report outcome and
+when all sixteen books, accounting,
+staging completion and validity, evidence completeness, source completeness, both
+canonical report comparisons and zero unfinished tape reservations pass. A
+completed command with incomplete or degraded acceptance evidence exits nonzero
+while retaining its observations. Earlier recorded provider failures and absent
+model roles do not independently fail this gate. `summary` remains informational.
+
+## Controlled edge cases
+
+After the native attempt has finished, invoke this command inside the reviewed
+offline sandbox with kernel network denial:
+
+```sh
+python scripts/run_live_workflow_acceptance.py edges \
+  --root /private/new-campaign \
+  --boundary-receipt /supervisor/offline-boundary.json
+```
+
+The command calls the edge driver against the retained native tape and writes
+`edge-cases/matrix.json`. It never changes the copied native recording hooks or
+reuses a model response for a changed request. Each private derivative retains
+its parent digest, exact request, phase and original duplicate occurrence.
+The driver copies at most one body per case, limited to 1 MiB after mutation.
+An oversized derivative is recorded as unexercised without writing its body or
+launching a worker. Missing eligible captures also remain unexercised.
+
+The seventeen rows distinguish transport checks, JSON decoding, the exact
+candidate FINRA adapter, native model-helper replay and tape-binding checks.
+FINRA semantic mutations require the unmodified parent to pass that adapter
+first. Model malformed-output checks identify the candidate analyzer JSON decoder
+explicitly and set `role_specific_parser_coverage: false`; they do not establish
+committee or strategy-specific parsing behavior. Every row retains
+`whole_workflow_coverage: false`. These cases do not perform cold workflow replay,
+calendar/startup recovery, duplicate daily execution or subsequent-session fills.
+The command exits nonzero when any row fails; a zero exit can still include
+unexercised rows, so inspect the matrix counts.
+
+`summary` accepts only a terminal matrix bound to this campaign's current immutable
+tape, exact case roster, phase/request/occurrence identities and consistent counts.
+It reports pass/fail/unexercised counts by exercised level and lists remaining
+unexercised or failed cases. A plan alone, invalid/stale matrix, or an entirely
+unexercised matrix retains `controlled_mutations_not_executed`. A valid matrix
+with attempted cases replaces that generic gap with any specific failed and
+unexercised gaps. No matrix clears the whole-workflow or cold-replay coverage limit.
 
 The initial tool reports explicit gaps for observer sidecars/native whole-poll
 composition, cold acquisition replay, controlled mutations, actual timer firing
