@@ -68,6 +68,20 @@ class TransportFixture:
         response.headers.update(headers or {})
         return response
 
+    @classmethod
+    def finra_response(cls, payload, rows):
+        """Construct only the external public-query response, with pagination proof."""
+        assert payload['compareFilters'][0]['fieldName'] == 'settlementDate'
+        assert payload['compareFilters'][0]['compareType'] == 'EQUAL'
+        assert payload['domainFilters'][0]['fieldName'] == 'symbolCode'
+        symbols = payload['domainFilters'][0]['values']
+        day = payload['compareFilters'][0]['fieldValue']
+        selected = [row for row in rows if row['symbolCode'] in symbols and row['settlementDate'] == day]
+        page = selected[:payload['limit']]
+        return cls.response(page, headers={'Content-Type': 'application/json',
+            'Record-Total': str(len(selected)), 'Record-Offset': '0',
+            'Record-Limit': str(payload['limit']), 'Total-Records-On-Page': str(len(page))})
+
     def http(self, method, url, **kwargs):
         if self.block_all:
             self.blocked_calls["http"] += 1
@@ -75,6 +89,9 @@ class TransportFixture:
         self.calls[url.split("?")[0]] += 1
         params = kwargs.get("params") or {}
         self.request_trace.append((url, dict(params)))
+        if url == 'https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest':
+            assert method.lower() == 'post' and kwargs['stream'] is True and kwargs['allow_redirects'] is False
+            return self.finra_response(kwargs['json'], self.finra_rows)
         if url.endswith('/CommitmentsofTraders/ReleaseSchedule/index.htm'):
             from test_cftc_freshness import calendar
             return self.response(calendar(self.session.year))

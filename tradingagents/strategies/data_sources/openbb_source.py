@@ -417,7 +417,61 @@ class OpenBBSource:
         return result
 
     def fetch_short_interest(self, tickers: list[str], *, as_of=None) -> dict[str, Any]:
-        """Acquire the complete native FINRA history once for uncached exact symbols."""
+        """Query FINRA for exact current-cycle symbols within one inherited budget."""
+        from . import finra_query
+        from .finra_bulk import population_digest, validated_acquisition
+        from .finra_schedule import validate_current_settlement
+        from .request_policy import provider_subbudget, provider_clock_time
+        acquired_at = datetime.fromisoformat(acquisition_time())
+        symbols = list(dict.fromkeys(tickers))
+        for symbol in symbols:
+            key = f'equity_short_interest|{symbol}'
+            if key in self._cache:
+                try:
+                    current = validate_current_settlement(self._cache[key]['date'],
+                        acquired_at=acquired_at, as_of=as_of)['status'] == 'current'
+                except (SourceFetchError, KeyError):
+                    current = False
+                if not current:
+                    self._cache.pop(key)
+        cached = {symbol: self._cache[f'equity_short_interest|{symbol}']
+                  for symbol in symbols if f'equity_short_interest|{symbol}' in self._cache}
+        pending = [symbol for symbol in symbols if symbol not in cached]
+        acquisition = {'schema_version': 4, 'requested_count': len(symbols),
+            'cached_count': len(cached), 'population_sha256': population_digest(symbols), 'attempts': []}
+        successes, errors = {}, {}
+        def run():
+            attempt = finra_query.new_attempt()
+            acquisition['attempts'].append(attempt)
+            return finra_query.acquire(pending, attempt, acquired_at=acquired_at, as_of=as_of)
+        if pending:
+            try:
+                with provider_subbudget('openbb', maximum_seconds=60,
+                        absolute_deadline=provider_clock_time('openbb') + 60, max_attempts=2):
+                    successes, errors = provider_call('openbb', 'equity_short_interest_batch', run)
+                    provider_timeout('openbb')
+                    # The complete query and metadata must validate before any
+                    # new cache entry becomes visible to subsequent callers.
+                    validated_acquisition(acquisition)
+                    provider_timeout('openbb')
+            except Exception as exc:
+                error = source_fetch_error('FINRA public query acquisition failed', exc)
+                if acquisition['attempts']:
+                    finra_query.fail_attempt(acquisition['attempts'][-1], error)
+                successes = {}
+                failure = {'error': str(error), 'reason_code': error.reason_code}
+                if error.http_status is not None:
+                    failure['http_status'] = error.http_status
+                errors = {symbol: dict(failure) for symbol in pending}
+            for symbol, value in successes.items():
+                self._cache[f'equity_short_interest|{symbol}'] = value
+        values = cached | successes
+        return {'short_interest': {symbol: values[symbol] for symbol in symbols if symbol in values},
+                'errors': {symbol: errors[symbol] for symbol in symbols if symbol in errors},
+                'acquisition': validated_acquisition(acquisition)}
+
+    def _fetch_short_interest_archive(self, tickers: list[str], *, as_of=None) -> dict[str, Any]:
+        """Retained archive compatibility path; never a fallback from API acquisition."""
         from .finra_bulk import acquire, check_deadline, new_attempt, validated_acquisition, population_digest
         from .finra_schedule import validate_current_settlement
         acquired_at = datetime.fromisoformat(acquisition_time())
