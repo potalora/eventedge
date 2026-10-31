@@ -75,9 +75,10 @@ def test_finra_acquisition_is_validated_frozen_and_replayed(tmp_path):
         'inventory_before_observed': True, 'missing_archive_dates_before': ['2026-09-15', '2026-09-30'],
         'query_population_sha256': 'c'*64, 'prepare_started_at': 1.0,
         'prepare_finished_at': 2.0, 'prepare_elapsed_seconds': 1.0}
-    # Preserve an actual archived v1 receipt as the current factory adds v2 fields.
+    # Preserve an actual archived v1 receipt as the current factory adds fields.
     attempt.pop('acquired_at')
     attempt.pop('archive_coverage')
+    attempt.pop('current_archive_probe')
     acquisition = {'schema_version': 1, 'requested_count': 2, 'cached_count': 0, 'population_sha256': 'c'*64,
                    'attempts': [attempt]}
     call['enrichment']['short_interest_acquisition'] = deepcopy(acquisition)

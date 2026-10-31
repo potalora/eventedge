@@ -48,6 +48,9 @@ def native(tmp_path, monkeypatch):
     # Fake dependency boundary intentionally mirrors complete native model fields.
     # No installed OpenBB preparation/refresh or provider operation is invoked.
     from tradingagents.strategies.data_sources import evidence, openbb_source
+    # Synthetic SDK failures never trigger public diagnostic networking.
+    from tradingagents.strategies.data_sources import finra_bulk
+    monkeypatch.setattr(finra_bulk, 'probe_missing_current_archive', lambda day: None)
     # Fix the September archive publication context while preserving clocks
     # explicitly supplied by broader pipeline or publication-boundary fixtures.
     if openbb_source.acquisition_time is evidence.acquisition_time:

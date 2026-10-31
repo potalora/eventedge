@@ -435,7 +435,7 @@ class OpenBBSource:
         cached = {symbol: self._cache[f"equity_short_interest|{symbol}"]
                   for symbol in symbols if f"equity_short_interest|{symbol}" in self._cache}
         pending = [symbol for symbol in symbols if symbol not in cached]
-        acquisition = {"schema_version": 2, "requested_count": len(symbols),
+        acquisition = {"schema_version": 3, "requested_count": len(symbols),
                        "cached_count": len(cached), "attempts": [], "population_sha256": population_digest(symbols)}
         successes, errors = {}, {}
         def run():
