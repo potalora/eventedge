@@ -53,6 +53,14 @@ def sha(path):
     return result.hexdigest()
 
 
+def readonly_git_identity():
+    # Fixed trusted local utility only; incoming replay argv never selects it.
+    path=no_symlinks('/usr/bin/git'); info=path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+        'readonly_git_binary_identity')
+    return {'path':str(path),'sha256':sha(path)}
+
+
 def private_json(path, value):
     path = Path(path)
     fd = os.open(path, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
@@ -294,6 +302,15 @@ def load_profile_bytes(source, selected, expected_sha256):
     return body
 
 
+def _write_owned_startup(site, dependency_site, hooks, config_path):
+    # The owned .pth binds the exact prepared config even when native supervised
+    # workers deliberately clear their environment. Ambient conflicts still fail.
+    code=("try:\n from tools.live_workflow.bootstrap import install\n install(config_path="
+        +repr(str(config_path))+")\nexcept BaseException:\n import traceback; traceback.print_exc(); os._exit(90)")
+    startup='import os; exec('+repr(code)+')'
+    (Path(site)/'live_workflow.pth').write_text(str(dependency_site)+'\n'+str(hooks)+'\n'+startup+'\n')
+
+
 def prepare(args):
     source=validate_candidate(args.candidate_root,args.candidate_commit)
     require(date.fromisoformat(args.session).isoformat() == args.session,'invalid_reference_session')
@@ -329,25 +346,22 @@ def prepare(args):
     own_package=root/'hooks/tools'; own_package.mkdir()
     (own_package/'__init__.py').write_text('')
     shutil.copytree(Path(__file__).parent,own_package/'live_workflow',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
-    # Dependency .pth files are deliberately NOT executed. Only this owned .pth
-    # registers the plain verified dependency path and copied minimal hook package.
-    # repr preserves actual newlines inside exec without a multiline .pth command.
-    code="try:\n from tools.live_workflow.bootstrap import install\n install()\nexcept BaseException:\n import traceback; traceback.print_exc(); os._exit(90)"
-    startup='import os; exec('+repr(code)+')'
-    (site/'live_workflow.pth').write_text(str(dependency_site)+'\n'+str(root/'hooks')+'\n'+startup+'\n')
+    # Dependency .pth files are deliberately not executed.
+    _write_owned_startup(site,dependency_site,root/'hooks',root/'hook-config.json')
     hooks={str(path.relative_to(root/'hooks')):sha(path) for path in sorted((root/'hooks').rglob('*.py'))}
     contract={'schema_version':1,'root':str(root),'candidate_commit':args.candidate_commit,
         'original_profile_sha256':args.profile_sha256,'profile_sha256':sha(root/'profile.json'),
         'reference_session':args.session,
         'dependency_site':str(dependency_site),'dependency_sha256':args.dependency_sha256,
-        'python_version':version,'owned_runtime':runtime_identity(repo,version),'runtime_policy':{'source_fetch_seconds':900,'model_phase_seconds':2400,'model_call_seconds':120},
+        'python_version':version,'owned_runtime':runtime_identity(repo,version),
+        'local_git':readonly_git_identity(),'runtime_policy':{'source_fetch_seconds':900,'model_phase_seconds':2400,'model_call_seconds':120},
         'hooks':hooks,'prepared_at':datetime.now(timezone.utc).isoformat(),
         'auth_path':AUTH_PATH,'auth_policy':'canonical_shared_parent_rw_same_uid',
         'observer':_optional_checkout(args.observer_root,args.observer_commit),
         'native':_optional_checkout(args.native_root,args.native_commit)}
     private_json(root/'contract.json',contract)
     private_json(root/'hook-config.json',{'mode':'live_record','root':str(root),'candidate_repo':str(repo),
-        'tape_dir':str(root/'tape'),'run_identity':{k:contract[k] for k in ('candidate_commit','original_profile_sha256',
+        'tape_dir':str(root/'tape'),'local_git':contract['local_git'],'run_identity':{k:contract[k] for k in ('candidate_commit','original_profile_sha256',
             'profile_sha256','dependency_sha256','prepared_at','reference_session')},'phase':'generation_prepare'})
     _child(root,'prepare')
     row=json.loads((root/'generation.json').read_text())
@@ -374,6 +388,7 @@ def verify_contract(root):
     root=no_symlinks(root); contract=json.loads((root/'contract.json').read_text())
     require(contract['root'] == str(root), 'campaign_root_mismatch')
     require(runtime_identity(root/'repo',contract['python_version']) == contract['owned_runtime'], 'owned_runtime_changed')
+    require(readonly_git_identity() == contract['local_git'],'readonly_git_binary_changed')
     validate_candidate(root/'repo',contract['candidate_commit'])
     require(sha(root/'profile.json') == contract['profile_sha256'], 'profile_hash_changed')
     require(sha(root/'original-profile.json') == contract['original_profile_sha256'], 'original_profile_hash_changed')
@@ -381,7 +396,8 @@ def verify_contract(root):
     identity={k:contract[k] for k in ('candidate_commit','original_profile_sha256','profile_sha256',
         'dependency_sha256','prepared_at','reference_session')}
     require(config == {'mode':'live_record','root':str(root),'candidate_repo':str(root/'repo'),
-        'tape_dir':str(root/'tape'),'run_identity':identity,'phase':'generation_prepare'}, 'hook_configuration_changed')
+        'tape_dir':str(root/'tape'),'local_git':contract['local_git'],
+        'run_identity':identity,'phase':'generation_prepare'}, 'hook_configuration_changed')
     require(dependency_fingerprint(contract['dependency_site']) == contract['dependency_sha256'], 'dependency_hash_changed')
     actual={str(p.relative_to(root/'hooks')):sha(p) for p in sorted((root/'hooks').rglob('*.py'))}
     require(actual == contract['hooks'], 'recording_hooks_changed')

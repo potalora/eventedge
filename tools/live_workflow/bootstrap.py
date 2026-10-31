@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -35,8 +36,105 @@ def phase_for(argv, inherited):
     return inherited
 
 
-def install():
-    config_path=os.environ.get('EVENTEDGE_LIVE_CONFIG')
+def _candidate_native_file(raw, repo, relative):
+    path=Path(raw)
+    if not path.is_absolute() or path.is_symlink():
+        return False
+    try:
+        parts=path.relative_to(repo).parts
+    except ValueError:
+        return False
+    tail=Path(relative).parts
+    return (parts==tail or (len(parts)==len(tail)+2 and parts[0]=='.worktrees'
+        and re.fullmatch(r'gen_[0-9]{3,}',parts[1]) is not None and parts[2:]==tail))
+
+
+def _native_parent_phase(argv, repo, parent_cwd):
+    # Only a native candidate Python script can bind a cleaned NOAA worker.
+    if not argv or Path(argv[0]).absolute()!=Path(sys.executable).absolute():
+        raise RuntimeError('owned NOAA parent interpreter mismatch')
+    index=1
+    while index<len(argv) and argv[index] in ('-B','-I','-u','-s','-E'):
+        index+=1
+    if index>=len(argv):
+        raise RuntimeError('owned NOAA parent command missing')
+    parent_cwd=Path(parent_cwd)
+    try:
+        cwd_parts=parent_cwd.relative_to(repo).parts
+    except ValueError:
+        raise RuntimeError('owned NOAA parent working directory outside candidate') from None
+    if cwd_parts and not (len(cwd_parts)==2 and cwd_parts[0]=='.worktrees'
+            and re.fullmatch(r'gen_[0-9]{3,}',cwd_parts[1]) is not None):
+        raise RuntimeError('owned NOAA parent working directory unsupported')
+    script=Path(argv[index])
+    if not script.is_absolute():
+        script=parent_cwd/script
+    script=Path(os.path.normpath(script))
+    args=argv[index+1:];name=script.name
+    if name not in ('run_cohorts.py','run_generations.py') or not _candidate_native_file(script,repo,'scripts/'+name):
+        raise RuntimeError('owned NOAA parent command unsupported')
+    if args.count('--date')!=1:
+        raise RuntimeError('owned NOAA parent date missing')
+    try:
+        label=args[args.index('--date')+1]
+        if date.fromisoformat(label).isoformat()!=label:
+            raise ValueError
+    except (IndexError,ValueError):
+        raise RuntimeError('owned NOAA parent date invalid') from None
+    if name=='run_generations.py':
+        if not args or args[0] not in ('preflight','run-daily'):
+            raise RuntimeError('owned NOAA parent operation unsupported')
+        preflight=args[0]=='preflight'
+    else:
+        preflight='--preflight' in args
+        if args.count('--preflight')>1 or '--recover-runtime' in args:
+            raise RuntimeError('owned NOAA parent operation unsupported')
+    if preflight:
+        if args.count('--preflight-mode')!=1:
+            raise RuntimeError('owned NOAA parent preflight mode missing')
+        position=args.index('--preflight-mode')+1
+        if position>=len(args) or args[position] not in ('screen','governed'):
+            raise RuntimeError('owned NOAA parent preflight mode invalid')
+        return 'preflight_'+args[position]
+    if '--preflight-mode' in args:
+        raise RuntimeError('owned NOAA parent phase conflicting')
+    return 'daily'
+
+
+def _cleaned_noaa_phase(repo):
+    parent=os.getppid();folder=Path('/proc')/str(parent)
+    try:
+        with (folder/'status').open('rb') as stream:
+            status=stream.read(8193)
+        with (folder/'cmdline').open('rb') as stream:
+            command=stream.read(32769)
+    except OSError:
+        raise RuntimeError('owned NOAA parent metadata unavailable') from None
+    if len(status)>8192 or len(command)>32768 or not command.endswith(b'\x00'):
+        raise RuntimeError('owned NOAA parent metadata exceeds bound')
+    rows=[line.split()[1:] for line in status.splitlines() if line.startswith(b'Uid:')]
+    expected=[str(os.getuid()).encode()]*4
+    if rows!=[expected] or os.getppid()!=parent:
+        raise RuntimeError('owned NOAA parent identity mismatch')
+    try:
+        argv=[part.decode('utf-8') for part in command[:-1].split(b'\x00')]
+    except UnicodeError:
+        raise RuntimeError('owned NOAA parent command invalid') from None
+    try:
+        parent_cwd=os.readlink(folder/'cwd')
+    except OSError:
+        raise RuntimeError('owned NOAA parent working directory unavailable') from None
+    if len(parent_cwd)>4096 or not Path(parent_cwd).is_absolute() or os.getppid()!=parent:
+        raise RuntimeError('owned NOAA parent working directory invalid')
+    # Full parent argv/cwd is neither logged nor retained; only the strict phase is returned.
+    return _native_parent_phase(argv,repo,parent_cwd)
+
+
+def install(*, config_path=None):
+    inherited_config=os.environ.get('EVENTEDGE_LIVE_CONFIG')
+    if config_path is not None and inherited_config is not None and str(config_path)!=inherited_config:
+        raise RuntimeError('owned hook configuration conflicts with pinned path')
+    config_path=config_path if config_path is not None else inherited_config
     if not config_path:
         raise RuntimeError('owned hook requires private live config')
     config=json.loads(Path(config_path).read_text())
@@ -51,7 +149,12 @@ def install():
     spec=importlib.util.find_spec('tradingagents')
     if spec is None or spec.origin is None or not Path(spec.origin).resolve().is_relative_to(repo):
         raise RuntimeError('candidate import root mismatch')
-    phase=phase_for(sys.argv,os.environ.get('EVENTEDGE_LIVE_PHASE',config['phase']))
+    inherited_phase=os.environ.get('EVENTEDGE_LIVE_PHASE')
+    phase=phase_for(sys.argv,inherited_phase or config['phase'])
+    if _candidate_native_file(sys.argv[0],repo,'tradingagents/strategies/data_sources/noaa_yearly_transport.py'):
+        phase=_cleaned_noaa_phase(repo)
+        if inherited_phase is not None and inherited_phase!=phase:
+            raise RuntimeError('owned NOAA inherited phase conflicts with parent')
     os.environ['EVENTEDGE_LIVE_PHASE']=phase
     if getattr(sys,'_eventedge_live_hooks_installed',False):
         return
@@ -59,7 +162,7 @@ def install():
     # Accepted-state no-IO replay uses explicit prohibitions, not transport tape
     # replay. It must never turn an accidental acquisition into a recorded answer.
     if 'accepted-replay' in sys.argv:
-        _forbid_io(_replay_attempts())
+        _forbid_io(_replay_attempts(),repo=repo,git_identity=config['local_git'])
         return
     from .recorded_io import install_source_io
     from .recorded_models import install_model_io
@@ -159,7 +262,53 @@ def _replay_attempts():
     return sys._eventedge_replay_attempts
 
 
-def _forbid_io(attempts):
+def _install_process_guard(attempts, *, repo, git_identity):
+    """Allow the one native local identity read; all other processes stay denied."""
+    from .runner import readonly_git_identity
+    repo=Path(repo)
+    if not repo.is_absolute() or repo != repo.resolve():
+        raise RuntimeError('replay process guard configuration invalid')
+    if (not isinstance(git_identity,dict) or set(git_identity)!= {'path','sha256'}
+            or git_identity['path']!='/usr/bin/git'
+            or re.fullmatch(r'[0-9a-f]{64}',str(git_identity['sha256'])) is None):
+        raise RuntimeError('replay process guard configuration invalid')
+    state=getattr(sys,'_eventedge_replay_process_guard',None)
+    if state is not None:
+        if state['repo']!=str(repo) or state['identity']!=git_identity or state['attempts'] is not attempts:
+            raise RuntimeError('replay process guard configuration changed')
+        subprocess.Popen=state['wrapper']
+        return state
+    state={'repo':str(repo),'identity':dict(git_identity),'attempts':attempts,
+        'original':subprocess.Popen,'allowed':Counter()}
+    expected=['git','-C',str(repo),'rev-parse','--path-format=absolute','--git-common-dir']
+    def guarded(argv,*args,**kwargs):
+        valid=(type(argv) is list and all(type(value) is str for value in argv) and argv==expected
+            and not args and set(kwargs)=={'stdout','stderr','text'}
+            and type(kwargs['stdout']) is int and kwargs['stdout']==subprocess.PIPE
+            and type(kwargs['stderr']) is int and kwargs['stderr']==subprocess.PIPE and kwargs['text'] is True
+            and not state['allowed'])
+        if valid:
+            try:
+                valid=readonly_git_identity()==state['identity']
+            except (OSError,ValueError):
+                valid=False
+        if not valid:
+            attempts['process']+=1
+            raise RuntimeError('process')
+        state['allowed']['canonical_git_common_dir']+=1
+        return state['original'](['/usr/bin/git','--no-optional-locks','-c','core.hooksPath=/dev/null',
+            '-C',str(repo),'rev-parse','--path-format=absolute','--git-common-dir'],
+            cwd=str(repo),stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+            text=True,close_fds=True,env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8',
+            'GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null','GIT_TERMINAL_PROMPT':'0',
+            'GIT_OPTIONAL_LOCKS':'0','GIT_NO_LAZY_FETCH':'1'})
+    state['wrapper']=guarded
+    sys._eventedge_replay_process_guard=state
+    subprocess.Popen=guarded
+    return state
+
+
+def _forbid_io(attempts, *, repo, git_identity):
     class ForbiddenIO(RuntimeError):
         pass
     def forbidden(name):
@@ -167,7 +316,7 @@ def _forbid_io(attempts):
             attempts[name]+=1
             raise ForbiddenIO(name)
         return stop
-    subprocess.Popen=forbidden('process')
+    _install_process_guard(attempts,repo=repo,git_identity=git_identity)
     for name in ('getaddrinfo','gethostbyname','create_connection'):
         setattr(socket,name,forbidden('network.'+name))
     for name in ('connect','connect_ex'):
@@ -211,7 +360,8 @@ def _accepted_replay(root, session):
         require(before == copy_before,'replay_copy_mismatch')
         os.environ.update({CONFIG_FILE_ENV:row['config_file'],CONFIG_SHA_ENV:row['config_sha256'],
             'AUTORESEARCH_STATE_DIR':str(replay)})
-        forbidden=_forbid_io(attempts)
+        config=json.loads((root/'hook-config.json').read_text())
+        forbidden=_forbid_io(attempts,repo=repo,git_identity=config['local_git'])
         config=_build_config(_build_parser().parse_args([]))
         try:
             owner=CohortOrchestrator(build_default_cohorts(config),config,
@@ -225,7 +375,6 @@ def _accepted_replay(root, session):
             for name in dir(type(owner._price_source)):
                 if name.startswith(('fetch','get_','resolve_')) and callable(getattr(owner._price_source,name,None)):
                     setattr(owner._price_source,name,forbidden('price.'+name))
-            subprocess.Popen=forbidden('process')
             with model_budget(time.monotonic()+110):
                 result=owner.run_daily(session)
             require(sorted(result) == BOOKS and all(v.get('replayed') is True for v in result.values()),'completed_replay_required')
@@ -238,7 +387,10 @@ def _accepted_replay(root, session):
         require(before == after and copy_before == copy_after and native_before == native_after,'immutable_replay_changed_state')
         _imports(repo)
         private_json(root/'accepted-replay.json',{'schema_version':1,'kind':'accepted_state_no_io_replay',
-            'zero_attempted_calls':True,'attempted_calls':dict(attempts),'replayed_books':sorted(result),
+            'zero_attempted_calls':True,'attempted_calls':dict(attempts),
+            'attempted_calls_scope':'forbidden_external_io_and_arbitrary_processes',
+            'allowed_local_process_calls':dict(sys._eventedge_replay_process_guard['allowed']),
+            'replayed_books':sorted(result),
             'all_logical_tables_identical':True,'accepted_inputs_identical':True,'native_artifacts_identical':True,
             'state_before_sha256':__import__('tools.live_workflow.runner',fromlist=['digest']).digest(before),
             'cold_acquisition_replay':False,'session':session})

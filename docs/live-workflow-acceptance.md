@@ -68,7 +68,12 @@ make production state/home, Docker/SSH/notification sockets and credentials
 inaccessible, mount only the private campaign and verified dependencies, enforce
 the enabled transport families' broker-write guards, deny notification delivery,
 and contain/kill all descendants with a bounded
-cgroup. Suggested native bounds are 3500 seconds, 4 GiB/no swap and 64 tasks.
+cgroup. The verified supervisor uses 3500 seconds, 4 GiB/no swap and 256 tasks
+for the live lane; offline workers retain a 64-task limit. The first live campaign
+hit the kernel's 64-task ceiling while the native Yahoo client launched its
+threads. Preserve that failed campaign and use a fresh campaign after correcting
+the test boundary. Resource counters sampled before unit teardown cannot exclude
+a later limit hit.
 The tighter campaign cap is a test constraint, not production-equivalent proof.
 The live boundary trusts the reviewed frozen candidate, disabled paper execution
 and verified Requests/urllib/HTTPX/HTTPX2/curl transport guards. FINRA and
@@ -156,8 +161,12 @@ The offline receipt uses the same shared fields and additionally requires
 `"kernel_network_denied": true`. A separate 120-second worker takes the real
 candidate runtime lease, makes a coherent SQLite-backup state copy (including
 committed WAL rows), and invokes the real cohort replay over accepted state.
-Provider, model, Requests/urllib/HTTPX/HTTPX2/curl, socket and subsequent subprocess
-attempts are prohibited and counted. All sixteen books must return `replayed`.
+Provider, model, Requests/urllib/HTTPX/HTTPX2/curl, socket and arbitrary subprocess
+attempts are prohibited and counted. The candidate's exact local Git common-dir
+query is allowed once to locate its real runtime lock, using a pinned `/usr/bin/git`
+and a fixed clean environment. The receipt counts that local query separately;
+zero forbidden attempts does not mean zero subprocess launches. All sixteen books
+must return `replayed`.
 Every original database table's typed logical contents and schema, all accepted
 inputs, replay-copy files and original native artifacts must remain identical.
 The native inventory includes frozen-profile result/source/data-cache paths,

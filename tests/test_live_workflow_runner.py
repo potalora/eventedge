@@ -219,7 +219,7 @@ def test_credentials_file_is_private_and_never_shell_evaluated(tmp_path):
 
 def test_owned_startup_imports_candidate_and_does_not_load_dependency_pth(tmp_path):
     """A controlled subprocess exercises interpreter startup without provider hooks."""
-    from tools.live_workflow.runner import sanitized_environment
+    from tools.live_workflow.runner import sanitized_environment,readonly_git_identity
     repo=tmp_path/'repo'; repo.mkdir(); (repo/'tradingagents').mkdir()
     (repo/'tradingagents/__init__.py').write_text('IDENTITY="dummy-candidate"\n')
     for folder in ('home','cache','tmp'):
@@ -241,19 +241,36 @@ def test_owned_startup_imports_candidate_and_does_not_load_dependency_pth(tmp_pa
     hook_root=Path(__file__).resolve().parents[1]
     code="from tools.live_workflow.bootstrap import install; install()"
     (site/'owned.pth').write_text(str(dep)+'\n'+str(hook_root)+'\n'+'import os; exec('+repr(code)+')\n')
-    config=tmp_path/'hook.json'; config.write_text(json.dumps({'candidate_repo':str(repo),'phase':'test'}))
+    config=tmp_path/'hook.json'; config.write_text(json.dumps({'candidate_repo':str(repo),'phase':'test',
+        'local_git':readonly_git_identity()}))
     env['EVENTEDGE_LIVE_CONFIG']=str(config)
+    git(repo,'init','-q')
     # accepted-replay selects explicit no-IO installation rather than live hooks.
-    proc=subprocess.run([str(python),'-c','import tradingagents; print(tradingagents.IDENTITY); print(tradingagents.__file__)',
+    payload='''import json,runpy,subprocess,sys,tradingagents
+print(tradingagents.IDENTITY);print(tradingagents.__file__)
+state=sys._eventedge_replay_process_guard
+other=runpy.run_module('tools.live_workflow.bootstrap',run_name='isolated_replay_bootstrap')
+other['_forbid_io'](state['attempts'],repo=state['repo'],git_identity=state['identity'])
+command=['git','-C',state['repo'],'rev-parse','--path-format=absolute','--git-common-dir']
+result=subprocess.run(command,capture_output=True,text=True,check=True)
+try:subprocess.Popen(['git','status'])
+except RuntimeError:pass
+print(json.dumps({'common_dir':result.stdout.strip(),'allowed':dict(state['allowed']),'attempts':dict(state['attempts'])}))
+'''
+    proc=subprocess.run([str(python),'-c',payload,
         'accepted-replay'],env=env,cwd=repo,capture_output=True,text=True)
     assert proc.returncode == 0,proc.stderr
-    assert proc.stdout.splitlines() == ['dummy-candidate',str(repo/'tradingagents/__init__.py')]
+    lines=proc.stdout.splitlines()
+    assert lines[:2] == ['dummy-candidate',str(repo/'tradingagents/__init__.py')]
+    assert json.loads(lines[2])=={'common_dir':str(repo/'.git'),
+        'allowed':{'canonical_git_common_dir':1},'attempts':{'process':1}}
 
 
-def test_no_io_guard_counts_forbidden_requests_without_network(monkeypatch):
+def test_no_io_guard_counts_forbidden_requests_without_network(monkeypatch,tmp_path):
     from collections import Counter
     from types import ModuleType,SimpleNamespace
     from tools.live_workflow.bootstrap import _forbid_io
+    from tools.live_workflow.runner import readonly_git_identity
     # Supply a dummy candidate runtime module, never import any real application.
     strategies=ModuleType('tradingagents.strategies')
     strategies.llm_utils=SimpleNamespace(call_analysis_model=lambda:None)
@@ -269,7 +286,8 @@ def test_no_io_guard_counts_forbidden_requests_without_network(monkeypatch):
         monkeypatch.setattr(owner,name,getattr(owner,name))
     for package in ('httpx2','curl_cffi'):
         monkeypatch.setitem(sys.modules,package,None)
-    attempts=Counter(); _forbid_io(attempts)
+    monkeypatch.delattr(sys,'_eventedge_replay_process_guard',raising=False)
+    attempts=Counter(); _forbid_io(attempts,repo=tmp_path,git_identity=readonly_git_identity())
     with pytest.raises(RuntimeError,match='network'):
         socket.create_connection(('invalid.example',443))
     assert attempts == {'network.create_connection':1}
@@ -621,3 +639,345 @@ def test_summary_cli_remains_informational_when_native_checks_fail(tmp_path,monk
     monkeypatch.setattr(runner,'summarize',lambda root:result)
     assert runner.main(['summary','--root',str(tmp_path)])==0
     assert json.loads(capsys.readouterr().out)==result
+
+
+@pytest.fixture
+def owned_worker_startup(tmp_path):
+    """Owned .pth plus controlled installers, with the native cleaned child env."""
+    import os
+    import shutil
+    from tools.live_workflow import bootstrap,runner
+    repo=tmp_path/'candidate'; repo.mkdir()
+    app=repo/'tradingagents'; app.mkdir();(app/'__init__.py').write_text('')
+    scripts=repo/'scripts';scripts.mkdir()
+    worker=app/'strategies/data_sources/noaa_yearly_transport.py';worker.parent.mkdir(parents=True)
+    worker.write_text('import json,os\nprint(json.dumps({"controlled_transport_reached":True,"phase":os.environ["EVENTEDGE_LIVE_PHASE"]}))\n')
+    hooks=tmp_path/'hooks';package=hooks/'tools/live_workflow';package.mkdir(parents=True)
+    (hooks/'tools/__init__.py').write_text('');(package/'__init__.py').write_text('')
+    shutil.copyfile(bootstrap.__file__,package/'bootstrap.py');shutil.copyfile(runner.__file__,package/'runner.py')
+    trace=tmp_path/'trace';trace.mkdir()
+    (package/'recorded_io.py').write_text('import json,os\nfrom pathlib import Path\ndef install_source_io(**options):\n Path(options["tape_dir"],str(os.getpid())+".json").write_text(json.dumps({"phase":options["phase"]}))\n')
+    (package/'recorded_models.py').write_text('def install_model_io(**options): pass\n')
+    dependency=tmp_path/'controlled-dependencies';dependency.mkdir()
+    (dependency/'httpx.py').write_text('''BODY=b"offline controlled transport; not NOAA evidence\\n"
+class TimeoutException(Exception): pass
+class TransportError(Exception): pass
+class Timeout:
+ def __init__(self,**options): pass
+class Response:
+ status_code=200
+ headers={"Content-Length":str(len(BODY)),"Content-Encoding":"identity"}
+ def __enter__(self): return self
+ def __exit__(self,*args): pass
+ def iter_raw(self,chunk_size): yield BODY
+class Client:
+ def __init__(self,**options): pass
+ def __enter__(self): return self
+ def __exit__(self,*args): pass
+ def stream(self,*args,**kwargs): return Response()
+''')
+    config=tmp_path/'hook-config.json'
+    config.write_text(json.dumps({'candidate_repo':str(repo),'phase':'generation_prepare','mode':'live_record',
+        'tape_dir':str(trace),'run_identity':{'test':'controlled-no-network'}}))
+    env={'PATH':'/usr/bin:/bin','HOME':str(tmp_path),'LANG':'C.UTF-8','LC_ALL':'C.UTF-8'}
+    subprocess.run([sys.executable,'-I','-B','-m','venv','--without-pip',str(repo/'.venv')],env=env,check=True,capture_output=True)
+    site=repo/'.venv/lib'/f'python{sys.version_info.major}.{sys.version_info.minor}'/'site-packages'
+    runner._write_owned_startup(site,dependency,hooks,config)
+    parent_code='''import json,os,subprocess,sys
+from pathlib import Path
+repo=Path(__file__).resolve().parents[1]
+worker=repo/'tradingagents/strategies/data_sources/noaa_yearly_transport.py'
+env={'LANG':'C.UTF-8','LC_ALL':'C.UTF-8','PYTHONIOENCODING':'utf-8'}
+command=[sys.executable,'-B',str(worker),'--url','https://offline.invalid/noaa','--output',str(repo/'body'),'--max-bytes','1024','--connect-timeout','1','--read-timeout','1']
+result=subprocess.run(command,env=env,capture_output=True,text=True,timeout=5)
+print(json.dumps({'returncode':result.returncode,'stdout':result.stdout,'stderr':result.stderr,'worker_environment_names':sorted(env)}))
+'''
+    for name in ('run_cohorts.py','run_generations.py','unknown.py'):
+        (scripts/name).write_text(parent_code)
+    return {'repo':repo,'config':config,'trace':trace,'env':env,'worker':worker,'python':repo/'.venv/bin/python'}
+
+
+def _run_owned_worker(fixture,parent,args):
+    result=subprocess.run([str(fixture['python']),'-B',str(fixture['repo']/'scripts'/parent),*args],
+        env=fixture['env'],cwd=fixture['repo'],capture_output=True,text=True,timeout=10)
+    assert result.returncode==0,result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize('parent,args,phase',[
+    ('run_cohorts.py',['--date','2026-10-30','--preflight','--preflight-mode','screen'],'preflight_screen'),
+    ('run_cohorts.py',['--date','2026-10-30','--preflight','--preflight-mode','governed'],'preflight_governed'),
+    ('run_cohorts.py',['--date','2026-10-30'],'daily'),
+    ('run_generations.py',['preflight','--date','2026-10-30','--preflight-mode','screen'],'preflight_screen'),
+    ('run_generations.py',['run-daily','--date','2026-10-30'],'daily'),
+])
+def test_owned_pth_cleaned_worker_infers_only_verified_native_parent_phase(owned_worker_startup,parent,args,phase):
+    result=_run_owned_worker(owned_worker_startup,parent,args)
+    assert result['returncode']==0,result['stderr']
+    assert json.loads(result['stdout'])=={'controlled_transport_reached':True,'phase':phase}
+    assert result['worker_environment_names']==['LANG','LC_ALL','PYTHONIOENCODING']
+
+
+def test_owned_worker_rejects_unrecognized_parent(owned_worker_startup):
+    result=_run_owned_worker(owned_worker_startup,'unknown.py',['--date','2026-10-30'])
+    assert result['returncode']==90
+    assert result['stdout']==''
+
+
+@pytest.mark.parametrize('problem',['missing_pinned_config','conflicting_environment_config'])
+def test_owned_pth_does_not_fallback_from_missing_or_conflicting_pinned_config(owned_worker_startup,problem,tmp_path):
+    fixture=owned_worker_startup
+    if problem=='missing_pinned_config':fixture['config'].unlink()
+    else:fixture['env']['EVENTEDGE_LIVE_CONFIG']=str(tmp_path/'unrelated-config.json')
+    result=subprocess.run([str(fixture['python']),'-B','-c','print("must not reach payload")'],env=fixture['env'],
+        cwd=fixture['repo'],capture_output=True,text=True,timeout=5)
+    assert result.returncode==90 and result.stdout==''
+
+
+@pytest.mark.parametrize('relative_parent',[False,True])
+def test_actual_noaa_worker_reaches_controlled_transport_with_cleaned_environment(owned_worker_startup,relative_parent):
+    import os
+    candidate_root=os.environ.get('EVENTEDGE_TEST_CANDIDATE')
+    if not candidate_root:pytest.skip('actual candidate NOAA transport requires explicit EVENTEDGE_TEST_CANDIDATE')
+    source=Path(candidate_root)/'tradingagents/strategies/data_sources/noaa_yearly_transport.py'
+    if not source.is_file():pytest.skip('supplied candidate lacks native NOAA transport')
+    fixture=owned_worker_startup;fixture['worker'].write_bytes(source.read_bytes())
+    if relative_parent:
+        generation=_controlled_generation_parent(fixture)
+        process=subprocess.run([str(fixture['python']),'scripts/run_cohorts.py','--date','2026-10-30'],
+            env=fixture['env'],cwd=generation,capture_output=True,text=True,timeout=10)
+        assert process.returncode==0,process.stderr
+        result=json.loads(process.stdout)
+    else:
+        generation=fixture['repo']
+        result=_run_owned_worker(fixture,'run_cohorts.py',['--date','2026-10-30'])
+    assert result['returncode']==0,result['stderr']
+    response=json.loads(result['stdout']);body=(generation/'body').read_bytes()
+    assert response['status_code']==200 and response['bytes']==len(body)
+    assert response['sha256']==hashlib.sha256(body).hexdigest()
+    assert body==b'offline controlled transport; not NOAA evidence\n'
+
+
+@pytest.mark.parametrize('args',[
+    ['--date','2026-10-30','--preflight','--preflight-mode','unknown'],
+    ['--date','2026-10-30','--preflight'],
+    ['--date','2026-10-30','--preflight-mode','screen'],
+    ['--date','2026-10-30','--recover-runtime'],
+])
+def test_owned_worker_rejects_ambiguous_or_non_native_parent_phase(owned_worker_startup,args):
+    result=_run_owned_worker(owned_worker_startup,'run_cohorts.py',args)
+    assert result['returncode']==90 and result['stdout']==''
+
+
+@pytest.mark.parametrize('problem',['uid','parent_changed','status_bound','argv_bound'])
+def test_cleaned_worker_parent_metadata_is_same_uid_stable_and_bounded(tmp_path,monkeypatch,problem):
+    from io import BytesIO
+    import os
+    from tools.live_workflow.bootstrap import _cleaned_noaa_phase
+    uid=os.getuid()+1 if problem=='uid' else os.getuid()
+    status=('Uid:\t'+('\t'.join([str(uid)]*4))+'\n').encode()
+    command=b'\x00'.join(str(value).encode() for value in
+        (sys.executable,tmp_path/'scripts/run_cohorts.py','--date','2026-10-30'))+b'\x00'
+    if problem=='status_bound':status=b'x'*8193
+    if problem=='argv_bound':command=b'x'*32768+b'\x00'
+    pids=iter((123,124)) if problem=='parent_changed' else None
+    monkeypatch.setattr(os,'getppid',lambda:next(pids) if pids else 123)
+    def read_metadata(path,*args,**kwargs):
+        assert path.parent==Path('/proc/123')
+        return BytesIO(status if path.name=='status' else command)
+    monkeypatch.setattr(Path,'open',read_metadata)
+    with pytest.raises(RuntimeError,match='owned NOAA parent'):
+        _cleaned_noaa_phase(tmp_path)
+
+
+def _controlled_generation_parent(fixture):
+    """Exact GenerationManager shape: relative script, generation worktree cwd."""
+    generation=fixture['repo']/'.worktrees/gen_001'
+    scripts=generation/'scripts';scripts.mkdir(parents=True)
+    (scripts/'run_cohorts.py').write_bytes((fixture['repo']/'scripts/run_cohorts.py').read_bytes())
+    package=generation/'tradingagents';package.mkdir();(package/'__init__.py').write_text('')
+    worker=package/'strategies/data_sources/noaa_yearly_transport.py';worker.parent.mkdir(parents=True)
+    worker.write_bytes(fixture['worker'].read_bytes())
+    return generation
+
+
+@pytest.mark.parametrize('args,phase',[
+    (['--date','2026-10-30','--preflight','--preflight-mode','screen'],'preflight_screen'),
+    (['--date','2026-10-30','--preflight','--preflight-mode','governed'],'preflight_governed'),
+    (['--date','2026-10-30'],'daily'),
+])
+def test_cleaned_worker_accepts_exact_generation_manager_relative_argv_and_cwd(owned_worker_startup,args,phase):
+    fixture=owned_worker_startup;generation=_controlled_generation_parent(fixture)
+    process=subprocess.run([str(fixture['python']),'scripts/run_cohorts.py',*args],env=fixture['env'],
+        cwd=generation,capture_output=True,text=True,timeout=10)
+    assert process.returncode==0,process.stderr
+    result=json.loads(process.stdout)
+    assert result['returncode']==0,result['stderr']
+    assert json.loads(result['stdout'])['phase']==phase
+
+
+@pytest.fixture
+def replay_git_guard(candidate,monkeypatch):
+    from collections import Counter
+    from tools.live_workflow import bootstrap,runner
+    repo,_=candidate
+    # Both globally patched objects must return to their original state after each
+    # test; the subprocess guard itself deliberately persists across module loads.
+    monkeypatch.delattr(sys,'_eventedge_replay_process_guard',raising=False)
+    monkeypatch.setattr(subprocess,'Popen',subprocess.Popen)
+    return bootstrap,repo,runner.readonly_git_identity(),Counter()
+
+
+def _canonical_git_command(repo):
+    return ['git','-C',str(repo),'rev-parse','--path-format=absolute','--git-common-dir']
+
+
+def test_replay_guard_permits_only_real_local_canonical_git_identity(replay_git_guard):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    result=subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    assert Path(result.stdout.strip())==repo/'.git'
+    assert not attempts
+    assert sys._eventedge_replay_process_guard['allowed']=={'canonical_git_common_dir':1}
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.run(['git','-C',str(repo),'status'],capture_output=True,text=True)
+    assert attempts=={'process':1}
+
+
+@pytest.mark.parametrize('variant',[
+    'other_repo','symlink_repo','executable','shell_string','bytes','tuple','extra_arg','head','status',
+    'config','worktree','fetch','shell_kw','env','cwd','executable_kw','preexec_fn','pass_fds',
+    'extra_positional','stdout','stdin','close_fds','creationflags',
+])
+def test_replay_guard_rejects_all_noncanonical_process_forms(replay_git_guard,monkeypatch,tmp_path,variant):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    launches=[]
+    monkeypatch.setattr(subprocess,'Popen',lambda *args,**kwargs:launches.append((args,kwargs)))
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    argv=_canonical_git_command(repo);extra=[]
+    kwargs={'stdout':subprocess.PIPE,'stderr':subprocess.PIPE,'text':True}
+    if variant=='other_repo':argv[2]=str(repo)+'-sibling'
+    elif variant=='symlink_repo':
+        link=tmp_path/'alias';link.symlink_to(repo,target_is_directory=True);argv[2]=str(link)
+    elif variant=='executable':argv[0]='/usr/bin/git'
+    elif variant=='shell_string':argv='git status'
+    elif variant=='bytes':argv=[value.encode() for value in argv]
+    elif variant=='tuple':argv=tuple(argv)
+    elif variant=='extra_arg':argv.append('--help')
+    elif variant in ('head','status','config','worktree','fetch'):
+        argv=argv[:3]+({'head':['rev-parse','HEAD'],'status':['status'],'config':['config','-l'],
+            'worktree':['worktree','list'],'fetch':['fetch']}[variant])
+    elif variant=='extra_positional':extra=[0]
+    elif variant=='stdout':kwargs['stdout']=subprocess.DEVNULL
+    else:
+        key={'shell_kw':'shell','executable_kw':'executable'}.get(variant,variant)
+        kwargs[key]={'shell':True,'env':{},'cwd':str(repo),'executable':'/bin/true',
+            'preexec_fn':lambda:None,'pass_fds':(),'stdin':subprocess.DEVNULL,
+            'close_fds':True,'creationflags':0}[key]
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.Popen(argv,*extra,**kwargs)
+    assert attempts=={'process':1} and launches==[]
+
+
+def test_replay_git_child_has_fixed_environment_and_no_inherited_descriptors(replay_git_guard,monkeypatch):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    launches=[]
+    monkeypatch.setattr(subprocess,'Popen',lambda *args,**kwargs:launches.append((args,kwargs)))
+    for name in ('PATH','GIT_DIR','GIT_WORK_TREE','GIT_CONFIG_COUNT','GIT_CONFIG_KEY_0',
+            'GIT_CONFIG_VALUE_0','GIT_EXEC_PATH','LD_PRELOAD','FRED_API_KEY'):
+        monkeypatch.setenv(name,'dummy-untrusted-ambient')
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    subprocess.Popen(_canonical_git_command(repo),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    (args,options),=launches
+    assert args[0]==['/usr/bin/git','--no-optional-locks','-c','core.hooksPath=/dev/null',
+        '-C',str(repo),'rev-parse','--path-format=absolute','--git-common-dir']
+    assert options=={'cwd':str(repo),'stdin':subprocess.DEVNULL,'stdout':subprocess.PIPE,
+        'stderr':subprocess.PIPE,'text':True,'close_fds':True,'env':{
+        'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8','GIT_CONFIG_NOSYSTEM':'1',
+        'GIT_CONFIG_GLOBAL':'/dev/null','GIT_TERMINAL_PROMPT':'0','GIT_OPTIONAL_LOCKS':'0',
+        'GIT_NO_LAZY_FETCH':'1'}}
+    assert not attempts
+
+
+def test_replay_process_guard_is_idempotent_across_module_instances(replay_git_guard,monkeypatch):
+    import importlib.util
+    bootstrap,repo,identity,attempts=replay_git_guard
+    original=subprocess.Popen
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    first=subprocess.Popen
+    spec=importlib.util.spec_from_file_location('tools.live_workflow.isolated_bootstrap_namespace',bootstrap.__file__)
+    other=importlib.util.module_from_spec(spec);spec.loader.exec_module(other)
+    other._install_process_guard(attempts,repo=repo,git_identity=identity)
+    assert subprocess.Popen is first
+    assert sys._eventedge_replay_process_guard['original'] is original
+    subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    assert sys._eventedge_replay_process_guard['allowed']=={'canonical_git_common_dir':1}
+    with pytest.raises(RuntimeError,match='configuration'):
+        other._install_process_guard(attempts,repo=repo.parent,git_identity=identity)
+
+
+def test_replay_guard_does_not_reset_local_read_limit_or_denied_attempts(replay_git_guard):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.Popen(['git','status'])
+    subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    assert attempts=={'process':2}
+    assert sys._eventedge_replay_process_guard['allowed']=={'canonical_git_common_dir':1}
+
+
+@pytest.mark.parametrize('defect',['symlink','nonregular','wrong_owner','group_writable','world_writable'])
+def test_readonly_git_identity_refuses_untrusted_binary_metadata(monkeypatch,defect):
+    from types import SimpleNamespace
+    from tools.live_workflow.runner import readonly_git_identity
+    original_symlink=Path.is_symlink
+    original_lstat=Path.lstat
+    def is_symlink(path):
+        return True if path==Path('/usr/bin/git') and defect=='symlink' else original_symlink(path)
+    def lstat(path):
+        if path!=Path('/usr/bin/git'):return original_lstat(path)
+        mode=0o100755
+        if defect=='nonregular':mode=0o040755
+        if defect=='group_writable':mode|=0o020
+        if defect=='world_writable':mode|=0o002
+        return SimpleNamespace(st_mode=mode,st_uid=1000 if defect=='wrong_owner' else 0)
+    monkeypatch.setattr(Path,'is_symlink',is_symlink)
+    monkeypatch.setattr(Path,'lstat',lstat)
+    with pytest.raises(AcceptanceError,match='symlink|git_binary'):
+        readonly_git_identity()
+
+
+def test_replay_git_binary_pin_mismatch_denies_before_launch(replay_git_guard,monkeypatch):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    launches=[]
+    monkeypatch.setattr(subprocess,'Popen',lambda *args,**kwargs:launches.append((args,kwargs)))
+    bad={**identity,'sha256':'0'*64}
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=bad)
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.Popen(_canonical_git_command(repo),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    assert attempts=={'process':1} and not launches
+
+
+def test_actual_native_canonical_lock_identity_runs_under_replay_gate(replay_git_guard):
+    import importlib.util
+    import os
+    bootstrap,repo,identity,attempts=replay_git_guard
+    source_root=os.environ.get('EVENTEDGE_TEST_CANDIDATE')
+    if not source_root:pytest.skip('native lock requires explicit EVENTEDGE_TEST_CANDIDATE')
+    source=Path(source_root)/'tradingagents/strategies/orchestration/runtime_lock.py'
+    spec=importlib.util.spec_from_file_location('controlled_native_runtime_lock',source)
+    module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module
+    try:
+        spec.loader.exec_module(module)
+        bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity)
+        actual=module.canonical_runtime_lock_path(repo)
+        assert actual==repo/'data/operational/eventedge-runtime.lock'
+        with module.runtime_lock(actual,exclusive=True):
+            assert actual.is_file()
+        assert not attempts
+        assert sys._eventedge_replay_process_guard['allowed']=={'canonical_git_common_dir':1}
+    finally:
+        sys.modules.pop(spec.name,None)
