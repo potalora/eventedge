@@ -315,7 +315,7 @@ not an ordinary production timer firing.
 | Live model calls | 39 completed: 8 thesis and 16 committee calls to GPT-6.1 Sol, plus 15 bounded calls to GPT-6 Luna; configured high reasoning retained |
 | Recorded-data edge matrix | 17 passed, 0 failed, 0 unexercised; adapter, model-helper and request-binding checks, each explicitly marked as component coverage |
 | Packaged observer and native whole-poll consumer | Ran with a fake delivery sink; correctly withheld the proposal because Saturday acquisition did not match the Friday report session's New York date; no notifications sent |
-| Accepted-state replay | Investigation retained separately; completion is not implied by the native or edge results |
+| Accepted-state replay | Passed for all sixteen books with zero forbidden I/O attempts; all logical tables, accepted inputs and native artifacts identical |
 
 The native run retained eight handled Yahoo HTTP 401 responses and one HTTP 404;
 zero transport exceptions does not mean every HTTP response succeeded. Its report
@@ -331,6 +331,18 @@ used a 256-task bound. A later credential-free replay reached the native accepte
 input validator and failed because source identities bind the original source
 credential configuration. No captured envelope, identity or historical failure
 was rewritten to manufacture a pass.
+
+The successful offline replay used separately reviewed tool commit
+`c06a180207d32f6ec8a45b34cb57ba615d991685` and the same six selected source
+credentials in memory, with kernel network denial and no model-auth mount.
+Its 106-second unit completed without timeout or abort, and all descendants
+exited. It recorded four permitted local queries separately from zero forbidden
+I/O attempts. A coherent copy covered 5,171 entries and 635,553,716 bytes.
+The parent audit confirmed the original inventory unchanged and every private
+file's bytes/mode unchanged; seventeen SQLite shared-memory files had only mtime
+changes in the private copy. The original recording hooks and failed attempts
+remain intact. Accepted-state replay receipt SHA256:
+`22a3f741517d66ce4f50ad0d8615c17750eb335662702d50b529e7390715372a`.
 
 Private raw captures and operational receipts remain outside Git. The successful
 campaign is `eventedge-live-workflow-20261031-case-v4`; its primary, postcheck and
