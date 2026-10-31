@@ -38,12 +38,14 @@ python scripts/run_live_workflow_acceptance.py prepare \
   --dependency-sha256 VERIFIED_FINGERPRINT \
   --python /absolute/resolved/python3.12 --python-version 3.12 \
   --git-sha256 ROOT_VERIFIED_GIT_SHA256 \
+  --uname-sha256 ROOT_VERIFIED_UNAME_SHA256 \
   --session 2026-10-30 --destination /private/new-campaign
 ```
 
-The trusted supervisor must verify the fixed `/usr/bin/git` is a regular,
-root-owned executable that is not writable by group or others before entering the user namespace, then
-supply its digest. Inside the namespace the tool requires that exact digest.
+The trusted supervisor must verify `/usr/bin/git` and `/usr/bin/uname` are regular,
+root-owned executables that are not writable by group or others before entering
+the user namespace, then supply their digests. Inside the namespace the tool
+requires those exact digests.
 An unmapped owner is accepted only when it equals the kernel's overflow UID and
 the file is on a read-only mount. The supervisor also verifies the mapped file's
 device and inode against the host file; an inside ownership number alone does
@@ -172,10 +174,12 @@ candidate runtime lease, makes a coherent SQLite-backup state copy (including
 committed WAL rows), and invokes the real cohort replay over accepted state.
 Provider, model, Requests/urllib/HTTPX/HTTPX2/curl, socket and arbitrary subprocess
 attempts are prohibited and counted. The candidate's exact local Git common-dir
-query is allowed once to locate its real runtime lock, using a pinned `/usr/bin/git`
-and a fixed clean environment. The receipt counts that local query separately;
-zero forbidden attempts does not mean zero subprocess launches. All sixteen books
-must return `replayed`.
+query is allowed once to locate its real runtime lock. The pinned OpenBB version
+also performs two fixed local Git checks and one standard-library `uname -p`
+platform check during import. Each allowed command has exact arguments, a fixed
+clean environment and a separate invocation cap and counter. The receipt counts
+these local queries separately; zero forbidden attempts does not mean zero
+subprocess launches. All sixteen books must return `replayed`.
 Every original database table's typed logical contents and schema, all accepted
 inputs, replay-copy files and original native artifacts must remain identical.
 The native inventory includes frozen-profile result/source/data-cache paths,
@@ -183,6 +187,30 @@ The native inventory includes frozen-profile result/source/data-cache paths,
 run-attempt logs), the generation manifest and canonical reports. Runner-owned
 receipts and console logs remain outside the candidate root.
 No table exemptions or reconstructed success are permitted.
+
+For a retained campaign whose recording hooks predate a replay repair, keep its
+contract, hooks, tape and failed attempt unchanged. A separately reviewed offline
+supervisor can take a coherent full copy under the original canonical lease,
+verify every copied file, and mount that private copy at the original campaign
+path. It must keep the host baseline read-only and verify it again after the
+check. The replay worker then runs inside that boundary with a new empty private
+output directory outside the copied campaign:
+
+```sh
+/usr/bin/python3.12 -I -S /reviewed/tools/live_workflow/replay_worker.py \
+  --root /original/campaign/path --output-dir /private/new-replay-output \
+  --session 2026-10-30 --contract-sha256 ORIGINAL_CONTRACT_SHA256 \
+  --worker-sha256 REVIEWED_WORKER_SHA256 --uname-sha256 ROOT_VERIFIED_UNAME_SHA256
+```
+
+This internal worker requires the supervisor's kernel network denial, read-only
+tooling and dependencies, absent auth mount, process containment and snapshot
+checks. `-I -S` prevents execution of the retained virtualenv's recording hooks;
+the same accepted interpreter, dependencies and candidate code are loaded
+explicitly. Its receipt binds the original contract and hook hashes to the
+separate replay implementation. New attempt, state-copy and result files belong
+only to the separate output directory. The guard stays installed through worker
+exit; the parent performs the final checkout and baseline verification.
 
 `native-report.json` preserves the candidate's independent accounting, staging,
 source and accepted-input validators. `report-reproduction.json` compares the

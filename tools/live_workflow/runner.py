@@ -63,12 +63,13 @@ def _kernel_overflow_uid():
     return result
 
 
-def readonly_git_identity(expected_sha256):
+def _readonly_utility_identity(name,expected_sha256):
     # The supervisor verifies host ownership outside its user namespace and
     # supplies this pin. Incoming argv/current bytes never select the trust pin.
     require(isinstance(expected_sha256,str) and re.fullmatch(r'[0-9a-f]{64}',expected_sha256) is not None,
-        'readonly_git_binary_pin_required')
-    path=no_symlinks('/usr/bin/git'); info=path.lstat()
+        'readonly_'+name+'_binary_pin_required')
+    require(name in ('git','uname'),'readonly_utility_not_reviewed')
+    path=no_symlinks('/usr/bin/'+name); info=path.lstat()
     owner_valid=info.st_uid == 0
     if not owner_valid:
         # A host-root-owned /usr binary is unmapped inside the single-UID
@@ -77,9 +78,17 @@ def readonly_git_identity(expected_sha256):
         owner_valid=(info.st_uid == _kernel_overflow_uid()
             and bool(os.statvfs(path).f_flag & os.ST_RDONLY))
     require(stat.S_ISREG(info.st_mode) and owner_valid and not info.st_mode & 0o022,
-        'readonly_git_binary_identity')
-    require(sha(path) == expected_sha256,'readonly_git_binary_hash_mismatch')
+        'readonly_'+name+'_binary_identity')
+    require(sha(path) == expected_sha256,'readonly_'+name+'_binary_hash_mismatch')
     return {'path':str(path),'sha256':expected_sha256}
+
+
+def readonly_git_identity(expected_sha256):
+    return _readonly_utility_identity('git',expected_sha256)
+
+
+def readonly_uname_identity(expected_sha256):
+    return _readonly_utility_identity('uname',expected_sha256)
 
 
 def private_json(path, value):
@@ -100,7 +109,8 @@ def no_symlinks(path):
 def git(repo, *args):
     # No ambient Git config, aliases, executable hooks or transport overrides.
     env = {'PATH':'/usr/bin:/bin', 'HOME':'/nonexistent', 'GIT_CONFIG_NOSYSTEM':'1',
-        'GIT_CONFIG_GLOBAL':'/dev/null', 'GIT_TERMINAL_PROMPT':'0'}
+        'GIT_CONFIG_GLOBAL':'/dev/null', 'GIT_TERMINAL_PROMPT':'0',
+        'GIT_OPTIONAL_LOCKS':'0','GIT_NO_LAZY_FETCH':'1'}
     return subprocess.check_output(['git','-c','core.hooksPath=/dev/null','-C',str(repo),*args],
         env=env, text=True, stderr=subprocess.PIPE, timeout=45).strip()
 
@@ -334,6 +344,7 @@ def _write_owned_startup(site, dependency_site, hooks, config_path):
 
 def prepare(args):
     git_identity=readonly_git_identity(args.git_sha256)
+    uname_identity=readonly_uname_identity(args.uname_sha256)
     source=validate_candidate(args.candidate_root,args.candidate_commit)
     require(date.fromisoformat(args.session).isoformat() == args.session,'invalid_reference_session')
     root=no_symlinks(args.destination)
@@ -376,14 +387,17 @@ def prepare(args):
         'reference_session':args.session,
         'dependency_site':str(dependency_site),'dependency_sha256':args.dependency_sha256,
         'python_version':version,'owned_runtime':runtime_identity(repo,version),
-        'local_git':git_identity,'runtime_policy':{'source_fetch_seconds':900,'model_phase_seconds':2400,'model_call_seconds':120},
+        'local_git':git_identity,'local_uname':uname_identity,
+        'runtime_policy':{'source_fetch_seconds':900,'model_phase_seconds':2400,'model_call_seconds':120},
         'hooks':hooks,'prepared_at':datetime.now(timezone.utc).isoformat(),
         'auth_path':AUTH_PATH,'auth_policy':'canonical_shared_parent_rw_same_uid',
         'observer':_optional_checkout(args.observer_root,args.observer_commit),
         'native':_optional_checkout(args.native_root,args.native_commit)}
     private_json(root/'contract.json',contract)
     private_json(root/'hook-config.json',{'mode':'live_record','root':str(root),'candidate_repo':str(repo),
-        'tape_dir':str(root/'tape'),'local_git':contract['local_git'],'run_identity':{k:contract[k] for k in ('candidate_commit','original_profile_sha256',
+        'tape_dir':str(root/'tape'),'local_git':contract['local_git'],'dependency_site':str(dependency_site),
+        'local_uname':contract['local_uname'],
+        'run_identity':{k:contract[k] for k in ('candidate_commit','original_profile_sha256',
             'profile_sha256','dependency_sha256','prepared_at','reference_session')},'phase':'generation_prepare'})
     _child(root,'prepare')
     row=json.loads((root/'generation.json').read_text())
@@ -406,21 +420,35 @@ def runtime_identity(repo, version):
             if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc'}}
 
 
+def _verify_hook_configuration(root,contract):
+    config=json.loads((root/'hook-config.json').read_text())
+    identity={k:contract[k] for k in ('candidate_commit','original_profile_sha256','profile_sha256',
+        'dependency_sha256','prepared_at','reference_session')}
+    expected_config={'mode':'live_record','root':str(root),'candidate_repo':str(root/'repo'),
+        'tape_dir':str(root/'tape'),'local_git':contract['local_git'],
+        'run_identity':identity,'phase':'generation_prepare'}
+    # Retained recordings predate startup's dependency binding. Their unchanged
+    # strict old config remains verifiable by the separate external processor;
+    # fresh prepared hooks also bind the already pinned contract dependency site.
+    if 'local_uname' in contract:
+        expected_config['dependency_site']=contract['dependency_site']
+        expected_config['local_uname']=contract['local_uname']
+    require(config == expected_config, 'hook_configuration_changed')
+
+
 def verify_contract(root):
     root=no_symlinks(root); contract=json.loads((root/'contract.json').read_text())
     require(contract['root'] == str(root), 'campaign_root_mismatch')
     require(runtime_identity(root/'repo',contract['python_version']) == contract['owned_runtime'], 'owned_runtime_changed')
     require(readonly_git_identity(contract['local_git']['sha256']) == contract['local_git'],
         'readonly_git_binary_changed')
+    if 'local_uname' in contract:
+        require(readonly_uname_identity(contract['local_uname']['sha256']) == contract['local_uname'],
+            'readonly_uname_binary_changed')
     validate_candidate(root/'repo',contract['candidate_commit'])
     require(sha(root/'profile.json') == contract['profile_sha256'], 'profile_hash_changed')
     require(sha(root/'original-profile.json') == contract['original_profile_sha256'], 'original_profile_hash_changed')
-    config=json.loads((root/'hook-config.json').read_text())
-    identity={k:contract[k] for k in ('candidate_commit','original_profile_sha256','profile_sha256',
-        'dependency_sha256','prepared_at','reference_session')}
-    require(config == {'mode':'live_record','root':str(root),'candidate_repo':str(root/'repo'),
-        'tape_dir':str(root/'tape'),'local_git':contract['local_git'],
-        'run_identity':identity,'phase':'generation_prepare'}, 'hook_configuration_changed')
+    _verify_hook_configuration(root,contract)
     require(dependency_fingerprint(contract['dependency_site']) == contract['dependency_sha256'], 'dependency_hash_changed')
     actual={str(p.relative_to(root/'hooks')):sha(p) for p in sorted((root/'hooks').rglob('*.py'))}
     require(actual == contract['hooks'], 'recording_hooks_changed')
@@ -709,7 +737,7 @@ def main(argv=None):
     sub=parser.add_subparsers(dest='operation',required=True)
     prep=sub.add_parser('prepare')
     for key in ('candidate-root','candidate-commit','profile-sha256','dependency-site','dependency-sha256',
-            'git-sha256','destination','session'):
+            'git-sha256','uname-sha256','destination','session'):
         prep.add_argument('--'+key,required=True)
     prep.add_argument('--python',default=str(Path(sys.executable).resolve()))
     prep.add_argument('--python-version',default='3.12')

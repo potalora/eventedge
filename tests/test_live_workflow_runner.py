@@ -26,6 +26,10 @@ def _test_git_sha256():
     return hashlib.sha256(Path('/usr/bin/git').read_bytes()).hexdigest()
 
 
+def _test_uname_identity():
+    return {'path':'/usr/bin/uname','sha256':hashlib.sha256(Path('/usr/bin/uname').read_bytes()).hexdigest()}
+
+
 @pytest.fixture
 def candidate(tmp_path):
     root = tmp_path/'candidate'; root.mkdir()
@@ -248,7 +252,7 @@ def test_owned_startup_imports_candidate_and_does_not_load_dependency_pth(tmp_pa
     code="from tools.live_workflow.bootstrap import install; install()"
     (site/'owned.pth').write_text(str(dep)+'\n'+str(hook_root)+'\n'+'import os; exec('+repr(code)+')\n')
     config=tmp_path/'hook.json'; config.write_text(json.dumps({'candidate_repo':str(repo),'phase':'test',
-        'local_git':readonly_git_identity(_test_git_sha256())}))
+        'local_git':readonly_git_identity(_test_git_sha256()),'dependency_site':None,'local_uname':None}))
     env['EVENTEDGE_LIVE_CONFIG']=str(config)
     git(repo,'init','-q')
     # accepted-replay selects explicit no-IO installation rather than live hooks.
@@ -333,6 +337,7 @@ def test_prepare_refuses_incompatible_python_before_any_application_call(candida
     args=Namespace(candidate_root=root,candidate_commit=commit,session='2026-10-30',destination=tmp_path/'campaign',
         profile_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),dependency_site=site,
         dependency_sha256=dependency_fingerprint(site),git_sha256=_test_git_sha256(),
+        uname_sha256=_test_uname_identity()['sha256'],
         python=str(Path(sys.executable).resolve()),python_version='9.9',
         observer_root=None,observer_commit=None,native_root=None,native_commit=None)
     called=[]; monkeypatch.setattr('tools.live_workflow.runner._child',lambda *a,**kw:called.append(a))
@@ -356,6 +361,7 @@ def test_prepare_allows_only_its_native_runtime_lock_among_new_operational_files
     args=Namespace(candidate_root=source,candidate_commit=commit,session='2026-10-30',destination=root,
         profile_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),dependency_site=site,
         dependency_sha256=dependency_fingerprint(site),git_sha256=_test_git_sha256(),
+        uname_sha256=_test_uname_identity()['sha256'],
         python=str(Path(sys.executable).resolve()),python_version='9.9',
         observer_root=None,observer_commit=None,native_root=None,native_commit=None)
     # Stop before any application import; prepare has established clone policy.
@@ -1067,3 +1073,221 @@ def test_prepare_requires_supervisor_supplied_git_pin_before_any_filesystem_work
     with pytest.raises(SystemExit) as error:
         main(args)
     assert error.value.code==2 and '--git-sha256' in capsys.readouterr().err
+
+
+@pytest.fixture
+def openbb_git_guard(replay_git_guard,tmp_path,monkeypatch):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    site=tmp_path/'reviewed-dependency-site';version=site/'openbb_core/app/version.py'
+    version.parent.mkdir(parents=True);version.write_text('# controlled version-module fixture\n')
+    monkeypatch.setattr(bootstrap,'OPENBB_VERSION_SHA256',hashlib.sha256(version.read_bytes()).hexdigest())
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity,dependency_site=site)
+    return bootstrap,repo,identity,attempts,site
+
+
+def test_openbb_local_git_probe_has_separate_exact_two_call_limit(openbb_git_guard):
+    bootstrap,repo,identity,attempts,site=openbb_git_guard
+    command=['/usr/bin/git','rev-parse','--is-inside-work-tree']
+    for _ in range(2):
+        result=subprocess.run(command,cwd=site/'openbb_core/app',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        assert result.returncode==128  # native OpenBB converts this to False
+    canonical=subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    assert canonical.stdout.strip()==str(repo/'.git') and not attempts
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity,dependency_site=site)
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.run(command,cwd=site/'openbb_core/app',stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    assert attempts=={'process':1}
+    assert sys._eventedge_replay_process_guard['allowed']=={
+        'canonical_git_common_dir':1,'openbb_dependency_git_probe':2}
+
+
+@pytest.mark.parametrize('variant',['other_cwd','repo_cwd','cwd_string','other_argv','extra_arg','text',
+    'env','shell','stdout','cwd_missing','version_changed'])
+def test_openbb_git_probe_denies_every_other_process_shape(openbb_git_guard,variant):
+    bootstrap,repo,identity,attempts,site=openbb_git_guard
+    command=['/usr/bin/git','rev-parse','--is-inside-work-tree']
+    kwargs={'cwd':site/'openbb_core/app','stdout':subprocess.DEVNULL,'stderr':subprocess.DEVNULL}
+    if variant=='other_cwd':kwargs['cwd']=site/'openbb_core'
+    elif variant=='repo_cwd':kwargs['cwd']=repo
+    elif variant=='cwd_string':kwargs['cwd']=str(site/'openbb_core/app')
+    elif variant=='other_argv':command[-1]='HEAD'
+    elif variant=='extra_arg':command.append('--help')
+    elif variant=='text':kwargs['text']=True
+    elif variant=='env':kwargs['env']={}
+    elif variant=='shell':kwargs['shell']=True
+    elif variant=='stdout':kwargs['stdout']=subprocess.PIPE
+    elif variant=='cwd_missing':kwargs.pop('cwd')
+    elif variant=='version_changed':(site/'openbb_core/app/version.py').write_text('# changed\n')
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.Popen(command,**kwargs)
+    assert attempts=={'process':1} and not sys._eventedge_replay_process_guard['allowed']
+
+
+def test_external_worker_requires_no_site_isolation_and_retains_frozen_failure(tmp_path):
+    from tools.live_workflow import replay_worker
+    worker=Path(replay_worker.__file__)
+    root=tmp_path/'frozen';root.mkdir();(root/'contract.json').write_text('{}')
+    old=root/'accepted-replay-process.json';old.write_text('{"retained":"old failure"}')
+    output=tmp_path/'new-output';output.mkdir(mode=0o700)
+    args=['--root',str(root),'--output-dir',str(output),'--session','2026-10-30',
+        '--contract-sha256','0'*64,'--worker-sha256',hashlib.sha256(worker.read_bytes()).hexdigest(),
+        '--uname-sha256',_test_uname_identity()['sha256']]
+    env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONPATH':str(root),
+        'EVENTEDGE_LIVE_CONFIG':'/must-not-load-recording-hooks','FRED_API_KEY':'dummy-unused'}
+    unisolated=subprocess.run([sys.executable,'-I','-B',str(worker),*args],env=env,
+        capture_output=True,text=True,timeout=5)
+    assert unisolated.returncode!=0 and 'requires_isolated_no_site' in unisolated.stderr
+    result=subprocess.run([sys.executable,'-I','-S','-B',str(worker),*args],env=env,
+        capture_output=True,text=True,timeout=5)
+    assert result.returncode==2
+    failure=json.loads((output/'replay-worker-failure.json').read_text())
+    assert failure['failure_reason']=='external_replay_contract_hash_mismatch'
+    assert 'dummy-unused' not in json.dumps(failure)
+    assert old.read_text()=='{"retained":"old failure"}'
+    assert not (output/'accepted-state').exists()
+
+
+@pytest.mark.parametrize('startup',['external_no_site','fresh_owned_pth'])
+def test_full_accepted_openbb_import_under_offline_gate(tmp_path,startup):
+    import os
+    candidate_root=os.environ.get('EVENTEDGE_TEST_CANDIDATE')
+    site=os.environ.get('EVENTEDGE_TEST_DEPENDENCY_SITE')
+    if not candidate_root or not site:
+        pytest.skip('full accepted OpenBB import requires explicit candidate and dependency site')
+    site=Path(site)
+    if not (site/'openbb_core/app/version.py').is_file():
+        pytest.skip('explicit dependency site is unavailable to this test process')
+    tool=Path(__file__).resolve().parents[1]
+    repo=tmp_path/'dummy-repo';repo.mkdir()
+    # No source calls, models, settings credentials or retained baseline. Only
+    # exact native source availability and the actual accepted dependency import.
+    code='''import json,sys
+from pathlib import Path
+sys.path[:0]=[sys.argv[2],sys.argv[1],sys.argv[3]]
+from tools.live_workflow import bootstrap,runner
+attempts=bootstrap._replay_attempts()
+bootstrap._forbid_io(attempts,repo=Path(sys.argv[4]),
+ git_identity={'path':'/usr/bin/git','sha256':sys.argv[5]},dependency_site=Path(sys.argv[3]),
+ uname_identity={'path':'/usr/bin/uname','sha256':sys.argv[6]})
+from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
+import tradingagents
+assert Path(tradingagents.__file__).is_relative_to(Path(sys.argv[2]))
+available=OpenBBSource().is_available()
+print(json.dumps({'available':available,'attempted_calls':dict(attempts),
+ 'allowed_local_process_calls':dict(sys._eventedge_replay_process_guard['allowed'])}))
+'''
+    home=tmp_path/'home';home.mkdir(mode=0o700)
+    env={'PATH':'/usr/bin:/bin','HOME':str(home),'LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1',
+        'XDG_CONFIG_HOME':str(home/'.config'),'XDG_CACHE_HOME':str(home/'.cache'),
+        'XDG_DATA_HOME':str(home/'.local/share')}
+    if startup=='external_no_site':
+        command=[sys.executable,'-I','-S','-B','-c',code,str(tool),candidate_root,str(site),
+            str(repo),_test_git_sha256(),_test_uname_identity()['sha256']]
+    else:
+        from tools.live_workflow.runner import _write_owned_startup
+        subprocess.run([sys.executable,'-I','-B','-m','venv','--without-pip',str(repo/'.venv')],
+            env=env,check=True,capture_output=True,timeout=10)
+        owned_site=repo/'.venv/lib'/f'python{sys.version_info.major}.{sys.version_info.minor}'/'site-packages'
+        config=tmp_path/'fresh-hook-config.json'
+        config.write_text(json.dumps({'candidate_repo':candidate_root,'phase':'test',
+            'dependency_site':str(site),'local_git':{'path':'/usr/bin/git','sha256':_test_git_sha256()},
+            'local_uname':_test_uname_identity()}))
+        _write_owned_startup(owned_site,site,tool,config)
+        payload='''import json,sys
+from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
+available=OpenBBSource().is_available()
+print(json.dumps({'available':available,'attempted_calls':dict(sys._eventedge_replay_attempts),
+ 'allowed_local_process_calls':dict(sys._eventedge_replay_process_guard['allowed'])}))
+'''
+        command=[str(repo/'.venv/bin/python'),'-I','-B','-c',payload,'accepted-replay']
+    result=subprocess.run(command,env=env,cwd=tmp_path,capture_output=True,text=True,timeout=35)
+    assert result.returncode==0,result.stderr[-4000:]
+    assert json.loads(result.stdout.splitlines()[-1])=={'available':True,'attempted_calls':{},
+        'allowed_local_process_calls':{'openbb_dependency_git_probe':2,'platform_uname_processor':1}}
+
+
+def test_uname_probe_requires_explicit_pin_and_has_one_separate_call(replay_git_guard):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity,
+        uname_identity=_test_uname_identity())
+    value=subprocess.check_output(['uname','-p'],stderr=subprocess.DEVNULL,text=True,encoding='utf8')
+    assert isinstance(value,str) and value.strip()
+    subprocess.run(_canonical_git_command(repo),capture_output=True,text=True,check=True)
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.check_output(['uname','-p'],stderr=subprocess.DEVNULL,text=True,encoding='utf8')
+    assert attempts=={'process':1}
+    assert sys._eventedge_replay_process_guard['allowed']=={
+        'canonical_git_common_dir':1,'platform_uname_processor':1}
+
+
+@pytest.mark.parametrize('variant',['no_pin','bad_pin','other_binary','other_flag','extra_arg',
+    'encoding','cwd','env','stdout','stderr','text','shell'])
+def test_uname_probe_rejects_unpinned_or_non_native_shapes(replay_git_guard,variant):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    uname=None if variant=='no_pin' else _test_uname_identity()
+    if variant=='bad_pin':uname['sha256']='0'*64
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity,uname_identity=uname)
+    command=['uname','-p'];kwargs={'stdout':subprocess.PIPE,'stderr':subprocess.DEVNULL,
+        'text':True,'encoding':'utf8'}
+    if variant=='other_binary':command[0]='/usr/bin/uname'
+    elif variant=='other_flag':command[-1]='-a'
+    elif variant=='extra_arg':command.append('--help')
+    elif variant=='encoding':kwargs['encoding']='utf-8'
+    elif variant=='cwd':kwargs['cwd']=repo
+    elif variant=='env':kwargs['env']={}
+    elif variant=='stdout':kwargs['stdout']=subprocess.DEVNULL
+    elif variant=='stderr':kwargs['stderr']=subprocess.PIPE
+    elif variant=='text':kwargs['text']=False
+    elif variant=='shell':kwargs['shell']=True
+    with pytest.raises(RuntimeError,match='process'):
+        subprocess.Popen(command,**kwargs)
+    assert attempts=={'process':1} and not sys._eventedge_replay_process_guard['allowed']
+
+
+def test_uname_delegation_uses_fixed_binary_environment_and_fd_controls(replay_git_guard,monkeypatch):
+    bootstrap,repo,identity,attempts=replay_git_guard
+    launches=[]
+    monkeypatch.setattr(subprocess,'Popen',lambda *args,**kwargs:launches.append((args,kwargs)))
+    monkeypatch.setenv('PATH','dummy-poison');monkeypatch.setenv('LD_PRELOAD','dummy-poison')
+    bootstrap._install_process_guard(attempts,repo=repo,git_identity=identity,uname_identity=_test_uname_identity())
+    subprocess.Popen(['uname','-p'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,encoding='utf8')
+    (args,kwargs),=launches
+    assert args==(['/usr/bin/uname','-p'],)
+    assert kwargs=={'cwd':str(repo),'stdin':subprocess.DEVNULL,'stdout':subprocess.PIPE,
+        'stderr':subprocess.DEVNULL,'text':True,'encoding':'utf8','close_fds':True,
+        'env':{'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'}}
+    assert not attempts
+
+
+def test_readonly_git_status_does_not_refresh_copied_index(candidate,tmp_path):
+    import shutil
+    from tools.live_workflow import runner
+    original,_=candidate;copy=tmp_path/'private-copy'
+    shutil.copytree(original,copy)
+    before=(copy/'.git/index').read_bytes()
+    assert runner.git(copy,'status','--porcelain','--untracked-files=all')==''
+    assert (copy/'.git/index').read_bytes()==before
+
+
+@pytest.mark.parametrize('contract_kind',['retained_original','fresh_with_dependency_pins'])
+def test_hook_shape_is_selected_by_verified_contract_not_stripped_config(tmp_path,contract_kind):
+    from tools.live_workflow.runner import _verify_hook_configuration
+    identity={key:'controlled-'+key for key in ('candidate_commit','original_profile_sha256',
+        'profile_sha256','dependency_sha256','prepared_at','reference_session')}
+    contract={**identity,'dependency_site':str(tmp_path/'deps'),
+        'local_git':{'path':'/usr/bin/git','sha256':'0'*64}}
+    config={'mode':'live_record','root':str(tmp_path),'candidate_repo':str(tmp_path/'repo'),
+        'tape_dir':str(tmp_path/'tape'),'local_git':contract['local_git'],
+        'run_identity':identity,'phase':'generation_prepare'}
+    if contract_kind=='fresh_with_dependency_pins':
+        contract['local_uname']={'path':'/usr/bin/uname','sha256':'1'*64}
+        config.update(dependency_site=contract['dependency_site'],local_uname=contract['local_uname'])
+    path=tmp_path/'hook-config.json';path.write_text(json.dumps(config))
+    _verify_hook_configuration(tmp_path,contract)
+    if contract_kind=='fresh_with_dependency_pins':
+        config.pop('dependency_site');config.pop('local_uname')
+    else:
+        config['dependency_site']=contract['dependency_site']
+    path.write_text(json.dumps(config))
+    with pytest.raises(AcceptanceError,match='hook_configuration_changed'):
+        _verify_hook_configuration(tmp_path,contract)

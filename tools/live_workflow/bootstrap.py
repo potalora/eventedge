@@ -18,6 +18,8 @@ import subprocess
 import sys
 import time
 
+OPENBB_VERSION_SHA256='18cef03d4793aaba4f91ffcc094ba9589529858ed13302d768d5080ee457ac92'
+
 
 def phase_for(argv, inherited):
     args=list(argv)
@@ -162,7 +164,8 @@ def install(*, config_path=None):
     # Accepted-state no-IO replay uses explicit prohibitions, not transport tape
     # replay. It must never turn an accidental acquisition into a recorded answer.
     if 'accepted-replay' in sys.argv:
-        _forbid_io(_replay_attempts(),repo=repo,git_identity=config['local_git'])
+        _forbid_io(_replay_attempts(),repo=repo,git_identity=config['local_git'],
+            dependency_site=config['dependency_site'],uname_identity=config['local_uname'])
         return
     from .recorded_io import install_source_io
     from .recorded_models import install_model_io
@@ -262,40 +265,83 @@ def _replay_attempts():
     return sys._eventedge_replay_attempts
 
 
-def _install_process_guard(attempts, *, repo, git_identity):
-    """Allow the one native local identity read; all other processes stay denied."""
-    from .runner import readonly_git_identity
+def _install_process_guard(attempts, *, repo, git_identity, dependency_site=None, uname_identity=None):
+    """Allow pinned native/dependency local reads; all other processes stay denied."""
+    from .runner import readonly_git_identity,readonly_uname_identity,no_symlinks,sha
     repo=Path(repo)
     if not repo.is_absolute() or repo != repo.resolve():
         raise RuntimeError('replay process guard configuration invalid')
+    if uname_identity is not None and (not isinstance(uname_identity,dict)
+            or set(uname_identity)!={'path','sha256'} or uname_identity['path']!='/usr/bin/uname'
+            or re.fullmatch(r'[0-9a-f]{64}',str(uname_identity['sha256'])) is None):
+        raise RuntimeError('replay process guard uname configuration invalid')
     if (not isinstance(git_identity,dict) or set(git_identity)!= {'path','sha256'}
             or git_identity['path']!='/usr/bin/git'
             or re.fullmatch(r'[0-9a-f]{64}',str(git_identity['sha256'])) is None):
         raise RuntimeError('replay process guard configuration invalid')
+    openbb_cwd=None
+    if dependency_site is not None:
+        site=no_symlinks(dependency_site)
+        if site != site.resolve():
+            raise RuntimeError('replay process guard dependency configuration invalid')
+        openbb_cwd=site/'openbb_core/app'
+        if sha(no_symlinks(openbb_cwd/'version.py')) != OPENBB_VERSION_SHA256:
+            raise RuntimeError('replay process guard dependency version changed')
     state=getattr(sys,'_eventedge_replay_process_guard',None)
     if state is not None:
-        if state['repo']!=str(repo) or state['identity']!=git_identity or state['attempts'] is not attempts:
+        if (state['repo']!=str(repo) or state['identity']!=git_identity or state['attempts'] is not attempts
+                or state['openbb_cwd']!=openbb_cwd or state['uname_identity']!=uname_identity):
             raise RuntimeError('replay process guard configuration changed')
         subprocess.Popen=state['wrapper']
         return state
     state={'repo':str(repo),'identity':dict(git_identity),'attempts':attempts,
-        'original':subprocess.Popen,'allowed':Counter()}
+        'original':subprocess.Popen,'allowed':Counter(),'openbb_cwd':openbb_cwd,
+        'uname_identity':None if uname_identity is None else dict(uname_identity)}
     expected=['git','-C',str(repo),'rev-parse','--path-format=absolute','--git-common-dir']
     def guarded(argv,*args,**kwargs):
-        valid=(type(argv) is list and all(type(value) is str for value in argv) and argv==expected
+        canonical=(type(argv) is list and all(type(value) is str for value in argv) and argv==expected
             and not args and set(kwargs)=={'stdout','stderr','text'}
             and type(kwargs['stdout']) is int and kwargs['stdout']==subprocess.PIPE
             and type(kwargs['stderr']) is int and kwargs['stderr']==subprocess.PIPE and kwargs['text'] is True
-            and not state['allowed'])
+            and state['allowed']['canonical_git_common_dir']<1)
+        openbb=(openbb_cwd is not None and type(argv) is list and all(type(value) is str for value in argv)
+            and argv==['/usr/bin/git','rev-parse','--is-inside-work-tree'] and not args
+            and set(kwargs)=={'cwd','stdout','stderr'} and type(kwargs['cwd']) is type(openbb_cwd)
+            and kwargs['cwd']==openbb_cwd and type(kwargs['stdout']) is int
+            and kwargs['stdout']==subprocess.DEVNULL and type(kwargs['stderr']) is int
+            and kwargs['stderr']==subprocess.DEVNULL and state['allowed']['openbb_dependency_git_probe']<2)
+        uname=(uname_identity is not None and type(argv) is list and all(type(value) is str for value in argv)
+            and argv==['uname','-p'] and not args and set(kwargs)=={'stdout','stderr','text','encoding'}
+            and type(kwargs['stdout']) is int and kwargs['stdout']==subprocess.PIPE
+            and type(kwargs['stderr']) is int and kwargs['stderr']==subprocess.DEVNULL
+            and kwargs['text'] is True and kwargs['encoding']=='utf8'
+            and state['allowed']['platform_uname_processor']<1)
+        valid=canonical or openbb or uname
         if valid:
             try:
-                valid=readonly_git_identity(state['identity']['sha256'])==state['identity']
+                valid=(readonly_uname_identity(state['uname_identity']['sha256'])==state['uname_identity'] if uname
+                    else readonly_git_identity(state['identity']['sha256'])==state['identity'])
+                if openbb:
+                    valid=valid and sha(no_symlinks(openbb_cwd/'version.py'))==OPENBB_VERSION_SHA256
             except (OSError,ValueError):
                 valid=False
         if not valid:
             attempts['process']+=1
             raise RuntimeError('process')
-        state['allowed']['canonical_git_common_dir']+=1
+        operation=('canonical_git_common_dir' if canonical else
+            'platform_uname_processor' if uname else 'openbb_dependency_git_probe')
+        state['allowed'][operation]+=1
+        if uname:
+            return state['original'](['/usr/bin/uname','-p'],cwd=str(repo),stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,encoding='utf8',close_fds=True,
+                env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'})
+        if openbb:
+            return state['original'](['/usr/bin/git','--no-optional-locks','-c','core.hooksPath=/dev/null',
+                'rev-parse','--is-inside-work-tree'],cwd=str(openbb_cwd),stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,
+                env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8',
+                    'GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null','GIT_TERMINAL_PROMPT':'0',
+                    'GIT_OPTIONAL_LOCKS':'0','GIT_NO_LAZY_FETCH':'1'})
         return state['original'](['/usr/bin/git','--no-optional-locks','-c','core.hooksPath=/dev/null',
             '-C',str(repo),'rev-parse','--path-format=absolute','--git-common-dir'],
             cwd=str(repo),stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
@@ -308,7 +354,7 @@ def _install_process_guard(attempts, *, repo, git_identity):
     return state
 
 
-def _forbid_io(attempts, *, repo, git_identity):
+def _forbid_io(attempts, *, repo, git_identity, dependency_site=None, uname_identity=None):
     class ForbiddenIO(RuntimeError):
         pass
     def forbidden(name):
@@ -316,7 +362,8 @@ def _forbid_io(attempts, *, repo, git_identity):
             attempts[name]+=1
             raise ForbiddenIO(name)
         return stop
-    _install_process_guard(attempts,repo=repo,git_identity=git_identity)
+    _install_process_guard(attempts,repo=repo,git_identity=git_identity,dependency_site=dependency_site,
+        uname_identity=uname_identity)
     for name in ('getaddrinfo','gethostbyname','create_connection'):
         setattr(socket,name,forbidden('network.'+name))
     for name in ('connect','connect_ex'):
@@ -341,7 +388,7 @@ def _forbid_io(attempts, *, repo, git_identity):
     return forbidden
 
 
-def _accepted_replay(root, session):
+def _accepted_replay(root, session, *, output_dir=None, dependency_site=None, uname_identity=None):
     from .runner import (BOOKS,private_json,require,snapshot_state,state_inventory,native_inventory)
     from tradingagents.strategies.orchestration.runtime_lock import runtime_lock,canonical_runtime_lock_path
     from tradingagents.strategies.orchestration.generation_config import CONFIG_FILE_ENV,CONFIG_SHA_ENV
@@ -351,7 +398,8 @@ def _accepted_replay(root, session):
     # Imports of run_cohorts below resolve to the reviewed generation's scripts.
     sys.path.insert(0,row['worktree_path'])
     from scripts.run_cohorts import _build_config,_build_parser
-    replay=root/'accepted-state'; attempts=_replay_attempts(); owner=None
+    action=root if output_dir is None else Path(output_dir)
+    replay=action/'accepted-state'; attempts=_replay_attempts(); owner=None
     with runtime_lock(canonical_runtime_lock_path(repo),exclusive=True):
         state=Path(row['state_dir']); before=state_inventory(state)
         frozen_profile=json.loads(Path(row['config_file']).read_text())
@@ -361,7 +409,10 @@ def _accepted_replay(root, session):
         os.environ.update({CONFIG_FILE_ENV:row['config_file'],CONFIG_SHA_ENV:row['config_sha256'],
             'AUTORESEARCH_STATE_DIR':str(replay)})
         config=json.loads((root/'hook-config.json').read_text())
-        forbidden=_forbid_io(attempts,repo=repo,git_identity=config['local_git'])
+        bound_site=dependency_site if dependency_site is not None else config['dependency_site']
+        bound_uname=uname_identity if uname_identity is not None else config['local_uname']
+        forbidden=_forbid_io(attempts,repo=repo,git_identity=config['local_git'],dependency_site=bound_site,
+            uname_identity=bound_uname)
         config=_build_config(_build_parser().parse_args([]))
         try:
             owner=CohortOrchestrator(build_default_cohorts(config),config,
@@ -386,7 +437,7 @@ def _accepted_replay(root, session):
         after=state_inventory(state); copy_after=state_inventory(replay); native_after=native_inventory(repo,frozen_profile)
         require(before == after and copy_before == copy_after and native_before == native_after,'immutable_replay_changed_state')
         _imports(repo)
-        private_json(root/'accepted-replay.json',{'schema_version':1,'kind':'accepted_state_no_io_replay',
+        private_json(action/'accepted-replay.json',{'schema_version':1,'kind':'accepted_state_no_io_replay',
             'zero_attempted_calls':True,'attempted_calls':dict(attempts),
             'attempted_calls_scope':'forbidden_external_io_and_arbitrary_processes',
             'allowed_local_process_calls':dict(sys._eventedge_replay_process_guard['allowed']),
