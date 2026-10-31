@@ -54,6 +54,9 @@ def check_deadline():
 
 def validated_acquisition(value):
     """Validate the precise credential-free durable schema and return an isolated copy."""
+    if type(value) is dict and type(value.get('schema_version')) is int and value['schema_version'] == 4:
+        from .finra_query import validated_acquisition as validate_query
+        return validate_query(value)
     if type(value) is not dict or set(value) != {"schema_version", "requested_count", "cached_count", "attempts", "population_sha256"}:
         raise ValueError("Invalid FINRA acquisition metadata")
     if value["schema_version"] not in (1, 2, 3) or type(value["schema_version"]) is not int:

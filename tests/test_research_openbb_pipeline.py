@@ -12,7 +12,7 @@ from types import ModuleType, SimpleNamespace as N
 
 import pytest
 
-from test_finra_bulk import native, raw
+from test_finra_query_integration import row as finra_row
 from test_source_reliability_pipeline import pipeline, accepted_input_bytes
 from test_research_hold_staging import _run
 
@@ -20,7 +20,7 @@ from test_research_hold_staging import _run
 @pytest.mark.parametrize('factor_failure', [False, True])
 @pytest.mark.parametrize('interrupted', [False, True])
 def test_openbb_available_research_freezes_every_enrichment_before_16_book_replay(
-        pipeline, native, monkeypatch, factor_failure, interrupted):
+        pipeline, monkeypatch, factor_failure, interrupted):
     fixture, owner, config, _ = pipeline
     config['autoresearch']['research_resilience_policy'] = 'dependency_isolation_v1'
     calls = []
@@ -42,18 +42,21 @@ def test_openbb_available_research_freezes_every_enrichment_before_16_book_repla
     sdk = ModuleType('openbb')
     sdk.obb = N(equity=N(profile=profile), famafrench=N(factors=factors), user=N(credentials=N()))
     monkeypatch.setitem(sys.modules, 'openbb', sdk)
-    native.add([raw('NVDA', settlementDate='2026-09-15'), raw('NVDA')])
-    native.prepare_hook = lambda: pytest.fail('replay prepared FINRA') if fixture.block_all else None
+    # At the fixed October 2 session only September 15 is published. The
+    # external endpoint filters its later row out using the exact date query.
+    fixture.finra_rows = [finra_row('NVDA', settlementDate='2026-09-15', accountingYearMonthNumber=20260915),
+                         finra_row('NVDA', settlementDate='2026-09-30', accountingYearMonthNumber=20260930)]
+    finra_endpoint = 'https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest'
     assert owner.cohorts[0]['engine'].registry.get('openbb').is_available()
     if interrupted:
         fixture.interrupt_committee_at = 5
     first, first_wire, _ = _run(pipeline)
     assert first['outcome'] == ('failed' if interrupted else 'degraded' if factor_failure else 'clean')
     assert calls and {name for name, _ in calls} == {'profiles', 'factors'}
-    assert native.prepare_calls == 0 and native.queries == [{'symbol': 'NVDA'}]
+    assert fixture.calls[finra_endpoint] == 1
     frozen = accepted_input_bytes(config)
     assert any(name.startswith('decision_inputs/') for name in frozen)
-    before = deepcopy((fixture.calls, fixture.model_calls, calls, native.prepare_calls, native.queries))
+    before = deepcopy((fixture.calls, fixture.model_calls, calls))
     fixture.interrupt_committee_at = None
     fixture.block_all = True
     # Incomplete cohorts may finish their first committee decision. Optional
@@ -62,13 +65,14 @@ def test_openbb_available_research_freezes_every_enrichment_before_16_book_repla
     assert result['outcome'] == ('degraded' if factor_failure else 'clean')
     assert len(wire) == 16 and all(not row['error'] for row in wire.values())
     assert accepted_input_bytes(config) == frozen and not fixture.blocked_calls
-    assert (fixture.calls, calls, native.prepare_calls, native.queries) == (before[0], before[2], before[3], before[4])
+    assert (fixture.calls, calls) == (before[0], before[2])
     for row in wire.values():
         status = row['committee_decision_status']
         scope = status['research_enrichment_scope']
         assert scope['research_coverage_complete'] is (not factor_failure)
         assert bool(scope['excluded']) is factor_failure
         assert status['short_interest_acquisition']['requested_count'] == 1
+        assert status['short_interest_acquisition']['schema_version'] == 4
         assert status['short_interest_acquisition']['attempts'][0]['status'] == 'success'
     completed_model_calls = fixture.model_calls.copy()
     again, _, _ = _run(pipeline)

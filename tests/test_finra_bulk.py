@@ -102,6 +102,9 @@ def native(tmp_path, monkeypatch):
     state.storage = storage
     state.source = OpenBBSource()
     state.source._obb = N()  # already initialized; no real SDK initialization
+    # These fixtures exercise the retained archive contracts and frozen replay.
+    # The production API route has separate transport/integration tests.
+    state.source.fetch_short_interest = state.source._fetch_short_interest_archive
     return state
 
 

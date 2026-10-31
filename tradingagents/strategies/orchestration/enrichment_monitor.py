@@ -16,6 +16,46 @@ MAX_BYTES = 64 * 1024
 MAX_FAILURES = 256
 
 
+def _validate_query_facts(original, acquisition):
+    """A valid query receipt must also describe the accepted enrichment facts."""
+    from ..data_sources.finra_bulk import population_digest
+    from ..data_sources.fetch_errors import source_number
+    from datetime import date
+    values = original.get('short_interest', {})
+    errors = original.get('errors', {}).get('short_interest', {})
+    failure = 'FINRA receipt contradicts accepted enrichment facts'
+    if type(values) is not dict or type(errors) is not dict:
+        raise ValueError(failure)
+    for value in values.values():
+        if (type(value) is not dict or set(value) != {'short_interest', 'short_pct_of_float', 'days_to_cover', 'date'}
+                or not source_number(value['short_interest'], minimum=0)
+                or not source_number(value['days_to_cover'], minimum=0)
+                or value['short_pct_of_float'] is not None and not source_number(value['short_pct_of_float'], minimum=0)):
+            raise ValueError(failure)
+        try:
+            if type(value['date']) is not str or date.fromisoformat(value['date']).isoformat() != value['date']:
+                raise ValueError
+        except ValueError:
+            raise ValueError(failure) from None
+    population = set(values) | set(errors)
+    if (set(values) & set(errors) or len(population) != acquisition['requested_count']
+            or population_digest(population) != acquisition['population_sha256']):
+        raise ValueError(failure)
+    terminal = acquisition['attempts'][-1] if acquisition['attempts'] else None
+    coverage = terminal.get('query_coverage') if terminal else None
+    if coverage is None:
+        if len(values) != acquisition['cached_count']:
+            raise ValueError(failure)
+        return
+    accepted = set(coverage['accepted_symbols'])
+    unavailable = set(coverage['missing_symbols']) | set(coverage['invalid_symbols'])
+    if (not accepted <= set(values) or unavailable != set(errors)
+            or len(set(values) - accepted) != acquisition['cached_count']
+            or any(type(values[symbol]) is not dict
+                or values[symbol].get('date') != coverage['required_settlement_date'] for symbol in accepted)):
+        raise ValueError(failure)
+
+
 def assess_accepted_enrichment(original, scope, *, capability_config=None, codec_limits=None):
     """Project fixed diagnostics only after native accepted-input validation."""
     from .research_resilience import project_enrichment
@@ -60,19 +100,25 @@ def assess_accepted_enrichment(original, scope, *, capability_config=None, codec
         if result['status'] == 'complete' and ((terminal is not None and terminal['status'] == 'error')
                 or terminal is None and acquisition['cached_count'] != acquisition['requested_count']):
             raise ValueError('FINRA receipt contradicts complete enrichment scope')
-        attempts = []
-        for attempt in acquisition['attempts']:
-            item = {key: attempt.get(key) for key in ('status', 'reason_code', 'acquired_at')}
-            coverage = attempt.get('archive_coverage')
-            item['archive_coverage'] = ({key: coverage[key] for key in
-                ('required_settlement_date', 'current_complete', 'historical_complete')} if coverage is not None else None)
-            probe = attempt.get('current_archive_probe')
-            item['current_archive_probe'] = ({key: probe[key] for key in
-                ('kind', 'settlement_date', 'observed_at', 'http_status', 'outcome')} if probe is not None else None)
-            attempts.append(item)
-        result['short_interest_acquisition'] = {key: acquisition[key] for key in
-            ('schema_version', 'requested_count', 'cached_count', 'population_sha256')}
-        result['short_interest_acquisition']['attempts'] = attempts
+        if acquisition['schema_version'] == 4:
+            # Query evidence describes exact symbols, not archive inventory.
+            # Preserve the full bounded contract for independent native validation.
+            _validate_query_facts(original, acquisition)
+            result['short_interest_acquisition'] = acquisition
+        else:
+            attempts = []
+            for attempt in acquisition['attempts']:
+                item = {key: attempt.get(key) for key in ('status', 'reason_code', 'acquired_at')}
+                coverage = attempt.get('archive_coverage')
+                item['archive_coverage'] = ({key: coverage[key] for key in
+                    ('required_settlement_date', 'current_complete', 'historical_complete')} if coverage is not None else None)
+                probe = attempt.get('current_archive_probe')
+                item['current_archive_probe'] = ({key: probe[key] for key in
+                    ('kind', 'settlement_date', 'observed_at', 'http_status', 'outcome')} if probe is not None else None)
+                attempts.append(item)
+            result['short_interest_acquisition'] = {key: acquisition[key] for key in
+                ('schema_version', 'requested_count', 'cached_count', 'population_sha256')}
+            result['short_interest_acquisition']['attempts'] = attempts
     if len(_bytes(result)) > MAX_BYTES:
         raise ValueError('enrichment monitor size bound')
     return result

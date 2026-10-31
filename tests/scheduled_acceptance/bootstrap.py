@@ -250,6 +250,19 @@ def _install():
             return fixture.response({},503,headers={'Retry-After':'0'})
         if fault == 'midday_congress_503' and '/revision/main' in url:
             return fixture.response({},503,headers={'Retry-After':'0'})
+        if url == 'https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest':
+            # The DB holds constructed external response rows, not a production
+            # adapter cache. Exercise the real API transport/parser and receipt.
+            import sqlite3
+            assert method.lower() == 'post' and kwargs['stream'] is True and kwargs['allow_redirects'] is False
+            db = Path(os.environ['EVENTEDGE_ACCEPTANCE_BASE']) / 'finra-response.db'
+            with sqlite3.connect(db.as_uri() + '?mode=ro', uri=True) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = [dict(row) for row in connection.execute('SELECT * FROM short_interest')]
+            for row in rows:
+                row.pop('index')
+                row['accountingYearMonthNumber'] = int(row['settlementDate'].replace('-', ''))
+            return fixture.finra_response(kwargs['json'], rows)
         if _yearly:
             # Only this new HTTP boundary uses retained original public bytes.
             # The Oct19 acquisition is replayed under a constructed Oct14/15

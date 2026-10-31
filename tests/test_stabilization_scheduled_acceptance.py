@@ -294,8 +294,8 @@ from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
 from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator
 from tradingagents.strategies.orchestration.research_resilience import project_enrichment
 config=json.loads(Path(sys.argv[1]).read_text())
-# Extend the external FINRA response cache, using its native schema. Every
-# normalization, batching, acquisition and retirement decision remains real.
+# Extend the constructed external rows; the HTTP fixture translates them into
+# FINRA query responses. Normalization, batching and retirement remain real.
 with sqlite3.connect(Path(os.environ['EVENTEDGE_ACCEPTANCE_BASE'])/'finra-response.db') as connection:
  for index,symbol in enumerate(['SLV','UNG'],100):
   connection.execute('INSERT INTO short_interest VALUES (?,?,?,?,?,?,?,?,?,?,?)',
@@ -324,13 +324,34 @@ print(json.dumps({'original':original,'projected':projected,'scope':scope}))
     assert value["projected"]["factors"]["observation_date"] == "2026-09-30"
     assert value["projected"]["factors"]["Mkt-RF"] == 0.01
     assert {row["date"] for row in value["projected"]["short_interest"].values()} == {"2026-09-30"}
-    acquisition, = value["original"]["short_interest_acquisition"]["attempts"]
-    assert acquisition["archive_coverage"]["current_complete"] is True
-    assert acquisition["archive_coverage"]["historical_complete"] is False
+    from tradingagents.strategies.data_sources.finra_bulk import validated_acquisition
+    receipt = value["original"]["short_interest_acquisition"]
+    assert validated_acquisition(receipt) == receipt
+    assert receipt["schema_version"] == 4
+    assert receipt["requested_count"] == 2 and receipt["cached_count"] == 0
+    acquisition, = receipt["attempts"]
+    assert acquisition["status"] == "success" and acquisition["reason_code"] is None
+    assert acquisition["source"] == "official_finra_public_query_api"
+    endpoint = "https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest"
+    assert acquisition["endpoint"] == endpoint
+    coverage = acquisition["query_coverage"]
+    assert coverage["scope"] == "exact_requested_symbols_at_required_settlement"
+    assert coverage["required_settlement_date"] == "2026-09-30"
+    assert coverage["requested_symbols"] == coverage["accepted_symbols"] == ["SLV", "UNG"]
+    assert coverage["missing_symbols"] == coverage["invalid_symbols"] == []
+    assert coverage["current_complete"] is True
+    assert "archive_coverage" not in acquisition
+    batch, = acquisition["batches"]
+    assert batch["requested_symbols"] == ["SLV", "UNG"]
+    assert batch["http_status"] == 200
+    assert batch["record_total"] == batch["row_count"] == batch["total_records_on_page"] == 2
+    assert batch["record_offset"] == 0 and batch["record_limit"] == 3
     trace = harness.trace()
-    assert not any(row["kind"] in {"forbidden_network", "unexpected_httpx", "http", "model"} for row in trace)
+    assert not any(row["kind"] in {"forbidden_network", "unexpected_httpx", "model"} for row in trace)
+    request, = [row for row in trace if row["kind"] == "http"]
+    assert request["url"] == endpoint and request["method"].lower() == "post"
     assert {row["endpoint"] for row in trace if row["kind"] == "sdk"} == {
-        "openbb.profile", "openbb.factors", "finra.transform_data"}
+        "openbb.profile", "openbb.factors"}
 
 
 @pytest.mark.parametrize("fault, complete", [("fred_optional_payems_503", True),
