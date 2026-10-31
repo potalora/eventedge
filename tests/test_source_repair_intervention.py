@@ -485,3 +485,53 @@ else:
 ''', str(destination)], user=consumer.pw_uid, group=consumer.pw_gid,
             extra_groups=[], cwd='/tmp', capture_output=True, text=True, check=True)
         assert result.stdout.strip() == 'readable_not_writable'
+
+
+@pytest.mark.parametrize(
+    "reason,detail",
+    [
+        ("missing_origin_evidence", "preceding-session baseline"),
+        ("missing_session_evidence", "intermediate session"),
+        ("acquisition_session_mismatch", "acquisition date"),
+    ],
+)
+def test_evidence_qualification_names_why_automatic_repair_was_not_started(reason, detail):
+    value = report()
+    (case,) = build(value, [outcome(value, reason)])
+    assert case["reason_code"] == reason
+    assert "Automatic repair was not started" in case["summary"]
+    assert detail in case["summary"]
+    rendered = api().render_intervention_case(case)
+    assert "Recommended: Assess accepted source evidence (option 1)." in rendered
+    assert "Recommended: Restore" not in rendered
+    assert case["options"] == list(api().OPTIONS)
+    assert "1. Assess accepted source evidence:" in rendered
+    assert "Restore current source/access" not in rendered
+    assert "restore_access" == case["recommended_option"]
+    assert "does not authorize production changes" in rendered
+
+
+def test_generic_evidence_failure_recommends_assessment_without_inventing_specific_cause():
+    value = report()
+    (case,) = build(value, [outcome(value, "evidence_unavailable")])
+    assert case["reason_code"] == "assessment_required"
+    rendered = api().render_intervention_case(case)
+    assert "Recommended: Assess accepted source evidence (option 1)." in rendered
+    assert "healthy" not in case["summary"]
+
+
+def test_renderer_separates_report_wide_coverage_from_provider_attributed_impact():
+    value = report()
+    (case,) = build(value, [outcome(value)])
+    rendered = api().render_intervention_case(case)
+    assert "Overall report: outcome=degraded; input coverage=incomplete." in rendered
+    assert "Provider-attributed impact: no affected strategies or cohorts recorded in this report." in rendered
+    assert "Observed impact: report=" not in rendered
+
+
+def test_evidence_qualification_options_remain_fixed_and_reject_tampering():
+    value = report()
+    (case,) = build(value, [outcome(value, "missing_origin_evidence")])
+    case["options"][0]["next_step"] = "Fabricate an earlier healthy acquisition."
+    with pytest.raises(ValueError):
+        api().render_intervention_case(case)

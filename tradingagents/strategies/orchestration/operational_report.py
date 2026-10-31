@@ -1257,7 +1257,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
 
 
 
-def _completion_facts(state, profile, report, health, source_envelope, diagnose):
+def _completion_facts(state, profile, report, health, source_envelope, diagnose, *, enrichment_observation=None):
     """Read immutable screening and native committee rows without store writes."""
     from .research_screening import _decode, _digest, VERSION
     from .source_inputs import source_codec_limits
@@ -1359,13 +1359,13 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose)
         from .enrichment_capabilities import configured as enrichment_configured
         if enrichment_configured(profile.config['autoresearch']):
             facts['enrichment_scope'] = _accepted_enrichment_scope(
-                state, profile, report, source_envelope, facts['committees'])
+                state, profile, report, source_envelope, facts['committees'], observation=enrichment_observation)
     except (OSError, sqlite3.Error, LedgerConflictError, ValueError, TypeError, KeyError, AttributeError):
         diagnose('accepted_enrichment_invalid')
     return facts
 
 
-def _accepted_enrichment_scope(state, profile, report, source_envelope, committees):
+def _accepted_enrichment_scope(state, profile, report, source_envelope, committees, *, observation=None):
     """Reconstruct optional scope from accepted inputs and all native book bindings.
 
     The source envelope supplies its original credential-sensitive identity.
@@ -1441,6 +1441,9 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
                     or staging['context'].get('decision_clock') != context):
                 raise ValueError('accepted enrichment differs from staging decision clock')
         _, scope = project_enrichment(enrichment, codec_limits=store.codec_limits, capability_config=ar)
+        if observation is not None:
+            from .enrichment_monitor import assess_accepted_enrichment
+            observation.update(assess_accepted_enrichment(enrichment, scope, capability_config=ar, codec_limits=store.codec_limits))
         return scope
 
 

@@ -254,6 +254,16 @@ source digest, generation, full commit, configuration and acquisition time, then
 uses the existing source and incident projectors to corroborate the current
 failure and its origin. A healthy intervening observation, invented persistence,
 missing history, changed identity or unavailable projection prevents admission.
+
+The fixed export qualifications are `missing_origin_evidence`,
+`missing_session_evidence` and `acquisition_session_mismatch`. The export CLI
+returns exit 2 and exactly `Source repair evidence unavailable: CODE.` followed
+by a newline. A trusted broker may retain only one of those three allowlisted
+codes from that exact diagnostic contract; arbitrary stderr, worker causes,
+tracebacks and provider bodies remain private and map to a generic qualification.
+The code describes admission failure: automatic repair was not started. It does
+not imply authentication failure, publisher shutdown or a failed repair worker.
+
 This deliberately fails closed where accepted source evidence cannot establish
 the reported failure; a report-only or health-store-only failure needs operator
 assessment.
@@ -315,6 +325,22 @@ choices:
    proposal/PR. Production retirement requires explicit approval.
 4. **Acknowledge:** record awareness only. Acknowledgment does not authorize any
    production change, relax a gate or mark the source recovered.
+
+Evidence qualification cases retain the exact fixed code and explain the
+missing baseline, intermediate acquisition or acquisition/session mismatch.
+They recommend inspecting accepted source evidence. Generic evidence outcomes
+remain `assessment_required` and do not invent a more precise cause. The v1
+numbered option identifiers and serialized descriptors stay unchanged for
+compatibility; for these reasons the renderer presents option 1 as **Assess
+accepted source evidence**, and preparation must follow the evidence workflow.
+This changes neither admission proof nor production authority. Both application
+and native Hermes validators/renderers must be upgraded together to recognize
+the three additional fixed reasons.
+
+The card labels report outcome and input coverage as **Overall report**,
+separately from **Provider-attributed impact**. An empty provider scope means
+no affected strategy or cohort was recorded; it does not turn report-wide
+coverage into an attributable provider failure or prove that trading stopped.
 
 Impact names only source-health strategy/cohort references explicitly present in
 the current validated report; absent scope remains unspecified. It does not claim

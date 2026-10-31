@@ -83,6 +83,7 @@ def test_version_two_partial_history_evidence_is_durable_and_tamper_checked(nati
     attempt = finra_bulk.new_attempt()
     finra_bulk.acquire(['A'], attempt, acquired_at=ACQUIRED)
     attempt.update(status='partial', reason_code='provider_error')
+    attempt.pop('current_archive_probe')
     metadata = dict(schema_version=2, requested_count=1, cached_count=0,
                     population_sha256=finra_bulk.population_digest(['A']), attempts=[attempt])
     assert finra_bulk.validated_acquisition(metadata) == metadata
@@ -98,6 +99,7 @@ def test_archived_version_one_metadata_retains_its_original_schema(native):
     attempt.update(status='success', reason_code=None)
     attempt.pop('archive_coverage')
     attempt.pop('acquired_at')
+    attempt.pop('current_archive_probe')
     legacy = dict(schema_version=1, requested_count=1, cached_count=0,
                   population_sha256=finra_bulk.population_digest(['A']), attempts=[attempt])
     assert finra_bulk.validated_acquisition(legacy) == legacy

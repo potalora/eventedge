@@ -78,6 +78,9 @@ OUTCOME_REASONS = frozenset(
         "broad_semantic_change",
         "repair_failed",
         "evidence_unavailable",
+        "missing_origin_evidence",
+        "missing_session_evidence",
+        "acquisition_session_mismatch",
         "native_auth_unavailable",
         "unknown_completion",
     }
@@ -119,6 +122,18 @@ SUMMARIES = {
     "semantic_change_required": "Independent evidence identifies a broader source meaning or contract change. A reviewed proposal and generation decision are required.",
     "repair_failed": "The bounded source repair did not complete successfully. Operator assessment is required.",
     "assessment_required": "Source repair status or required evidence needs operator assessment. Automatic continuation is unavailable.",
+    "missing_origin_evidence": "Automatic repair was not started: accepted source history lacks the healthy preceding-session baseline or configuration boundary needed to prove the incident origin. Operator evidence assessment is required.",
+    "missing_session_evidence": "Automatic repair was not started: accepted source history is missing an intermediate session needed to corroborate the incident. Operator evidence assessment is required.",
+    "acquisition_session_mismatch": "Automatic repair was not started: an accepted source acquisition date does not match its asserted session in New York. Operator evidence assessment is required.",
+}
+EVIDENCE_ASSESSMENT_REASONS = frozenset(
+    {"assessment_required", "missing_origin_evidence", "missing_session_evidence",
+     "acquisition_session_mismatch"}
+)
+EVIDENCE_OPTION = {
+    **OPTIONS[0],
+    "label": "Assess accepted source evidence",
+    "next_step": "Inspect retained accepted source history and prepare an evidence recovery plan. Preserve missing-history qualifications; do not invent evidence or change production without explicit approval.",
 }
 RECOMMENDATIONS = {
     reason: (
@@ -181,6 +196,8 @@ def _reason(request, outcome):
     if outcome is None or outcome["state"] not in {"requires_user", "failed"}:
         return None
     code, evidence = outcome["reason_code"], outcome["evidence_kind"]
+    if code in EVIDENCE_ASSESSMENT_REASONS:
+        return code
     if code == "access_required" and evidence == "operator_verified":
         return "access_required"
     if evidence in {"provider_contract", "operator_verified"}:
@@ -341,6 +358,10 @@ def case_sha256(case):
 def render_intervention_case(case):
     case = validate_intervention_case(case)
     impact = case["impact"]
+    display_options = (
+        (EVIDENCE_OPTION, *OPTIONS[1:])
+        if case["reason_code"] in EVIDENCE_ASSESSMENT_REASONS else OPTIONS
+    )
     coverage = (
         "valid"
         if impact["input_coverage_valid"] is True
@@ -361,23 +382,25 @@ def render_intervention_case(case):
     lines = [
         f"URGENT: EventEdge source {case['provider']} needs your decision.",
         case["summary"],
-        f"Observed impact: report={impact['report_outcome']}; input coverage={coverage}."
+        f"Overall report: outcome={impact['report_outcome']}; input coverage={coverage}.",
+        "Provider-attributed impact:"
         + (
             " " + "; ".join(scope) + "."
             if scope
-            else " Affected strategy/cohort scope is not specified in this report."
+            else " no affected strategies or cohorts recorded in this report."
         ),
         f"Generation {case['generation_id']}; session {case['session']}; case {case['case_id']}.",
         "Recommended: "
-        + next(
+        + ("Assess accepted source evidence (option 1)"
+           if case["reason_code"] in EVIDENCE_ASSESSMENT_REASONS else next(
             item["label"]
             for item in OPTIONS
             if item["option"] == case["recommended_option"]
-        )
+        ))
         + ".",
     ]
     lines.extend(
-        f"{item['number']}. {item['label']}: {item['next_step']}" for item in OPTIONS
+        f"{item['number']}. {item['label']}: {item['next_step']}" for item in display_options
     )
     rendered = "\n".join(lines)
     if len(rendered) > 4096:
@@ -572,6 +595,7 @@ def refresh_intervention_proposals(repo_root, *, now=None):
     if lock.parent.parent.parent != capture.root:
         raise ValueError("intervention refresh requires canonical checkout")
     results = []
+    enrichment_results = []
     with _readonly_runtime_lock(lock):
         manifest = _decode(
             capture.read("data/generations/manifest.json"), MAX_REPORT_BYTES
@@ -590,6 +614,7 @@ def refresh_intervention_proposals(repo_root, *, now=None):
             metadata = _metadata(capture, generation)
             if _head(capture, generation) != metadata["git_commit"]:
                 raise ValueError("intervention active generation HEAD mismatch")
+            report, paths = None, None
             try:
                 raw, _ = _report_pair(capture, generation, session)
                 report = _decode(raw, MAX_REPORT_BYTES)
@@ -619,5 +644,14 @@ def refresh_intervention_proposals(repo_root, *, now=None):
                         "diagnostics": ["report_unavailable"],
                     }
                 )
+            # Supplemental capability observation never changes the canonical
+            # report or adds unsupported providers to source-repair intake.
+            try:
+                from .enrichment_monitor import publish_enrichment_monitor
+                enrichment_results.append(publish_enrichment_monitor(
+                    capture.root, report, paths, metadata=metadata, now=clock))
+            except (OSError, ValueError, TypeError, KeyError):
+                enrichment_results.append({"path": None, "status": "unavailable",
+                    "generation_id": generation, "diagnostics": ["enrichment_monitor_unavailable"]})
         capture.verify()
-    return {"proposals": results}
+    return {"proposals": results, "enrichment_monitors": enrichment_results}

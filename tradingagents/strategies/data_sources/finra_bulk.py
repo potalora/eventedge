@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 import sqlite3
 
+import requests
+
 from .fetch_errors import SourceFetchError, source_fetch_error
 from .request_policy import provider_timeout, provider_clock_time
 from .finra_schedule import correct_archive_dates, assess_archive_inventory
@@ -37,6 +39,8 @@ MAX_ROWS = 1_000_000
 MAX_BYTES = 128 * 1024 * 1024
 MAX_DATES = 1024
 MAX_SYMBOLS = 100_000
+ARCHIVE_URL = 'https://cdn.finra.org/equity/otcmarket/biweekly/shrt{}.csv'
+PROBE_OUTCOMES = {'http_response', 'timeout', 'transport_error', 'probe_error', 'budget_exhausted'}
 REASONS = {"timeout", "transport_error", "http_error", "invalid_response", "provider_error", "batch_failure"}
 
 
@@ -52,7 +56,7 @@ def validated_acquisition(value):
     """Validate the precise credential-free durable schema and return an isolated copy."""
     if type(value) is not dict or set(value) != {"schema_version", "requested_count", "cached_count", "attempts", "population_sha256"}:
         raise ValueError("Invalid FINRA acquisition metadata")
-    if value["schema_version"] not in (1, 2) or type(value["schema_version"]) is not int:
+    if value["schema_version"] not in (1, 2, 3) or type(value["schema_version"]) is not int:
         raise ValueError("Invalid FINRA acquisition metadata")
     if type(value["population_sha256"]) is not str or not re.fullmatch("[a-f0-9]{64}", value["population_sha256"]):
         raise ValueError("Invalid FINRA acquisition metadata")
@@ -66,12 +70,14 @@ def validated_acquisition(value):
             "missing_archive_dates_before", "required_archive_dates", "query_population_sha256",
             "prepare_started_at", "prepare_finished_at", "prepare_elapsed_seconds",
             "inventory_before_observed", "inventory_after_observed"}
-    if value['schema_version'] == 2:
+    if value['schema_version'] >= 2:
         keys |= {'acquired_at', 'archive_coverage'}
+    if value['schema_version'] == 3:
+        keys |= {'current_archive_probe'}
     for attempt in value["attempts"]:
         if type(attempt) is not dict or set(attempt) != keys:
             raise ValueError("Invalid FINRA acquisition metadata")
-        statuses = ('success', 'partial', 'error') if value['schema_version'] == 2 else ('success', 'error')
+        statuses = ('success', 'partial', 'error') if value['schema_version'] >= 2 else ('success', 'error')
         if type(attempt["status"]) is not str or (attempt["reason_code"] is not None and type(attempt["reason_code"]) is not str) or attempt["status"] not in statuses or attempt["reason_code"] not in REASONS | {None}:
             raise ValueError("Invalid FINRA acquisition metadata")
         if (attempt["status"] == "success") != (attempt["reason_code"] is None):
@@ -117,7 +123,7 @@ def validated_acquisition(value):
                 raise ValueError("Invalid FINRA acquisition metadata")
             if observed and attempt[missing_key] != sorted(set(attempt["required_archive_dates"]) - set(attempt[cached_key])):
                 raise ValueError("Invalid FINRA acquisition metadata")
-        if value['schema_version'] == 2:
+        if value['schema_version'] >= 2:
             acquired = attempt['acquired_at']
             try:
                 acquired_time = datetime.fromisoformat(acquired) if acquired is not None else None
@@ -146,6 +152,29 @@ def validated_acquisition(value):
                             raise ValueError
                 except (ValueError, TypeError, KeyError, SourceFetchError):
                     raise ValueError('Invalid FINRA acquisition metadata') from None
+        if value['schema_version'] == 3 and attempt['current_archive_probe'] is not None:
+            probe = attempt['current_archive_probe']
+            try:
+                if (type(probe) is not dict or set(probe) != {
+                        'kind', 'settlement_date', 'url', 'observed_at', 'http_status', 'outcome'}
+                        or probe['kind'] != 'post_download_http_probe'
+                        or probe['outcome'] not in PROBE_OUTCOMES
+                        or attempt['status'] != 'error'
+                        or attempt['archive_coverage']['current_complete'] is not False
+                        or probe['settlement_date'] != attempt['archive_coverage']['required_settlement_date']
+                        or probe['url'] != ARCHIVE_URL.format(probe['settlement_date'].replace('-', ''))):
+                    raise ValueError
+                observed = datetime.fromisoformat(probe['observed_at'])
+                settlement = date.fromisoformat(probe['settlement_date'])
+                if (observed.utcoffset() is None or observed.isoformat() != probe['observed_at']
+                        or observed < acquired_time or settlement.isoformat() != probe['settlement_date']):
+                    raise ValueError
+                status = probe['http_status']
+                if ((probe['outcome'] == 'http_response') != (status is not None)
+                        or status is not None and (type(status) is not int or not 100 <= status <= 599)):
+                    raise ValueError
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise ValueError('Invalid FINRA acquisition metadata') from None
     return json.loads(json.dumps(value, allow_nan=False))
 
 
@@ -155,7 +184,48 @@ def new_attempt():
             "cached_archive_dates_before": [], "missing_archive_dates_before": [], "required_archive_dates": [],
             "query_population_sha256": None, "prepare_started_at": None, "prepare_finished_at": None,
             "prepare_elapsed_seconds": None, "inventory_before_observed": False,
-            "inventory_after_observed": False, "acquired_at": None, "archive_coverage": None}
+            "inventory_after_observed": False, "acquired_at": None, "archive_coverage": None,
+            "current_archive_probe": None}
+
+
+def probe_missing_current_archive(day):
+    """Observe a later HTTP status, never the SDK result or archive validity.
+
+    One header-only observation uses the remaining acquisition budget, with no
+    redirects, retries, ambient authentication, body reads or cache writes.
+    Failure to diagnose must not replace the original missing-archive failure.
+    """
+    probe = {'kind': 'post_download_http_probe', 'settlement_date': day,
+             'url': ARCHIVE_URL.format(day.replace('-', '')),
+             'observed_at': datetime.now(timezone.utc).isoformat(),
+             'http_status': None, 'outcome': 'probe_error'}
+    session = response = None
+    try:
+        timeout = min(3, provider_timeout('openbb'))
+        session = requests.Session()
+        session.trust_env = False
+        response = session.get(probe['url'], headers={
+            'Range': 'bytes=0-0', 'User-Agent': 'EventEdge-FINRA-diagnostic/1'},
+            timeout=(timeout / 2, timeout / 2), allow_redirects=False, stream=True)
+        status = response.status_code
+        if type(status) is int and 100 <= status <= 599:
+            probe.update(http_status=status, outcome='http_response')
+    except SourceFetchError:
+        probe['outcome'] = 'budget_exhausted'
+    except requests.Timeout:
+        probe['outcome'] = 'timeout'
+    except requests.RequestException:
+        probe['outcome'] = 'transport_error'
+    except Exception:
+        pass
+    finally:
+        for resource in (response, session):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+    return probe
 
 
 def population_digest(symbols):
@@ -267,6 +337,7 @@ def acquire(symbols, attempt, *, acquired_at=None, as_of=None):
                     attempt['inventory_after_observed'] = True
                     attempt['archive_coverage'] = assess_archive_inventory(
                         expected, refreshed, acquired_at=acquired_at, as_of=as_of)
+                    attempt['current_archive_probe'] = probe_missing_current_archive(current)
                     raise SourceFetchError('Required published FINRA archive unavailable', reason_code='provider_error')
     finally:
         attempt["prepare_finished_at"] = provider_clock_time("openbb")
