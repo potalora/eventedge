@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import weakref
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +24,38 @@ ENVIRONMENT_PROOF = ROOT / 'tests/fixtures/scheduled_acceptance/production-envir
 ORIGINAL_SHA = 'cfd010bec8effa9936df71a9fe87f72eac9403c43219163998d78d917314673d'
 GENERATION = 'gen_020'
 
+
+
+def _profile_phase(function):
+    """Optional CI timing evidence; retain failures without logging payloads."""
+    @wraps(function)
+    def measured(*args, **kwargs):
+        destination = os.environ.get('EVENTEDGE_CI_PROFILE_REPORT')
+        if not destination:
+            return function(*args, **kwargs)
+        started = time.perf_counter()
+        result = None
+        failed = True
+        try:
+            result = function(*args, **kwargs)
+            failed = False
+            return result
+        finally:
+            owner = args[0] if args else None
+            audit = getattr(owner, 'audit', {})
+            record = {'version': 1, 'phase': function.__name__,
+                'elapsed_seconds': time.perf_counter()-started, 'raised': failed,
+                'profile_variant': kwargs.get('profile_variant',audit.get('profile_variant'))}
+            if function.__name__ == 'run':
+                record['entrypoint'] = kwargs.get('entrypoint','controller')
+                record['returncode'] = getattr(result,'returncode',None)
+            # Append each bounded JSON record atomically; no test state is shared.
+            descriptor = os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
+            try:
+                os.write(descriptor,(json.dumps(record,sort_keys=True)+'\n').encode())
+            finally:
+                os.close(descriptor)
+    return measured
 
 def sha(body):
     return hashlib.sha256(body).hexdigest()
@@ -74,6 +108,7 @@ class Harness:
     def python(self):
         return self.repo/'.venv/bin/python'
 
+    @_profile_phase
     def run(self, now, *, entrypoint='controller', fault=None, timeout=240, **options):
         instant = datetime.fromisoformat(now)
         assert instant.tzinfo is not None
@@ -113,6 +148,7 @@ class Harness:
     def report(self, session):
         return json.loads((self.repo / 'docs/reports' / f'{session}-{GENERATION}-operational-report.json').read_text())
 
+    @_profile_phase
     def readiness(self, session, *, sessions):
         """Run the public checker against the same disposable native evidence."""
         code = '''import json,sys
@@ -141,6 +177,7 @@ print(json.dumps(assess_generation(Path(sys.argv[1]),sys.argv[2],sys.argv[3],
         assert len(matches)==1
         return matches[0]
 
+    @_profile_phase
     def effective_config_proof(self):
         """Bind the real worker config, including retained compliance policy."""
         if not self.scenario_path.exists():
@@ -176,6 +213,7 @@ print(json.dumps({'blocked_tickers':config['autoresearch']['blocked_tickers'],
         return result
 
 
+@_profile_phase
 def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00',
                    profile_variant='retained_production'):
     """Snapshot candidate bytes in a *separate* local Git repository.

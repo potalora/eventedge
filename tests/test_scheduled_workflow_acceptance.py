@@ -208,3 +208,54 @@ def test_candidate_v2_profile_has_one_audited_policy_change_from_retained_baseli
     assert harness.audit['candidate_profile_sha256'] not in {ORIGINAL_SHA, harness.audit['fixture_sha256']}
     assert harness.effective_config_proof()['regulation_retrieval_policy'] == 'verified_government_copy_v2'
     assert not [row for row in harness.trace() if row['kind'] in {'http','sdk','model','forbidden_network','unexpected_httpx'}]
+
+
+@pytest.mark.parametrize('child', ['date', 'transport', 'http'])
+def test_small_acceptance_children_keep_network_denial_without_loading_pipeline(tmp_path, child):
+    """Startup isolation applies even when the child needs no source fixtures."""
+    harness = create_harness(tmp_path)
+    harness.scenario_path.write_text(json.dumps({'now':'2026-10-14T22:00:00+00:00',
+                                                'session':'2026-10-14','fault':None}))
+    checks = '''
+import socket,sys
+assert 'pandas' not in sys.modules
+assert 'test_source_reliability_pipeline' not in sys.modules
+assert 'tradingagents.strategies.orchestration' not in sys.modules
+try:
+ socket.create_connection(('127.0.0.1',9))
+except AssertionError as error:
+ assert 'scheduled acceptance forbids' in str(error)
+else:
+ raise AssertionError('socket guard missing')
+from curl_cffi import Curl,CurlOpt
+curl=Curl()
+curl.setopt(CurlOpt.URL,b'http://127.0.0.1:9')
+try:
+ curl.perform()
+except AssertionError as error:
+ assert 'scheduled acceptance forbids' in str(error)
+else:
+ raise AssertionError('native curl guard missing')
+finally:
+ curl.close()
+'''
+    if child == 'http':
+        checks = checks.replace("assert 'pandas' not in sys.modules\n", '')
+        checks = "import requests\nassert len(requests.get('https://finnhub.io/api/v1/calendar/earnings').json()['earningsCalendar']) == 1\n"+checks
+    if child == 'date':
+        executable = harness.repo.parent/'bin/date'
+        with executable.open('a') as stream:
+            stream.write(checks)
+        command = [str(executable), '+%Y-%m-%d']
+    else:
+        executable = Path(harness.env['EVENTEDGE_ACCEPTANCE_WORKTREE'])/'tradingagents/strategies/transport_worker.py'
+        executable.write_text(checks)
+        command = [str(harness.python), str(executable)]
+    result = subprocess.run(command,env=harness.env,cwd=harness.repo,capture_output=True,text=True,timeout=20)
+    assert result.returncode == 0, result.stdout+result.stderr
+    if child == 'date':
+        assert result.stdout.strip() == '2026-10-14'
+    denied = [row for row in harness.trace() if row['kind']=='forbidden_network']
+    assert len(denied)==2 and sum(row.get('boundary')=='native_curl' for row in denied)==1
+    external = [row for row in harness.trace() if row['kind'] in {'http','sdk','model'}]
+    assert [row['kind'] for row in external] == (['http'] if child == 'http' else [])
