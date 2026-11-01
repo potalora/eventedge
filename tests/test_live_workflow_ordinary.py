@@ -378,3 +378,30 @@ def test_summary_two_verified_ordinary_sessions_classifies_continuity_without_fi
     assert 'subsequent_session_fills_unobserved' in value['coverage_gaps']
     assert 'timer_dispatch_unobserved' in value['coverage_gaps']
     assert value['ordinary_sessions']['actual_timer_dispatch'] is False
+
+
+@pytest.mark.parametrize('artifact,damage',[
+    ('attempt.json','missing'),
+    ('native-report.json','missing'),
+    ('native-report.json','corrupt'),
+    ('report-reproduction.json','corrupt'),
+    ('ordinary-window.json','missing'),
+    ('native-process','corrupt'),
+    ('native-console','corrupt'),
+])
+def test_next_session_refuses_lost_or_corrupt_prior_support_before_claim_or_children(campaign,artifact,damage):
+    root,args,clock,controls,seen=campaign
+    assert ordinary.run_ordinary(args)['status']=='pass'
+    prior=root/'ordinary-sessions/2026-11-02'
+    if artifact=='native-process':path=root/'ordinary-2026-11-02-native-process.json'
+    elif artifact=='native-console':path=root/'logs/ordinary-2026-11-02-native.log'
+    else:path=prior/artifact
+    if damage=='missing':path.unlink()
+    else:path.write_bytes(b'corrupt retained artifact')
+    retained={str(file.relative_to(prior)):file.read_bytes() for file in prior.rglob('*') if file.is_file()}
+    before=len(seen);args.session='2026-11-03';clock[0]=datetime(2026,11,3,23,5,tzinfo=timezone.utc)
+    with pytest.raises(runner.AcceptanceError,match='ordinary_prior_session_evidence'):
+        ordinary.run_ordinary(args)
+    assert len(seen)==before
+    assert not (root/'ordinary-sessions/2026-11-03').exists()
+    assert {str(file.relative_to(prior)):file.read_bytes() for file in prior.rglob('*') if file.is_file()}==retained

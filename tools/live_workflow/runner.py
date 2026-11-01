@@ -884,6 +884,9 @@ def main(argv=None):
         prep.add_argument('--'+key)
     run=sub.add_parser('native'); replay=sub.add_parser('accepted-replay')
     ordinary=sub.add_parser('ordinary',help='One real-clock ordinary tick in a prepared live sandbox.')
+    idle=sub.add_parser('idle',help='Observe a genuine non-session controller tick without source credentials.')
+    for key in ('root','boundary-receipt','attempt-id'):
+        idle.add_argument('--'+key,required=True)
     for entry in (run,replay,ordinary):
         entry.add_argument('--root',required=True); entry.add_argument('--session',required=True)
         entry.add_argument('--boundary-receipt',required=True)
@@ -900,6 +903,9 @@ def main(argv=None):
     elif args.operation == 'ordinary':
         from .ordinary import run_ordinary
         result=run_ordinary(args)
+    elif args.operation == 'idle':
+        from .idle import run_idle
+        result=run_idle(args)
     elif args.operation == 'accepted-replay': result=accepted_replay(args)
     elif args.operation == 'edges':
         from .edges import run_edges
@@ -909,6 +915,6 @@ def main(argv=None):
     print(json.dumps(result,sort_keys=True,allow_nan=False))
     if args.operation == 'native':
         return int(not native_acceptance_passed(result))
-    if args.operation == 'ordinary':
+    if args.operation in ('ordinary','idle'):
         return int(result['status'] != 'pass')
     return int(result['counts']['fail'] > 0) if args.operation == 'edges' else 0

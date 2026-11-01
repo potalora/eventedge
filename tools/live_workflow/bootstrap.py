@@ -268,6 +268,17 @@ def _ordinary_window(root, session, previous_session, output_dir):
         'expected_next_session':next_session(date.fromisoformat(previous_session)).isoformat() if previous_session else None})
 
 
+def _idle_window(root, output_dir):
+    from .runner import private_json,no_symlinks,require
+    root=no_symlinks(root);output=no_symlinks(output_dir)
+    require(output.is_dir() and output.is_relative_to(root),
+        'idle_output_must_be_private_campaign_directory')
+    from tradingagents.strategies.orchestration.trading_calendar import exchange_date,is_session
+    now=datetime.now(timezone.utc);local=exchange_date(now)
+    private_json(output/'idle-window.json',{'observed_at':now.isoformat(),
+        'exchange_date':local.isoformat(),'ordinary_idle_expected':not is_session(local)})
+
+
 def _report(root, session, output_dir=None):
     from .runner import private_json,no_symlinks,require
     from tradingagents.strategies.orchestration.operational_report import build_operational_report,render_operational_report
@@ -480,7 +491,7 @@ def _accepted_replay(root, session, *, output_dir=None, dependency_site=None, un
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=('prepare','window','ordinary-window','check-idle','report','accepted-replay'))
+    parser.add_argument('operation',choices=('prepare','window','ordinary-window','idle-window','check-idle','report','accepted-replay'))
     parser.add_argument('--root',required=True); parser.add_argument('--session')
     parser.add_argument('--output-dir');parser.add_argument('--previous-session')
     args=parser.parse_args(argv); root=Path(args.root)
@@ -491,6 +502,8 @@ def main(argv=None):
         _report(root,args.session,args.output_dir)
     elif args.operation == 'ordinary-window':
         _ordinary_window(root,args.session,args.previous_session,args.output_dir)
+    elif args.operation == 'idle-window':
+        _idle_window(root,args.output_dir)
     else:
         _accepted_replay(root,args.session)
     return 0

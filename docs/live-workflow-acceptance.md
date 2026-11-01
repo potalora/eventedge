@@ -415,6 +415,9 @@ or after 18:00, and the candidate's own XNYS calendar to accept it. The first
 session must match the prepared contract; each later invocation must be the
 exact next trading session after the prior accepted result. Source credentials
 are selected explicitly under the same live boundary as the prospective lane.
+Before a later session may claim or launch, the prior sequence's attempt,
+calendar, report, reproduction, process and console evidence is revalidated.
+A surviving success result cannot hide missing or damaged supporting artifacts.
 The command runs the unchanged ordinary `recover_runtime.py --repo-root ...`
 entry point, without prospective flags or a clock override.
 
@@ -433,6 +436,63 @@ fills are valid. This command does not install or claim a timer: results explici
 retain `actual_timer_dispatch: false`. Real timer dispatch, aligned observer
 delivery, future fills and several successive sessions still need their own
 observations. Unit tests of these gates are not evidence that future sessions ran.
+
+## Actual timer dispatch
+
+The separate `idle` operation exercises the unchanged ordinary controller on an
+actual non-session day before acquisition. It accepts no session or credential
+override. It observes the candidate calendar before and after the tick, requires
+the generation state to remain exactly its frozen configuration, checks the
+native journal and proves zero new source/model calls and unfinished recordings.
+It also binds a fresh healthy native status to that child process's execution
+interval and final console JSON. An exit-zero invocation skipped because of a
+busy controller lock cannot borrow the preceding tick's heartbeat. Each attempt
+retains its own immutable status snapshot.
+Each `idle-ticks/ATTEMPT` directory is claimed exclusively; failures and incomplete
+attempts block later idle observations. Historical process/log hashes are checked
+before another tick starts.
+
+```sh
+python scripts/run_live_workflow_acceptance.py idle \
+  --root /private/ordinary-campaign \
+  --boundary-receipt /supervisor/live-boundary.json \
+  --attempt-id SUPERVISOR_RUN_ID
+```
+
+`tools/live_workflow/scheduled.py` is the standalone root dispatcher for the
+reviewed external supervisor. It installs no units. Copy it into the protected
+supervisor directory, pin it and all controls in an immutable `schedule.json`,
+and use its exact command as the test service's `Type=exec` entry point:
+
+```sh
+/usr/bin/python3.12 -I -B /reviewed-supervisor/scheduled.py \
+  --manifest /reviewed-supervisor/schedule.json --slot REVIEWED_SLOT_ID
+```
+
+The bounded manifest contains at most seven ordered slots: initial idle checks,
+then ordinary sessions at 18:00 America/New_York. Before launching the pinned
+supervisor, the dispatcher checks its actual systemd service PID and invocation,
+the associated timer and recent monotonic trigger, the real scheduled window,
+unchanged controls and the accepted predecessor. A lock prevents overlap and an
+exclusive durable claim prevents retries. Worker completion additionally binds
+the real unit result, empty removed cgroup and exact campaign receipt. The
+external dispatch receipt establishes actual timer firing; the native runner's
+own manual-entry metadata stays unchanged.
+
+Runtime test timers are separate from `trade.service` and `trade.timer` and expire
+after their specified dates. Transient timers do not survive a host reboot;
+campaign state and receipts remain on disk. A missed or failed predecessor blocks
+the sequence instead of silently catching up, resetting state or inventing a
+successful session. Verify the installed schedules, actual timer firings and
+future results independently. The real calendar, provider responses and model
+outputs are never replaced to shorten the observation period.
+
+Actual native observer readers and notification transport are separate checks.
+Retain unavailable/stale proposal findings from a prospective run. A single
+explicitly authorized, labelled test message can verify the existing native
+private-chat route without opening production intervention state or inventing a
+source case. A confirmed platform receipt and exact message readback establish
+transport delivery, not human reading or positive ordinary-report consumption.
 
 ## October 31, 2026 execution evidence
 

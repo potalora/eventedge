@@ -141,6 +141,11 @@ def run_ordinary(args):
     output=folder/args.session
     runner.require(not output.exists(),'ordinary_session_attempt_already_exists')
     previous=_history(folder,contract,contract_sha256,row['gen_id'])
+    if previous is not None:
+        prior=ordinary_coverage(root)
+        runner.require(prior.get('status')=='accepted' and prior.get('accepted_sequence') is True
+            and (prior.get('observed_last_result') or {}).get('session')==previous,
+            'ordinary_prior_session_evidence_invalid')
     runner.require(previous is not None or args.session==contract['reference_session'],
         'ordinary_first_session_must_match_contract_reference')
     runner.require(previous is None or args.session>previous,'ordinary_successive_session_required')
