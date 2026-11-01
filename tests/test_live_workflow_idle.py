@@ -212,7 +212,8 @@ def test_attempt_identifier_cannot_escape_private_receipt_directory(campaign,att
 
 def test_incomplete_prior_tick_refuses_before_child(campaign):
     root,args,_,_,_,calls,_=campaign;idle=implementation()
-    (root/'idle-ticks/prior-incomplete').mkdir(mode=0o700,parents=True)
+    (root/'idle-ticks').mkdir(mode=0o700)
+    (root/'idle-ticks/prior-incomplete').mkdir(mode=0o700)
     with pytest.raises(runner.AcceptanceError,match='idle_previous_tick_incomplete'):idle.run_idle(args)
     assert calls==[]
 
