@@ -300,6 +300,11 @@ def test_campaign_summary_reports_latest_ordinary_checks_and_preserves_unobserve
         'canonical_json_identical':True,'canonical_markdown_identical':True}
     assert 'timer_dispatch_unobserved' in value['coverage_gaps']
     assert 'subsequent_session_fills_unobserved' in value['coverage_gaps']
+    assert 'ordinary_session_workflow_unobserved' not in value['coverage_gaps']
+    assert 'multi_session_continuity_unobserved' in value['coverage_gaps']
+    assert 'cold_acquisition_replay_not_executed' in value['diagnostic_coverage_gaps']
+    assert value['acceptance_evidence_policy']=='live_sources_real_data_live_models_only'
+    assert value['offline_checks_establish_live_readiness'] is False
 
 
 def test_ordinary_summary_verifies_two_session_sequence_readonly(campaign):
@@ -362,3 +367,14 @@ def test_ordinary_summary_rejects_untrusted_result_shapes(campaign,tamper):
     path.write_text(json.dumps(value));coverage=ordinary.ordinary_coverage(root)
     assert coverage['status']=='invalid' and coverage['accepted_sessions']==0
     assert 'private text' not in json.dumps(coverage)
+
+
+def test_summary_two_verified_ordinary_sessions_classifies_continuity_without_fill_or_timer_claims(campaign):
+    root,args,clock,controls,seen=campaign;ordinary.run_ordinary(args)
+    args.session='2026-11-03';clock[0]=datetime(2026,11,3,23,5,tzinfo=timezone.utc)
+    ordinary.run_ordinary(args);value=runner.summarize(root)
+    assert 'ordinary_session_workflow_unobserved' not in value['coverage_gaps']
+    assert 'multi_session_continuity_unobserved' not in value['coverage_gaps']
+    assert 'subsequent_session_fills_unobserved' in value['coverage_gaps']
+    assert 'timer_dispatch_unobserved' in value['coverage_gaps']
+    assert value['ordinary_sessions']['actual_timer_dispatch'] is False

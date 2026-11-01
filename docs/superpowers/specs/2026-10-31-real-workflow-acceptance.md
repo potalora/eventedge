@@ -4,6 +4,10 @@ The acceptance tool must run the pinned candidate's complete paper workflow in a
 fresh disposable generation with actual source acquisition and actual configured
 model calls. Endpoint probes followed by generated workflow inputs do not qualify.
 The user explicitly selected real sources and live models on October 31, 2026.
+On November 1 the user reiterated that the goal is to establish whether the
+system works with real sources and real data. Live observations are the acceptance
+evidence; simulated workflows, recorded replay and injected faults are separate
+diagnostics and cannot close unobserved live paths.
 
 The tool lives on a topic based on main and accepts a separate exact candidate.
 It clones that candidate locally without hardlinks, removes remotes, retains the
@@ -33,15 +37,18 @@ requests; no generic answer or live fallback is allowed.
 Acceptance distinguishes workflow completion, source completeness, model-role
 coverage and continuity. Natural empty data, abstention and zero trades are valid;
 they cannot establish branches that did not execute. Independently check sixteen
-books, accounting/staging, canonical report reproduction, producer observations
-and native consumption with fake delivery. The initial native run is followed by
-network-denied accepted-state replay. Cold acquisition replay is supported only
-for actually recorded boundaries, with explicit gaps otherwise.
+books, accounting/staging, canonical report reproduction and real producer/model
+observations. Actual ordinary-session controller runs, observer consumption,
+timer dispatch, multi-session continuity and fills require their own observations.
+A fake delivery sink cannot establish actual observer delivery. Offline CI and
+accepted-state replay remain code/diagnostic evidence, not acceptance requirements.
 
-Controlled edge cases retain immutable parent captures: source denial/throttle/
+Existing controlled-edge diagnostic tooling retains immutable parent captures: source denial/throttle/
 timeout, malformed or partial data, duplicate/missing symbols, invalid pagination,
 stale/future dates, model timeout/refusal/malformed output, wrong identities,
 interruption, duplicate execution and calendar/startup boundaries. Changed model
 requests cannot reuse unrelated recorded responses. Classify native observations,
-replay and controlled mutations separately. A single session proves neither future
-availability, subsequent fills nor five-session qualification.
+replay and controlled mutations separately. Planned replay/fault campaigns and
+additional live captures solely to support replay are stopped. Naturally occurring
+provider/model failures remain in the actual run evidence. A single session proves
+neither future availability, subsequent fills nor five-session qualification.

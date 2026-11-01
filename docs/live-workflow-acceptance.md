@@ -5,6 +5,15 @@ models. It never changes production trading code/state or deploys anything. Its
 normal canonical model authentication may refresh the shared auth directory.
 Captures and logs are private and remain outside Git.
 
+Acceptance evidence comes from the complete native workflow using real providers,
+real source data and the configured live models. Each claim stays bound to the
+observed candidate, frozen profile, runtime and session. Offline CI checks,
+recorded replay and injected faults provide separate code or diagnostic evidence;
+they do not establish live readiness. The November 1 clarification makes this the
+completion policy: additional captures solely for replay and planned offline fault
+campaigns are stopped. Preserve their existing artifacts without treating missing
+replay coverage as a live acceptance gap.
+
 The tool checkout can be based on older main: it imports no application modules.
 Every application child imports the disposable candidate clone. The clone copies
 Git objects without hardlinks/alternates, removes remotes, disables hooks and
@@ -39,8 +48,7 @@ python scripts/run_live_workflow_acceptance.py prepare \
   --python /absolute/resolved/python3.12 --python-version 3.12 \
   --git-sha256 ROOT_VERIFIED_GIT_SHA256 \
   --uname-sha256 ROOT_VERIFIED_UNAME_SHA256 \
-  --session 2026-10-30 --destination /private/new-campaign \
-  --baseline-destination /private/new-campaign-baseline
+  --session 2026-10-30 --destination /private/new-campaign
 ```
 
 The trusted supervisor must verify `/usr/bin/git` and `/usr/bin/uname` are regular,
@@ -73,13 +81,14 @@ Optional `--observer-root/--observer-commit` and
 `--native-root/--native-commit` pin additional clean reviewed checkouts. These inputs
 identify external composition code; they do not claim it has run.
 
-`--baseline-destination` captures the complete prepared campaign before acquisition,
+Optional `--baseline-destination` captures the complete prepared campaign before acquisition,
 including its Git/worktree/runtime identities, frozen configuration and every
 state/cache/result path. SQLite files use coherent backups including committed WAL
 contents. The separate private baseline retains byte/mode inventories, a content
 receipt and source-stability evidence; each scenario restores a fresh copy at the
 original absolute path inside its supervisor namespace. No accepted tables are
 deleted to invent a pristine state. Keep the receipt hash outside the baseline.
+This preservation option is not a requirement for live workflow acceptance.
 
 ## External boundary and single native attempt
 
@@ -167,11 +176,23 @@ Recordings distinguish screen/governed preflight, daily, controller and report
 processes; identical requests use tape occurrence identities. Real `date`, system
 clock, source adapters and configured native model clients remain active.
 
-## Evidence and accepted-state replay
+## Evidence
 
 ```sh
 python scripts/run_live_workflow_acceptance.py summary --root /private/new-campaign
+```
 
+The summary declares that acceptance requires live sources, real data and live
+models. `coverage_gaps` records unobserved real workflow paths, while
+`diagnostic_coverage_gaps` retains optional replay/recorder/fault limitations.
+Recorded source and model exceptions are counted separately from clock-recorder
+failures; the original aggregate and all underlying events remain available.
+
+## Optional diagnostic: accepted-state replay
+
+This command checks preserved accepted state without making a new live observation:
+
+```sh
 python scripts/run_live_workflow_acceptance.py accepted-replay \
   --root /private/new-campaign --session 2026-10-30 \
   --boundary-receipt /supervisor/offline-boundary.json \
@@ -253,10 +274,11 @@ completed command with incomplete or degraded acceptance evidence exits nonzero
 while retaining its observations. Earlier recorded provider failures and absent
 model roles do not independently fail this gate. `summary` remains informational.
 
-## Controlled edge cases
+## Optional diagnostic: controlled edge cases
 
-After the native attempt has finished, invoke this command inside the reviewed
-offline sandbox with kernel network denial:
+For a separately needed diagnostic investigation after a native attempt has
+finished, this command runs inside the reviewed offline sandbox with kernel
+network denial. It is not part of live acceptance:
 
 ```sh
 python scripts/run_live_workflow_acceptance.py edges \
@@ -288,12 +310,14 @@ tape, exact case roster, phase/request/occurrence identities and consistent coun
 It reports pass/fail/unexercised counts by exercised level and lists remaining
 unexercised or failed cases. A plan alone, invalid/stale matrix, or an entirely
 unexercised matrix retains `controlled_mutations_not_executed`. A valid matrix
-with attempted cases replaces that generic gap with any specific failed and
-unexercised gaps. No matrix clears the whole-workflow or cold-replay coverage limit.
+with attempted cases replaces that generic diagnostic gap with any specific failed
+and unexercised diagnostic gaps. No matrix clears an unobserved live workflow path.
 
-The initial tool reports explicit gaps for observer sidecars/native whole-poll
-composition, cold acquisition replay, controlled mutations, actual timer firing
-and subsequent-session fills. Root may run the exact candidate's
+The summary keeps unobserved real workflow behavior in `coverage_gaps`, including
+ordinary sessions, continuity, actual observer composition, timer firing and
+subsequent-session fills. Missing or failed replay, controlled mutations and
+clock-recording support belong to `diagnostic_coverage_gaps`; they cannot qualify
+or disqualify an otherwise established live observation. Root may run the exact candidate's
 `scripts/source_repair.py interventions --repo-root ...`, then the pinned native
 consumer with a private StateStore and fake send callback, and retain separate
 receipts. No real notifications may be sent. Accepted-state replay is **not** a
@@ -305,7 +329,7 @@ answer for a changed prompt.
 Unit tests use dummy repositories, private SQLite WAL data and controlled local
 subprocesses. They read no credentials and contact no live providers or production.
 
-## Cold recorded workflow
+## Optional diagnostic: cold recorded workflow
 
 `tools/live_workflow/cold_worker.py` runs the unchanged candidate prospective
 controller, shell, screen/governed checks, daily command and independent report
@@ -464,7 +488,7 @@ separate replay supervisor directories retain exact code/configuration hashes,
 boundary probes, unit results and preservation receipts. Normal production
 session acceptance remains separate from these isolated tests.
 
-## November 1 cold replay investigation
+## November 1 diagnostic investigation
 
 The first complete cold attempt used the original pre-acquisition supervisor
 archive, whose saved checksum and file inventory were independently verified.
@@ -491,5 +515,56 @@ metadata is explicitly unsupported. No target is inferred from a later request.
 Finally, the native committee prompt includes a generated regime timestamp and
 source acquisition timestamps. Exact replay therefore needs genuinely observed
 clock inputs as well as responses. A new capture without those inputs would not
-close this gap. This blocked run is preserved and does not authorize workflow
-fault qualification, which still requires a successful cold baseline first.
+close the diagnostic gap. This blocked run is preserved. Following the user's
+November 1 clarification, the planned cold baseline/fault campaigns and a further
+capture solely for replay are stopped. The ongoing real-source/live-model run
+is evaluated independently; an incomplete clock trace does not turn a recorder
+limitation into a source or trading failure.
+
+## November 1 real-source/live-model observation
+
+The separate `eventedge-live-workflow-20261101-case-v5` campaign completed the
+unchanged native controller with actual sources/data and live configured models.
+It retained candidate `dba04fbaf7bee827f5c61d5d8431677c3d65cb10`, the same accepted
+frozen profile and fingerprinted Python 3.12 runtime. The recording implementation
+was pinned at `28acdaf5a952470b7f3736478bb4cabad9660527`; later reporting changes did
+not modify the run or its evidence.
+
+The native controller returned zero. The independent report process returned zero
+at `2026-11-01T01:54:53Z`, with sixteen books, accounting, staging validity,
+staging completeness, source completeness and evidence completeness all passing.
+Canonical JSON and Markdown reproduced exactly. All sandbox descendants exited,
+and the supervisor removed their empty cgroup.
+
+The tape contains 359 source calls: 124 Requests, 229 curl and 6 HTTPX calls.
+One real Requests `ReadTimeout` during USAspending screen acquisition is retained;
+the same request's next recorded occurrence returned HTTP 200, and the real screen
+and governed preflights ultimately passed. The other 358 source
+calls returned responses, including native handled HTTP error responses. These
+counts do not imply that every HTTP request succeeded. All 39 live model calls
+returned: 15 bounded GPT-6 Luna calls, 8 thesis GPT-6.1 Sol calls and 16 committee
+GPT-6.1 Sol calls, with the configured high reasoning effort. No model failure or
+unfinished recording was observed.
+
+This evidence covers the frozen profile's six supported strategy flows across
+four horizons and four sizes. The sixteen books share source inputs and signals;
+they are not sixteen independent live observations. Deferred or excluded strategy
+flows remain outside this acceptance claim. The reference session was October 30,
+while source acquisition occurred November 1 UTC / October 31 New York under the
+native prospective next-open guard. This does not establish Friday point-in-time
+acquisition, an ordinary session, actual timer/observer dispatch, multi-session
+continuity or later fills.
+
+The completed private paper ledgers contain 24 pending intents eligible on
+November 2 and zero fills, consistent with the canonical report. These are real
+native decisions from the acquired data and live models, retained as pending
+paper intents. They establish neither broker orders nor successful future fills.
+
+Five unsupported clock-recording observations remain an explicit diagnostic
+limitation. They did not replace native values, and the original native report
+and process results passed independently. A read-only assessment of those original
+artifacts separates real coverage gaps from diagnostic limits and records their
+hashes; its SHA256 is
+`d4497c124ea486248b68ceb9681dde58d93d5677412a237cabb2fb3e8a718d2d`.
+No further capture solely for replay or offline fault campaign was started after
+the user's clarification. Production was unchanged by this work.

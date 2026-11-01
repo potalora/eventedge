@@ -733,20 +733,27 @@ def tape_coverage(root):
     completed={row['event_id'] for row in records}
     unfinished=[p.stem for p in (Path(root)/'tape/reservations').glob('*.json') if p.stem not in completed]
     sources=Counter(); models=Counter(); clocks=Counter(); phases=Counter(); failures=0
+    source_failures=model_failures=clock_failures=0
     roles=set()
     for event in records:
         phases[event['phase']]+=1
         failures+=event.get('failure') is not None
         if event['boundary'] == 'observed_clock':
             clocks[event['operation']]+=1
+            clock_failures+=event.get('failure') is not None
         elif event['boundary'] == 'model_helper':
+            model_failures+=event.get('failure') is not None
             request=event['public_request']; role=request.get('role')
             if role:
                 roles.add(role)
             models[(role,request.get('model'),request.get('effort'))]+=1
         else:
             sources[(event['boundary'],event['operation'])]+=1
+            source_failures+=event.get('failure') is not None
     return {'verified_events':len(records),'observed_failures':failures,'phase_counts':dict(phases),
+        'observed_source_failures':source_failures,'observed_model_failures':model_failures,
+        'observed_source_model_failures':source_failures+model_failures,
+        'observed_clock_failures':clock_failures,
         'clock_capture':clock_capture_coverage(Path(root)/'tape',records),
         'unfinished_reservations':len(unfinished),
         'source_boundaries':[{'boundary':key[0],'operation':key[1],'calls':count} for key,count in sorted(sources.items())],
@@ -825,20 +832,38 @@ def summarize(root):
         checks=last.get('checks',report_checks({}))
         reproduction=last.get('canonical_report_reproduction',{})
     gaps=['observer_sidecars_and_native_full_poll_require_external_composition_receipt',
-        'cold_acquisition_replay_not_executed','subsequent_session_fills_unobserved','timer_dispatch_unobserved']
+        'subsequent_session_fills_unobserved','timer_dispatch_unobserved']
+    if ordinary['status']=='not_observed':
+        gaps.append('ordinary_session_workflow_unobserved')
+    elif ordinary['status'] in ('failed','incomplete','invalid'):
+        gaps.append({'failed':'ordinary_session_workflow_failed',
+            'incomplete':'ordinary_session_workflow_incomplete',
+            'invalid':'ordinary_session_evidence_invalid'}[ordinary['status']])
+    if ordinary.get('accepted_sessions',0)<2:
+        gaps.append('multi_session_continuity_unobserved')
+    elif ordinary.get('accepted_sequence') is not True:
+        gaps.append('multi_session_continuity_incomplete')
+    if not coverage.get('source_boundaries'):
+        gaps.append('live_source_calls_unobserved')
+    if coverage.get('unobserved_model_roles'):
+        gaps.append('live_model_roles_unobserved')
+    diagnostics=['cold_acquisition_replay_not_executed']
     if coverage.get('clock_capture',{}).get('status') in ('invalid','incomplete'):
-        gaps.append('observed_clock_capture_incomplete')
+        diagnostics.append('observed_clock_capture_incomplete')
     if edges['status'] != 'recorded' or not (edges['counts']['pass']+edges['counts']['fail']):
-        gaps.append('controlled_mutations_not_executed')
+        diagnostics.append('controlled_mutations_not_executed')
     if edges['status'] == 'invalid':
-        gaps.append('controlled_mutations_artifact_invalid')
+        diagnostics.append('controlled_mutations_artifact_invalid')
     elif edges['status'] == 'recorded':
         if edges['counts']['unexercised']:
-            gaps.append('controlled_mutations_unexercised')
+            diagnostics.append('controlled_mutations_unexercised')
         if edges['counts']['fail']:
-            gaps.append('controlled_mutations_failed')
+            diagnostics.append('controlled_mutations_failed')
     return {'deployed':False,'checks':checks,'canonical_report_reproduction':reproduction,
         'recorded_boundary_coverage':coverage,'controlled_mutations':edges,'coverage_gaps':gaps,
+        'diagnostic_coverage_gaps':diagnostics,
+        'acceptance_evidence_policy':'live_sources_real_data_live_models_only',
+        'offline_checks_establish_live_readiness':False,
         'ordinary_sessions':ordinary,
         'model_coverage':'inspect private tape by exact role/model/effort; absent roles remain unobserved',
         'native_lane':native_lane,'auth_writes':'normal canonical shared refresh permitted'}

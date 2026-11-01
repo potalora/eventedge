@@ -1,8 +1,29 @@
 # Real workflow coverage follow-up
 
-The existing campaign passed the real source/model workflow, component faults and
-accepted-state replay. This follow-up adds the missing machinery without treating
-those observations as cold replay or future-session evidence.
+The existing campaign passed one real-source/live-model workflow. Component
+faults and accepted-state replay are separate diagnostic observations. On November
+1 the user clarified that testing must establish operation with real sources and
+real data. The active completion plan follows that requirement:
+
+- Finish the ongoing isolated native run with real providers, real source data,
+  the accepted runtime/profile and configured live models. Preserve natural
+  provider/model failures and verify the native sixteen-book report independently.
+- Keep offline CI as code/regression evidence. Preserve every existing test while
+  measuring improvements on the existing runners without sharding.
+- Report ordinary sessions, actual timer/observer behavior, continuity and fills
+  only after they are observed in real operation. Natural empty data and zero
+  fills are valid but leave unexecuted paths unqualified.
+- Use the separate ordinary-session command with real-calendar admission, one
+  durable attempt per date, exact next-session continuity and independently bound
+  reports. Its observations stay separate from the prospective campaign; failed
+  or skipped session sequences do not qualify.
+- Stop the planned cold baseline/fault campaigns and the additional capture
+  intended only to validate replay. Keep existing artifacts and failed attempts.
+  Move replay/recorder/mutation limitations out of live acceptance gaps into
+  explicitly separate diagnostic coverage.
+
+The following diagnostic machinery was implemented before this clarification.
+It remains available for investigation and is not an acceptance requirement:
 
 - Preserve a complete pristine campaign outside its working directory. Bind the
   contract, all file bytes and modes, coherent SQLite contents and runtime links.
@@ -23,13 +44,6 @@ those observations as cold replay or future-session evidence.
   unchanged native values and runtime deadlines stay native. A missing historical
   header or clock value is not reconstructed. Validate the hook with actual
   candidate/SDK subprocesses before a fresh live-source/model capture.
-- Add a separate ordinary-session command with real-calendar admission, one
-  durable attempt per date, exact next-session continuity and independently bound
-  reports. Keep its observations separate from the prospective campaign and
-  reject failed or skipped session sequences.
-- Keep ordinary timer dispatch, naturally aligned observer delivery, later-session
-  continuity and actual fills as separately observed gates. A future schedule or
-  empty fill set cannot certify a nonzero execution path.
 
 Implementation ownership is split between transport replay, baseline preservation,
 the native workflow worker and its external supervisor. Verification includes
