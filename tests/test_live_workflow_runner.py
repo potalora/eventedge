@@ -532,7 +532,7 @@ def test_summary_keeps_mutation_gap_without_completed_matrix(tmp_path):
     matrix=edge_summary_fixture(tmp_path)
     (tmp_path/'edge-cases/plan.json').write_text(json.dumps(matrix))
     result=summarize(tmp_path)
-    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+    assert 'controlled_mutations_not_executed' in result['diagnostic_coverage_gaps']
     assert result['controlled_mutations']['status']=='not_executed'
 
 
@@ -547,10 +547,13 @@ def test_summary_reports_bound_matrix_counts_levels_and_remaining_gaps(tmp_path)
     assert observed['level_counts']['http_transport']=={'pass':1,'fail':1,'unexercised':1}
     assert len(observed['unexercised_cases'])==15
     assert observed['failed_cases'][0]['case']=='source_429'
-    assert 'controlled_mutations_not_executed' not in result['coverage_gaps']
-    assert 'controlled_mutations_unexercised' in result['coverage_gaps']
-    assert 'controlled_mutations_failed' in result['coverage_gaps']
-    assert 'cold_acquisition_replay_not_executed' in result['coverage_gaps']
+    assert 'controlled_mutations_not_executed' not in result['diagnostic_coverage_gaps']
+    assert 'controlled_mutations_unexercised' in result['diagnostic_coverage_gaps']
+    assert 'controlled_mutations_failed' in result['diagnostic_coverage_gaps']
+    assert 'cold_acquisition_replay_not_executed' in result['diagnostic_coverage_gaps']
+    assert not any(gap.startswith(('cold_','controlled_mutations_','observed_clock_')) for gap in result['coverage_gaps'])
+    assert result['acceptance_evidence_policy']=='live_sources_real_data_live_models_only'
+    assert result['offline_checks_establish_live_readiness'] is False
 
 
 @pytest.mark.parametrize('corrupt',[
@@ -571,8 +574,8 @@ def test_summary_rejects_stale_or_overclaimed_edge_matrix(tmp_path,corrupt):
     (tmp_path/'edge-cases/matrix.json').write_text(json.dumps(matrix))
     result=summarize(tmp_path)
     assert result['controlled_mutations']['status']=='invalid'
-    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
-    assert 'controlled_mutations_artifact_invalid' in result['coverage_gaps']
+    assert 'controlled_mutations_not_executed' in result['diagnostic_coverage_gaps']
+    assert 'controlled_mutations_artifact_invalid' in result['diagnostic_coverage_gaps']
 
 
 def test_summary_all_unexercised_matrix_does_not_claim_mutation_execution(tmp_path):
@@ -585,7 +588,7 @@ def test_summary_all_unexercised_matrix_does_not_claim_mutation_execution(tmp_pa
     result=summarize(tmp_path)
     assert result['controlled_mutations']['status']=='recorded'
     assert result['controlled_mutations']['counts']=={'pass':0,'fail':0,'unexercised':17}
-    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+    assert 'controlled_mutations_not_executed' in result['diagnostic_coverage_gaps']
 
 
 def test_summary_invalid_json_matrix_remains_visible_failure(tmp_path):
@@ -594,7 +597,7 @@ def test_summary_invalid_json_matrix_remains_visible_failure(tmp_path):
     (tmp_path/'edge-cases/matrix.json').write_text('{')
     result=summarize(tmp_path)
     assert result['controlled_mutations']['status']=='invalid'
-    assert 'controlled_mutations_not_executed' in result['coverage_gaps']
+    assert 'controlled_mutations_not_executed' in result['diagnostic_coverage_gaps']
 
 
 @pytest.mark.parametrize('failures',[0,1])
@@ -685,6 +688,7 @@ def owned_worker_startup(tmp_path):
     trace=tmp_path/'trace';trace.mkdir()
     (package/'recorded_io.py').write_text('import json,os\nfrom pathlib import Path\ndef install_source_io(**options):\n Path(options["tape_dir"],str(os.getpid())+".json").write_text(json.dumps({"phase":options["phase"]}))\n')
     (package/'recorded_models.py').write_text('def install_model_io(**options): pass\n')
+    (package/'recorded_clocks.py').write_text('import os\ndef install_clock_io(config,phase):\n assert phase==os.environ["EVENTEDGE_LIVE_PHASE"]\n assert config["mode"]=="live_record"\n')
     dependency=tmp_path/'controlled-dependencies';dependency.mkdir()
     (dependency/'httpx.py').write_text('''BODY=b"offline controlled transport; not NOAA evidence\\n"
 class TimeoutException(Exception): pass
@@ -1428,3 +1432,104 @@ def test_normal_accepted_replay_forwards_only_explicit_selected_source_values(tm
     attempt=(tmp_path/'replay-attempt.json').read_text()
     assert json.loads(attempt)['credential_env_names']==['FRED_API_KEY']
     assert 'controlled-dummy-fred' not in attempt and 'controlled-dummy-paid' not in attempt
+
+
+@pytest.mark.parametrize('status,exit_code',[('pass',0),('fail',1)])
+def test_ordinary_cli_requires_complete_process_acceptance(monkeypatch,capsys,status,exit_code):
+    from tools.live_workflow import ordinary,runner
+    seen=[]
+    def observation(args):
+        seen.append(args)
+        return {'status':status,'native_process_success':status=='pass'}
+    monkeypatch.setattr(ordinary,'run_ordinary',observation)
+    # Report content alone must not override an infrastructure failure.
+    monkeypatch.setattr(runner,'native_acceptance_passed',lambda result:True)
+    result=runner.main(['ordinary','--root','/private/campaign','--session','2026-11-02',
+        '--boundary-receipt','/private/boundary.json','--credential-env','FRED_API_KEY'])
+    assert result==exit_code
+    assert json.loads(capsys.readouterr().out)['status']==status
+    assert seen[0].credential_env==['FRED_API_KEY'] and seen[0].session=='2026-11-02'
+
+
+def test_observed_clocks_are_counted_separately_from_source_and_model_calls(tmp_path,monkeypatch):
+    from tools.live_workflow import recorded_io,runner
+    from tools.live_workflow.ordinary import _session_coverage
+    records=[
+        {'event_id':'a','phase':'daily','boundary':'observed_clock','operation':'datetime.now','failure':None},
+        {'event_id':'b','phase':'daily','boundary':'http_decoded','operation':'requests.send','failure':None},
+        {'event_id':'c','phase':'daily','boundary':'model_helper','operation':'call_analysis_model','failure':None,
+            'public_request':{'role':'committee','model':'native-model','effort':'high'}},
+    ]
+    monkeypatch.setattr(recorded_io,'verify_tape',lambda root:records)
+    cumulative=runner.tape_coverage(tmp_path)
+    assert cumulative['verified_events']==3 and cumulative['clock_events']==1
+    assert sum(row['calls'] for row in cumulative['source_boundaries'])==1
+    assert sum(row['calls'] for row in cumulative['models'])==1
+    session=_session_coverage(records)
+    assert session['events']==3 and session['clock_events']==1
+    assert session['source_events']==session['model_events']==1
+
+
+@pytest.mark.parametrize('change,expected',[
+    ('none','complete'),('budget_failure','incomplete'),('unsupported_event','incomplete'),
+    ('wrong_actor','invalid'),('wrong_identity','invalid'),('missing_receipt','invalid'),
+    ('changed_global_clock','invalid'),
+])
+def test_clock_capture_summary_preserves_failures_and_requires_bound_receipts(tmp_path,change,expected):
+    from tools.live_workflow import runner
+    identity={'controlled':'native-clock-receipt-test'}
+    runner.private_json(tmp_path/'identity.json',identity)
+    actor={'entrypoint':'scripts/run_cohorts.py','source_sha256':'b'*64}
+    name='tradingagents.strategies.data_sources.evidence'
+    receipt={'schema_version':1,'kind':'observed_clock_runtime','installed':True,'mode':'live_record','phase':'daily',
+        'run_identity_sha256':runner.digest(identity),'actor':actor,'modules':{name:'a'*64},
+        'unsupported_local_imports':[{'module':name,'line':13,'reason':'local_clock_import_unobserved'}],
+        'capture_failures':{},'native_deadline_clocks':True,'global_datetime_and_pandas_unchanged':True,
+        'concurrent_same_key':'unqualified_not_cross_assigned'}
+    event={'boundary':'observed_clock','public_request':{'module':name,'source_sha256':'a'*64,
+        'actor':actor},'failure':None}
+    if change=='budget_failure':receipt['capture_failures']={'clock_event_limit':1}
+    elif change=='unsupported_event':event['failure']={'type':'UnsupportedClock','reason':'capture_unsupported'}
+    elif change=='wrong_actor':event['public_request']['actor']={**actor,'source_sha256':'c'*64}
+    elif change=='wrong_identity':receipt['run_identity_sha256']='d'*64
+    elif change=='changed_global_clock':receipt['global_datetime_and_pandas_unchanged']=False
+    if change!='missing_receipt':runner.private_json(tmp_path/'.clock-runtime-123.json',receipt)
+    value=runner.clock_capture_coverage(tmp_path,[event])
+    assert value['status']==expected
+    if change=='budget_failure':assert value['capture_failures']=={'clock_event_limit':1}
+    if change=='none':
+        assert value['clock_events']==1 and value['failed_clock_events']==0
+        assert value['potential_unobserved_local_imports']==[{'module':name,'line':13}]
+
+
+def test_optional_clock_capture_failure_is_diagnostic_not_live_readiness_gap(tmp_path,monkeypatch):
+    from tools.live_workflow import runner
+    edge_summary_fixture(tmp_path)
+    monkeypatch.setattr(runner,'clock_capture_coverage',lambda *args:{'status':'incomplete',
+        'capture_failures':{'observed_clock_capture_unsupported':1}})
+    result=runner.summarize(tmp_path)
+    assert 'observed_clock_capture_incomplete' in result['diagnostic_coverage_gaps']
+    assert 'observed_clock_capture_incomplete' not in result['coverage_gaps']
+    assert result['recorded_boundary_coverage']['clock_capture']['capture_failures']=={
+        'observed_clock_capture_unsupported':1}
+    assert 'ordinary_session_workflow_unobserved' in result['coverage_gaps']
+    assert 'multi_session_continuity_unobserved' in result['coverage_gaps']
+    assert result['offline_checks_establish_live_readiness'] is False
+
+
+def test_recorded_source_and_model_failures_remain_distinct_from_clock_diagnostics(tmp_path,monkeypatch):
+    from tools.live_workflow import recorded_io,runner
+    records=[
+        {'event_id':'a','phase':'daily','boundary':'observed_clock','operation':'unsupported',
+            'failure':{'type':'UnsupportedClock'}},
+        {'event_id':'b','phase':'daily','boundary':'http_decoded','operation':'requests.send',
+            'failure':{'type':'Timeout'}},
+        {'event_id':'c','phase':'daily','boundary':'model_helper','operation':'call_analysis_model',
+            'failure':{'type':'ModelDeadlineExceeded'},
+            'public_request':{'role':'committee','model':'native-model','effort':'high'}},
+    ]
+    monkeypatch.setattr(recorded_io,'verify_tape',lambda root:records)
+    value=runner.tape_coverage(tmp_path)
+    assert value['observed_failures']==3
+    assert value['observed_source_failures']==value['observed_model_failures']==value['observed_clock_failures']==1
+    assert value['observed_source_model_failures']==2
