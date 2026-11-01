@@ -2,6 +2,13 @@
 
 An autonomous event-driven trading research system that runs 12 strategies across 16 paper portfolio scenarios (4 time horizons × 4 portfolio sizes). This is a personal research project.
 
+For the deployed generation, current reliability work and deployment gates, start
+with [operating status](docs/reliability-status.md). The strategy catalogue below
+is broader than the deployed profile. [Future-generation work](docs/future-generations.md)
+stays parked until a demonstrated run failure requires a repair, or production
+reliability is established and a specific experiment is approved. An open PR is
+not a deployment queue.
+
 ## What it does
 
 Strategies examine events such as SEC filings, insider trades, and congressional disclosures. An LLM portfolio committee combines their signals and sizes positions for each scenario book.
