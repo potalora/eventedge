@@ -226,7 +226,7 @@ def test_exact_candidate_regime_and_source_store_codec_in_subprocess(tmp_path):
         pytest.skip('exact candidate source is supplied separately from the acceptance tool')
     site=Path(pd.__file__).parents[1];tool_root=Path(clocks.__file__).parents[2]
     script=tmp_path/'candidate_clock_smoke.py'
-    script.write_text('''import sys,os,json,socket\nfrom pathlib import Path\nfrom datetime import datetime,date,timezone\nsys.path[:0]=[sys.argv[1],sys.argv[2]]\nfrom tools.live_workflow import recorded_clocks as clocks,recorded_io as tape\nsys.path.insert(0,sys.argv[3])\nimport curl_cffi\ndef denied(*args,**kwargs):raise AssertionError('real network forbidden')\nsocket.socket.connect=denied;curl_cffi.Curl.perform=denied;curl_cffi.AsyncCurl.add_handle=denied\nimport pandas as pd\nfrom tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine\nfrom tradingagents.strategies.orchestration.source_inputs import SourceInputStore\nroot=Path(__file__).parent\ncfg={'mode':'live_record','candidate_repo':sys.argv[3],'dependency_site':sys.argv[2],'tape_dir':str(root/'tape'),'run_identity':{'candidate_commit':'a'*40}}\n# This is a component fixture, not a claim that its driver is a native CLI.\nclocks._logical_actor=lambda:{'entrypoint':'unit-native-method-fixture','source_sha256':'b'*64}\ntape.configure_tape(mode=cfg['mode'],tape_dir=cfg['tape_dir'],run_identity=cfg['run_identity'],phase='daily')\nclocks.install_clock_io(cfg,'daily')\ndef stage(name):\n engine=object.__new__(MultiStrategyEngine);engine.ar_config={'horizon':'30d'}\n data={'yfinance':{'vix':pd.DataFrame({'Close':[20.0]})},'fred':{'BAMLH0A0HYM2':pd.Series([4.0]),'T10Y2Y':pd.Series([0.5])}}\n regime=engine._build_regime_model(data)\n value={'datetime':datetime(2026,11,1,tzinfo=timezone.utc),'date':date(2026,11,1),'timestamp':pd.Timestamp('2026-11-01T00:00:00.123456789Z')}\n restored=SourceInputStore.decode(SourceInputStore.encode(value))\n assert type(restored['datetime']) is datetime and type(restored['date']) is date and type(restored['timestamp']) is pd.Timestamp\n store=SourceInputStore(root/name/'cache',accepted_dir=root/name/'accepted')\n identity={'generation':'gen_001','session':'2026-10-30','commit':'a'*40,'configuration':'c'*64}\n assert store.freeze(identity,{'native_codec':True})=={'native_codec':True}\n return regime\nfirst=stage('first');clocks.uninstall_clock_io();tape._CONFIG=None\nos.environ['EVENTEDGE_LIVE_REPLAY_STATE']=str(root/'cursor');cfg['mode']='offline_replay'\ntape.configure_tape(mode=cfg['mode'],tape_dir=cfg['tape_dir'],run_identity=cfg['run_identity'],phase='daily')\nclocks.install_clock_io(cfg,'daily')\ndef native_clock_forbidden(*args):raise AssertionError('offline native clock called')\nclocks._call_native=native_clock_forbidden\nsecond=stage('second');assert first==second;tape.assert_replay_complete()\nassert clocks._coverage()['capture_failures']=={}\nprint(json.dumps({'regime_identical':True,'native_codec_types':True,'clock_events':len(tape.verify_tape(cfg['tape_dir']))}))\n''')
+    script.write_text('''import sys,os,json,socket\nfrom pathlib import Path\nfrom datetime import datetime,date,timezone\nsys.path[:0]=[sys.argv[1],sys.argv[2]]\nfrom tools.live_workflow import recorded_clocks as clocks,recorded_io as tape\nsys.path.insert(0,sys.argv[3])\nimport curl_cffi\ndef denied(*args,**kwargs):raise AssertionError('real network forbidden')\nsocket.socket.connect=denied;curl_cffi.Curl.perform=denied;curl_cffi.AsyncCurl.add_handle=denied\nimport pandas as pd\nfrom tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine\nfrom tradingagents.strategies.orchestration.source_inputs import SourceInputStore\nfrom tradingagents.strategies.orchestration.shared_execution import _store as shared_execution_store\nfrom types import SimpleNamespace\nroot=Path(__file__).parent\ncfg={'mode':'live_record','candidate_repo':sys.argv[3],'dependency_site':sys.argv[2],'tape_dir':str(root/'tape'),'run_identity':{'candidate_commit':'a'*40}}\n# This is a component fixture, not a claim that its driver is a native CLI.\nclocks._logical_actor=lambda:{'entrypoint':'unit-native-method-fixture','source_sha256':'b'*64}\ntape.configure_tape(mode=cfg['mode'],tape_dir=cfg['tape_dir'],run_identity=cfg['run_identity'],phase='daily')\nclocks.install_clock_io(cfg,'daily')\ndef stage(name):\n engine=object.__new__(MultiStrategyEngine);engine.ar_config={'horizon':'30d'}\n data={'yfinance':{'vix':pd.DataFrame({'Close':[20.0]})},'fred':{'BAMLH0A0HYM2':pd.Series([4.0]),'T10Y2Y':pd.Series([0.5])}}\n regime=engine._build_regime_model(data)\n value={'datetime':datetime(2026,11,1,tzinfo=timezone.utc),'date':date(2026,11,1),'timestamp':pd.Timestamp('2026-11-01T00:00:00.123456789Z')}\n restored=SourceInputStore.decode(SourceInputStore.encode(value))\n assert type(restored['datetime']) is datetime and type(restored['date']) is date and type(restored['timestamp']) is pd.Timestamp\n store=SourceInputStore(root/name/'cache',accepted_dir=root/name/'accepted')\n identity={'generation':'gen_001','session':'2026-10-30','commit':'a'*40,'configuration':'c'*64}\n assert store.freeze(identity,{'native_codec':True})=={'native_codec':True}\n owner=SimpleNamespace(_base_config={'autoresearch':{'state_dir':str(root/name/'shared-state'),'source_cache_dir':str(root/name/'shared-cache')}},_metric_epoch_context=SimpleNamespace(generation_id='gen_001',generation_commit='a'*40))\n shared,shared_identity=shared_execution_store(owner,date(2026,10,30))\n assert shared_identity['purpose']=='shared-execution-v1'\n assert shared.freeze(shared_identity,{'real_shared_store':True},acquired_at=value['datetime'])=={'real_shared_store':True}\n assert shared.load_frozen(shared_identity)=={'real_shared_store':True}\n return regime\nfirst=stage('first');clocks.uninstall_clock_io();tape._CONFIG=None\nos.environ['EVENTEDGE_LIVE_REPLAY_STATE']=str(root/'cursor');cfg['mode']='offline_replay'\ntape.configure_tape(mode=cfg['mode'],tape_dir=cfg['tape_dir'],run_identity=cfg['run_identity'],phase='daily')\nclocks.install_clock_io(cfg,'daily')\ndef native_clock_forbidden(*args):raise AssertionError('offline native clock called')\nclocks._call_native=native_clock_forbidden\nsecond=stage('second');assert first==second;tape.assert_replay_complete()\nassert clocks._coverage()['capture_failures']=={}\nprint(json.dumps({'regime_identical':True,'native_codec_types':True,'clock_events':len(tape.verify_tape(cfg['tape_dir']))}))\n''')
     result=subprocess.run([sys.executable,'-I','-S',str(script),str(tool_root),str(site),str(candidate)],
         env={'PATH':'/usr/bin:/bin','HOME':str(tmp_path),'PYTHONDONTWRITEBYTECODE':'1','TZ':'UTC'},
         capture_output=True,text=True,timeout=60)
@@ -259,3 +259,53 @@ def test_new_timezone_does_not_reuse_clock_from_different_timezone(tmp_path,monk
     replay(cfg,tmp_path,monkeypatch)
     with pytest.raises(tape.TapeError):module.sample('SPY',ZoneInfo('America/New_York'))
     assert tape._REPLAY_FAILURES
+
+
+@pytest.mark.parametrize('extra',[
+    {'purpose':'shared-execution-v1'},
+    {'purpose':'prospective-decision-inputs-v1'},
+    {'purpose':'research-historical-decision-inputs-v1'},
+    {'policy':'reference_session_activity_v1'},
+    {'purpose':'research-screening-v1','epoch_id':'gen_001-2026-10-30-'+'a'*16,
+        'research_resilience_policy':'dependency_isolation_v1','screening_binding_sha256':'b'*64},
+    {'purpose':'research-screening-v1','epoch_id':'gen_001-2026-10-29-'+'a'*16,
+        'research_resilience_policy':'dependency_isolation_v1','screening_binding_sha256':'b'*64},
+])
+def test_all_reviewed_frozen_source_identity_contracts_are_exact(extra):
+    identity={'generation':'gen_001','session':'2026-10-30','commit':'a'*40,'configuration':'c'*64,**extra}
+    assert clocks._source_identity(identity)==tape._digest(tape._canonical(identity))
+
+
+@pytest.mark.parametrize('extra',[
+    {'purpose':'research-screening-v1','epoch_id':'gen_001-2026-11-02-'+'a'*16,
+        'research_resilience_policy':'dependency_isolation_v1','screening_binding_sha256':'b'*64},
+    {'purpose':'research-screening-v1','epoch_id':'gen_001-2026-02-30-'+'a'*16,
+        'research_resilience_policy':'dependency_isolation_v1','screening_binding_sha256':'b'*64},
+    {'purpose':'unknown-future-purpose'},
+    {'policy':'unknown-policy'},
+    {'purpose':'research-screening-v1'},
+    {'purpose':'research-screening-v1','epoch_id':'gen_002-2026-10-30-'+'a'*16,
+        'research_resilience_policy':'dependency_isolation_v1','screening_binding_sha256':'b'*64},
+    {'purpose':'research-screening-v1','epoch_id':'gen_001-2026-10-30-'+'a'*16,
+        'research_resilience_policy':'other-policy','screening_binding_sha256':'b'*64},
+])
+def test_unknown_or_cross_bound_frozen_identity_is_not_relaxed(extra):
+    identity={'generation':'gen_001','session':'2026-10-30','commit':'a'*40,'configuration':'c'*64,**extra}
+    with pytest.raises(tape.TapeError):clocks._source_identity(identity)
+
+
+def test_unsupported_identity_retains_safe_code_diagnostic_without_frame_values(tmp_path,monkeypatch):
+    source='from datetime import datetime,timezone\ndef sample(identity):\n return datetime.now(timezone.utc)\n'
+    cfg,module=setup(tmp_path,monkeypatch,source)
+    monkeypatch.delitem(sys.modules,module.__name__)
+    name='tradingagents.strategies.orchestration.source_inputs';module.__name__=name
+    monkeypatch.setitem(sys.modules,name,module)
+    clocks.install_clock_io(cfg,'daily')
+    module.sample({'generation':'gen_001','session':'2026-10-30','commit':'a'*40,
+        'configuration':'b'*64,'purpose':'private-sentinel-unknown'})
+    record=tape.verify_tape(cfg['tape_dir'])[0]
+    assert record['failure']['reason']=='observed_clock_capture_unsupported'
+    assert record['failure']['diagnostic_reason']=='unsupported_source_clock_identity'
+    assert record['public_request']['diagnostic_callsite']['function']=='sample'
+    assert record['public_request']['diagnostic_callsite']['line']==3
+    assert 'private-sentinel' not in json.dumps(record)

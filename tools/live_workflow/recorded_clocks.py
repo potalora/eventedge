@@ -172,7 +172,8 @@ def _source_identity(identity):
     keys=set(identity)
     cache={'source','window_start','session','configuration','contract'}
     frozen={'generation','session','commit','configuration'}
-    _require(keys in (cache,frozen,frozen|{'purpose'})
+    screening=frozen|{'purpose','epoch_id','research_resilience_policy','screening_binding_sha256'}
+    _require(keys in (cache,frozen,frozen|{'purpose'},frozen|{'policy'},screening)
         and all(type(item) is str and 0<len(item)<=1024 for item in identity.values()),
         'unsupported_source_clock_identity')
     _require(date.fromisoformat(identity['session']).isoformat()==identity['session']
@@ -184,9 +185,25 @@ def _source_identity(identity):
             and identity['contract']=='source-inputs-v1','unsupported_source_clock_identity')
     else:
         _require(re.fullmatch(r'gen_[0-9]{3,}',identity['generation']) is not None
-            and re.fullmatch('[a-f0-9]{40}',identity['commit']) is not None
-            and ('purpose' not in identity or identity['purpose']=='staging-volatility-v1'),
+            and re.fullmatch('[a-f0-9]{40}',identity['commit']) is not None,
             'unsupported_source_clock_identity')
+        if keys==screening:
+            epoch=re.fullmatch(re.escape(identity['generation'])+r'-(\d{4}-\d{2}-\d{2})-[a-f0-9]{16}',
+                identity['epoch_id'])
+            _require(epoch is not None,'unsupported_source_clock_identity')
+            try:epoch_start=date.fromisoformat(epoch[1])
+            except ValueError:raise tape.TapeError('unsupported_source_clock_identity') from None
+            _require(identity['purpose']=='research-screening-v1'
+                and identity['research_resilience_policy']=='dependency_isolation_v1'
+                and epoch_start.isoformat()==epoch[1] and epoch_start<=date.fromisoformat(identity['session'])
+                and re.fullmatch('[a-f0-9]{64}',identity['screening_binding_sha256']) is not None,
+                'unsupported_source_clock_identity')
+        elif 'purpose' in identity:
+            _require(identity['purpose'] in ('staging-volatility-v1','shared-execution-v1',
+                'prospective-decision-inputs-v1','research-historical-decision-inputs-v1'),
+                'unsupported_source_clock_identity')
+        elif 'policy' in identity:
+            _require(identity['policy']=='reference_session_activity_v1','unsupported_source_clock_identity')
     return tape._digest(tape._canonical(identity))
 
 
@@ -214,7 +231,8 @@ def _context(frame):
                 ar=_inert(owner,'ar_config')
                 if isinstance(ar,dict) and 'horizon' in ar:values['self.horizon']=_public(ar['horizon'])
             identity=frame.f_locals.get('identity')
-            if name.endswith('.source_inputs') and isinstance(identity,dict):
+            if name.endswith('.source_inputs') and 'identity' in frame.f_locals:
+                _require(type(identity) is dict,'unsupported_source_clock_identity')
                 values['source_input_identity_sha256']=_source_identity(identity)
             params=frame.f_locals.get('params')
             if isinstance(params,dict):
@@ -301,6 +319,31 @@ def _capture_failure(reason):
         with suppress(Exception):_persist_coverage()
 
 
+def _capture_diagnostic(error):
+    # Never persist arbitrary exception text or frame values. These are the
+    # reviewed fixed reason codes emitted by the clock observer itself.
+    reasons={'clock_path_identity','unsupported_clock_timezone','unsupported_native_clock_value',
+        'clock_value_bound','clock_context_bound','unsupported_clock_context',
+        'unsupported_source_clock_identity','clock_context_origin','unreviewed_clock_callsite',
+        'unsupported_clock_arguments','clock_request_bound','unreviewed_clock_actor',
+        'clock_shared_replay_cursor_required','clock_count_bound','clock_event_limit'}
+    if type(error) is tape.TapeError and str(error) in reasons:return str(error)
+    builtin={ValueError:'clock_capture_value_error',TypeError:'clock_capture_type_error',
+        OverflowError:'clock_capture_overflow_error',RecursionError:'clock_capture_recursion_error',
+        AttributeError:'clock_capture_attribute_error',KeyError:'clock_capture_key_error',
+        OSError:'clock_capture_os_error'}
+    return builtin.get(type(error),'clock_capture_exception')
+
+
+def _diagnostic_site(module,frame):
+    # Static code metadata only: no locals, arguments, source text or paths.
+    site={'module':module,'function':frame.f_code.co_qualname[:256],
+        'line':frame.f_lineno,'instruction':frame.f_lasti}
+    metadata=_PATCHED.get(module)
+    if metadata is not None:site['source_sha256']=metadata['sha256']
+    return site
+
+
 def _observe(module,original,kind,method,args,kwargs,frame):
     cfg=tape._configuration();live=cfg['mode']=='live_record'
     value=_call_native(original,method,args,kwargs) if live else None
@@ -333,15 +376,18 @@ def _observe(module,original,kind,method,args,kwargs,frame):
         # makes later replay qualification fail closed.
         reason='clock_event_limit' if isinstance(error,tape.TapeError) and str(error)=='clock_event_limit' else 'observed_clock_capture_unsupported'
         _capture_failure(reason)
+        failure={'type':'UnsupportedClock','reason':'observed_clock_capture_unsupported',
+            'diagnostic_reason':_capture_diagnostic(error)}
         if event is not None:
             with suppress(Exception):
-                tape.finish_event(event,failure={'type':'UnsupportedClock','reason':'observed_clock_capture_unsupported'})
+                tape.finish_event(event,failure=failure)
         else:
             with suppress(Exception):
                 _budget()
                 failed=tape.reserve_event(boundary='observed_clock',operation='unsupported',public_request={
-                    'module':module,'clock_kind':kind,'method':method,'callsite_qualified':False})
-                tape.finish_event(failed,failure={'type':'UnsupportedClock','reason':'observed_clock_capture_unsupported'})
+                    'module':module,'clock_kind':kind,'method':method,'callsite_qualified':False,
+                    'diagnostic_callsite':_diagnostic_site(module,frame)})
+                tape.finish_event(failed,failure=failure)
         return value
     finally:
         if descriptor is not None:
