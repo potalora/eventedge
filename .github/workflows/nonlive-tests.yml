@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+# Only superseded PR runs are cancelled. A fresh commit must pass both gates.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -19,10 +24,12 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install application and test runner
+        id: install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[chatgpt-plan]' pytest
       - name: Replay recorded NOAA yearly files
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
       - name: Retain NOAA yearly replay evidence
         if: always()
@@ -32,6 +39,7 @@ jobs:
           path: /tmp/eventedge-noaa-yearly.json
           retention-days: 14
       - name: Replay recorded public historical sources
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-historical-acceptance.json
       - name: Retain public historical replay evidence
         if: always()
@@ -41,9 +49,25 @@ jobs:
           path: /tmp/eventedge-public-historical-acceptance.json
           retention-days: 14
       - name: Scheduled workflow acceptance gate
-        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not document_qualification and not live' tests
+        id: scheduled_acceptance
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          EVENTEDGE_CI_PROFILE_REPORT: /tmp/eventedge-ci-standard-phases.jsonl
+        run: python -m pytest -q --durations=25 --junitxml=/tmp/eventedge-ci-standard-scheduled.xml -m 'scheduled_acceptance and not document_qualification and not live' tests
       - name: Run remaining non-live suite
-        run: python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          EVENTEDGE_CI_PROFILE_REPORT: /tmp/eventedge-ci-standard-phases.jsonl
+        run: python -m pytest -q --durations=25 --junitxml=/tmp/eventedge-ci-standard-remaining.xml -m 'not live and not scheduled_acceptance and not document_qualification' tests
+      - name: Retain test timings and per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nonlive-test-evidence-standard
+          path: |
+            /tmp/eventedge-ci-standard-*.xml
+            /tmp/eventedge-ci-standard-phases.jsonl
+          retention-days: 14
 
   test-openbb:
     runs-on: ubuntu-latest
@@ -56,12 +80,14 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install pinned optional SDK environment
+        id: install
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-ci-openbb.txt -e '.[chatgpt-plan,openbb,commodities]'
           python -m pip check
           openbb-build
       - name: Replay recorded NOAA yearly files
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
       - name: Retain NOAA yearly replay evidence
         if: always()
@@ -71,6 +97,7 @@ jobs:
           path: /tmp/eventedge-noaa-yearly.json
           retention-days: 14
       - name: Replay recorded public historical sources with OpenBB installed
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-historical-acceptance.json
       - name: Retain public historical replay evidence with OpenBB installed
         if: always()
@@ -80,6 +107,22 @@ jobs:
           path: /tmp/eventedge-public-historical-acceptance.json
           retention-days: 14
       - name: Scheduled workflow acceptance gate with OpenBB installed
-        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not document_qualification and not live' tests
+        id: scheduled_acceptance
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          EVENTEDGE_CI_PROFILE_REPORT: /tmp/eventedge-ci-openbb-phases.jsonl
+        run: python -m pytest -q --durations=25 --junitxml=/tmp/eventedge-ci-openbb-scheduled.xml -m 'scheduled_acceptance and not document_qualification and not live' tests
       - name: Run remaining non-live suite with OpenBB installed
-        run: python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          EVENTEDGE_CI_PROFILE_REPORT: /tmp/eventedge-ci-openbb-phases.jsonl
+        run: python -m pytest -q --durations=25 --junitxml=/tmp/eventedge-ci-openbb-remaining.xml -m 'not live and not scheduled_acceptance and not document_qualification' tests
+      - name: Retain test timings and per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nonlive-test-evidence-openbb
+          path: |
+            /tmp/eventedge-ci-openbb-*.xml
+            /tmp/eventedge-ci-openbb-phases.jsonl
+          retention-days: 14

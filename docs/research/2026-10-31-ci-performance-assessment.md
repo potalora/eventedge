@@ -74,12 +74,12 @@ worker execution, and replay/verification. Keep private temporary directories
 per test and environment, preserve all assertions and supported profiles, and
 compare elapsed time and runner-minutes across repeated runs.
 
-Use those measurements to decide whether bounded sharding or eliminating
-repeated setup warrants a reviewed follow-up. Any shard experiment must prove
-that its combined collected test IDs equal the existing selection with no gaps
-or duplicates, and must retain both environment gates and all historical replay
-evidence. Do not remove isolation, skip tests by changed paths, shorten real
-acceptance behavior, buy runners, or swap tooling as part of the FINRA release.
+The subsequent request excludes buying runners and sharding. The bounded
+[November 1 follow-up](2026-11-01-ci-performance.md) measures repeated import
+work while preserving both environment gates, the exact existing selections,
+all assertions, and historical replay evidence. Do not remove isolation, skip
+tests by changed paths, shorten real acceptance behavior, buy runners, shard,
+or swap tooling as part of this work.
 
 This assessment identifies no new FINRA or Congress ingestion defect. FINRA's
 published-settlement and symbol-coverage checks remain required. Congress

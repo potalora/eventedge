@@ -174,42 +174,8 @@ def _model_text(request):
     return json.dumps(value)
 
 
-def install():
-    if 'EVENTEDGE_ACCEPTANCE_SCENARIO' not in os.environ:
-        return
-    # Install denial before importing anything capable of provider discovery.
-    socket.socket.connect = _forbidden
-    socket.socket.connect_ex = _forbidden
-    socket.create_connection = _forbidden
-    socket.getaddrinfo = _forbidden
-    try:
-        # curl_cffi calls libcurl directly and bypasses Python socket hooks.
-        # Deny both native entrypoints before importing Yahoo or other SDKs.
-        import curl_cffi
-        curl_cffi.Curl.perform = _forbidden_native
-        curl_cffi.AsyncCurl.add_handle = _forbidden_native
-        _install()
-    except BaseException:
-        import traceback
-        traceback.print_exc()
-        # sitecustomize normally swallows errors; acceptance must fail closed.
-        os._exit(86)
 
-
-def _install():
-    sys.path.insert(0,os.environ['EVENTEDGE_ACCEPTANCE_WORKTREE'])
-    from test_source_reliability_pipeline import TransportFixture
-    import pandas as pd
-    import requests
-    import httpx
-    import yfinance
-    # The adapter retains its optional SDK availability probe; acquisition is
-    # nevertheless the real raw annual-archive HTTP/parser path below.
-    sys.modules['cot_reports'] = ModuleType('cot_reports')
-    fixture = TransportFixture()
-    current = scenario()
-    fixture.session = clock_module.date.fromisoformat(current['session'])
-    fixture.now = REAL_DATETIME.fromisoformat(current['now'])
+def _install_clock():
     class DatetimeMeta(type):
         def __instancecheck__(cls,value):
             return isinstance(value,REAL_DATETIME)
@@ -228,6 +194,101 @@ def _install():
         if module is not None and getattr(module,'__name__','').startswith('tradingagents'):
             if getattr(module,'datetime',None) is REAL_DATETIME:
                 module.datetime = FixedDatetime
+
+
+def _install_model_responses():
+    import httpx
+    def model_response(http_module,request):
+        if request.url.host != 'api.openai.com' or request.url.path != '/v1/responses':
+            trace('unexpected_httpx',url=str(request.url))
+            raise AssertionError('unconfigured HTTPX endpoint')
+        value = json.loads(request.content)
+        text = _model_text(value)
+        response = {'id':'resp_acceptance','model':value['model'],'status':'completed',
+            'output':[{'id':'msg_acceptance','type':'message','role':'assistant','status':'completed',
+                'content':[{'type':'output_text','text':text,'annotations':[]}]}]}
+        body = 'data: '+json.dumps({'type':'response.completed','response':response})+'\n\n'
+        return http_module.Response(200,headers={'content-type':'text/event-stream'},content=body.encode(),request=request)
+    httpx.HTTPTransport.handle_request = lambda transport,request:model_response(httpx,request)
+    # Current OpenAI SDKs can use the independently named HTTPX2 transport.
+    # Substitute the same physical response boundary, never the SDK request.
+    try:
+        import httpx2
+    except ImportError:
+        pass
+    else:
+        httpx2.HTTPTransport.handle_request = lambda transport,request:model_response(httpx2,request)
+
+
+def _install_small_child(kind):
+    """Keep actual child processes; load source fixtures only for source IO.
+
+    Model workers still execute the real auth, request, transport, and stream
+    parser. HTTP operations install the unchanged full fixture on first use.
+    Clock shims need neither the application imports nor provider fixtures.
+    """
+    sys.path.insert(0,os.environ['EVENTEDGE_ACCEPTANCE_WORKTREE'])
+    _install_clock()
+    if kind == 'transport':
+        import requests
+        def request(session, method, url, **kwargs):
+            # pandas C extensions must initialize against the native datetime
+            # type. The full fixture freezes the clock after those imports.
+            clock_module.datetime = REAL_DATETIME
+            _install(record_bootstrap=False)
+            return requests.sessions.Session.request(session,method,url,**kwargs)
+        requests.sessions.Session.request = request
+        _install_model_responses()
+    trace('bootstrap',network_denied=True,now=scenario()['now'],
+          ancestor_dotenv_present='EVENTEDGE_ACCEPTANCE_ANCESTOR_CANARY' in os.environ)
+
+def install():
+    if 'EVENTEDGE_ACCEPTANCE_SCENARIO' not in os.environ:
+        return
+    # Install denial before importing anything capable of provider discovery.
+    socket.socket.connect = _forbidden
+    socket.socket.connect_ex = _forbidden
+    socket.create_connection = _forbidden
+    socket.getaddrinfo = _forbidden
+    try:
+        # curl_cffi calls libcurl directly and bypasses Python socket hooks.
+        # Deny both native entrypoints before importing Yahoo or other SDKs.
+        import curl_cffi
+        curl_cffi.Curl.perform = _forbidden_native
+        curl_cffi.AsyncCurl.add_handle = _forbidden_native
+        # Select only exact test-owned executable paths, after both network
+        # denials are installed. Arbitrary Python children keep the full hook.
+        executable = Path(sys.argv[0]).resolve()
+        base = Path(os.environ['EVENTEDGE_ACCEPTANCE_BASE']).resolve()
+        worker = Path(os.environ['EVENTEDGE_ACCEPTANCE_WORKTREE']).resolve()/'tradingagents/strategies/transport_worker.py'
+        if executable == base/'bin/date':
+            _install_small_child('date')
+        elif executable == worker:
+            _install_small_child('transport')
+        else:
+            _install()
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        # sitecustomize normally swallows errors; acceptance must fail closed.
+        os._exit(86)
+
+
+def _install(*, record_bootstrap=True):
+    sys.path.insert(0,os.environ['EVENTEDGE_ACCEPTANCE_WORKTREE'])
+    from scheduled_acceptance.transport_fixture import TransportFixture
+    import pandas as pd
+    import requests
+    import httpx
+    import yfinance
+    # The adapter retains its optional SDK availability probe; acquisition is
+    # nevertheless the real raw annual-archive HTTP/parser path below.
+    sys.modules['cot_reports'] = ModuleType('cot_reports')
+    fixture = TransportFixture()
+    current = scenario()
+    fixture.session = clock_module.date.fromisoformat(current['session'])
+    fixture.now = REAL_DATETIME.fromisoformat(current['now'])
+    _install_clock()
     _install_openbb()
     def request(session, method,url,*,_yearly=False,**kwargs):
         current = scenario()
@@ -380,28 +441,10 @@ def _install():
         day = REAL_DATETIME.fromisoformat(scenario()['now']) + clock_module.timedelta(days=30)
         return pd.DataFrame({'EPS Estimate':[1.0],'Reported EPS':[None],'Surprise(%)':[None]},index=pd.DatetimeIndex([day]))
     yfinance.Ticker.get_earnings_dates = earnings_dates
-    def model_response(http_module,request):
-        if request.url.host != 'api.openai.com' or request.url.path != '/v1/responses':
-            trace('unexpected_httpx',url=str(request.url))
-            raise AssertionError('unconfigured HTTPX endpoint')
-        value = json.loads(request.content)
-        text = _model_text(value)
-        response = {'id':'resp_acceptance','model':value['model'],'status':'completed',
-            'output':[{'id':'msg_acceptance','type':'message','role':'assistant','status':'completed',
-                'content':[{'type':'output_text','text':text,'annotations':[]}]}]}
-        body = 'data: '+json.dumps({'type':'response.completed','response':response})+'\n\n'
-        return http_module.Response(200,headers={'content-type':'text/event-stream'},content=body.encode(),request=request)
-    httpx.HTTPTransport.handle_request = lambda transport,request:model_response(httpx,request)
-    # Current OpenAI SDKs can use the independently named HTTPX2 transport.
-    # Substitute the same physical response boundary, never the SDK request.
-    try:
-        import httpx2
-    except ImportError:
-        pass
-    else:
-        httpx2.HTTPTransport.handle_request = lambda transport,request:model_response(httpx2,request)
-    trace('bootstrap',network_denied=True,now=current['now'],
-          ancestor_dotenv_present='EVENTEDGE_ACCEPTANCE_ANCESTOR_CANARY' in os.environ)
+    _install_model_responses()
+    if record_bootstrap:
+        trace('bootstrap',network_denied=True,now=current['now'],
+              ancestor_dotenv_present='EVENTEDGE_ACCEPTANCE_ANCESTOR_CANARY' in os.environ)
     if current.get('preflight_timeout') is not None:
         from tradingagents.strategies.orchestration import generation_manager
         generation_manager._GENERATION_TIMEOUT_S = current['preflight_timeout']
