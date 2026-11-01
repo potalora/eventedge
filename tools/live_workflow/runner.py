@@ -653,18 +653,93 @@ def native_acceptance_passed(result):
         and type(unfinished) is int and unfinished == 0)
 
 
+def clock_capture_coverage(tape_root, records):
+    """Read bounded clock receipts; source/model success is a separate claim."""
+    empty={'status':'not_recorded','runtime_processes':0,'clock_events':0,
+        'failed_clock_events':0,'capture_failures':{},'potential_unobserved_local_imports':[]}
+    try:
+        root=no_symlinks(tape_root)
+        events=[row for row in records if row['boundary']=='observed_clock']
+        paths=sorted(root.glob('.clock-runtime-*.json'))
+        if not paths and not events:return empty
+        from .recorded_clocks import MODULES,PHASES
+        require(0<len(paths)<=10000,'clock_receipt_count')
+        identity=json.loads((root/'identity.json').read_bytes())
+        identity_sha=hashlib.sha256(json.dumps(identity,sort_keys=True,ensure_ascii=False,
+            separators=(',',':'),allow_nan=False).encode()).hexdigest()
+        modules={};actors=set();failures={};unobserved=set()
+        for path in paths:
+            no_symlinks(path);info=path.stat()
+            require(re.fullmatch(r'\.clock-runtime-[1-9][0-9]*\.json',path.name) is not None
+                and stat.S_ISREG(info.st_mode) and info.st_uid==root.stat().st_uid
+                and info.st_nlink==1 and not info.st_mode & 0o077 and info.st_size<=256*1024,
+                'clock_receipt_file')
+            value=json.loads(path.read_bytes())
+            require(type(value) is dict and set(value)=={'schema_version','kind','installed','mode','phase',
+                'run_identity_sha256','actor','modules','unsupported_local_imports','capture_failures',
+                'native_deadline_clocks','global_datetime_and_pandas_unchanged','concurrent_same_key'}
+                and type(value['schema_version']) is int and value['schema_version']==1
+                and value['installed'] is True
+                and value['kind']=='observed_clock_runtime' and value['mode']=='live_record'
+                and value['phase'] in PHASES and value['run_identity_sha256']==identity_sha
+                and value['native_deadline_clocks'] is True
+                and value['global_datetime_and_pandas_unchanged'] is True
+                and value['concurrent_same_key']=='unqualified_not_cross_assigned','clock_receipt_identity')
+            actor=value['actor']
+            require(type(actor) is dict and set(actor)=={'entrypoint','source_sha256'}
+                and type(actor['entrypoint']) is str and len(actor['entrypoint'])<=512
+                and not Path(actor['entrypoint']).is_absolute() and '..' not in Path(actor['entrypoint']).parts
+                and re.fullmatch(r'[A-Za-z0-9_./-]+',actor['entrypoint']) is not None
+                and type(actor['source_sha256']) is str
+                and re.fullmatch('[a-f0-9]{64}',actor['source_sha256']) is not None,'clock_receipt_actor')
+            actors.add(digest(actor))
+            require(type(value['modules']) is dict and set(value['modules'])<=MODULES,'clock_receipt_modules')
+            for name,pin in value['modules'].items():
+                require(type(pin) is str and re.fullmatch('[a-f0-9]{64}',pin) is not None
+                    and modules.get(name,pin)==pin,'clock_receipt_module_hash')
+                modules[name]=pin
+            counts=value['capture_failures']
+            require(type(counts) is dict and set(counts)<={'clock_context_overlap_unqualified',
+                'clock_event_limit','observed_clock_capture_unsupported'}
+                and all(type(count) is int and 0<count<=1000000 for count in counts.values()),
+                'clock_receipt_failures')
+            for name,count in counts.items():failures[name]=failures.get(name,0)+count
+            limitations=value['unsupported_local_imports']
+            require(type(limitations) is list and len(limitations)<=10000,'clock_receipt_limitations')
+            for item in limitations:
+                require(type(item) is dict and set(item)=={'module','line','reason'}
+                    and item['module'] in MODULES and type(item['line']) is int and 0<item['line']<=1000000
+                    and item['reason']=='local_clock_import_unobserved','clock_receipt_limitation')
+                unobserved.add((item['module'],item['line']))
+        failed=sum(row.get('failure') is not None for row in events)
+        for row in events:
+            if row.get('failure') is not None:continue
+            request=row['public_request']
+            require(request.get('module') in modules
+                and request.get('source_sha256')==modules[request['module']]
+                and digest(request.get('actor')) in actors,'clock_event_receipt_binding')
+        return {'status':'incomplete' if failed or failures else 'complete',
+            'runtime_processes':len(paths),'clock_events':len(events),'failed_clock_events':failed,
+            'capture_failures':dict(sorted(failures.items())),
+            'potential_unobserved_local_imports':[{'module':name,'line':line} for name,line in sorted(unobserved)]}
+    except Exception:
+        return {**empty,'status':'invalid','reason':'clock_capture_receipts_invalid'}
+
+
 def tape_coverage(root):
     from collections import Counter
     from .recorded_io import verify_tape
     records=verify_tape(Path(root)/'tape')
     completed={row['event_id'] for row in records}
     unfinished=[p.stem for p in (Path(root)/'tape/reservations').glob('*.json') if p.stem not in completed]
-    sources=Counter(); models=Counter(); phases=Counter(); failures=0
+    sources=Counter(); models=Counter(); clocks=Counter(); phases=Counter(); failures=0
     roles=set()
     for event in records:
         phases[event['phase']]+=1
         failures+=event.get('failure') is not None
-        if event['boundary'] == 'model_helper':
+        if event['boundary'] == 'observed_clock':
+            clocks[event['operation']]+=1
+        elif event['boundary'] == 'model_helper':
             request=event['public_request']; role=request.get('role')
             if role:
                 roles.add(role)
@@ -672,8 +747,11 @@ def tape_coverage(root):
         else:
             sources[(event['boundary'],event['operation'])]+=1
     return {'verified_events':len(records),'observed_failures':failures,'phase_counts':dict(phases),
+        'clock_capture':clock_capture_coverage(Path(root)/'tape',records),
         'unfinished_reservations':len(unfinished),
         'source_boundaries':[{'boundary':key[0],'operation':key[1],'calls':count} for key,count in sorted(sources.items())],
+        'clock_events':sum(clocks.values()),
+        'clock_boundaries':[{'operation':key,'calls':count} for key,count in sorted(clocks.items())],
         'models':[{'role':key[0],'model':key[1],'effort':key[2],'calls':count}
             for key,count in sorted(models.items(),key=lambda row:repr(row[0]))],
         'unobserved_model_roles':sorted({'bounded','thesis','committee'}-roles),
@@ -732,13 +810,24 @@ def edge_coverage(root):
 
 
 def summarize(root):
+    from .ordinary import ordinary_coverage
     root=Path(root)
     report=json.loads((root/'native-report.json').read_text()) if (root/'native-report.json').exists() else {}
     reproduction=json.loads((root/'report-reproduction.json').read_text()) if (root/'report-reproduction.json').exists() else {}
     coverage=tape_coverage(root)
     edges=edge_coverage(root)
+    ordinary=ordinary_coverage(root)
+    native_lane='real_clock_guarded_prospective_one_shot'
+    checks=report_checks(report)
+    if ordinary['status']!='not_observed':
+        native_lane='ordinary_real_clock_sessions'
+        last=ordinary['observed_last_result'] or {}
+        checks=last.get('checks',report_checks({}))
+        reproduction=last.get('canonical_report_reproduction',{})
     gaps=['observer_sidecars_and_native_full_poll_require_external_composition_receipt',
         'cold_acquisition_replay_not_executed','subsequent_session_fills_unobserved','timer_dispatch_unobserved']
+    if coverage.get('clock_capture',{}).get('status') in ('invalid','incomplete'):
+        gaps.append('observed_clock_capture_incomplete')
     if edges['status'] != 'recorded' or not (edges['counts']['pass']+edges['counts']['fail']):
         gaps.append('controlled_mutations_not_executed')
     if edges['status'] == 'invalid':
@@ -748,10 +837,11 @@ def summarize(root):
             gaps.append('controlled_mutations_unexercised')
         if edges['counts']['fail']:
             gaps.append('controlled_mutations_failed')
-    return {'deployed':False,'checks':report_checks(report),'canonical_report_reproduction':reproduction,
+    return {'deployed':False,'checks':checks,'canonical_report_reproduction':reproduction,
         'recorded_boundary_coverage':coverage,'controlled_mutations':edges,'coverage_gaps':gaps,
+        'ordinary_sessions':ordinary,
         'model_coverage':'inspect private tape by exact role/model/effort; absent roles remain unobserved',
-        'native_lane':'real_clock_guarded_prospective_one_shot','auth_writes':'normal canonical shared refresh permitted'}
+        'native_lane':native_lane,'auth_writes':'normal canonical shared refresh permitted'}
 
 
 def main(argv=None):
@@ -768,7 +858,8 @@ def main(argv=None):
     for key in ('observer-root','observer-commit','native-root','native-commit'):
         prep.add_argument('--'+key)
     run=sub.add_parser('native'); replay=sub.add_parser('accepted-replay')
-    for entry in (run,replay):
+    ordinary=sub.add_parser('ordinary',help='One real-clock ordinary tick in a prepared live sandbox.')
+    for entry in (run,replay,ordinary):
         entry.add_argument('--root',required=True); entry.add_argument('--session',required=True)
         entry.add_argument('--boundary-receipt',required=True)
         entry.add_argument('--credential-env',action='append',default=[],choices=sorted(CREDENTIAL_NAMES),
@@ -781,6 +872,9 @@ def main(argv=None):
     args=parser.parse_args(argv)
     if args.operation == 'prepare': result=prepare(args)
     elif args.operation == 'native': result=native(args)
+    elif args.operation == 'ordinary':
+        from .ordinary import run_ordinary
+        result=run_ordinary(args)
     elif args.operation == 'accepted-replay': result=accepted_replay(args)
     elif args.operation == 'edges':
         from .edges import run_edges
@@ -790,4 +884,6 @@ def main(argv=None):
     print(json.dumps(result,sort_keys=True,allow_nan=False))
     if args.operation == 'native':
         return int(not native_acceptance_passed(result))
+    if args.operation == 'ordinary':
+        return int(result['status'] != 'pass')
     return int(result['counts']['fail'] > 0) if args.operation == 'edges' else 0

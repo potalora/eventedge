@@ -326,11 +326,35 @@ changed prompt. The initial worker uses the real clock and therefore may be
 blocked when original source queries no longer match; a blocked run is evidence
 of a replay limitation, not successful workflow coverage.
 
+Fresh hooks also observe the wall-clock inputs used by an explicit list of
+candidate source/model modules and Yahoo SDK modules during screen preflight,
+governed preflight and daily execution. Each live call returns the exact native
+object it obtained. Module-local facades preserve constructors and instance
+checks; global datetime and pandas classes are unchanged. The trace binds the
+logical parent/worker entry point, source hash, call site, timezone, public
+source/ticker/window context and duplicate occurrence. Ambiguous overlapping
+calls and unsupported values remain capture failures.
+
+Offline cold replay uses those exact typed observations only when the verified
+tape contains them. It retains full source and model request matching. Controller
+admission, authentication expiry, monotonic budgets and execution deadlines keep
+their native clocks. Clock events are counted separately from provider/model
+calls. Bounded runtime receipts expose capture failures and potential local
+imports outside the hook; failed or missing clock receipts block cold admission.
+Those local-import declarations are static scope limits, not claims that the
+branches executed. Legacy tapes cannot be retroactively given a clock trace.
+
 Anonymous Yahoo authentication is a separate boundary: cookies and crumbs were
 not recorded. An explicitly reported offline-only placeholder replaces just the
 SDK's anonymous crumb acquisition; all source request construction and response
 decoding remain native and exact, and every lower authentication/network attempt
 is denied. This does not establish replay of the authentication lifecycle.
+The model client's public profile identity has a separate offline adapter. It
+returns only the unique identity already present in the verified model tape, for
+the exact canonical auth path. It never loads an auth grant or refreshes a token;
+the native client and full model request matching remain active. Both adapters
+record their invocation counts and explicitly exclude authentication lifecycle
+coverage.
 
 A baseline passes only after complete tape consumption, all sixteen-book native
 checks, independent canonical report reproduction and process quiescence. Fault
@@ -347,6 +371,44 @@ Cold replay still does not establish actual ordinary timer firing, naturally
 aligned observer acceptance, multi-session continuity or future fills. Those
 claims require their own real observations; a successful empty portfolio session
 must not be presented as nonzero fill coverage.
+
+## Ordinary sessions and continuity
+
+Prepare a separate campaign with the first intended trading session as its
+`--session`. Under the reviewed live sandbox, invoke:
+
+```sh
+python scripts/run_live_workflow_acceptance.py ordinary \
+  --root /private/ordinary-campaign --session 2026-11-02 \
+  --boundary-receipt /supervisor/live-boundary.json \
+  --credential-env ALPACA_API_KEY --credential-env ALPACA_SECRET_KEY \
+  --credential-env FRED_API_KEY --credential-env FINNHUB_API_KEY \
+  --credential-env COURTLISTENER_TOKEN --credential-env USDA_NASS_API_KEY
+```
+
+Admission requires the actual New York date to equal the requested session, at
+or after 18:00, and the candidate's own XNYS calendar to accept it. The first
+session must match the prepared contract; each later invocation must be the
+exact next trading session after the prior accepted result. Source credentials
+are selected explicitly under the same live boundary as the prospective lane.
+The command runs the unchanged ordinary `recover_runtime.py --repo-root ...`
+entry point, without prospective flags or a clock override.
+
+Every session claims `ordinary-sessions/DATE` before launching a child. Its
+calendar observation, process receipts, independent report, canonical comparison
+and final result are retained. A failed or interrupted attempt cannot be retried
+or skipped to advance this campaign. Existing prospective attempts and existing
+native reports or run attempts for that session are rejected; previously accepted
+outputs cannot stand in for a new observation. Success requires both child
+processes, exact identities, all native sixteen-book checks and report comparisons.
+Reports alone cannot turn a failed child into a passing CLI exit.
+
+The cumulative tape retains the original campaign identity; each result also
+counts only the newly recorded source/model events for that session. Natural zero
+fills are valid. This command does not install or claim a timer: results explicitly
+retain `actual_timer_dispatch: false`. Real timer dispatch, aligned observer
+delivery, future fills and several successive sessions still need their own
+observations. Unit tests of these gates are not evidence that future sessions ran.
 
 ## October 31, 2026 execution evidence
 
@@ -401,3 +463,33 @@ campaign is `eventedge-live-workflow-20261031-case-v4`; its primary, postcheck a
 separate replay supervisor directories retain exact code/configuration hashes,
 boundary probes, unit results and preservation receipts. Normal production
 session acceptance remains separate from these isolated tests.
+
+## November 1 cold replay investigation
+
+The first complete cold attempt used the original pre-acquisition supervisor
+archive, whose saved checksum and file inventory were independently verified.
+That archive contains the prepared isolated environment before any source or
+model calls; it is not a reconstruction from accepted state. The completed
+recordings were mounted read-only alongside a separate restored copy.
+
+The attempt consumed 253 of 397 recorded events and ended **blocked**, with 26
+exact-request lookup failures. Its independent report reproduced the canonical
+JSON and Markdown but was degraded, so it did not qualify. The supervisor
+confirmed the original archive, receipt, campaign contract and completed tape
+unchanged, then removed the empty process cgroup. No live provider or model call
+was made by this replay.
+
+Twenty-four missing requests were repeated thesis calls: the offline public
+profile adapter covered model transport but omitted the native memo's independent
+namespace lookup. The correction preserves the native memo and exact prompt
+matching. Two older lookup failures lack the metadata needed for retrospective
+attribution; new receipts retain only bounded request hashes and operation labels.
+
+The old tape also omitted HTTP redirect targets. New recordings retain sanitized
+redirect metadata and replay the native redirect sequence; missing historical
+metadata is explicitly unsupported. No target is inferred from a later request.
+Finally, the native committee prompt includes a generated regime timestamp and
+source acquisition timestamps. Exact replay therefore needs genuinely observed
+clock inputs as well as responses. A new capture without those inputs would not
+close this gap. This blocked run is preserved and does not authorize workflow
+fault qualification, which still requires a successful cold baseline first.

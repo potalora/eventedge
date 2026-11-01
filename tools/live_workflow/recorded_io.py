@@ -16,6 +16,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import threading
@@ -34,6 +35,7 @@ _SECRET_KEYS = frozenset({'authorization', 'proxy_authorization', 'cookie', 'set
 _PUBLIC_HEADERS = frozenset({'accept', 'content-type', 'range', 'if-modified-since', 'if-none-match'})
 _RESPONSE_HEADERS = frozenset({'content-type', 'content-length', 'content-encoding', 'date', 'etag', 'last-modified', 'retry-after', 'x-ratelimit-remaining',
     'record-total', 'record-offset', 'record-limit', 'total-records-on-page'})
+_REDIRECT_STATUSES = frozenset({301,302,303,307,308})
 
 
 class TapeError(RuntimeError):
@@ -162,7 +164,20 @@ def reserve_event(*, boundary, operation, public_request):
 
 
 def _safe_headers(headers):
-    return {str(k).lower(): str(v)[:2048] for k, v in (headers or {}).items() if str(k).lower() in _RESPONSE_HEADERS}
+    result={str(k).lower():str(v)[:2048] for k,v in (headers or {}).items() if str(k).lower() in _RESPONSE_HEADERS}
+    for key,value in (headers or {}).items():
+        if str(key).lower()=='location':
+            value=str(value)
+            if len(value)>32768 or any(ord(c)<32 or ord(c)==127 for c in value):continue
+            try:
+                parsed=urlsplit(value)
+                if parsed.scheme not in ('','http','https') or parsed.username or parsed.password:continue
+                # Relative redirects retain their path. Authentication query
+                # fields and fragments are absent in both response metadata and
+                # the following request identity; no raw target is retained.
+                result['location']=public_http_request('GET',value)['url']
+            except (ValueError,TapeError):continue
+    return result
 
 
 def finish_event(event, *, response_file=None, sdk_value=None, status=None, safe_headers=None, failure=None, representation=None):
@@ -176,6 +191,10 @@ def finish_event(event, *, response_file=None, sdk_value=None, status=None, safe
     record = {**event, 'sdk_value': sdk_value, 'status': status, 'safe_headers': _safe_headers(safe_headers),
               'failure': failure, 'finished_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
               'response_file': None, 'response_sha256': None, 'response_bytes': 0}
+    if status in _REDIRECT_STATUSES:
+        present=any(str(key).lower()=='location' for key in (safe_headers or {}))
+        record['redirect_metadata']={'location_observed':safe_headers is not None,'location_present':present,
+            'location_replayable':safe_headers is not None and (not present or 'location' in record['safe_headers'])}
     if representation is not None:
         record['representation'] = representation
     if response_file is not None:
@@ -238,11 +257,16 @@ def _replay_event(*, boundary, operation, public_request):
         occurrence = int(counter_file.read_text()) if counter_file is not None and counter_file.exists() else _REPLAY_COUNTS.get(base, 0)
         event_id = _event_id(key, occurrence)
         path = cfg['root'] / 'events' / (event_id + '.json')
-        if not path.is_file():
-            raise TapeError('missing exact tape entry')
-        record = _validate_record(cfg['root'], path)
-        if any(record.get(k) != v for k, v in key.items()) or record.get('occurrence') != occurrence or record.get('event_id') != event_id:
-            raise TapeError('record identity mismatch')
+        try:
+            if not path.is_file():
+                raise TapeError('missing exact tape entry')
+            record = _validate_record(cfg['root'], path)
+            if any(record.get(k) != v for k, v in key.items()) or record.get('occurrence') != occurrence or record.get('event_id') != event_id:
+                raise TapeError('record identity mismatch')
+        except (TapeError,ValueError,OSError) as error:
+            error._live_lookup={'boundary':boundary,'operation':operation,
+                'request_sha256':key['request_sha256'],'occurrence':occurrence,'event_id':event_id}
+            raise
         _REPLAY_COUNTS[base] = occurrence + 1
         if counter_file is not None:
             _private_write(counter_file, str(occurrence + 1).encode(), replace=True)
@@ -252,23 +276,33 @@ def _replay_event(*, boundary, operation, public_request):
 
 
 
-def record_replay_failure(reason):
+def record_replay_failure(reason, *, lookup=None):
     """Audit a public reason code even when native application catches TapeError."""
     if not isinstance(reason, str) or len(reason) > 128 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ' for c in reason):
         reason = 'invalid_replay_outcome'
     _REPLAY_FAILURES.append(reason)
     cfg = _configuration()
     if cfg['cursor'] is not None:
+        value={'phase':cfg['phase'],'reason':reason}
+        # Only bounded public hashes/labels, never a URL, prompt, system text,
+        # request body or arbitrary exception string. Reject unsafe diagnostics.
+        if (isinstance(lookup,dict) and set(lookup)=={'boundary','operation','request_sha256','occurrence','event_id'}
+                and all(isinstance(lookup[name],str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',lookup[name])
+                    for name in ('boundary','operation'))
+                and all(isinstance(lookup[name],str) and re.fullmatch('[a-f0-9]{64}',lookup[name])
+                    for name in ('request_sha256','event_id'))
+                and type(lookup['occurrence']) is int and 0<=lookup['occurrence']<=999999):
+            value['lookup']=lookup
         fd, path = tempfile.mkstemp(prefix='failure-', suffix='.json', dir=cfg['cursor'])
         with os.fdopen(fd, 'wb') as output:
-            output.write(_canonical({'phase': cfg['phase'], 'reason': reason}))
+            output.write(_canonical(value))
 
 
 def replay_event(*, boundary, operation, public_request):
     try:
         return _replay_event(boundary=boundary, operation=operation, public_request=public_request)
-    except (TapeError, ValueError, OSError):
-        record_replay_failure('exact_lookup_failed')
+    except (TapeError, ValueError, OSError) as error:
+        record_replay_failure('exact_lookup_failed',lookup=getattr(error,'_live_lookup',None))
         raise
 
 def assert_replay_complete():
@@ -326,14 +360,41 @@ def _redact(value):
     raise TapeError('unsupported public request value')
 
 
+def _url_secret_keys(query):
+    """Exclude signing credentials only in complete recognized protocol groups.
+
+    Ordinary policy/sig/signature fields are source inputs. A field name alone
+    cannot establish that it is authentication or authorize identity collapse.
+    This recognizes URL signing structure; it does not verify signatures.
+    """
+    values={}
+    for key,value in query:values.setdefault(key.lower().replace('-','_'),[]).append(value)
+    def complete(*names):
+        return all(name in values and len(values[name])==1 and values[name][0] for name in names)
+    excluded=set(_SECRET_KEYS)
+    for prefix,algorithms in (('x_amz',{'AWS4-HMAC-SHA256','AWS4-ECDSA-P256-SHA256'}),
+                              ('x_goog',{'GOOG4-RSA-SHA256','GOOG4-HMAC-SHA256'})):
+        required=[prefix+'_'+field for field in ('algorithm','credential','date','expires','signedheaders','signature')]
+        if complete(*required) and values[prefix+'_algorithm'][0] in algorithms:
+            excluded.update((prefix+'_credential',prefix+'_signature',prefix+'_security_token'))
+    if complete('signature','key_pair_id') and (complete('policy') or complete('expires')):
+        excluded.update(('signature','key_pair_id','policy'))
+    if complete('awsaccesskeyid','signature','expires'):
+        excluded.update(('awsaccesskeyid','signature'))
+    if complete('googleaccessid','signature','expires'):
+        excluded.update(('googleaccessid','signature'))
+    return excluded
+
+
 def public_http_request(method, url, *, body=None, headers=None):
     parsed = urlsplit(str(url))
     if parsed.username or parsed.password:
         if _CONFIG is not None and _CONFIG['mode'] == 'offline_replay':
             record_replay_failure('credential_url_unsupported')
         raise TapeError('credential URL unsupported')
-    query = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True)
-             if k.lower().replace('-', '_') not in _SECRET_KEYS]
+    pairs=parse_qsl(parsed.query,keep_blank_values=True)
+    excluded=_url_secret_keys(pairs)
+    query = [(k,v) for k,v in pairs if k.lower().replace('-','_') not in excluded]
     public_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ''))
     public_body = None
     if body is not None:
@@ -472,7 +533,25 @@ class _ReplayBody:
         return data
 
 
+def _replay_headers(record):
+    if record.get('status') in _REDIRECT_STATUSES:
+        metadata=record.get('redirect_metadata')
+        if (not isinstance(metadata,dict) or set(metadata)!={'location_observed','location_present','location_replayable'}
+                or metadata['location_observed'] is not True or metadata['location_replayable'] is not True
+                or type(metadata['location_present']) is not bool
+                or metadata['location_present']!=('location' in record['safe_headers'])):
+            record_replay_failure('unsupported_redirect_capture')
+            raise TapeError('redirect metadata was not retained or is incompatible')
+        if metadata['location_present']:
+            location=record['safe_headers']['location']
+            if not isinstance(location,str) or _safe_headers({'Location':location}).get('location')!=location:
+                record_replay_failure('unsupported_redirect_capture')
+                raise TapeError('redirect metadata contains an unsafe target')
+    return dict(record['safe_headers'])
+
+
 def _replay_body(record, family):
+    _replay_headers(record)
     failure = None
     if record['failure'] is not None:
         kind = record['failure'].get('type')
@@ -782,7 +861,7 @@ def _curl_replay_response(module, record, session, args, kwargs):
     response.reason = ''
     response.status_code = record['status']
     response.ok = 200 <= response.status_code < 400
-    response.headers = module.Headers(record['safe_headers'])
+    response.headers = module.Headers(_replay_headers(record))
     response.default_encoding = kwargs.get('default_encoding', 'utf-8')
     # The SDK already decoded compression during acquisition. Response.content
     # is those exact bytes; its native text/json properties do not decompress.

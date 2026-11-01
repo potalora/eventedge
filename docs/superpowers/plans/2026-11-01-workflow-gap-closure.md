@@ -17,6 +17,16 @@ those observations as cold replay or future-session evidence.
 - Run a baseline before attributing counterfactual results to mutations. Faults
   change one identified recorded response. Missing downstream requests are blocked
   coverage, not successful fault handling; never reuse an answer for a new prompt.
+- Preserve the first blocked cold attempt. New captures retain sanitized redirect
+  metadata and genuine source/model clock inputs. Replay the clock trace only in
+  the offline lane, with exact actor/call-site/context identity; live calls return
+  unchanged native values and runtime deadlines stay native. A missing historical
+  header or clock value is not reconstructed. Validate the hook with actual
+  candidate/SDK subprocesses before a fresh live-source/model capture.
+- Add a separate ordinary-session command with real-calendar admission, one
+  durable attempt per date, exact next-session continuity and independently bound
+  reports. Keep its observations separate from the prospective campaign and
+  reject failed or skipped session sequences.
 - Keep ordinary timer dispatch, naturally aligned observer delivery, later-session
   continuity and actual fills as separately observed gates. A future schedule or
   empty fill set cannot certify a nonzero execution path.

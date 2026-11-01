@@ -6,6 +6,27 @@ import pytest
 from tools.live_workflow import runner
 
 
+def test_replay_usage_accepts_bounded_lookup_identity_without_request_contents(tmp_path):
+    from tools.live_workflow.cold_replay import replay_usage
+    lookup={'boundary':'source_http','operation':'requests.send',
+        'request_sha256':'a'*64,'occurrence':1,'event_id':'b'*64}
+    value={'phase':'daily','reason':'exact_lookup_failed','lookup':lookup}
+    runner.private_json(tmp_path/'failure-test.json',value)
+    assert replay_usage(tmp_path,[])==(set(),[value])
+
+
+@pytest.mark.parametrize('change',[
+    {'request_sha256':'raw-private-url'}, {'occurrence':True}, {'occurrence':-1},
+    {'event_id':'invalid'}, {'raw_prompt':'private prompt'}, {'operation':'private\ntext'}])
+def test_replay_usage_rejects_unbounded_or_invalid_lookup_receipts(tmp_path,change):
+    from tools.live_workflow.cold_replay import replay_usage
+    lookup={'boundary':'model_helper','operation':'call_analysis_model',
+        'request_sha256':'a'*64,'occurrence':0,'event_id':'b'*64,**change}
+    runner.private_json(tmp_path/'failure-test.json',{'phase':'daily','reason':'exact_lookup_failed','lookup':lookup})
+    with pytest.raises(runner.AcceptanceError,match='failure_record_invalid'):
+        replay_usage(tmp_path,[])
+
+
 def test_cold_replay_cannot_pass_when_application_swallows_missing_request():
     from tools.live_workflow.cold_replay import evaluate_outcome
     checks = {name: True for name in ('sixteen_books', 'accounting', 'staging_complete',

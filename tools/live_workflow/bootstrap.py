@@ -1,7 +1,8 @@
 """Owned startup hook: real candidate imports, real clock, pass-through recording.
 
 The .pth installed by prepare loads this in every owned child interpreter. This
-file contains no fake source, model, auth, datetime, date or SDK implementation.
+file observes native live source, model and scoped clock values. Only an explicit
+offline replay substitutes recorded clock inputs.
 """
 from __future__ import annotations
 
@@ -177,6 +178,9 @@ def install(*, config_path=None):
         os.environ['EVENTEDGE_LIVE_REPLAY_STATE']=config['replay_state_dir']
     install_source_io(**arguments)
     install_model_io(**arguments)
+    if config['mode']=='live_record' or config.get('replay_observed_clocks') is True:
+        from .recorded_clocks import install_clock_io
+        install_clock_io(config,phase)
     if config['mode']=='offline_replay':
         from .replay_runtime import install_replay_runtime
         install_replay_runtime(config)
@@ -247,21 +251,40 @@ def _check_idle(root):
         'journal_incidents':0,'application_state_unchanged':True})
 
 
-def _report(root, session):
-    from .runner import private_json
+def _ordinary_window(root, session, previous_session, output_dir):
+    from .runner import private_json,no_symlinks,require
+    from tradingagents.strategies.orchestration.decision_clock import latest_completed_session,require_reference
+    from tradingagents.strategies.orchestration.trading_calendar import exchange_date,is_session,next_session
+    output=no_symlinks(output_dir)
+    require(output.is_dir() and output.is_relative_to(root),'ordinary_output_must_be_private_campaign_directory')
+    now=datetime.now(timezone.utc); latest=latest_completed_session(now); allowed=True
+    try:
+        require_reference(latest,now)
+    except ValueError:
+        allowed=False
+    private_json(output/'ordinary-window.json',{'observed_at':now.isoformat(),
+        'session':latest.isoformat(),'allowed':allowed,
+        'ordinary_idle_expected':not is_session(exchange_date(now)),
+        'expected_next_session':next_session(date.fromisoformat(previous_session)).isoformat() if previous_session else None})
+
+
+def _report(root, session, output_dir=None):
+    from .runner import private_json,no_symlinks,require
     from tradingagents.strategies.orchestration.operational_report import build_operational_report,render_operational_report
     row=json.loads((root/'generation.json').read_text()); repo=root/'repo'
     report=build_operational_report(repo,row['gen_id'],session)
     from tradingagents.strategies.orchestration.source_incidents import load_source_incidents
     report['source_incidents']=load_source_incidents(report,repo/'docs/reports')
-    private_json(root/'native-report.json',report)
+    output=root if output_dir is None else no_symlinks(output_dir)
+    require(output.is_dir() and output.is_relative_to(root),'report_output_must_be_private_campaign_directory')
+    private_json(output/'native-report.json',report)
     stem=f"{session}-{row['gen_id']}-operational-report"
     json_path=repo/'docs/reports'/f'{stem}.json'; md_path=repo/'docs/reports'/f'{stem}.md'
     json_matches=json_path.exists() and json.loads(json_path.read_text()) == report
     markdown_matches=md_path.exists() and md_path.read_text() == render_operational_report(report)
     # Missing or divergent canonical shell reports remain visible, never regenerated
     # to manufacture a passing comparison.
-    private_json(root/'report-reproduction.json',{'canonical_json_identical':json_matches,
+    private_json(output/'report-reproduction.json',{'canonical_json_identical':json_matches,
         'canonical_markdown_identical':markdown_matches,'observed_at':datetime.now(timezone.utc).isoformat()})
     _imports(repo)
 
@@ -457,14 +480,17 @@ def _accepted_replay(root, session, *, output_dir=None, dependency_site=None, un
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=('prepare','window','check-idle','report','accepted-replay'))
+    parser.add_argument('operation',choices=('prepare','window','ordinary-window','check-idle','report','accepted-replay'))
     parser.add_argument('--root',required=True); parser.add_argument('--session')
+    parser.add_argument('--output-dir');parser.add_argument('--previous-session')
     args=parser.parse_args(argv); root=Path(args.root)
     operations={'prepare':_prepare,'window':_window,'check-idle':_check_idle}
     if args.operation in operations:
         operations[args.operation](root)
     elif args.operation == 'report':
-        _report(root,args.session)
+        _report(root,args.session,args.output_dir)
+    elif args.operation == 'ordinary-window':
+        _ordinary_window(root,args.session,args.previous_session,args.output_dir)
     else:
         _accepted_replay(root,args.session)
     return 0

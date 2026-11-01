@@ -118,8 +118,23 @@ def replay_usage(cursor, records):
     for path in sorted(cursor.glob('failure-*.json')):
         runner.no_symlinks(path)
         value = json.loads(path.read_bytes())
-        runner.require(set(value) == {'phase', 'reason'} and all(isinstance(v, str) for v in value.values()),
+        runner.require(type(value) is dict and set(value) in
+                       ({'phase','reason'},{'phase','reason','lookup'})
+                       and all(type(value.get(key)) is str for key in ('phase','reason')),
                        'cold_replay_failure_record_invalid')
+        if 'lookup' in value:
+            lookup=value['lookup']
+            runner.require(type(lookup) is dict and set(lookup)==
+                           {'boundary','operation','request_sha256','occurrence','event_id'},
+                           'cold_replay_failure_record_invalid')
+            runner.require(all(type(lookup[key]) is str and
+                           re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',lookup[key]) is not None
+                           for key in ('boundary','operation'))
+                           and all(type(lookup[key]) is str and
+                           re.fullmatch(r'[a-f0-9]{64}',lookup[key]) is not None
+                           for key in ('request_sha256','event_id'))
+                           and type(lookup['occurrence']) is int and 0<=lookup['occurrence']<1000000,
+                           'cold_replay_failure_record_invalid')
         failures.append(value)
     return consumed, failures
 
@@ -226,13 +241,20 @@ def run(args):
     runner.require(run_identity == original_config['run_identity'], 'cold_tape_contract_identity')
     runner.require(all(event.get('lane') == 'native_observation' and not event.get('parent')
         for event in records), 'cold_native_parent_required')
+    recorded_clocks=any(event['boundary']=='observed_clock' for event in records)
+    clock_coverage=runner.clock_capture_coverage(tape,records)
+    runner.require(clock_coverage['status'] not in ('invalid','incomplete'),
+        'cold_observed_clock_capture_incomplete')
     identity = {'schema_version': 1, 'lane': 'cold_recorded_workflow', 'case': args.case,
         'candidate_commit': contract['candidate_commit'], 'session': args.session,
         'contract_sha256': args.contract_sha256, 'baseline_receipt_sha256': args.baseline_sha256,
         'baseline_tree_sha256': runner.digest(receipt['snapshot_inventory']),
         'parent_tape_sha256': parent_digest, 'boundary_receipt_sha256': boundary,
         'kernel_network_namespace': net, 'live_provider_calls': 0, 'live_model_calls': 0,
-        'clock_policy': 'real_wall_clock', 'authentication_lifecycle_replayed': False,
+        'clock_policy': 'recorded_scoped_wall_clock_inputs' if recorded_clocks else 'real_wall_clock',
+        'recorded_clock_capture':clock_coverage,
+        'admission_and_deadline_clocks':'real_wall_clock_and_monotonic',
+        'authentication_lifecycle_replayed': False,
         'offline_auth_placeholders': ['yahoo_anonymous_crumb', 'recorded_plan_profile_identity'],
         'started_at': datetime.now(timezone.utc).isoformat()}
     tool_root = Path(__file__).resolve().parents[2]
@@ -267,6 +289,7 @@ def run(args):
     config = {**original_config, 'mode': 'offline_replay', 'tape_dir': str(replay_tape),
         'dependency_site': contract['dependency_site'], 'dependency_sha256': contract['dependency_sha256'],
         'replay_state_dir': str(cursor),
+        'replay_observed_clocks':recorded_clocks,
         'offline_auth_placeholders': ['yahoo_anonymous_crumb', 'recorded_plan_profile_identity'],
         'recorded_plan_auth_path': contract['auth_path']}
     config_path = output / 'replay-config.json'

@@ -130,7 +130,7 @@ def _recorded_public_plan_profile():
     return profiles.pop()
 
 
-def _install_plan_profile_placeholder(module,auth_path,profile):
+def _install_plan_profile_placeholder(module,auth_module,auth_path,profile):
     original=module._profile_identity
     @functools.wraps(original)
     def recorded_identity(path):
@@ -147,9 +147,18 @@ def _install_plan_profile_placeholder(module,auth_path,profile):
                 'phase':tape._configuration()['phase'],'placeholder':'recorded_plan_profile_identity',
                 'count':_STATE['profile_count'],'auth_lifecycle_replayed':False,
                 'recorded_public_profile_sha256':digest(profile),
-                'scope':'only_candidate_profile_identity_no_auth_record_access'})
+                'scope':'only_candidate_public_profile_namespace_no_auth_record_access'})
         return profile
     module._profile_identity=recorded_identity
+    original_reader=auth_module.read_profile_identity
+    @functools.wraps(original_reader)
+    def recorded_reader(auth_path_value=None,*,deadline=None):
+        # The native cross-horizon memo independently checks this same public
+        # namespace. Preserve its deadline and profile equality guards without
+        # opening status records, credential stores or grants.
+        if deadline is not None:auth_module._remaining(deadline)
+        return recorded_identity(auth_path_value)
+    auth_module.read_profile_identity=recorded_reader
 
 
 def install_replay_runtime(config):
@@ -190,7 +199,7 @@ def install_replay_runtime(config):
         return _runtime_receipt()
     curl=_pinned_module('curl_cffi',site)
     data=_pinned_module('yfinance.data',site) if 'yahoo_anonymous_crumb' in placeholders else None
-    client=None
+    client=auth_module=None
     if plan:
         repo=no_symlinks(config['candidate_repo'])
         require(repo.is_dir() and Path(config['candidate_repo']).is_absolute(),
@@ -198,6 +207,11 @@ def install_replay_runtime(config):
         client=importlib.import_module('tradingagents.strategies.chatgpt_plan_client')
         require(no_symlinks(client.__file__).is_relative_to(repo),
             'offline_runtime_candidate_profile_origin')
+        auth_module=importlib.import_module('tradingagents.strategies.plan_auth')
+        require(no_symlinks(auth_module.__file__).is_relative_to(repo)
+            and callable(getattr(auth_module,'read_profile_identity',None))
+            and callable(getattr(auth_module,'_remaining',None)),
+            'offline_runtime_candidate_profile_reader_origin')
     _STATE={'identity':identity,'cursor':cursor,'namespace':namespace,'pid':os.getpid(),
         'denied_calls':{},'auth_count':0,'profile_count':0,'dependency_sha256':config['dependency_sha256'],
         'placeholders':list(placeholders)}
@@ -210,5 +224,5 @@ def install_replay_runtime(config):
     curl.Curl.perform=_denial(curl.Curl.perform,'curl.Curl.perform','offline_native_curl_io_denied')
     curl.AsyncCurl.add_handle=_denial(curl.AsyncCurl.add_handle,'curl.AsyncCurl.add_handle','offline_native_curl_io_denied')
     if data is not None:_install_yahoo_placeholder(data)
-    if client is not None:_install_plan_profile_placeholder(client,auth_path,profile)
+    if client is not None:_install_plan_profile_placeholder(client,auth_module,auth_path,profile)
     return _runtime_receipt()

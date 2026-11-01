@@ -176,9 +176,17 @@ def plan_profile_case(tmp_path,monkeypatch,profiles=('recorded-public-profile',)
     cfg['candidate_repo']=str(candidate)
     module=ModuleType('tradingagents.strategies.chatgpt_plan_client')
     module.__file__=str(candidate/'tradingagents/strategies/chatgpt_plan_client.py')
-    def original(path):raise AssertionError('auth/profile file was read')
+    def original(path,*,deadline=None):raise AssertionError('auth/profile file was read')
     module._profile_identity=original
     module.ClientType=object()
+    auth=ModuleType('tradingagents.strategies.plan_auth')
+    auth.__file__=str(candidate/'tradingagents/strategies/plan_auth.py')
+    auth.read_profile_identity=original
+    auth._remaining=lambda deadline:None
+    auth.status=original
+    auth.get_plan_credentials=original
+    monkeypatch.setitem(sys.modules,auth.__name__,auth)
+    monkeypatch.setattr(tradingagents.strategies,'plan_auth',auth,raising=False)
     monkeypatch.setitem(sys.modules,module.__name__,module)
     monkeypatch.setattr(tradingagents.strategies,'chatgpt_plan_client',module,raising=False)
     tape._CONFIG['mode']='live_record'
@@ -201,8 +209,52 @@ def test_public_plan_profile_lookup_uses_exact_recorded_identity_without_auth(tm
     receipt=json.loads((Path(cfg['replay_state_dir'])/f'plan-profile-placeholder-{os.getpid()}.json').read_bytes())
     assert receipt['count']==2
     assert receipt['auth_lifecycle_replayed'] is False
-    assert receipt['scope']=='only_candidate_profile_identity_no_auth_record_access'
+    assert receipt['scope']=='only_candidate_public_profile_namespace_no_auth_record_access'
     assert not list(Path(cfg['replay_state_dir']).glob('failure-*.json'))
+
+
+def test_public_profile_reader_preserves_memo_namespace_without_reading_auth(tmp_path,monkeypatch):
+    from tools.live_workflow.runner import AUTH_PATH
+    cfg,module=plan_profile_case(tmp_path,monkeypatch)
+    auth=sys.modules['tradingagents.strategies.plan_auth']
+    status,credentials=auth.status,auth.get_plan_credentials
+    checked=[];monkeypatch.setattr(auth,'_remaining',lambda deadline:checked.append(deadline))
+    runtime.install_replay_runtime(cfg)
+    profile=module._profile_identity(AUTH_PATH)
+    # The native candidate memo independently reads this public namespace for
+    # every horizon; it cannot use the constructor-only profile adapter.
+    assert [auth.read_profile_identity(Path(AUTH_PATH),deadline=123.0) for _ in range(4)]==[profile]*4
+    assert checked==[123.0]*4
+    assert auth.status is status and auth.get_plan_credentials is credentials
+    assert not list(Path(cfg['replay_state_dir']).glob('failure-*.json'))
+
+
+@pytest.mark.parametrize('path',[None,'/different/auth.json','/home/hermes/.config/eventedge/../eventedge/plan-auth.json'])
+def test_public_profile_reader_denies_noncanonical_paths_without_auth(tmp_path,monkeypatch,path):
+    cfg,module=plan_profile_case(tmp_path,monkeypatch);runtime.install_replay_runtime(cfg)
+    with pytest.raises(tape.TapeError,match='offline_plan_profile_path_denied'):
+        sys.modules['tradingagents.strategies.plan_auth'].read_profile_identity(path,deadline=123.0)
+    with pytest.raises(tape.TapeError,match='recorded replay failures'):tape.assert_replay_complete()
+
+
+def test_public_profile_reader_preserves_native_deadline_guard(tmp_path,monkeypatch):
+    from tools.live_workflow.runner import AUTH_PATH
+    cfg,module=plan_profile_case(tmp_path,monkeypatch)
+    auth=sys.modules['tradingagents.strategies.plan_auth']
+    def expired(deadline):raise TimeoutError('native deadline exhausted')
+    monkeypatch.setattr(auth,'_remaining',expired)
+    runtime.install_replay_runtime(cfg)
+    with pytest.raises(TimeoutError,match='native deadline'):
+        auth.read_profile_identity(Path(AUTH_PATH),deadline=0)
+    assert not list(Path(cfg['replay_state_dir']).glob('plan-profile-placeholder-*.json'))
+
+
+def test_public_profile_reader_requires_candidate_origin_before_install(tmp_path,monkeypatch):
+    cfg,module=plan_profile_case(tmp_path,monkeypatch)
+    auth=sys.modules['tradingagents.strategies.plan_auth'];original=auth.read_profile_identity
+    auth.__file__=str(tmp_path/'foreign/plan_auth.py')
+    with pytest.raises(AcceptanceError,match='profile_reader_origin'):runtime.install_replay_runtime(cfg)
+    assert auth.read_profile_identity is original
 
 
 @pytest.mark.parametrize('profile',[None,'','\nunsafe','x'*513,42])

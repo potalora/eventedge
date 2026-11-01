@@ -81,6 +81,83 @@ def test_public_request_drops_secrets_and_preserves_semantics():
     assert 'limit=10' in result['url']
 
 
+def test_redirect_capture_and_real_requests_follow_replay_without_native_send(tmp_path,monkeypatch):
+    import io as streams
+    import requests
+    io=setup_tape(tmp_path)
+    calls=[];recording=True
+    target='https://example.org/final?keep=1&token=PRIVATE_TOKEN&Signature=PRIVATE_SIGNATURE&Key-Pair-Id=PRIVATE_KEYPAIR&Policy=PRIVATE_POLICY#PRIVATE_FRAGMENT'
+    def native(self,request,**kwargs):
+        assert recording,'offline replay reached native adapter'
+        calls.append(request.url)
+        response=requests.Response();response.request=request;response.url=request.url
+        response.status_code=301 if request.url=='https://example.org/start' else 200
+        response.headers=requests.structures.CaseInsensitiveDict(
+            {'Location':target} if response.status_code==301 else {'Content-Type':'application/json'})
+        response.raw=streams.BytesIO(b'' if response.status_code==301 else b'{"ok":true}')
+        return response
+    monkeypatch.setattr(requests.adapters.HTTPAdapter,'send',native)
+    io._install_requests()
+    with requests.Session() as client:
+        original=client.get('https://example.org/start')
+    assert original.json()=={'ok':True} and [r.status_code for r in original.history]==[301]
+    recordings=io.verify_tape(tmp_path)
+    stored=b''.join(path.read_bytes() for path in (tmp_path/'events').glob('*.json'))
+    assert b'PRIVATE_' not in stored
+    redirect=next(r for r in recordings if r['status']==301)
+    assert redirect['safe_headers']['location']=='https://example.org/final?keep=1'
+    recording=False;io=setup_tape(tmp_path,'offline_replay')
+    with requests.Session() as client:
+        response=client.get('https://example.org/start')
+    assert response.json()==original.json()
+    assert [r.status_code for r in response.history]==[301]
+    assert response.url=='https://example.org/final?keep=1'
+    assert len(calls)==2
+    io.assert_replay_complete()
+
+
+def test_historical_redirect_without_metadata_is_explicitly_unsupported(tmp_path):
+    io=setup_tape(tmp_path)
+    record=io.finish_event(event(io),status=301,safe_headers={})
+    record.pop('redirect_metadata',None)
+    io=setup_tape(tmp_path,'offline_replay')
+    with pytest.raises(io.TapeError,match='redirect metadata'):
+        io._replay_body(record,'requests')
+    with pytest.raises(io.TapeError,match='replay failures'):io.assert_replay_complete()
+
+
+@pytest.mark.parametrize('location',['https://user:PRIVATE_PASSWORD@example.org/path','https://example.org/'+('x'*32769)],ids=['userinfo','oversize'])
+def test_unretained_redirect_target_marks_new_capture_unreplayable(tmp_path,location):
+    io=setup_tape(tmp_path)
+    record=io.finish_event(event(io),status=302,safe_headers={'Location':location})
+    assert 'location' not in record['safe_headers']
+    assert record['redirect_metadata']['location_replayable'] is False
+    assert 'PRIVATE_PASSWORD' not in json.dumps(record)
+
+
+@pytest.mark.parametrize('key',['policy','sig','signature','AWSAccessKeyId','X-Amz-Signature','X-Goog-Credential'])
+def test_ordinary_query_fields_do_not_collapse_distinct_request_identity(key):
+    io=io_module()
+    first=io.public_http_request('GET','https://example.org/source?'+key+'=first')
+    second=io.public_http_request('GET','https://example.org/source?'+key+'=second')
+    assert first['url']!=second['url']
+    assert io._digest(io._canonical(first))!=io._digest(io._canonical(second))
+
+
+@pytest.mark.parametrize('query',[
+    'X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=PRIVATE_CREDENTIAL&X-Amz-Date=20261101T000000Z&X-Amz-Expires=600&X-Amz-SignedHeaders=host&X-Amz-Signature=PRIVATE_SIGNATURE&X-Amz-Security-Token=PRIVATE_SESSION',
+    'X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=PRIVATE_CREDENTIAL&X-Goog-Date=20261101T000000Z&X-Goog-Expires=600&X-Goog-SignedHeaders=host&X-Goog-Signature=PRIVATE_SIGNATURE',
+    'Signature=PRIVATE_SIGNATURE&Key-Pair-Id=PRIVATE_PAIR&Policy=PRIVATE_POLICY',
+    'AWSAccessKeyId=PRIVATE_ACCESS&Signature=PRIVATE_SIGNATURE&Expires=12345',
+])
+def test_recognized_signed_query_groups_redact_only_credentials(query):
+    io=io_module()
+    result=io.public_http_request('GET','https://example.org/source?keep=1&'+query)
+    assert 'PRIVATE_' not in result['url']
+    assert 'keep=1' in result['url']
+    assert io.public_http_request('GET',result['url'])==result
+
+
 def test_finra_pagination_headers_survive_capture_and_exact_replay(tmp_path):
     io=setup_tape(tmp_path)
     headers={'Record-Total':'12','Record-Offset':'0','Record-Limit':'13',
@@ -303,6 +380,32 @@ def test_swallowed_replay_miss_still_fails_completion(tmp_path):
     io.replay_event(boundary='sdk', operation='query', public_request={'symbol': 'ABC'})
     with pytest.raises(io.TapeError, match='replay failures'):
         io.assert_replay_complete()
+
+
+def test_lookup_diagnostics_bind_missing_request_without_prompt_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv('EVENTEDGE_LIVE_REPLAY_STATE',str(tmp_path/'cursor'))
+    io=setup_tape(tmp_path/'tape')
+    io=setup_tape(tmp_path/'tape','offline_replay')
+    request={'prompt':'PRIVATE_PROMPT_SENTINEL','system':'PRIVATE_SYSTEM_SENTINEL'}
+    with pytest.raises(io.TapeError,match='missing exact'):
+        io.replay_event(boundary='model_helper',operation='call_analysis_model',public_request=request)
+    failure=json.loads(next((tmp_path/'cursor').glob('failure-*.json')).read_bytes())
+    key=io._key(boundary='model_helper',operation='call_analysis_model',public_request=request)
+    assert failure=={'phase':'daily','reason':'exact_lookup_failed','lookup':{
+        'boundary':'model_helper','operation':'call_analysis_model',
+        'request_sha256':key['request_sha256'],'occurrence':0,'event_id':io._event_id(key,0)}}
+    assert 'PRIVATE_' not in json.dumps(failure)
+
+
+def test_lookup_diagnostics_identify_exhausted_duplicate_occurrence(tmp_path,monkeypatch):
+    monkeypatch.setenv('EVENTEDGE_LIVE_REPLAY_STATE',str(tmp_path/'cursor'))
+    io=setup_tape(tmp_path/'tape');io.finish_event(event(io),sdk_value=1)
+    io=setup_tape(tmp_path/'tape','offline_replay')
+    io.replay_event(boundary='sdk',operation='query',public_request={'symbol':'ABC'})
+    with pytest.raises(io.TapeError,match='missing exact'):
+        io.replay_event(boundary='sdk',operation='query',public_request={'symbol':'ABC'})
+    failure=json.loads(next((tmp_path/'cursor').glob('failure-*.json')).read_bytes())
+    assert failure['lookup']['occurrence']==1
 
 
 def test_recorded_source_timeout_replays_native_exception(tmp_path):

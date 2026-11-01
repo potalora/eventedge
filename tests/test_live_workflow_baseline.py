@@ -29,6 +29,27 @@ def campaign(tmp_path):
     return root,hashlib.sha256((root/'contract.json').read_bytes()).hexdigest()
 
 
+
+def private_python(tmp_path):
+    # Hosted toolcache modes are not the runtime safety policy under test.
+    # Copy bytes only, then set permissions on this test-owned inode exclusively.
+    path=tmp_path/'owned-python'
+    path.write_bytes(Path(sys.executable).resolve().read_bytes())
+    path.chmod(0o500)
+    return path
+
+
+def test_private_python_fixture_preserves_writable_source_without_reusing_inode(tmp_path,monkeypatch):
+    source=tmp_path/'host-python';source.write_bytes(b'controlled interpreter bytes')
+    source.chmod(0o775);before=source.stat()
+    monkeypatch.setattr(sys,'executable',str(source))
+    copied=private_python(tmp_path)
+    assert copied.read_bytes()==source.read_bytes()
+    assert copied.stat().st_mode & 0o777==0o500
+    assert copied.stat().st_ino!=source.stat().st_ino
+    assert source.stat().st_mode==before.st_mode
+    assert source.stat().st_ino==before.st_ino
+
 def test_complete_private_baseline_and_fresh_restore(tmp_path):
     root,pin=campaign(tmp_path)
     snap=tmp_path/'baseline'
@@ -103,17 +124,18 @@ def test_unsafe_or_unbounded_sources_rejected(tmp_path,kind):
 
 def test_owned_python_and_internal_venv_links_preserved(tmp_path):
     root,pin=campaign(tmp_path)
-    runtime={'python_target':str(Path(sys.executable).resolve()),
-        'python_sha256':hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest()}
+    python=private_python(tmp_path)
+    runtime={'python_target':str(python),
+        'python_sha256':hashlib.sha256(python.read_bytes()).hexdigest()}
     (root/'contract.json').write_text(json.dumps({'owned_runtime':runtime}))
     pin=hashlib.sha256((root/'contract.json').read_bytes()).hexdigest()
-    (root/'repo/.venv/bin/python').symlink_to(Path(sys.executable).resolve())
+    (root/'repo/.venv/bin/python').symlink_to(python)
     (root/'repo/.venv/bin/python3').symlink_to('python')
     (root/'repo/.venv/lib').mkdir()
     (root/'repo/.venv/lib64').symlink_to('lib')
     (root/'cache/internal').symlink_to('result')
     receipt=baseline.capture_baseline(root,tmp_path/'baseline',pin)
-    assert receipt['snapshot_inventory']['repo/.venv/bin/python']['target_sha256']==hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest()
+    assert receipt['snapshot_inventory']['repo/.venv/bin/python']['target_sha256']==hashlib.sha256(python.read_bytes()).hexdigest()
     assert (tmp_path/'baseline/tree/cache/internal').read_text()=='retained result'
     baseline.verify_baseline(tmp_path/'baseline',receipt['receipt_sha256'])
 
@@ -150,8 +172,8 @@ def test_non_database_sidecar_names_are_preserved(tmp_path):
 
 
 def test_unpinned_external_venv_link_rejected(tmp_path):
-    root,pin=campaign(tmp_path)
-    (root/'repo/.venv/bin/python').symlink_to(Path(sys.executable).resolve())
+    root,pin=campaign(tmp_path);python=private_python(tmp_path)
+    (root/'repo/.venv/bin/python').symlink_to(python)
     with pytest.raises(AcceptanceError,match='unpinned_python'):
         baseline.capture_baseline(root,tmp_path/'baseline',pin)
 
@@ -231,7 +253,7 @@ def test_imported_original_baseline_preserves_canonical_absolute_paths(tmp_path)
 def test_unmapped_root_python_requires_exact_pin_overflow_uid_and_readonly_mount(
         tmp_path,monkeypatch,owner,readonly,valid_pin,writable_mode,accepted):
     from types import SimpleNamespace
-    root,pin=campaign(tmp_path);python=Path(sys.executable).resolve()
+    root,pin=campaign(tmp_path);python=private_python(tmp_path)
     runtime={'python_target':str(python),
         'python_sha256':hashlib.sha256(python.read_bytes()).hexdigest() if valid_pin else '0'*64}
     (root/'contract.json').write_text(json.dumps({'owned_runtime':runtime}))
@@ -242,7 +264,7 @@ def test_unmapped_root_python_requires_exact_pin_overflow_uid_and_readonly_mount
         info=original_lstat(path,*args,**kwargs)
         if path==python:
             fields=list(info);fields[4]=owner
-            if writable_mode:fields[0]|=0o022
+            fields[0]=(fields[0]&~0o022)|(0o022 if writable_mode else 0)
             return os.stat_result(fields)
         return info
     monkeypatch.setattr(Path,'lstat',mapped_lstat)
