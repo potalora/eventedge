@@ -438,16 +438,24 @@ def test_forbidden_model_auth_replay_is_sticky(tmp_path):
 
 
 @pytest.mark.parametrize('asynchronous', [False, True])
-def test_curl_unsupported_replay_is_sticky_after_consumption(tmp_path, monkeypatch, asynchronous):
+@pytest.mark.parametrize('status', [200, 401])
+def test_curl_exact_replay_without_native_transport(tmp_path, monkeypatch, asynchronous, status):
     import asyncio
-    from types import SimpleNamespace
-    from curl_cffi.requests import Session, AsyncSession
+    import curl_cffi
+    from curl_cffi.requests import Session, AsyncSession, Response, Headers, exceptions
     io = setup_tape(tmp_path)
-    response = SimpleNamespace(status_code=200, content=b'hello', headers={})
+    calls = []
     def native(self, method, url, *args, **kwargs):
+        calls.append(url)
+        response = Response()
+        response.status_code = status
+        response.ok = 200 <= status < 400
+        response.content = b'{"value":"caf\xe9","occurrence":' + str(len(calls)).encode() + b'}'
+        response.headers = Headers({'Content-Type':'application/json; charset=iso-8859-1',
+            'Content-Encoding':'gzip', 'X-Private':'not retained'})
         return response
     async def async_native(self, method, url, *args, **kwargs):
-        return response
+        return native(self, method, url, *args, **kwargs)
     monkeypatch.setattr(Session, 'request', native)
     monkeypatch.setattr(AsyncSession, 'request', async_native)
     io._install_curl()
@@ -459,10 +467,130 @@ def test_curl_unsupported_replay_is_sticky_after_consumption(tmp_path, monkeypat
             return asyncio.run(run())
         with Session() as client:
             return client.get('https://example.org/data')
-    assert call() is response
+    originals = [call(), call()]
+    def forbidden(*args, **kwargs):
+        pytest.fail('native Curl operation attempted')
+    monkeypatch.setattr(curl_cffi.Curl, 'perform', forbidden)
+    monkeypatch.setattr(curl_cffi.AsyncCurl, 'add_handle', forbidden)
     io = setup_tape(tmp_path, 'offline_replay')
-    with pytest.raises(io.TapeError, match='curl SDK replay unsupported'):
+    for original in originals:
+        response = call()
+        assert type(response) is Response and response.curl is None
+        assert response.status_code == original.status_code
+        assert response.ok == original.ok
+        assert response.content == original.content
+        assert response.text == original.text
+        assert response.json() == original.json()
+        assert response.headers['Content-Encoding'] == 'gzip'
+        assert 'X-Private' not in response.headers
+        assert response.request.url == 'https://example.org/data'
+        assert response.request.method == 'GET'
+        if status >= 400:
+            with pytest.raises(exceptions.HTTPError) as error:
+                response.raise_for_status()
+            assert error.value.response is response
+        else:
+            response.raise_for_status()
+    assert len(calls) == 2
+    io.assert_replay_complete()
+    with pytest.raises(io.TapeError, match='missing exact'):
         call()
+    with pytest.raises(io.TapeError, match='replay failures'):
+        io.assert_replay_complete()
+
+
+@pytest.fixture
+def curl_recording(tmp_path, monkeypatch):
+    import asyncio
+    from curl_cffi import requests as module
+    io = setup_tape(tmp_path)
+    calls = []
+    def native(self, method, url, *args, **kwargs):
+        calls.append(url)
+        response = module.Response()
+        response.content = b'{"value":1}'
+        return response
+    async def async_native(self, method, url, *args, **kwargs):
+        return native(self, method, url, *args, **kwargs)
+    monkeypatch.setattr(module.Session, 'request', native)
+    monkeypatch.setattr(module.AsyncSession, 'request', async_native)
+    io._install_curl()
+    def call(asynchronous=False, *args, **kwargs):
+        if asynchronous:
+            async def run():
+                async with module.AsyncSession() as client:
+                    return await client.request('GET', 'https://example.org/data', *args, **kwargs)
+            return asyncio.run(run())
+        with module.Session() as client:
+            return client.request('GET', 'https://example.org/data', *args, **kwargs)
+    return io, calls, call
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('unsupported', [
+    {'stream':True}, {'content_callback':lambda data:None}, {'content':b'uncaptured'},
+    {'files':{'file':b'uncaptured'}}, {'multipart':object()},
+    {'default_encoding':lambda data:'utf-8'},
+])
+def test_curl_unsupported_replay_forms_fail_sticky(tmp_path, curl_recording, asynchronous, unsupported):
+    io, calls, call = curl_recording
+    call(asynchronous)
+    io = setup_tape(tmp_path, 'offline_replay')
+    with pytest.raises(io.TapeError, match='unsupported curl replay request'):
+        call(asynchronous, **unsupported)
+    assert len(calls) == 1
+    with pytest.raises(io.TapeError, match='replay failures'):
+        io.assert_replay_complete()
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('fault', ['incomplete', 'representation', 'status', 'missing_body', 'unfinished'])
+def test_curl_incompatible_capture_fails_sticky(tmp_path, curl_recording, asynchronous, fault):
+    io, calls, call = curl_recording
+    call(asynchronous)
+    record = io.verify_tape(tmp_path)[0]
+    path = tmp_path/'events'/(record['event_id']+'.json')
+    if fault == 'unfinished':
+        path.unlink()
+    else:
+        if fault == 'incomplete':
+            record['failure'] = {'type':'IncompleteBody', 'reason':'controlled incomplete body'}
+        elif fault == 'representation':
+            record['representation'] = 'http_raw'
+        elif fault == 'status':
+            record['status'] = None
+        else:
+            record.update(response_file=None, response_sha256=None, response_bytes=0)
+        record.pop('record_sha256')
+        record['record_sha256'] = io._digest(io._canonical(record))
+        path.write_bytes(io._canonical(record))
+    io = setup_tape(tmp_path, 'offline_replay')
+    with pytest.raises(io.TapeError, match='missing exact|incompatible curl capture'):
+        call(asynchronous)
+    assert len(calls) == 1
+    with pytest.raises(io.TapeError, match='replay failures'):
+        io.assert_replay_complete()
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+def test_curl_exact_request_and_phase_still_required(tmp_path, curl_recording, asynchronous):
+    io, calls, call = curl_recording
+    call(asynchronous, params={'symbol':'ABC'})
+    io = setup_tape(tmp_path, 'offline_replay')
+    with pytest.raises(io.TapeError, match='missing exact'):
+        call(asynchronous, params={'symbol':'XYZ'})
+    io = setup_tape(tmp_path, 'offline_replay', phase='preflight')
+    with pytest.raises(io.TapeError, match='missing exact'):
+        call(asynchronous, params={'symbol':'ABC'})
+    assert len(calls) == 1
+
+
+def test_curl_positional_request_arguments_fail_sticky(tmp_path, curl_recording):
+    io, calls, call = curl_recording
+    call()
+    io = setup_tape(tmp_path, 'offline_replay')
+    with pytest.raises(io.TapeError, match='unsupported curl replay request'):
+        call(False, {'uncaptured':'positional params'})
     with pytest.raises(io.TapeError, match='replay failures'):
         io.assert_replay_complete()
 

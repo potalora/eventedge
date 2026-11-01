@@ -171,8 +171,15 @@ def install(*, config_path=None):
     from .recorded_models import install_model_io
     arguments={key:config[key] for key in ('mode','tape_dir','run_identity')}
     arguments['phase']=phase
+    if config['mode']=='offline_replay':
+        # Cleaned source children recover the same private cursor from the pinned
+        # offline configuration, even when the native launcher clears its env.
+        os.environ['EVENTEDGE_LIVE_REPLAY_STATE']=config['replay_state_dir']
     install_source_io(**arguments)
     install_model_io(**arguments)
+    if config['mode']=='offline_replay':
+        from .replay_runtime import install_replay_runtime
+        install_replay_runtime(config)
 
 
 def _install_log_redaction():

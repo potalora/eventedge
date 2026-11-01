@@ -752,6 +752,45 @@ def _install_httpx(module):
         cls._send_single_request = make_wrapper(original, asynchronous)
 
 
+def _curl_replay_response(module, record, session, args, kwargs):
+    """Rebuild the retained decoded-body surface, without allocating a Curl.
+
+    Cookies, redirect history, timing and the server's reason phrase were never
+    retained. They are not replay evidence; the request URL and an empty reason
+    are used rather than inventing a final redirect URL or server message.
+    """
+    unsupported = (args or kwargs.get('stream') or any(kwargs.get(name) is not None
+        for name in ('content_callback', 'content', 'files', 'multipart'))
+        or not isinstance(kwargs.get('default_encoding', 'utf-8'), str)
+        or getattr(session, 'response_class', module.Response) is not module.Response)
+    if unsupported:
+        record_replay_failure('unsupported_curl_replay_request')
+        raise TapeError('unsupported curl replay request')
+    representation = record.get('representation')
+    decoded = representation == 'sdk_decoded_http' or (representation == 'controlled_mutation'
+        and record.get('lane') == 'controlled_mutation' and isinstance(record.get('parent'), dict))
+    if (not decoded or record.get('boundary') != 'sdk_decoded_http'
+            or record.get('operation') != 'curl_cffi.request' or record.get('failure') is not None
+            or type(record.get('status')) is not int or not 100 <= record['status'] <= 599
+            or record.get('response_file') is None or record.get('sdk_value') is not None):
+        record_replay_failure('incompatible_curl_capture')
+        raise TapeError('incompatible curl capture; complete decoded response required')
+    request = record['public_request']
+    response = module.Response(request=module.Request(url=request['url'],
+        headers=module.Headers(request['headers']), method=request['method']))
+    response.url = request['url']
+    response.reason = ''
+    response.status_code = record['status']
+    response.ok = 200 <= response.status_code < 400
+    response.headers = module.Headers(record['safe_headers'])
+    response.default_encoding = kwargs.get('default_encoding', 'utf-8')
+    # The SDK already decoded compression during acquisition. Response.content
+    # is those exact bytes; its native text/json properties do not decompress.
+    with (_configuration()['root'] / record['response_file']).open('rb') as body:
+        response.content = body.read()
+    return response
+
+
 def _install_curl():
     try:
         from curl_cffi import requests as module
@@ -790,8 +829,7 @@ def _install_curl():
                         return await original(self, method, url, *args, **kwargs)
                     event = prepare(self, method, url, kwargs)
                     if _configuration()['mode'] == 'offline_replay':
-                        record_replay_failure('unsupported_curl_sdk_replay')
-                        raise TapeError('curl SDK replay unsupported; retained evidence only')
+                        return _curl_replay_response(module, event, self, args, kwargs)
                     try:
                         response = await original(self, method, url, *args, **kwargs)
                     except Exception as exc:
@@ -805,8 +843,7 @@ def _install_curl():
                         return original(self, method, url, *args, **kwargs)
                     event = prepare(self, method, url, kwargs)
                     if _configuration()['mode'] == 'offline_replay':
-                        record_replay_failure('unsupported_curl_sdk_replay')
-                        raise TapeError('curl SDK replay unsupported; retained evidence only')
+                        return _curl_replay_response(module, event, self, args, kwargs)
                     try:
                         response = original(self, method, url, *args, **kwargs)
                     except Exception as exc:

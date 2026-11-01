@@ -415,7 +415,16 @@ def prepare(args):
     row=json.loads((root/'generation.json').read_text())
     require(row['git_commit'] == args.candidate_commit and row['config_sha256'] == sha(root/'profile.json'), 'generation_identity')
     verify_contract(root)
-    return {'prepared':True,'root':str(root),'generation':row['gen_id'],'deployed':False}
+    result={'prepared':True,'root':str(root),'generation':row['gen_id'],'deployed':False}
+    if getattr(args,'baseline_destination',None) is not None:
+        # Preparation has no active native child and no acquisition has begun.
+        # The full copy is outside the campaign, so later workers cannot rewrite
+        # their starting evidence through ordinary candidate paths.
+        from .baseline import capture_baseline
+        baseline=capture_baseline(root,args.baseline_destination,sha(root/'contract.json'))
+        result['cold_baseline']={'root':str(no_symlinks(args.baseline_destination)),
+            'receipt_sha256':baseline['receipt_sha256'],'acquisition_started':False}
+    return result
 
 
 def _optional_checkout(root, commit):
@@ -755,6 +764,7 @@ def main(argv=None):
     prep.add_argument('--python',default=str(Path(sys.executable).resolve()))
     prep.add_argument('--python-version',default='3.12')
     prep.add_argument('--profile-file',help='Explicit frozen profile; must match --profile-sha256. Defaults to candidate stabilization-v3.json.')
+    prep.add_argument('--baseline-destination',help='New private directory outside the campaign for its complete pre-acquisition replay baseline.')
     for key in ('observer-root','observer-commit','native-root','native-commit'):
         prep.add_argument('--'+key)
     run=sub.add_parser('native'); replay=sub.add_parser('accepted-replay')

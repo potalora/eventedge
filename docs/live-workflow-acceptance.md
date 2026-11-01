@@ -39,7 +39,8 @@ python scripts/run_live_workflow_acceptance.py prepare \
   --python /absolute/resolved/python3.12 --python-version 3.12 \
   --git-sha256 ROOT_VERIFIED_GIT_SHA256 \
   --uname-sha256 ROOT_VERIFIED_UNAME_SHA256 \
-  --session 2026-10-30 --destination /private/new-campaign
+  --session 2026-10-30 --destination /private/new-campaign \
+  --baseline-destination /private/new-campaign-baseline
 ```
 
 The trusted supervisor must verify `/usr/bin/git` and `/usr/bin/uname` are regular,
@@ -71,6 +72,14 @@ verified deployment's explicit 900-second wait; native model defaults must remai
 Optional `--observer-root/--observer-commit` and
 `--native-root/--native-commit` pin additional clean reviewed checkouts. These inputs
 identify external composition code; they do not claim it has run.
+
+`--baseline-destination` captures the complete prepared campaign before acquisition,
+including its Git/worktree/runtime identities, frozen configuration and every
+state/cache/result path. SQLite files use coherent backups including committed WAL
+contents. The separate private baseline retains byte/mode inventories, a content
+receipt and source-stability evidence; each scenario restores a fresh copy at the
+original absolute path inside its supervisor namespace. No accepted tables are
+deleted to invent a pristine state. Keep the receipt hash outside the baseline.
 
 ## External boundary and single native attempt
 
@@ -295,6 +304,49 @@ answer for a changed prompt.
 
 Unit tests use dummy repositories, private SQLite WAL data and controlled local
 subprocesses. They read no credentials and contact no live providers or production.
+
+## Cold recorded workflow
+
+`tools/live_workflow/cold_worker.py` runs the unchanged candidate prospective
+controller, shell, screen/governed checks, daily command and independent report
+builder against a complete pristine baseline and an immutable completed tape.
+It requires an external supervisor to restore that baseline at its canonical
+absolute path, deny kernel networking, hide model auth and production state,
+mount dependencies/tooling/tape read-only and contain all descendants. Invoke it
+with the accepted base interpreter and `-I -S`; it refuses ordinary interpreter
+startup. The separate output and private restored campaign preserve every attempt.
+
+The worker verifies the baseline receipt, contract, runtime, candidate, profile
+and exact tape identity before installing a separately recorded startup overlay
+in the private copy. Curl responses use the actual installed response classes.
+Unsupported streaming/metadata forms fail closed. Recorded requests retain phase,
+public request and duplicate occurrence; a missing request remains a sticky
+failure even when application code catches it. Model responses never satisfy a
+changed prompt. The initial worker uses the real clock and therefore may be
+blocked when original source queries no longer match; a blocked run is evidence
+of a replay limitation, not successful workflow coverage.
+
+Anonymous Yahoo authentication is a separate boundary: cookies and crumbs were
+not recorded. An explicitly reported offline-only placeholder replaces just the
+SDK's anonymous crumb acquisition; all source request construction and response
+decoding remain native and exact, and every lower authentication/network attempt
+is denied. This does not establish replay of the authentication lifecycle.
+
+A baseline passes only after complete tape consumption, all sixteen-book native
+checks, independent canonical report reproduction and process quiescence. Fault
+workers additionally require a hash-pinned successful baseline with the same
+starting content, contract, session, tape and tool implementation. They modify one
+identified recorded response. Source faults must reach the governed SIP request,
+produce its matching native ticker rejection and valid independent report, and
+commit no economic effect. Model malformed-output cases run the owning native
+parser as part of the full workflow. Unreached mutations, unknown downstream
+requests, corrupt databases, report failures and lingering descendants cannot
+pass. The supervisor verifies original evidence again after cgroup cleanup.
+
+Cold replay still does not establish actual ordinary timer firing, naturally
+aligned observer acceptance, multi-session continuity or future fills. Those
+claims require their own real observations; a successful empty portfolio session
+must not be presented as nonzero fill coverage.
 
 ## October 31, 2026 execution evidence
 
