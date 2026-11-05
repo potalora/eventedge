@@ -19,6 +19,7 @@ from tradingagents.strategies.orchestration.source_repair_intervention import (
     refresh_intervention_proposals,
 )
 from tradingagents.strategies.orchestration.source_repair import (
+    EvidenceChangedDuringCapture,
     EvidenceQualificationError,
     MAX_REQUEST_BYTES,
     _Capture,
@@ -64,6 +65,16 @@ def main(argv=None):
             )
         print(json.dumps(result, sort_keys=True, allow_nan=False))
         return 0
+    except EvidenceChangedDuringCapture:
+        # Only projection may ask the broker for a fresh bounded subprocess.
+        # Admission/export retains its existing single-attempt failure policy.
+        print(
+            "Source intervention projection temporarily unavailable: evidence changed during capture."
+            if arguments.operation == "interventions"
+            else "Source repair unavailable: evidence changed during capture.",
+            file=sys.stderr,
+        )
+        return 75 if arguments.operation == "interventions" else 2
     except EvidenceQualificationError as error:
         print('Source repair evidence unavailable: ' + error.reason_code + '.', file=sys.stderr)
         return 2

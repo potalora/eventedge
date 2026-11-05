@@ -342,6 +342,10 @@ def build_repair_requests(
         raise ValueError("invalid source repair report contract") from error
 
 
+class EvidenceChangedDuringCapture(ValueError):
+    """An unstable capture must be discarded and corroborated afresh."""
+
+
 class _Capture:
     """No-follow descriptor traversal with before/after/final identity checks."""
 
@@ -399,11 +403,11 @@ class _Capture:
                         raise ValueError("evidence byte bound")
                     chunks.append(chunk)
                 if self._token(before) != self._token(os.fstat(leaf)):
-                    raise ValueError("evidence changed during capture")
+                    raise EvidenceChangedDuringCapture("evidence changed during capture")
                 data = b"".join(chunks)
                 current = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
                 if self._token(before) != self._token(current):
-                    raise ValueError("evidence replaced during capture")
+                    raise EvidenceChangedDuringCapture("evidence replaced during capture")
             finally:
                 os.close(leaf)
         finally:
@@ -411,7 +415,7 @@ class _Capture:
         key = path.as_posix()
         if key in self.files:
             if self.files[key] != (self._token(before), data):
-                raise ValueError("evidence changed during capture")
+                raise EvidenceChangedDuringCapture("evidence changed during capture")
         else:
             if len(self.files) >= MAX_FILES or self.total + len(data) > MAX_TOTAL_BYTES:
                 raise ValueError("evidence bundle capacity exhausted")
@@ -619,6 +623,47 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
                 f"docs/reports/{session}-{generation}-operational-report.json",
                 f"docs/reports/{session}-{generation}-operational-report.md",
             }
+            operating_profile, frozen_profile = None, None
+            config_file = metadata.get("config_file")
+            if config_file is None:
+                if (
+                    metadata.get("config_sha256") is not None
+                    or report.get("profile_sha256") is not None
+                ):
+                    raise ValueError("declared frozen profile evidence unavailable")
+            else:
+                from .generation_config import (
+                    FROZEN_CONFIG_NAME,
+                    MAX_CONFIG_BYTES,
+                    read_generation_config,
+                )
+                from .operating_contract import configured, profile_contract
+
+                relative = Path("data/generations") / generation / FROZEN_CONFIG_NAME
+                if type(config_file) is not str:
+                    raise ValueError("noncanonical frozen profile path")
+                declared = Path(config_file)
+                if not declared.is_absolute():
+                    declared = capture.root / declared
+                if declared != capture.root / relative:
+                    raise ValueError("noncanonical frozen profile path")
+                digest = metadata.get("config_sha256")
+                if (
+                    type(digest) is not str
+                    or not _DIGEST.fullmatch(digest)
+                    or report.get("profile_sha256") != digest
+                ):
+                    raise ValueError("frozen profile/report digest mismatch")
+                raw_config = capture.read(relative, MAX_CONFIG_BYTES)
+                target = stage / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw_config)
+                _, frozen_profile, verified_digest = read_generation_config(target, digest)
+                if configured(frozen_profile):
+                    operating_profile = profile_contract(
+                        frozen_profile, profile_sha256=verified_digest
+                    )
+                selected.add(relative.as_posix())
             from .source_inputs import (
                 CONTRACT_VERSION,
                 FULL_FILING_MAX_NODES,
@@ -700,6 +745,8 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
                     day.isoformat(),
                     commit,
                     lambda code, scope=None: errors.append(code),
+                    operating_profile=operating_profile,
+                    frozen_config=frozen_profile,
                 )
                 if (
                     "accepted_sources_invalid" in errors

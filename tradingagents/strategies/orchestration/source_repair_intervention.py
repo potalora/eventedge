@@ -14,6 +14,7 @@ import re
 from .source_coverage import canonical_source_health_failures
 from .source_incidents import MAX_REPORT_BYTES, _PROVIDERS, _SAFE_ID
 from .source_repair import (
+    EvidenceChangedDuringCapture,
     _COMMIT,
     _DIGEST,
     _GENERATION,
@@ -531,6 +532,8 @@ def publish_intervention_proposal(
                     outcomes.append(outcome)
                 except FileNotFoundError:
                     continue  # Absence alone makes no claim that a worker failed.
+                except EvidenceChangedDuringCapture:
+                    raise
                 except (ValueError, OSError, TypeError, KeyError):
                     envelope["diagnostics"] = ["broker_outcome_invalid"]
                     outcomes.append(
@@ -554,6 +557,8 @@ def publish_intervention_proposal(
                 now=now,
             )
             envelope["status"] = "available"
+        except EvidenceChangedDuringCapture:
+            raise
         except (ValueError, TypeError, KeyError):
             envelope.update(
                 status="unavailable", cases=[], diagnostics=["report_unavailable"]
@@ -634,6 +639,8 @@ def refresh_intervention_proposals(repo_root, *, now=None):
                         expected_session=session,
                     )
                 )
+            except EvidenceChangedDuringCapture:
+                raise
             except (OSError, ValueError, TypeError, KeyError):
                 results.append(
                     {
@@ -650,6 +657,8 @@ def refresh_intervention_proposals(repo_root, *, now=None):
                 from .enrichment_monitor import publish_enrichment_monitor
                 enrichment_results.append(publish_enrichment_monitor(
                     capture.root, report, paths, metadata=metadata, now=clock))
+            except EvidenceChangedDuringCapture:
+                raise
             except (OSError, ValueError, TypeError, KeyError):
                 enrichment_results.append({"path": None, "status": "unavailable",
                     "generation_id": generation, "diagnostics": ["enrichment_monitor_unavailable"]})
