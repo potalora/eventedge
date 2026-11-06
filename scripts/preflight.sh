@@ -14,8 +14,8 @@ VENV_PYTHON="${EVENTEDGE_PYTHON:-$REPO_ROOT/.venv/bin/python}"
 LOG_DIR="${EVENTEDGE_LOG_DIR:-$REPO_ROOT/data/logs}"
 mkdir -p "$LOG_DIR"
 
-TODAY=$(date +%Y-%m-%d)
-DOW=$(date +%u)  # 1=Monday ... 7=Sunday
+TODAY=$(TZ=America/New_York date +%Y-%m-%d)
+DOW=$(TZ=America/New_York date +%u)  # 1=Monday ... 7=Sunday
 
 if [ "$DOW" -ge 6 ]; then
     echo "$TODAY: Weekend, skipping preflight."

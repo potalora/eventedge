@@ -72,15 +72,8 @@ class _Prices:
 
     def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
         return {
-            (symbol, MONDAY): AdjustedClose(
-                symbol,
-                MONDAY,
-                Decimal("100"),
-                "fixture",
-                PROCESSED,
-            )
-            for symbol in symbols
-            if start_session <= MONDAY <= end_session_inclusive
+            (symbol, session): AdjustedClose(symbol, session, Decimal("100"), "fixture", PROCESSED)
+            for symbol in symbols for session in (start_session, end_session_inclusive)
         }
 
 
@@ -509,7 +502,7 @@ def test_sequential_intent_rebuild_preserves_current_pending_and_self_volatility
         rebuilt = executor._current_intent_policy_context(
             MONDAY,
             due.intent_id,
-            {"DUE": Decimal("100")},
+            {"DUE": Decimal("100"), "HELD": Decimal("100")},
             {},
             baseline,
         )

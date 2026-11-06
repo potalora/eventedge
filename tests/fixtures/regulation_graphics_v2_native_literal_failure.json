@@ -1,0 +1,78 @@
+{
+  "origin": {
+    "kind": "retained_native_failed_attempt",
+    "source_receipt_sha256": "23065910a8c6c9775b6d57621983581a73c0d67382688504886334cedeed1213",
+    "observed_completed_at": "2026-10-15T23:59:21.481038+00:00",
+    "semantic_acceptance": false
+  },
+  "attempt": {
+    "graphics_batches": [],
+    "graphics_failure": {
+      "asset_ids": [
+        "EP05OC26.007"
+      ],
+      "failure_reason": "invalid_regulation_graphics_literal",
+      "model_call_started": true,
+      "model_provenance": {
+        "billing_mode": "chatgpt_plan",
+        "configured_model": "gpt-6-luna",
+        "document_inputs": [
+          {
+            "filename": "EP05OC26.007.png",
+            "media_type": "image/png",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "size_bytes": 8799
+          }
+        ],
+        "effective_output_limit": null,
+        "identity_status": "unpinned",
+        "reasoning_effort": "high",
+        "response_id": "resp_05172974ac48522c016ad168bb038c87d281d3d6e369a7a61a",
+        "returned_model": "gpt-6-luna",
+        "returned_revision": null,
+        "role": "bounded"
+      },
+      "model_request": {
+        "effort": "high",
+        "max_tokens": 4096,
+        "model": "gpt-6-luna",
+        "prompt_bytes": 1454,
+        "prompt_sha256": "bc8c5bd3ae31907ecdc214157fe6c6a05207c56620426741871d102153e66f98",
+        "request_sha256": "e0ba70f84d39b08325a81a55da131ee51b26a30e19325ca0abbc2e48417e4142",
+        "role": "bounded",
+        "system_bytes": 4293,
+        "system_sha256": "a6ad6593f3d78d8851698e380116cf8ee64e1a127babd85cc8d713fa54d51518",
+        "temperature": 0.0,
+        "version": "research-model-request-v1"
+      },
+      "receipt_sha256": "6c1e312259c8aa723ae69306bdbd92ee3e0436681696123cb815160ccde55ac0",
+      "request_identity": {
+        "assets": [
+          {
+            "context": "tiple share \nclasses as of the December 2025. Table 3 provides further detail on \ncounts and net assets of registered closed-end funds by type.\n---------------------------------------------------------------------------\n\n    \\257\\ Proposed rule 23c-3(c).\n    \\258\\ These percent changes are calculated relative to 2016 net \nasset levels of $311 billion ($262 billion in registered closed-end \nfunds plus $49 billion in BDCs) across 608 regulated closed-end \nfunds (530 registered closed-end funds plus 78 BDCs).\n\n[graphic TP05OC26.007]\n\n\n\n[[Page 63427]]\n\n\n    The proposed amendments would also modify several items on Form N-2 \nfor regulated closed-end funds to provide disclosures regarding their \nmulti-share class and master-feeder structures. Table 4 provides \ndetails on counts and net assets for registered closed-end feeder funds \nin master-feeder structures.\n[GRAPHIC] [TIFF OMITTED] TP05OC26.008\n\n    Advisers to Regulated Closed-End Funds. The proposed amendments \nwould affect registered investment advisers to regulated closed-end \nfun",
+            "filename": "EP05OC26.007.png",
+            "id": "EP05OC26.007",
+            "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+            "size_bytes": 8799
+          }
+        ],
+        "recognition_receipt_sha256": null,
+        "request_identity_sha256": "63bf9500d507dc197c105ecf15766adfd669f63a2f9ef89ea66a7f64784eb7c0",
+        "stage": "recognition",
+        "version": "regulation-graphics-request-v2"
+      },
+      "response_bytes": 2821,
+      "response_encoding": "utf-8",
+      "response_over_limit": false,
+      "response_received": true,
+      "response_sha256": "77d3400de9bc6a5ac3c968098db9d5e113a08e9dac344fe9a74a553c957b032b",
+      "response_text": "{\"version\":\"regulation-graphics-recognition-v1\",\"request_identity_sha256\":\"63bf9500d507dc197c105ecf15766adfd669f63a2f9ef89ea66a7f64784eb7c0\",\"graphics\":[{\"id\":\"EP05OC26.007\",\"sha256\":\"ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7\",\"status\":\"complete\",\"kind\":\"table\",\"transcript\":\"Table 3: Counts and Net Assets of Registered Closed-end Funds\\n\\n[blank column header] | All Registered Closed-end Funds | Interval Funds | Tender Offer Funds | Traded Closed-end Funds\\nCount | 706 | 139 | 174 | 393\\nNet Assets\\n($ billions) | 428 | 101 | 100 | 227\",\"elements\":[{\"id\":\"title\",\"kind\":\"heading\",\"text\":\"Table 3: Counts and Net Assets of Registered Closed-end Funds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col_stub\",\"kind\":\"column\",\"text\":null,\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col_all\",\"kind\":\"column\",\"text\":\"All Registered\\nClosed-end\\nFunds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col_interval\",\"kind\":\"column\",\"text\":\"Interval\\nFunds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col_tender\",\"kind\":\"column\",\"text\":\"Tender\\nOffer Funds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"col_traded\",\"kind\":\"column\",\"text\":\"Traded\\nClosed-end\\nFunds\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"row_count\",\"kind\":\"row\",\"text\":\"Count\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"row_assets\",\"kind\":\"row\",\"text\":\"Net Assets\\n($ billions)\",\"source\":\"image\",\"references\":[],\"precision\":\"printed\"},{\"id\":\"unit_assets\",\"kind\":\"unit\",\"text\":\"$ billions\",\"source\":\"image\",\"references\":[\"row_assets\"],\"precision\":\"printed\"},{\"id\":\"cell_count_all\",\"kind\":\"cell\",\"text\":\"706\",\"source\":\"image\",\"references\":[\"row_count\",\"col_all\"],\"precision\":\"printed\"},{\"id\":\"cell_count_interval\",\"kind\":\"cell\",\"text\":\"139\",\"source\":\"image\",\"references\":[\"row_count\",\"col_interval\"],\"precision\":\"printed\"},{\"id\":\"cell_count_tender\",\"kind\":\"cell\",\"text\":\"174\",\"source\":\"image\",\"references\":[\"row_count\",\"col_tender\"],\"precision\":\"printed\"},{\"id\":\"cell_count_traded\",\"kind\":\"cell\",\"text\":\"393\",\"source\":\"image\",\"references\":[\"row_count\",\"col_traded\"],\"precision\":\"printed\"},{\"id\":\"cell_assets_all\",\"kind\":\"cell\",\"text\":\"428\",\"source\":\"image\",\"references\":[\"row_assets\",\"col_all\",\"unit_assets\"],\"precision\":\"printed\"},{\"id\":\"cell_assets_interval\",\"kind\":\"cell\",\"text\":\"101\",\"source\":\"image\",\"references\":[\"row_assets\",\"col_interval\",\"unit_assets\"],\"precision\":\"printed\"},{\"id\":\"cell_assets_tender\",\"kind\":\"cell\",\"text\":\"100\",\"source\":\"image\",\"references\":[\"row_assets\",\"col_tender\",\"unit_assets\"],\"precision\":\"printed\"},{\"id\":\"cell_assets_traded\",\"kind\":\"cell\",\"text\":\"227\",\"source\":\"image\",\"references\":[\"row_assets\",\"col_traded\",\"unit_assets\"],\"precision\":\"printed\"}],\"unresolved\":[]}]}",
+      "stage": "recognition",
+      "validation_status": "failed",
+      "version": "regulation-graphics-failed-attempt-v1"
+    },
+    "model_call_started": false,
+    "model_provenance": {},
+    "version": "regulation-model-attempt-v2"
+  }
+}

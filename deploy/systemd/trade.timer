@@ -3,6 +3,10 @@ Description=Run EventEdge daily cycle weekdays at 18:00 ET
 
 [Timer]
 OnCalendar=Mon..Fri 18:00 America/New_York
+# Application selects due normal samples and safe persisted-only recovery.
+OnCalendar=*:0/5
+OnBootSec=2min
+AccuracySec=30s
 Persistent=true
 
 [Install]

@@ -1,0 +1,101 @@
+{
+  "data" : {
+    "id" : "EPA-HQ-OAR-2024-0078-0003",
+    "type" : "documents",
+    "links" : {
+      "self" : "https://api.regulations.gov/v4/documents/EPA-HQ-OAR-2024-0078-0003"
+    },
+    "attributes" : {
+      "additionalRins" : null,
+      "allowLateComments" : false,
+      "authorDate" : null,
+      "authors" : null,
+      "cfrPart" : "40 CFR Part 81",
+      "commentEndDate" : "2026-11-06T04:59:59Z",
+      "commentStartDate" : "2026-10-06T04:00:00Z",
+      "effectiveDate" : null,
+      "exhibitLocation" : null,
+      "exhibitType" : null,
+      "frDocNum" : "2026-20468",
+      "frVolNum" : "91",
+      "implementationDate" : null,
+      "media" : null,
+      "ombApproval" : null,
+      "paperLength" : 0,
+      "paperWidth" : 0,
+      "regWriterInstruction" : null,
+      "sourceCitation" : null,
+      "startEndPage" : "63516 - 63519",
+      "subject" : null,
+      "topics" : null,
+      "address1" : null,
+      "address2" : null,
+      "agencyId" : "EPA",
+      "city" : null,
+      "category" : null,
+      "comment" : null,
+      "country" : null,
+      "displayProperties" : [ {
+        "name" : "pageCount",
+        "label" : "Page Count",
+        "tooltip" : "Number of pages In the content file"
+      } ],
+      "docAbstract" : "Federal Register for Tuesday, October 6, 2026 (91 FR 63516) (FRL-11650-03-OAR)",
+      "docketId" : "EPA-HQ-OAR-2024-0078",
+      "documentType" : "Proposed Rule",
+      "email" : null,
+      "fax" : null,
+      "field1" : null,
+      "field2" : null,
+      "fileFormats" : [ {
+        "fileUrl" : "https://downloads.regulations.gov/EPA-HQ-OAR-2024-0078-0003/content.pdf",
+        "format" : "pdf",
+        "size" : 300365
+      }, {
+        "fileUrl" : "https://downloads.regulations.gov/EPA-HQ-OAR-2024-0078-0003/content.html",
+        "format" : "html",
+        "size" : 25146
+      } ],
+      "firstName" : null,
+      "govAgency" : null,
+      "govAgencyType" : null,
+      "objectId" : "09000064b962e73b",
+      "lastName" : null,
+      "legacyId" : null,
+      "modifyDate" : "2026-10-09T09:00:52Z",
+      "organization" : null,
+      "originalDocumentId" : "EPA_FRDOC_0001-33196",
+      "pageCount" : 4,
+      "phone" : null,
+      "postedDate" : "2026-10-06T04:00:00Z",
+      "postmarkDate" : null,
+      "reasonWithdrawn" : null,
+      "receiveDate" : "2026-10-06T04:00:00Z",
+      "restrictReason" : null,
+      "restrictReasonType" : null,
+      "stateProvinceRegion" : null,
+      "submitterRep" : null,
+      "submitterRepAddress" : null,
+      "submitterRepCityState" : null,
+      "subtype" : null,
+      "title" : "Initial Air Quality Designations for the 2024 Revised Primary Annual Fine Particle National Ambient Air Quality Standards",
+      "trackingNbr" : null,
+      "withdrawn" : false,
+      "zip" : null,
+      "openForComment" : true,
+      "withinCommentPeriod" : true
+    },
+    "relationships" : {
+      "attachments" : {
+        "data" : [ ],
+        "links" : {
+          "self" : "https://api.regulations.gov/v4/documents/EPA-HQ-OAR-2024-0078-0003/relationships/attachments",
+          "related" : "https://api.regulations.gov/v4/documents/EPA-HQ-OAR-2024-0078-0003/attachments"
+        }
+      }
+    }
+  },
+  "links" : {
+    "self" : "https://regulations.gov/v4/documents/EPA-HQ-OAR-2024-0078-0003?include=attachments"
+  }
+}

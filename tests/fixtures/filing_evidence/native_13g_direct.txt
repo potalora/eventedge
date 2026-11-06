@@ -1,0 +1,176 @@
+<SEC-DOCUMENT>0002042926-26-000016.txt : 20261009
+<SEC-HEADER>0002042926-26-000016.hdr.sgml : 20261009
+<ACCEPTANCE-DATETIME>20261009162034
+ACCESSION NUMBER:		0002042926-26-000016
+CONFORMED SUBMISSION TYPE:	SCHEDULE 13G/A
+PUBLIC DOCUMENT COUNT:		1
+FILED AS OF DATE:		20261009
+DATE AS OF CHANGE:		20261009
+
+SUBJECT COMPANY:	
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			Femto Technologies Inc.
+		CENTRAL INDEX KEY:			0001888151
+		STANDARD INDUSTRIAL CLASSIFICATION:	SERVICES-PREPACKAGED SOFTWARE [7372]
+		ORGANIZATION NAME:           	06 Technology
+		EIN:				000000000
+		STATE OF INCORPORATION:			A1
+		FISCAL YEAR END:			1231
+
+	FILING VALUES:
+		FORM TYPE:		SCHEDULE 13G/A
+		SEC ACT:		1934 Act
+		SEC FILE NUMBER:	005-94130
+		FILM NUMBER:		261453141
+
+	BUSINESS ADDRESS:	
+		STREET 1:		2264E 11TH AVENUE
+		CITY:			VANCOUVER
+		STATE:			A1
+		ZIP:			V5N1Z6
+		BUSINESS PHONE:		16048336820
+
+	MAIL ADDRESS:	
+		STREET 1:		2264E 11TH AVENUE
+		CITY:			VANCOUVER
+		STATE:			A1
+		ZIP:			V5N1Z6
+
+	FORMER COMPANY:	
+		FORMER CONFORMED NAME:	BYND CANNASOFT ENTERPRISES INC.
+		DATE OF NAME CHANGE:	20211014
+
+FILED BY:		
+
+	COMPANY DATA:	
+		COMPANY CONFORMED NAME:			Corley Thomas John
+		CENTRAL INDEX KEY:			0002042926
+		ORGANIZATION NAME:           	
+
+	FILING VALUES:
+		FORM TYPE:		SCHEDULE 13G/A
+
+	MAIL ADDRESS:	
+		STREET 1:		132 WASHINGTON PLACE
+		CITY:			STATE COLLEGE
+		STATE:			PA
+		ZIP:			16801
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>SCHEDULE 13G/A
+<SEQUENCE>1
+<FILENAME>primary_doc.xml
+<TEXT>
+<XML>
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13g" xmlns:com="http://www.sec.gov/edgar/common">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13G/A</submissionType>
+    <previousAccessionNumber>0002042926-25-000014</previousAccessionNumber>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0002042926</cik>
+          <ccc>REDACTED</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <amendmentNo>5</amendmentNo>
+      <securitiesClassTitle>Subordinate Voting Shares, without par value</securitiesClassTitle>
+      <eventDateRequiresFilingThisStatement>09/30/2026</eventDateRequiresFilingThisStatement>
+      <issuerInfo>
+        <issuerCik>0001888151</issuerCik>
+        <issuerName>Femto Technologies Inc.</issuerName>
+        <issuerCusips>
+          <issuerCusipNumber>31447N303</issuerCusipNumber>
+        </issuerCusips>
+        <issuerPrincipalExecutiveOfficeAddress>
+          <com:street1>2264E 11TH AVENUE</com:street1>
+          <com:street2>2264E 11TH AVENUE</com:street2>
+          <com:city>VANCOUVER</com:city>
+          <com:stateOrCountry>A1</com:stateOrCountry>
+          <com:zipCode>V5N1Z6</com:zipCode>
+        </issuerPrincipalExecutiveOfficeAddress>
+      </issuerInfo>
+      <designateRulesPursuantThisScheduleFiled>
+        <designateRulePursuantThisScheduleFiled>Rule 13d-1(c)</designateRulePursuantThisScheduleFiled>
+      </designateRulesPursuantThisScheduleFiled>
+    </coverPageHeader>
+    <coverPageHeaderReportingPersonDetails>
+
+      <reportingPersonName>Corley Thomas John</reportingPersonName>
+      <reportingPersonBeneficiallyOwnedNumberOfShares>
+        <soleVotingPower>83464.00</soleVotingPower>
+        <sharedVotingPower>0.00</sharedVotingPower>
+        <soleDispositivePower>83464.00</soleDispositivePower>
+        <sharedDispositivePower>0.00</sharedDispositivePower>
+      </reportingPersonBeneficiallyOwnedNumberOfShares>
+      <reportingPersonBeneficiallyOwnedAggregateNumberOfShares>83464.00</reportingPersonBeneficiallyOwnedAggregateNumberOfShares>
+      <classPercent>8.0</classPercent>
+      <typeOfReportingPerson>IN</typeOfReportingPerson>
+      <comments>Percent of class is based on 1,037,774 shares outstanding as of June 30, 2026 as reported on the Form-6K published on August 17th, 2026</comments>
+    </coverPageHeaderReportingPersonDetails>
+    <items>
+      <item1>
+        <issuerName>Femto Technologies Inc.</issuerName>
+        <issuerPrincipalExecutiveOfficeAddress>2264E 11TH AVENUE, 2264E 11TH AVENUE, VANCOUVER, BRITISH COLUMBIA, CANADA, V5N1Z6.</issuerPrincipalExecutiveOfficeAddress>
+      </item1>
+      <item2>
+        <filingPersonName>Thomas Corley</filingPersonName>
+        <principalBusinessOfficeOrResidenceAddress>132 Washington Place
+State College, PA 16801</principalBusinessOfficeOrResidenceAddress>
+        <citizenship>United States</citizenship>
+      </item2>
+      <item3>
+        <notApplicableFlag>N</notApplicableFlag>
+      </item3>
+      <item4>
+        <amountBeneficiallyOwned>83464</amountBeneficiallyOwned>
+        <classPercent>8.0</classPercent>
+        <numberOfSharesPersonHas>
+          <solePowerOrDirectToVote>83464</solePowerOrDirectToVote>
+          <sharedPowerOrDirectToVote>0</sharedPowerOrDirectToVote>
+          <solePowerOrDirectToDispose>83464</solePowerOrDirectToDispose>
+          <sharedPowerOrDirectToDispose>0</sharedPowerOrDirectToDispose>
+        </numberOfSharesPersonHas>
+      </item4>
+      <item6>
+        <notApplicableFlag>N</notApplicableFlag>
+      </item6>
+      <item7>
+        <notApplicableFlag>N</notApplicableFlag>
+      </item7>
+      <item8>
+        <notApplicableFlag>N</notApplicableFlag>
+      </item8>
+      <item9>
+        <notApplicableFlag>N</notApplicableFlag>
+      </item9>
+      <item10>
+        <notApplicableFlag>N</notApplicableFlag>
+        <certifications>By signing below I certify that, to the best of my knowledge and belief, the securities referred to above were not acquired and are not held for the purpose of or with the effect of changing or influencing the control of the issuer of the securities and were not acquired and are not held in connection with or as a participant in any transaction having that purpose or effect, other than activities solely in connection with a nomination under &amp;#167; 240.14a-11.
+
+</certifications>
+      </item10>
+    </items>
+    <signatureInformation>
+      <reportingPersonName>Corley Thomas John</reportingPersonName>
+      <signatureDetails>
+        <signature>Thomas Corley</signature>
+        <title>Individual</title>
+        <date>10/09/2026</date>
+      </signatureDetails>
+    </signatureInformation>
+  </formData>
+</edgarSubmission>
+</XML>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>

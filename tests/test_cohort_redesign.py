@@ -356,6 +356,7 @@ class TestOrchestratorHorizonScreening:
 
         mock_strategy = MagicMock()
         mock_strategy.name = "test_strat"
+        mock_strategy.retirement_reason = None
         mock_strategy.get_default_params.return_value = {"hold_days": 90}
         mock_strategy.screen.return_value = []
 

@@ -473,10 +473,8 @@ class SignalJournal:
             if conviction < min_conviction or ret_5d is None:
                 continue
 
-            direction = e.get("direction", "long")
-            correct = (direction == "long" and ret_5d > 0) or (
-                direction == "short" and ret_5d < 0
-            )
+            # fill_outcomes already signs returns by trade direction.
+            correct = ret_5d > 0
 
             if not correct:
                 failures.append(e)

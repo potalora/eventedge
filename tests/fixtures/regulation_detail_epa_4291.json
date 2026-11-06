@@ -1,0 +1,101 @@
+{
+  "data" : {
+    "id" : "EPA-R10-OAR-2026-4291-0013",
+    "type" : "documents",
+    "links" : {
+      "self" : "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-4291-0013"
+    },
+    "attributes" : {
+      "additionalRins" : null,
+      "allowLateComments" : false,
+      "authorDate" : null,
+      "authors" : null,
+      "cfrPart" : "40 CFR Parts 60, 61, and 63",
+      "commentEndDate" : "2026-11-19T04:59:59Z",
+      "commentStartDate" : "2026-10-19T04:00:00Z",
+      "effectiveDate" : null,
+      "exhibitLocation" : null,
+      "exhibitType" : null,
+      "frDocNum" : "2026-21383",
+      "frVolNum" : null,
+      "implementationDate" : null,
+      "media" : null,
+      "ombApproval" : null,
+      "paperLength" : 0,
+      "paperWidth" : 0,
+      "regWriterInstruction" : null,
+      "sourceCitation" : null,
+      "startEndPage" : "66058 - 66062",
+      "subject" : null,
+      "topics" : [ "Environmental Protection", "Air Pollution Control", "Administrative Practices and Procedures", "Hazardous Substances", "Intergovernmental Relations", "Reporting and Recordkeeping Requirements", "Radioactive Materials", "Uranium", "Business and Industry", "Nitrogen Oxides", "Ozone", "Sulfur Oxides", "Volatile Organic Compounds" ],
+      "address1" : null,
+      "address2" : null,
+      "agencyId" : "EPA",
+      "city" : null,
+      "category" : null,
+      "comment" : null,
+      "country" : null,
+      "displayProperties" : [ {
+        "name" : "pageCount",
+        "label" : "Page Count",
+        "tooltip" : "Number of pages In the content file"
+      } ],
+      "docAbstract" : null,
+      "docketId" : "EPA-R10-OAR-2026-4291",
+      "documentType" : "Proposed Rule",
+      "email" : null,
+      "fax" : null,
+      "field1" : null,
+      "field2" : null,
+      "fileFormats" : [ {
+        "fileUrl" : "https://downloads.regulations.gov/EPA-R10-OAR-2026-4291-0013/content.pdf",
+        "format" : "pdf",
+        "size" : 225397
+      }, {
+        "fileUrl" : "https://downloads.regulations.gov/EPA-R10-OAR-2026-4291-0013/content.html",
+        "format" : "html",
+        "size" : 34219
+      } ],
+      "firstName" : null,
+      "govAgency" : null,
+      "govAgencyType" : null,
+      "objectId" : "09000064b967d0fb",
+      "lastName" : null,
+      "legacyId" : null,
+      "modifyDate" : "2026-10-22T09:00:44Z",
+      "organization" : null,
+      "originalDocumentId" : "EPA_FRDOC_0001-33220",
+      "pageCount" : 5,
+      "phone" : null,
+      "postedDate" : "2026-10-19T04:00:00Z",
+      "postmarkDate" : null,
+      "reasonWithdrawn" : null,
+      "receiveDate" : "2026-10-19T04:00:00Z",
+      "restrictReason" : null,
+      "restrictReasonType" : null,
+      "stateProvinceRegion" : null,
+      "submitterRep" : null,
+      "submitterRepAddress" : null,
+      "submitterRepCityState" : null,
+      "subtype" : null,
+      "title" : "New Source Performance Standards and National Emission Standards for Hazardous Air Pollutants: Delegation of Authority to Northwest Clean Air Agency, Washington State",
+      "trackingNbr" : null,
+      "withdrawn" : false,
+      "zip" : null,
+      "withinCommentPeriod" : true,
+      "openForComment" : true
+    },
+    "relationships" : {
+      "attachments" : {
+        "data" : [ ],
+        "links" : {
+          "self" : "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-4291-0013/relationships/attachments",
+          "related" : "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-4291-0013/attachments"
+        }
+      }
+    }
+  },
+  "links" : {
+    "self" : "https://regulations.gov/v4/documents/EPA-R10-OAR-2026-4291-0013?include=attachments"
+  }
+}

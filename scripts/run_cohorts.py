@@ -59,7 +59,9 @@ def _runtime_lock_context(*, exclusive: bool):
         ) from error
     return runtime_lock(
         lock_path,
-        exclusive=exclusive,
+        # A verified inherited exclusive lock remains exclusive even for a
+        # read-only preflight; never downgrade the controller-owned lock.
+        exclusive=exclusive or mode_value == "exclusive",
         inherited_fd=inherited_fd,
         inherited_exclusive=mode_value == "exclusive",
     )
@@ -251,7 +253,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--preflight-mode requires --preflight")
     if args.compare:
         return ""
-    requested = args.date or date.today().isoformat()
+    from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+    requested = args.date or exchange_date().isoformat()
     try:
         trading_session = date.fromisoformat(requested)
     except ValueError:
@@ -277,9 +280,37 @@ def _build_config(args: argparse.Namespace) -> dict:
     from dotenv import load_dotenv
     from tradingagents.default_config import DEFAULT_CONFIG
 
-    load_dotenv()
-    config = dict(DEFAULT_CONFIG)
+    from tradingagents.strategies.orchestration.generation_config import (
+        CONFIG_FILE_ENV, CONFIG_SHA_ENV, apply_generation_config,
+    )
+
+    # A frozen generation receives credentials from its explicit launcher.
+    # Implicit discovery could inject unfrozen behavior into a later session.
+    if CONFIG_FILE_ENV not in os.environ and CONFIG_SHA_ENV not in os.environ:
+        load_dotenv()
+    profile = os.environ.get(CONFIG_FILE_ENV)
+    digest = os.environ.get(CONFIG_SHA_ENV)
+    if CONFIG_FILE_ENV in os.environ or CONFIG_SHA_ENV in os.environ:
+        if not profile or not digest:
+            raise ValueError('generation_config_invalid')
+        config = apply_generation_config(DEFAULT_CONFIG, profile, digest)
+    else:
+        config = dict(DEFAULT_CONFIG)
     config["autoresearch"] = dict(config.get("autoresearch", {}))
+    from tradingagents.strategies.orchestration.operating_contract import configured as stabilization_configured
+    frozen_behavior = stabilization_configured(config)
+    if frozen_behavior:
+        # The supported generation freezes behavior in reviewed bytes. Secret
+        # credentials remain launcher-owned; ambient trade/contact settings may
+        # only repeat the frozen values, never change their source identity.
+        for declared in (args.block_tickers, os.environ.get('BLOCKED_TICKERS')):
+            if declared:
+                selected = [ticker.strip().upper() for ticker in declared.split(',') if ticker.strip()]
+                if selected != config['autoresearch'].get('blocked_tickers'):
+                    raise ValueError('generation_config_behavior_conflict')
+        contact = os.environ.get('EDGAR_USER_AGENT')
+        if contact and contact != config['autoresearch'].get('edgar_user_agent'):
+            raise ValueError('generation_config_behavior_conflict')
     state_dir_override = os.environ.get("AUTORESEARCH_STATE_DIR")
     if state_dir_override:
         config["autoresearch"]["state_dir"] = state_dir_override
@@ -294,10 +325,10 @@ def _build_config(args: argparse.Namespace) -> dict:
         "fmp_api_key",
     ):
         env_val = os.environ.get(key.upper(), "")
-        if env_val:
+        if env_val and not (frozen_behavior and key == 'edgar_user_agent'):
             config["autoresearch"][key] = env_val
     blocked = args.block_tickers or os.environ.get("BLOCKED_TICKERS", "")
-    if blocked:
+    if blocked and not frozen_behavior:
         config["autoresearch"]["blocked_tickers"] = [
             ticker.strip().upper() for ticker in blocked.split(",") if ticker.strip()
         ]
@@ -371,6 +402,11 @@ def _run_preflight(config: dict, trading_date: str, mode: str) -> None:
         return
     print(rendered, file=sys.stderr)
     if normalized is not None:
+        for failure in normalized.get("screen_runtime_failures", []):
+            print(
+                f"PREFLIGHT RUNTIME FAILED: {failure['phase']} {failure['reason_code']}",
+                file=sys.stderr,
+            )
         for failure in normalized.get("screen_source_failures", []):
             status = failure["http_status"] or "unknown"
             print(
@@ -390,18 +426,48 @@ def _run_compare(
         CohortComparison,
     )
 
-    orchestrator = _build_orchestrator(args, config, generation_id, generation_commit)
-    ledgers = {
-        cohort["config"].name: cohort["ledger"] for cohort in orchestrator.cohorts
-    }
-    service = MetricsService(
-        config["autoresearch"]["state_dir"], ledgers, read_only=True
-    )
-    print(
-        json.dumps(
-            CohortComparison(metrics_service=service).compare(), indent=2, default=str
-        )
-    )
+    from pathlib import Path
+    import shutil
+    import tempfile
+    from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+    def operation():
+        root = Path(config["autoresearch"]["state_dir"])
+        cohorts = build_default_cohorts(config)
+        # SQLite mode=ro may still create WAL/SHM sidecars. Copy DB plus committed
+        # WAL under the shared runtime lock, then let SQLite read the disposable
+        # snapshot. Never use immutable=1 on a live DB: it ignores committed WAL.
+        with tempfile.TemporaryDirectory(prefix="eventedge-compare-") as temporary:
+            snapshot = Path(temporary)
+            paths = {"metrics_v2.sqlite3": root / "metrics_v2.sqlite3"}
+            paths.update({f"{c.name}/portfolio.db": Path(c.state_dir) / "portfolio.db" for c in cohorts})
+            for relative, source in paths.items():
+                if not source.is_file():
+                    raise FileNotFoundError(source)
+                target = snapshot / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                wal = Path(str(source) + "-wal")
+                if wal.is_file():
+                    shutil.copyfile(wal, Path(str(target) + "-wal"))
+            ledgers = {}
+            try:
+                for cohort in cohorts:
+                    ledgers[cohort.name] = PortfolioLedger.open_existing(snapshot / cohort.name / "portfolio.db")
+                service = MetricsService(snapshot, ledgers, read_only=True)
+                epoch = service.store.current_epoch()
+                if epoch is not None and (
+                    epoch.generation_id != generation_id
+                    or epoch.generation_commit != generation_commit
+                ):
+                    raise ValueError("comparison generation identity mismatch")
+                print(json.dumps(CohortComparison(metrics_service=service).compare(), indent=2, default=str))
+            finally:
+                for ledger in ledgers.values():
+                    ledger.close()
+
+    _run_locked(False, operation)
 
 
 def _run_daily(
@@ -439,6 +505,20 @@ def _run_daily(
         raise SystemExit(exit_code)
 
 
+def _record_runtime_identity(config: dict, generation_id: str, generation_commit: str) -> None:
+    if config.get("autoresearch", {}).get("stabilization_profile_policy") != "supported_sixteen_books_v1":
+        return
+    from pathlib import Path
+    from tradingagents.strategies.orchestration.run_evidence import worker_runtime_identity
+
+    identity = worker_runtime_identity(
+        Path(__file__).resolve().parents[1], generation_id=generation_id,
+        generation_commit=generation_commit,
+        profile_sha256=os.environ.get("EVENTEDGE_GENERATION_CONFIG_SHA256", ""),
+    )
+    print("EVENTEDGE_RUNTIME_IDENTITY_V1=" + json.dumps(identity, sort_keys=True), file=sys.stderr)
+
+
 def main():
     _raise_fd_limit()
     parser = _build_parser()
@@ -446,6 +526,7 @@ def main():
     exact_trading_date = _validate_args(args, parser)
     generation_id, generation_commit = _generation_identity(parser)
     config = _build_config(args)
+    _record_runtime_identity(config, generation_id, generation_commit)
     preflight_mode = args.preflight_mode or "all"
     if args.preflight:
         _run_preflight(config, exact_trading_date, preflight_mode)

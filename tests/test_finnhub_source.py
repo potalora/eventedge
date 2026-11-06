@@ -160,6 +160,21 @@ def test_fetch_company_news_recovers_after_transient_429():
     assert len(session.calls) == 2
 
 
+def test_news_observation_clock_is_real_acquisition_and_survives_cache():
+    from datetime import datetime, timezone
+    session = _FakeSession([[{'headline': 'Observed news', 'summary': 'Complete summary',
+                             'datetime': 1, 'url': 'https://example.test/story'}]])
+    src = FinnhubSource(api_key='k', reliability_config=_reliability_config(), http_session=session)
+    before = datetime.now(timezone.utc)
+    first = src.fetch_company_news('AAPL', '2026-05-01', '2026-05-08')
+    after = datetime.now(timezone.utc)
+    observed = datetime.fromisoformat(first[0]['observed_at'])
+    assert before <= observed <= after
+    assert first[0]['observed_at'] != first[0]['published_at']
+    assert src.fetch_company_news('AAPL', '2026-05-01', '2026-05-08') == first
+    assert len(session.calls) == 1
+
+
 def test_malformed_earnings_date_degrades_without_starting_request(caplog):
     session = _FakeSession([])
     src = FinnhubSource(
@@ -532,3 +547,75 @@ def test_aggregate_finnhub_fetch_uses_one_deadline_and_preserves_results():
     assert "disruption_news" not in result
     assert "supply_chains" not in result
     assert "pqc_news" not in result
+
+
+
+def _real_derived_earnings_calendar():
+    """Public numeric fields from the retained October 15, 2026 source events.
+
+    Calendar wire keys and dates are reconstructed from normalized records and
+    their publication dates; this compact fixture is not an archived HTTP body.
+    GLGI's ordinary null estimate must remain distinct from malformed numbers.
+    """
+    return [
+        {"symbol": "AA", "date": "2026-10-15", "year": 2026, "quarter": 3,
+         "epsActual": 1.82, "epsEstimate": 1.5163,
+         "revenueActual": 3704000000, "revenueEstimate": 3898734812},
+        {"symbol": "GLGI", "date": "2026-10-14", "year": 2027, "quarter": 1,
+         "epsActual": -0.09, "epsEstimate": None,
+         "revenueActual": 5320000, "revenueEstimate": None},
+        {"symbol": "CMC", "date": "2026-10-15", "year": 2026, "quarter": 4,
+         "epsActual": 2.09, "epsEstimate": 1.9933,
+         "revenueActual": 2658330000, "revenueEstimate": 2598088942},
+    ]
+
+
+@pytest.mark.parametrize(("present", "estimate"), [
+    pytest.param(False, None, id="missing"),
+    pytest.param(True, None, id="actual-null"),
+    pytest.param(True, -0.1, id="finite-negative"),
+    pytest.param(True, 0.0, id="zero"),
+    pytest.param(True, 0.25, id="finite-positive"),
+])
+def test_earnings_optional_estimate_keeps_valid_real_events_and_cache(present, estimate):
+    rows = _real_derived_earnings_calendar()
+    if present:
+        rows[1]["epsEstimate"] = estimate
+    else:
+        del rows[1]["epsEstimate"]
+    session = _FakeSession([{"earningsCalendar": rows}])
+    source = FinnhubSource(api_key="not-real", http_session=session,
+                           reliability_config=_reliability_config())
+
+    result = source.fetch_recent_earnings("2026-10-08", "2026-10-15")
+
+    assert result == rows
+    assert result[1]["epsActual"] == -0.09
+    # The fake has no second response: re-reading must use the success cache.
+    assert source.fetch_recent_earnings("2026-10-08", "2026-10-15") == rows
+
+
+@pytest.mark.parametrize("estimate", [
+    pytest.param("invalid", id="text"),
+    pytest.param("1.5163", id="numeric-text"),
+    pytest.param(True, id="true"),
+    pytest.param(False, id="false"),
+    pytest.param(float("nan"), id="nan"),
+    pytest.param(float("inf"), id="positive-infinity"),
+    pytest.param(float("-inf"), id="negative-infinity"),
+    pytest.param(10 ** 400, id="oversized-positive-integer"),
+    pytest.param(-(10 ** 400), id="oversized-negative-integer"),
+])
+def test_earnings_invalid_estimate_rejects_uncached_and_retains_real_siblings(estimate):
+    rows = _real_derived_earnings_calendar()
+    rows[1]["epsEstimate"] = estimate
+    session = _FakeSession([{"earningsCalendar": rows}])
+    source = FinnhubSource(api_key="not-real", http_session=session,
+                           reliability_config=_reliability_config())
+
+    with pytest.raises(SourceFetchError) as caught:
+        source.fetch_recent_earnings("2026-10-08", "2026-10-15")
+
+    assert caught.value.reason_code == "invalid_response"
+    assert caught.value.partial_data["earnings"] == [rows[0], rows[2]]
+    assert not source._cache

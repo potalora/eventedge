@@ -247,7 +247,7 @@ def test_generation_subprocess_env_includes_exact_generation_metadata(
         "state_dir": str(state_dir),
         "worktree_path": str(worktree),
     }
-    module = "tradingagents.strategies.orchestration.generation_manager.subprocess.run"
+    module = "tradingagents.strategies.orchestration.generation_manager._run_preflight_worker"
     with patch(module, side_effect=capture_run):
         result = manager._run_cohorts_subprocess(gen_data, ["--date", "2026-08-03"])
 

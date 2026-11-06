@@ -156,6 +156,7 @@ class StrategyModule(Protocol):
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Check if exit conditions are met. Returns (should_exit, reason)."""
         ...

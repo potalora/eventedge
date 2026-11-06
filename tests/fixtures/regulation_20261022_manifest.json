@@ -1,0 +1,58 @@
+{
+  "acquired_at": "2026-10-22T08:47:10.646042+00:00",
+  "source": "official_regulations_detail_and_govinfo_originals",
+  "production_read_only": true,
+  "model_calls": 0,
+  "files": {
+    "regulation_detail_epa_4291.json": {
+      "url": "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-4291-0013?include=attachments",
+      "bytes": 3632,
+      "sha256": "acc0683325f7979fff8675f157b4fa2e02801d4397880ba5fb392d66cfbc5223"
+    },
+    "regulation_govinfo_epa_4291.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-19/html/2026-21383.htm",
+      "bytes": 34219,
+      "sha256": "6b9b11b4eea0e8402f7ab6d573896d17b1191f7cb4710a0160a16c20885ac954"
+    },
+    "regulation_detail_epa_0505.json": {
+      "url": "https://api.regulations.gov/v4/documents/EPA-HQ-OAR-2024-0505-0951?include=attachments",
+      "bytes": 3483,
+      "sha256": "5e00d8f39fbd4bb1155fff9ef0646c7cddf8f3f6d2df9bda1968c2f806d2a244"
+    },
+    "regulation_govinfo_epa_0505.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-16/html/2026-21155.htm",
+      "bytes": 94740,
+      "sha256": "b73bb9a38d254e6b5485cf6496bb062128aedeb973fc1b5467b86615bc7cc2f8"
+    },
+    "regulation_detail_epa_5581.json": {
+      "url": "https://api.regulations.gov/v4/documents/EPA-R09-OAR-2026-5581-0001?include=attachments",
+      "bytes": 3485,
+      "sha256": "81389acd1d63106fea88aa2c3359db465e9eb4b6ba207dd660aa08ce02104caa"
+    },
+    "regulation_govinfo_epa_5581.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-19/html/2026-21287.htm",
+      "bytes": 39918,
+      "sha256": "206c01ac4067973e6d87cc059354de123a61e4637e7d6239275600581bc6ca91"
+    },
+    "regulation_detail_epa_5119.json": {
+      "url": "https://api.regulations.gov/v4/documents/EPA-R09-OAR-2026-5119-0001?include=attachments",
+      "bytes": 3538,
+      "sha256": "25ce37adc1086c3b662c37d5525db10ba584ea5e20d9c141f855bc73d4f528c4"
+    },
+    "regulation_govinfo_epa_5119.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-19/html/2026-21288.htm",
+      "bytes": 83856,
+      "sha256": "b526e94f5bf060ba7e6af9cd6481c7166a8727a9a4bf6923357011c990808cbb"
+    },
+    "regulation_detail_sec_correction_6502.json": {
+      "url": "https://api.regulations.gov/v4/documents/SEC-2026-6502-0001?include=attachments",
+      "bytes": 3035,
+      "sha256": "1b0c2e949418140dab1a147ade503733c6ec51a6df9386ac06e788018188df17"
+    },
+    "regulation_govinfo_sec_correction_6502.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-10-20/html/C1-2026-20360.htm",
+      "bytes": 1297,
+      "sha256": "948e3657db5050058de4e79de927147a7d3e3d96f32a8be4f55dff159a29a286"
+    }
+  }
+}

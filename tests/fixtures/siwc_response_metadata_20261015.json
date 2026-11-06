@@ -1,0 +1,54 @@
+{
+  "version": "siwc-metadata-structural-fixture-v1",
+  "source_sha256": "1d20efce057a9f9145c0f47ba5fe3f148fb72d6c2bee4502c15bfb2942c2f9f1",
+  "native_structural_event": {
+    "record": "event",
+    "ordinal": 761,
+    "kind": "other",
+    "shape": "object",
+    "count": 4,
+    "fields": {
+      "sequence_number": {
+        "present": true,
+        "shape": "integer",
+        "index": 760
+      },
+      "type": {
+        "present": true,
+        "shape": "string",
+        "length": 17,
+        "enum": "other"
+      }
+    },
+    "protocol_type": "response.metadata",
+    "sdk_known": false,
+    "unsupported": true,
+    "unrecognized_field_count": 2,
+    "unknown_fields": [
+      {
+        "field_name": "response_id",
+        "shape": "string"
+      },
+      {
+        "field_name": "metadata",
+        "shape": "object"
+      }
+    ],
+    "unknown_fields_omitted": 0
+  },
+  "native_failure": {
+    "record": "failure",
+    "code": "stream_invalid",
+    "ordinal": 761,
+    "kind": "other",
+    "parser_sha256": "6691af4e6143330420d3a91f4ee26f3b35e5c8d9bd52c217fdb880279f3e8c29",
+    "filename": "chatgpt_plan_transport.py",
+    "function": "stream_plan_response",
+    "line": 374,
+    "comparisons": {
+      "response_ids_consistent": true,
+      "item_ids_consistent": true
+    }
+  },
+  "scope": "Native structural evidence only. Content/identities were not retained; synthetic replay below supplies independent demo data. Native failure remains failed."
+}

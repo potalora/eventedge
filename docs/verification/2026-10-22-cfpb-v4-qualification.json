@@ -1,0 +1,78 @@
+{
+  "started_at": "2026-10-22T23:53:12.524979+00:00",
+  "finished_at": "2026-10-22T23:53:14.854460+00:00",
+  "elapsed_seconds": 2.329,
+  "scope": {
+    "agency": "CFPB",
+    "posted_date_from": "2026-07-09",
+    "posted_date_to": "2026-07-10"
+  },
+  "discovery_coverage": {
+    "mode": "exhaustive_window",
+    "complete": true,
+    "samples": {
+      "CFPB": {
+        "mode": "exhaustive_window",
+        "complete": true,
+        "agency": "CFPB",
+        "posted_date_from": "2026-07-09",
+        "posted_date_to": "2026-07-10",
+        "pages": 1,
+        "total": 185,
+        "has_next": true,
+        "termination": "older_than_window"
+      }
+    },
+    "as_of": "2026-07-10"
+  },
+  "content_coverage": {
+    "discovery_complete": true,
+    "content_complete": true,
+    "required_rows": 1,
+    "complete_rows": 1,
+    "failed_rows": 0,
+    "consumed_bytes": 133717,
+    "reserved_bytes": 0,
+    "byte_limit": 33554432,
+    "byte_budget_exhausted": false,
+    "policy": "complete_document_text_v1",
+    "retrieval_policy": "verified_government_copy_v4",
+    "manifest_sha256": "fee9a1217168d311c9da040f531114f4e8118c56b092fd618312d0eb1e5a9498",
+    "evidence_sha256": {
+      "CFPB-2026-0018-0001": "88608271f964aed9d7b2b3b5c8bfcbee6dcfcfb4ad62636997f09e8a36ee5b0c"
+    },
+    "failed_document_ids": []
+  },
+  "documents": {
+    "CFPB-2026-0018-0001": {
+      "detail_sha256": "96f6523d9ac6b891f2f38504c83a7bd16ea21d7f35a72d5bbb5f8b04b589dec9",
+      "bodies": [
+        {
+          "sha256": "433e8ce81fc5c47ce809c7affd2edff0cb0e657ba6fa38da1ceecfdbe14fceb7",
+          "observed_at": "2026-10-22T23:53:14.715116+00:00",
+          "characters": 38648,
+          "primary_http_status": 403,
+          "action": "Notice; request for information."
+        }
+      ]
+    }
+  },
+  "consumer_request_sha256": {
+    "CFPB-2026-0018-0001": "0e4ebc5fae785ae72b7d7d060ef5231c1c445768209f5a6fa780e233663e8768"
+  },
+  "adapter_requests": 4,
+  "request_urls": [
+    "https://api.regulations.gov/v4/documents",
+    "https://api.regulations.gov/v4/documents/CFPB-2026-0018-0001",
+    "https://downloads.regulations.gov/CFPB-2026-0018-0001/content.html",
+    "https://www.govinfo.gov/content/pkg/FR-2026-07-09/html/2026-13834.htm"
+  ],
+  "replay_network_calls": 0,
+  "model_calls": 0,
+  "production_changed": false,
+  "historical_availability_claim": false,
+  "code_sha256": {
+    "regulations_source": "542e80c2aa6c89236bca018d0e628c7f84ab708979ec12a7456e6038feae4535"
+  },
+  "policy": "verified_government_copy_v4"
+}

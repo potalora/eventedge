@@ -1,0 +1,20 @@
+{
+  "html": {
+    "url": "https://www.govinfo.gov/content/pkg/FR-1997-03-11/html/97-5879.htm",
+    "status": 200,
+    "bytes": 80480,
+    "sha256": "a2aede230f64e8a1fad4bee4963759dca48778b9d13a7116bb11a5f6c2c52cb8",
+    "title": "Federal Register, Volume 62 Issue 47 (Tuesday, March 11, 1997)",
+    "legacy_fr_number_present": true,
+    "publication_1997_present": true,
+    "pages_11270_11281": true,
+    "text_characters": 80072
+  },
+  "pdf": {
+    "url": "https://www.govinfo.gov/content/pkg/FR-1997-03-11/pdf/97-5879.pdf",
+    "status": 200,
+    "bytes": 176631,
+    "sha256": "1fdd634b33a8ad7bce1c76792165c3c46e601955988d99dba5d5726c5182584b",
+    "pdf_header_valid": true
+  }
+}

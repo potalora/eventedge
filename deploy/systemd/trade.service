@@ -10,5 +10,12 @@ Group=hermes
 Environment=HOME=/home/hermes
 WorkingDirectory=/home/hermes/trading_agents
 Environment=BLOCKED_TICKERS=GOOGL
-ExecStart=/home/hermes/trading_agents/scripts/daily_trading.sh
+ExecStart=/home/hermes/trading_agents/.venv/bin/python /home/hermes/trading_agents/scripts/recover_runtime.py --repo-root /home/hermes/trading_agents
 MemoryMax=4G
+
+# Bound the entire daily + one recovery invocation, including descendants.
+TimeoutStartSec=3h30min
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
+Restart=no

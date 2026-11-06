@@ -1,0 +1,76 @@
+{
+  "reviewed_on": "2026-10-22",
+  "schedule_version": "finra_publication_dates_reviewed_2026-10-22",
+  "source": "https://www.finra.org/filing-reporting/regulatory-filing-systems/short-interest",
+  "current_use_expires": "2027-01-01 America/New_York",
+  "publication_policy": "date_only_following_new_york_day_v1",
+  "schedule": {
+    "2025-11-14": "2025-11-25",
+    "2025-11-28": "2025-12-09",
+    "2025-12-15": "2025-12-24",
+    "2025-12-31": "2026-01-12",
+    "2026-01-15": "2026-01-27",
+    "2026-01-30": "2026-02-10",
+    "2026-02-13": "2026-02-25",
+    "2026-02-27": "2026-03-10",
+    "2026-03-13": "2026-03-24",
+    "2026-03-31": "2026-04-10",
+    "2026-04-15": "2026-04-24",
+    "2026-04-30": "2026-05-11",
+    "2026-05-15": "2026-05-27",
+    "2026-05-29": "2026-06-09",
+    "2026-06-15": "2026-06-25",
+    "2026-06-30": "2026-07-10",
+    "2026-07-15": "2026-07-24",
+    "2026-07-31": "2026-08-11",
+    "2026-08-14": "2026-08-25",
+    "2026-08-31": "2026-09-10",
+    "2026-09-15": "2026-09-24",
+    "2026-09-30": "2026-10-09",
+    "2026-10-15": "2026-10-26",
+    "2026-10-30": "2026-11-10",
+    "2026-11-13": "2026-11-24",
+    "2026-11-30": "2026-12-09",
+    "2026-12-15": "2026-12-24",
+    "2026-12-31": "2027-01-12"
+  },
+  "sdk_holiday_corrections": {
+    "2024-01-15": "2024-01-12",
+    "2024-03-29": "2024-03-28"
+  },
+  "corroborating_primary_sources": [
+    "https://ir.nasdaq.com/node/107016/pdf",
+    "https://ir.nasdaq.com/node/107396/pdf"
+  ],
+  "archive_probes": [
+    {
+      "url": "https://cdn.finra.org/equity/otcmarket/biweekly/shrt20240115.csv",
+      "status": 403
+    },
+    {
+      "url": "https://cdn.finra.org/equity/otcmarket/biweekly/shrt20240112.csv",
+      "status": 206,
+      "prefix": "accountingYearMonthNumber|symbolCode|issueName|issuerServicesGroupExchangeCode|marketClassCode|currentShortPositionQuantity|previousShortPositionQuantity|stockSplitFlag|averageDailyVolumeQuantity|daysToCoverQuantity|revisionFlag|changePercent|changePreviousNumber|settlementDate\n20240112|A|Agilent Technologies Inc.|A|NYSE|2785630|3900676||1641665|1.70||-28.59|-1115046|2024-01-12\n20240112|AA|Alcoa Corporation|A|NYSE|10924435|11711293||5312930|2.06||-6.72|-786858|2024-01-12\n20240112|AAA|AXS First Priority CLO "
+    },
+    {
+      "url": "https://cdn.finra.org/equity/otcmarket/biweekly/shrt20240329.csv",
+      "status": 403
+    },
+    {
+      "url": "https://cdn.finra.org/equity/otcmarket/biweekly/shrt20240328.csv",
+      "status": 206,
+      "prefix": "accountingYearMonthNumber|symbolCode|issueName|issuerServicesGroupExchangeCode|marketClassCode|currentShortPositionQuantity|previousShortPositionQuantity|stockSplitFlag|averageDailyVolumeQuantity|daysToCoverQuantity|revisionFlag|changePercent|changePreviousNumber|settlementDate\n20240328|A|Agilent Technologies Inc.|A|NYSE|3953999|3580343||1728363|2.29||10.44|373656|2024-03-28\n20240328|AA|Alcoa Corporation|A|NYSE|14365673|13178700||6133982|2.34||9.01|1186973|2024-03-28\n20240328|AAA|Alternative Access First Pr"
+    },
+    {
+      "url": "https://cdn.finra.org/equity/otcmarket/biweekly/shrt20260930.csv",
+      "status": 206,
+      "prefix": "\"accountingYearMonthNumber\"|\"symbolCode\"|\"issueName\"|\"issuerServicesGroupExchangeCode\"|\"marketClassCode\"|\"currentShortPositionQuantity\"|\"previousShortPositionQuantity\"|\"stockSplitFlag\"|\"averageDailyVolumeQuantity\"|\"daysToCoverQuantity\"|\"revisionFlag\"|\"changePercent\"|\"changePreviousNumber\"|\"settlementDate\"\n\"20260930\"|\"A\"|\"Agilent Technologies Inc.\"|\"A\"|\"NYSE\"|\"5240309\"|\"5078629\"||\"2950874\"|\"1.78\"||\"3.18\"|\"161680\"|\"2026-09-30\"\n\"20260930\"|\"AA\"|\"Alcoa Corporation\"|\"A\"|\"NYSE\"|\"11725447\"|\"11984650\"||\"4113310\"|\"2."
+    },
+    {
+      "url": "https://cdn.finra.org/equity/otcmarket/biweekly/shrt20261015.csv",
+      "status": 403
+    }
+  ],
+  "acquisition_scope": "Required currently published archive only; no optional historical backfill. Historical completeness concerns corrected SDK requested history only.",
+  "production_modified": false
+}

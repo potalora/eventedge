@@ -364,7 +364,7 @@ def _print_run_evidence(result: dict) -> None:
         print(f"    Evidence unavailable: {result['evidence_error']}")
 
 
-def main():
+def _main():
     parser = argparse.ArgumentParser(
         description="Manage parallel paper trading generations",
     )
@@ -373,6 +373,7 @@ def main():
     # start
     p_start = sub.add_parser("start", help="Start a new generation from current HEAD")
     p_start.add_argument("description", help="Description of this generation")
+    p_start.add_argument("--config-file", default=None, help="Freeze a secret-free JSON configuration overlay for this generation")
 
     # run-daily
     p_daily = sub.add_parser("run-daily", help="Run all active generations for a date")
@@ -512,7 +513,8 @@ def main():
         _exit_runtime_lock_error(error)
 
     if args.command == "start":
-        gen = manager.start_generation(args.description)
+        gen = (manager.start_generation(args.description) if args.config_file is None else
+               manager.start_generation(args.description, config_file=args.config_file))
         print(f"Started {gen.gen_id}")
         print(f"  Commit:    {gen.git_commit[:12]}")
         print(f"  Branch:    {gen.git_branch}")
@@ -523,7 +525,8 @@ def main():
     elif args.command == "run-daily":
         from tradingagents.strategies.orchestration.trading_calendar import is_session
 
-        requested = args.date or date.today().isoformat()
+        from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+        requested = args.date or exchange_date().isoformat()
         try:
             trading_session = date.fromisoformat(requested)
         except ValueError:
@@ -556,7 +559,8 @@ def main():
     elif args.command == "preflight":
         from tradingagents.strategies.orchestration.trading_calendar import is_session
 
-        requested = args.date or date.today().isoformat()
+        from tradingagents.strategies.orchestration.trading_calendar import exchange_date
+        requested = args.date or exchange_date().isoformat()
         try:
             trading_session = date.fromisoformat(requested)
         except ValueError:
@@ -681,6 +685,19 @@ def main():
                     default=str,
                 )
             print(f"Wrote {args.json}")
+
+
+def main() -> None:
+    from tradingagents.strategies.orchestration.generation_manager import GenerationManifestError
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy, RuntimeLockInvalid
+
+    try:
+        _main()
+    except GenerationManifestError as error:
+        print(f"Generation manifest error: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    except (RuntimeLockBusy, RuntimeLockInvalid) as error:
+        _exit_runtime_lock_error(error)
 
 
 if __name__ == "__main__":

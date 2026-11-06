@@ -1,0 +1,247 @@
+{
+  "expected_actual_id_and_eligibility": {
+    "hyphenated_global_station": "BR00A6-0010",
+    "lowercase_station": "US10adam008",
+    "main_plus_extra_catalog_selected_stations": 11,
+    "rainfall_only_inventory_elements": [
+      "PRCP"
+    ],
+    "rainfall_only_observed_rows": 37,
+    "rainfall_only_station_state": "NE",
+    "underscored_station": "US10box_001",
+    "underscored_station_current_ineligible_inventory_last_year": 2024,
+    "utf8_descriptive_name_station": "CA1NS000227",
+    "utf8_descriptive_station_name_rows_in_global_catalog": 11
+  },
+  "expected_crossyear": {
+    "2025-12-31": {
+      "quality_flagged_rows": 0,
+      "rows": 33,
+      "stations": 11
+    },
+    "2026-01-01": {
+      "absent_station_date_element": [
+        [
+          "USC00210075",
+          "2026-01-01",
+          "TMIN"
+        ]
+      ],
+      "quality_flagged_rows": 0,
+      "rows": 32,
+      "stations": 11
+    },
+    "independent_rows_per_day": 3,
+    "independent_station": "USW00014933"
+  },
+  "expected_independent_oracle": {
+    "crossyear_csv_dly_value_and_flags_match": 6,
+    "current_absent_date": "2026-10-16",
+    "current_csv_rows": 108,
+    "current_window": [
+      "2026-09-10",
+      "2026-10-15"
+    ]
+  },
+  "expected_main": {
+    "calendar_days": 37,
+    "elements": [
+      "PRCP",
+      "TMAX",
+      "TMIN"
+    ],
+    "quality_flagged_rows": 0,
+    "rows": 1110,
+    "states": 10,
+    "stations": 10
+  },
+  "files": {
+    "2025-crossyear-20251231-original.csv.gz": {
+      "boundary": "raw_original_csv_lines_recompressed",
+      "bytes": 256,
+      "compression": "gzip of unchanged selected original lines; mtime=0; not full original response bytes",
+      "decoded_bytes": 1263,
+      "decoded_sha256": "f67c27dbce2d57197a8743c297f12b80574b3f7058097caaafdc0b9b71ccb34a",
+      "parent": "2025.csv.gz",
+      "rows": 33,
+      "sha256": "629b7c4cc0338615c0c33a7319ea01d6eb51e8194e81c58550f3fabc3d54387a"
+    },
+    "2025-usw00014933-20251231-original.csv.gz": {
+      "boundary": "raw_original_csv_lines_recompressed",
+      "bytes": 77,
+      "compression": "gzip of unchanged selected original lines; mtime=0; not full original response bytes",
+      "decoded_bytes": 114,
+      "decoded_sha256": "278e6fc945aa71714789ff243fdee4ce86fc2cdd2719f729a513121da32462fd",
+      "parent": "2025.csv.gz",
+      "rows": 3,
+      "sha256": "f3302d89a619ce7079e8b20543c7e41a7f184e8a80f6acb7be992ee87c3032cf"
+    },
+    "2026-crossyear-20260101-original.csv.gz": {
+      "boundary": "raw_original_csv_lines_recompressed",
+      "bytes": 260,
+      "compression": "gzip of unchanged selected original lines; mtime=0; not full original response bytes",
+      "decoded_bytes": 1226,
+      "decoded_sha256": "b9c6092652ed91a959b693708ffd948d963d23c0b0501d3445a91d6e94378bc3",
+      "parent": "2026.csv.gz",
+      "rows": 32,
+      "sha256": "654a43b27dd2dce8b3cf5bc7f1f086f1d97bac01417c310f712b2db6da841ac9"
+    },
+    "2026-ten-state-37day-original.csv.gz": {
+      "boundary": "raw_original_csv_lines_recompressed",
+      "bytes": 4505,
+      "compression": "gzip of unchanged selected original lines; mtime=0; not full original response bytes",
+      "decoded_bytes": 42595,
+      "decoded_sha256": "664dcad73874b7e5e29dbf8b5417159652305e1ca8249c9c07f2bed1a43f4458",
+      "parent": "2026.csv.gz",
+      "rows": 1110,
+      "sha256": "d402a2342c533c7600256a275eaeb8a13603b17c192a063dbf4abeae1711504d"
+    },
+    "2026-usw00014933-20260101-original.csv.gz": {
+      "boundary": "raw_original_csv_lines_recompressed",
+      "bytes": 78,
+      "compression": "gzip of unchanged selected original lines; mtime=0; not full original response bytes",
+      "decoded_bytes": 115,
+      "decoded_sha256": "eac3c1ffd5fa28a24f256692b0f9842d2e61e546d617451edce6a1c71b2100dd",
+      "parent": "2026.csv.gz",
+      "rows": 3,
+      "sha256": "c40c937139e4df6f5452d703d9b15a4caabf5ac899b007cdc19604f15b4e8b1c"
+    },
+    "inventory-crossyear-core-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 1518,
+      "parent": "inventory.txt",
+      "rows": 33,
+      "sha256": "58702c145c5a2527507668573ebde4afe47117c539f3e39bdb080571e519f561"
+    },
+    "inventory-id-and-partial-core-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 138,
+      "parent": "inventory.txt",
+      "rows": 3,
+      "sha256": "03545256df602088ddf269d8956eb8f5c937577bcc4454c109116e12c81ad930"
+    },
+    "inventory-independent-oracle-core-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 138,
+      "parent": "inventory.txt",
+      "rows": 3,
+      "sha256": "180d00ae90a4d9a90eee6609ad0b479e236a163483d456930d56f26e968b54b5"
+    },
+    "inventory-ten-state-core-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 1380,
+      "parent": "inventory.txt",
+      "rows": 30,
+      "sha256": "71a1cb02184d51cfe65911992825e32bbdcb9b81514559e5144f207df5ab5c0b"
+    },
+    "numeric-oracles.json": {
+      "boundary": "derived_numeric_oracle",
+      "bytes": 18996,
+      "parent": "original CSV and independent .dly subsets",
+      "sha256": "f1fe4a8275c10ab1b8ea80f7b537c88f78b62b9f62b61e9016a74da5102ef498"
+    },
+    "observed-edge-case-inventory-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 690,
+      "parent": "inventory.txt",
+      "rows": 15,
+      "sha256": "f5f443d5de7ea79b5e6cacf7af10bdfc7becae1e598b9bcfb0860fbbd84cb229"
+    },
+    "observed-edge-case-stations-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 430,
+      "parent": "stations.txt",
+      "rows": 5,
+      "sha256": "d592a9c262bd93bffd881727e3df3f4e1abcb828d09ab360511442addabfbd0a"
+    },
+    "observed-edge-cases-original.csv": {
+      "boundary": "raw_original_csv_lines",
+      "bytes": 182,
+      "parent": "2026.csv.gz",
+      "rows": 5,
+      "sha256": "7a95fde1ca0663ca3fadf28fe6f4a495d687afa9ad5e2aabdfe8b6825b8bad39"
+    },
+    "rainfall-only-us10adam008-37day-original.csv": {
+      "boundary": "raw_original_csv_lines",
+      "bytes": 1387,
+      "parent": "2026.csv.gz",
+      "rows": 37,
+      "sha256": "6308e68738bf4f6a0faa6deed3e36bd3a549800dac57e7bc619d4a2b9a19665b"
+    },
+    "stations-crossyear-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 946,
+      "parent": "stations.txt",
+      "rows": 11,
+      "sha256": "b65ad501b33e296e4be855139aeef6dfeeca6e394b9600b7742075a599a8aa24"
+    },
+    "stations-id-and-partial-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 344,
+      "parent": "stations.txt",
+      "rows": 4,
+      "sha256": "7eda7c3a501aee423c5b9689064ff5732de578a967008fcb80cae3ffece87d2d"
+    },
+    "stations-independent-oracle-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 86,
+      "parent": "stations.txt",
+      "rows": 1,
+      "sha256": "9b1c7dd606bb84dc0b2717b8a3daba876f1ae32b656dc9514486cd4be8247459"
+    },
+    "stations-ten-state-original.txt": {
+      "boundary": "raw_original_catalog_lines",
+      "bytes": 860,
+      "parent": "stations.txt",
+      "rows": 10,
+      "sha256": "9ac6e91a77ad79f1609f29b211167cb275c60672bbc6e30f436cde8c935d8193"
+    },
+    "usw00014933-202512-202601-core-original.dly": {
+      "boundary": "raw_original_fixed_width_lines",
+      "bytes": 1620,
+      "parent": "official_static_station.body",
+      "rows": 6,
+      "sha256": "855f7b45029172265dd0fa2d58ec704dcfbd574fe7d7e00ddb02553d96d81e9d"
+    },
+    "usw00014933-20260101-02-annual-original.csv": {
+      "boundary": "raw_original_csv_lines",
+      "bytes": 231,
+      "parent": "2026.csv.gz",
+      "rows": 6,
+      "sha256": "55f3fb31d3a95598f0f4b0e5c3919b47256e7e94ba78dd7c29dad8c6a7bc18d7"
+    },
+    "usw00014933-202609-202610-core-original.dly": {
+      "boundary": "raw_original_fixed_width_lines",
+      "bytes": 1620,
+      "parent": "official_static_station.body",
+      "rows": 6,
+      "sha256": "ff8c9b3f4b0e8324821aacb54ff75f85be41a26b523a6cd7498f4ecfbbb6a46b"
+    },
+    "usw00014933-20260910-20261015-annual-original.csv": {
+      "boundary": "raw_original_csv_lines",
+      "bytes": 4162,
+      "parent": "2026.csv.gz",
+      "rows": 108,
+      "sha256": "f7c55563b4848910eb26a43d6bae424c2b796e76c9e73fd9e517d30899f4aaa3"
+    }
+  },
+  "fixture_id": "noaa-ghcnd-yearly-observed-20261019",
+  "reference_session": "2026-10-16",
+  "reference_window": [
+    "2026-09-10",
+    "2026-10-16"
+  ],
+  "roster_by_state": {
+    "IA": "USC00130214",
+    "IL": "USC00110187",
+    "IN": "USC00123078",
+    "KS": "USW00013980",
+    "MN": "USC00210075",
+    "MO": "USC00231216",
+    "ND": "USC00320941",
+    "NE": "USW00024020",
+    "OH": "USC00330563",
+    "SD": "USC00391032"
+  },
+  "schema_version": 1
+}

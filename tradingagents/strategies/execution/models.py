@@ -22,7 +22,7 @@ def _require_decimals(instance: object) -> None:
             "net_exposure", "margin_used", "buying_power", "realized_pnl",
             "unrealized_pnl", "gross_equity", "slippage_cost",
             "commission_cost", "other_fees", "borrow_cost", "financing_cost",
-            "dividend_cash", "net_equity", "high_water_mark", "amount",
+            "dividend_cash", "dividend_receivable", "net_equity", "high_water_mark", "amount",
         } and value is not None and not isinstance(value, Decimal):
             raise TypeError(f"{field.name} must be Decimal")
 
@@ -54,6 +54,10 @@ class CorporateAction:
     source: str
     fetched_at: datetime
     verified: bool
+    payment_date: date | None = None
+    payment_source: str = ""
+    payment_reference: str = ""
+    payment_observed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_decimals(self)
@@ -148,6 +152,7 @@ class AccountState:
     buying_power: Decimal
     net_equity: Decimal
     high_water_mark: Decimal
+    dividend_receivable: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         _require_decimals(self)
@@ -180,6 +185,7 @@ class AccountSnapshot:
     high_water_mark: Decimal
     valid: bool
     invalid_reason: str
+    dividend_receivable: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
         _require_decimals(self)

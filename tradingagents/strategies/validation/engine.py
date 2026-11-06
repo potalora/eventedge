@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import date
+from tradingagents.strategies.metrics.calendar import XNYSCalendar
 from typing import Callable
 
 import numpy as np
@@ -15,11 +17,9 @@ from tradingagents.strategies.validation.models import (
     WindowStats,
 )
 from tradingagents.strategies.validation.stats import (
-    bootstrap_ci,
     compute_abnormal_returns,
     fit_market_model,
     sum_car,
-    ttest_cars,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,16 @@ def compute_car(
     n_bootstrap: int = 10_000,
     rng_seed: int | None = None,
 ) -> EventStudyResult:
-    """Compute CARs for a list of events and aggregate cross-sectionally by group."""
+    """Descriptive catalyst-date total-return CARs; not executable strategy alpha.
+
+    n_bootstrap/rng_seed remain accepted for source compatibility. Inference is
+    withheld because overlapping events and common shocks violate IID sampling.
+    """
+    if not windows or any(start > end for start, end in windows):
+        raise ValueError("event windows must be nonempty and ordered")
+    if estimation[0] > estimation[1] or estimation[1] >= min(start for start, _ in windows):
+        raise ValueError("estimation must precede every event window")
+    calendar = XNYSCalendar()
     if not events:
         return EventStudyResult()
 
@@ -69,6 +78,7 @@ def compute_car(
 
     est_start, est_end = estimation
     max_window = max(end for _, end in windows)
+    min_window = min(start for start, _ in windows)
 
     all_events: list[EventCAR] = []
     skipped: set[str] = set()
@@ -86,12 +96,21 @@ def compute_car(
 
         # Align stock and market on the SAME common trading-day grid, then
         # compute both return series on that grid so day-over-day returns line up.
-        common = sorted(set(stk_closes) & set(spy_closes))
+        common = sorted(d for d in set(stk_closes) & set(spy_closes)
+                        if calendar.is_session(date.fromisoformat(d)))
         if len(common) < min_estimation_days + max_window + 2:
             skipped.add(ticker)
             continue
         stk_prices = np.array([stk_closes[d] for d in common], dtype=float)
         spy_prices = np.array([spy_closes[d] for d in common], dtype=float)
+        if not np.all(np.isfinite(stk_prices)) or not np.all(np.isfinite(spy_prices)) or np.any(stk_prices <= 0) or np.any(spy_prices <= 0):
+            skipped.add(ticker)
+            continue
+        def contiguous(lo: int, hi: int) -> bool:
+            return lo >= 0 and hi < len(common) and all(
+                calendar.next_session(date.fromisoformat(common[i])).isoformat() == common[i + 1]
+                for i in range(lo, hi)
+            )
         stk_rets = np.zeros(len(common))
         stk_rets[1:] = stk_prices[1:] / stk_prices[:-1] - 1.0
         mkt_rets = np.zeros(len(common))
@@ -99,21 +118,32 @@ def compute_car(
 
         produced_any = False
         for ev in ticker_events:
-            e = _event_index(common, ev.event_date)
-            if e is None:
+            anchor = date.fromisoformat(ev.event_date)
+            if not calendar.is_session(anchor):
+                anchor = calendar.next_session(anchor)
+            if anchor.isoformat() not in common:
                 continue
+            e = common.index(anchor.isoformat())
             est_lo = e + est_start          # inclusive
             est_hi = e + est_end            # inclusive
-            if est_lo < 1 or (est_hi - est_lo + 1) < min_estimation_days:
+            if est_lo < 1 or (est_hi - est_lo + 1) < min_estimation_days or not contiguous(est_lo - 1, est_hi):
                 continue
 
+            # Common-observation indices are session offsets only when the
+            # complete span is contiguous, including the fit-to-event gap.
+            # Otherwise missing embargo days can shift the estimation boundary.
+            if not contiguous(est_lo - 1, min(e + max_window, len(common) - 1)):
+                continue
             stock_est = stk_rets[est_lo : est_hi + 1]
             market_est = mkt_rets[est_lo : est_hi + 1]
             fit = fit_market_model(stock_est, market_est)
 
+            win_lo = e + min_window
             win_hi = min(e + max_window, len(common) - 1)
-            stock_win = stk_rets[e : win_hi + 1]
-            market_win = mkt_rets[e : win_hi + 1]
+            if win_lo < 1:
+                continue
+            stock_win = stk_rets[win_lo : win_hi + 1]
+            market_win = mkt_rets[win_lo : win_hi + 1]
             daily_ar = compute_abnormal_returns(
                 stock_win, market_win, fit.alpha, fit.beta
             )
@@ -121,8 +151,8 @@ def compute_car(
             cars: dict[str, float | None] = {}
             for w_start, w_end in windows:
                 label = _window_label(w_start, w_end)
-                if w_end <= (len(daily_ar) - 1):
-                    cars[label] = sum_car(daily_ar, w_start, w_end)
+                if e + w_end <= win_hi and contiguous(e + w_start - 1, e + w_end):
+                    cars[label] = sum_car(daily_ar, w_start - min_window, w_end - min_window)
                 else:
                     cars[label] = None  # window runs past available data
 
@@ -134,7 +164,16 @@ def compute_car(
                     market_model=fit,
                     daily_ar=[float(x) for x in daily_ar],
                     cars=cars,
-                    metadata=dict(ev.metadata),
+                    metadata={
+                        **dict(ev.metadata),
+                        "study_kind": "descriptive_catalyst_reaction",
+                        "return_basis": getattr(price_fn, "return_basis", "caller_supplied_total_return_prices"),
+                        "anchor_policy": "catalyst-date-close-reaction;next-XNYS-session-if-closed",
+                        "effective_anchor_session": anchor.isoformat(),
+                        "daily_ar_start_offset": min_window,
+                        "window_unavailable_reason": "missing_or_noncontiguous_XNYS_session" if any(v is None for v in cars.values()) else "",
+                        "execution_inference": "not_executable_alpha;day0_includes_previous_close_to_anchor_close",
+                    },
                 )
             )
             produced_any = True
@@ -170,17 +209,17 @@ def _aggregate(
             )
             if len(vals) == 0:
                 continue
-            t_stat, p_value = ttest_cars(vals)
-            ci = bootstrap_ci(vals, n_bootstrap=n_bootstrap, rng_seed=rng_seed)
             window_stats.append(
                 WindowStats(
                     window=label,
                     n_events=len(vals),
                     mean_car=float(vals.mean()),
                     std_car=float(vals.std(ddof=1)) if len(vals) > 1 else 0.0,
-                    t_stat=t_stat,
-                    p_value=p_value,
-                    ci=ci,
+                    t_stat=None,
+                    p_value=None,
+                    ci=None,
+                    inference_unavailable_reason="dependent_overlapping_events_and_common_market_shocks",
+
                 )
             )
         results.append(

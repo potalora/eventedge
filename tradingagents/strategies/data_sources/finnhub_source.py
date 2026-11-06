@@ -604,7 +604,8 @@ class FinnhubSource:
             for event in events:
                 if (not source_text(event.get("symbol")) or not source_date(event.get("date"))
                         or "epsActual" not in event
-                        or (event["epsActual"] is not None and not source_number(event["epsActual"]))):
+                        or (event["epsActual"] is not None and not source_number(event["epsActual"]))
+                        or (event.get("epsEstimate") is not None and not source_number(event["epsEstimate"]))):
                     invalid = True
                 else:
                     valid_events.append(event)
@@ -698,6 +699,7 @@ class FinnhubSource:
             )
             if not isinstance(news, list) or not all(isinstance(item, dict) for item in news):
                 raise SourceFetchError("Finnhub news response invalid", reason_code="invalid_response")
+            observed_at = datetime.now(timezone.utc).isoformat()
             result = []
             invalid = False
             for n in news or []:
@@ -712,6 +714,7 @@ class FinnhubSource:
                     "datetime": n.get("datetime", 0),
                     "url": n.get("url", ""),
                     "category": n.get("category", ""),
+                    "observed_at": observed_at,
                 }
                 published_at = _company_news_publication_time(n.get("datetime"))
                 if published_at is not None:

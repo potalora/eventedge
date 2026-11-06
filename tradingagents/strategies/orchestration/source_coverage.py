@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import date
 import hashlib
 import json
@@ -9,6 +10,7 @@ import re
 from typing import Any
 
 _HEALTHY = frozenset({'signals', 'legitimate_no_event'})
+_DISABLED = 'disabled_by_policy'
 _FAILURES = frozenset({'data_failure', 'strategy_defect', 'missing_health'})
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}')
 _KEYS = frozenset({'health_id', 'epoch_id', 'session', 'policy_id', 'strategy', 'status', 'sources', 'affected_cohorts'})
@@ -16,6 +18,92 @@ _KEYS = frozenset({'health_id', 'epoch_id', 'session', 'policy_id', 'strategy', 
 
 def _safe_id(value: object) -> bool:
     return isinstance(value, str) and _ID.fullmatch(value) is not None
+
+
+def canonical_source_scope_limits(value: object) -> dict[str, dict]:
+    """Allowlisted public scope facts, never provider prose or raw payloads."""
+    if not isinstance(value, Mapping) or not set(value) <= {'usaspending', 'courtlistener', 'congress'}:
+        raise ValueError('source scope limits are invalid')
+    output = {}
+    for provider, row in value.items():
+        if provider == 'congress':
+            from tradingagents.strategies.data_sources.congress_disclosure_audit import canonical_audit_summary
+            output[provider] = canonical_audit_summary(row)
+            continue
+        fields = ({'policy', 'scope_sha256', 'counts', 'attribution_complete', 'coverage_basis'}
+                  if provider == 'usaspending' else
+                  {'policy', 'scope_sha256', 'target_manifest_sha256', 'coverage_basis', 'content_kind',
+                   'issuer_count', 'case_count', 'docket_count', 'omitted_issuer_count',
+                   'target_search_complete', 'marketwide_coverage'})
+        if not isinstance(row, dict) or set(row) != fields:
+            raise ValueError('source scope fields are invalid')
+        if any(not isinstance(row[key], str) or re.fullmatch('[a-f0-9]{64}', row[key]) is None
+               for key in fields if key.endswith('sha256')):
+            raise ValueError('source scope digest is invalid')
+        if provider == 'usaspending':
+            counts = row['counts']
+            if (row['policy'] != 'verified_listed_targets_v1'
+                    or row['coverage_basis'] != 'verified_listed_targets'
+                    or not isinstance(counts, dict)
+                    or set(counts) != {'verified_listed_target', 'verified_no_listed_target', 'unresolved'}
+                    or any(type(n) is not int or not 0 <= n <= 2**63-1 for n in counts.values())
+                    or type(row['attribution_complete']) is not bool
+                    or row['attribution_complete'] is not (counts['unresolved'] == 0)):
+                raise ValueError('source scope attribution is contradictory')
+        elif (row['policy'] != 'focused_litigation_v1'
+                or row['coverage_basis'] != 'declared_issuer_and_case_queries'
+                or row['content_kind'] != 'docket_metadata_only'
+                or row['target_search_complete'] is not (row['omitted_issuer_count'] == 0)
+                or row['marketwide_coverage'] is not False
+                or any(type(row[key]) is not int or not 0 <= row[key] <= 2**63-1
+                       for key in ('issuer_count', 'case_count', 'docket_count', 'omitted_issuer_count'))):
+            raise ValueError('source scope litigation is contradictory')
+        output[provider] = deepcopy(row)
+    return dict(sorted(output.items()))
+
+
+def source_scope_limits_from_health(records) -> dict[str, dict]:
+    combined = {}
+    for record in records:
+        evidence = record.get('evidence', {}) if isinstance(record, Mapping) else record.evidence
+        if 'source_scope_limits' not in evidence:
+            continue
+        scoped = canonical_source_scope_limits(evidence['source_scope_limits'])
+        sources = evidence.get('data_sources')
+        errors = evidence.get('provider_errors', {})
+        status = record.get('status') if isinstance(record, Mapping) else record.status
+        strategy = record.get('strategy') if isinstance(record, Mapping) else record.strategy
+        signal_count = record.get('signal_count') if isinstance(record, Mapping) else record.signal_count
+        congress_audit = (set(scoped) == {'congress'} and strategy == 'congressional_trades'
+            and status == _DISABLED and signal_count == 0
+            and evidence.get('reason') == 'display_audit_only_v1'
+            and evidence.get('disclosure_policy') == 'display_audit_only_v1')
+        if (not isinstance(sources, (list, tuple)) or any(not isinstance(source, str) for source in sources)
+                or not isinstance(errors, Mapping) or (status == _DISABLED and not congress_audit)
+                or ('congress' in scoped and not congress_audit)
+                or any(provider not in sources or (provider in errors and not congress_audit) for provider in scoped)):
+            raise ValueError('source scope limits lack matching source provenance')
+        for provider, summary in scoped.items():
+            if provider in combined and combined[provider] != summary:
+                raise ValueError('source scope limits conflict across durable health')
+            combined[provider] = summary
+    return dict(sorted(combined.items()))
+
+
+def aggregate_source_scope_limits(results: dict) -> dict[str, dict]:
+    combined = {}
+    for result in results.values():
+        if not isinstance(result, dict):
+            continue
+        for provider, summary in canonical_source_scope_limits(result.get('source_scope_limits', {})).items():
+            if provider in combined and combined[provider] != summary:
+                raise ValueError('source scope limits conflict across cohort results')
+            combined[provider] = summary
+    if combined and any(isinstance(result, dict) and not result.get('error')
+                        and canonical_source_scope_limits(result.get('source_scope_limits', {})) != combined
+                        for result in results.values()):
+        raise ValueError('source scope limits missing from completed cohort')
+    return dict(sorted(combined.items()))
 
 
 def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
@@ -27,12 +115,20 @@ def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
     records = () if state.epoch_id is None else owner._metric_store.read_strategy_health(
         state.epoch_id, session=state.session, limit=1000
     )
+    disabled = getattr(owner, '_disabled_strategies', {})
     by_scope: dict[tuple[str, str], Any] = {}
     for record in records:
         key = (record.policy_id, record.strategy)
         if (record.epoch_id != state.epoch_id or record.session != state.session
-                or key in by_scope or record.status not in _HEALTHY | _FAILURES - {'missing_health'}):
+                or key in by_scope or record.status not in _HEALTHY | (_FAILURES - {'missing_health'}) | {_DISABLED}):
             raise ValueError('source coverage durable health is invalid')
+        if record.status == _DISABLED and (
+            disabled.get(record.strategy) != record.evidence.get('reason')
+            or record.strategy not in disabled or record.signal_count != 0
+        ):
+            raise ValueError('disabled strategy health does not match configured policy')
+        if record.strategy in disabled and record.status != _DISABLED:
+            raise ValueError('disabled strategy health is missing its policy exclusion')
         by_scope[key] = record
     cohorts_by_policy: dict[str, list[str]] = {}
     for cohort in owner.cohorts:
@@ -40,10 +136,12 @@ def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
         if cfg.name in results:
             cohorts_by_policy.setdefault(owner._policy_id_for_horizon(cfg.horizon), []).append(cfg.name)
     for policy, names in sorted(cohorts_by_policy.items()):
+        scope_limits = source_scope_limits_from_health(
+            record for (bound_policy, _), record in by_scope.items() if bound_policy == policy)
         references = []
         for strategy in sorted(strategies):
             record = by_scope.get((policy, strategy))
-            if record is not None and record.status in _HEALTHY:
+            if record is not None and record.status in _HEALTHY | {_DISABLED}:
                 continue
             if state.epoch_id is None:
                 continue
@@ -62,8 +160,14 @@ def apply_source_coverage(state: Any, results: dict[str, Any]) -> None:
             result = results[name]
             if not isinstance(result, dict):
                 continue
+            if 'source_scope_limits' in result and canonical_source_scope_limits(result['source_scope_limits']) != scope_limits:
+                raise ValueError('source scope limits differ from durable health')
+            if scope_limits:
+                result['source_scope_limits'] = deepcopy(scope_limits)
             result['input_coverage_valid'] = state.epoch_id is not None and not references
             result['source_health_failures'] = references
+            if disabled:
+                result['disabled_strategies'] = dict(sorted(disabled.items()))
             if references and result.get('execution_valid') is True:
                 result['degraded'] = True
     for result in results.values():

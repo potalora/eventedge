@@ -1,0 +1,230 @@
+{
+  "origin": "constructed_schema_fixture_not_native_semantic_proof",
+  "bundle": {
+    "recognition": {
+      "correlated_model_risk": true,
+      "guarantees_accuracy": false,
+      "machine_assessed": true,
+      "model_provenance": {
+        "billing_mode": "chatgpt_plan",
+        "configured_model": "gpt-6-luna",
+        "document_inputs": [
+          {
+            "filename": "DEMO.001.png",
+            "media_type": "image/png",
+            "sha256": "deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d",
+            "size_bytes": 4333
+          }
+        ],
+        "reasoning_effort": "high",
+        "response_id": "constructed-only",
+        "returned_model": "gpt-6-luna",
+        "role": "bounded"
+      },
+      "model_request": {
+        "effort": "high",
+        "max_tokens": 4096,
+        "model": "gpt-6-luna",
+        "prompt_bytes": 414,
+        "prompt_sha256": "1cf4d2f28f9f86cfc8fe978bc037dba1568c846202d99e3b6ce658cc3c613774",
+        "request_sha256": "b242985e0a1984376465eba845db8512238d0e04069c8feb37dd9c3d9d0c7bc9",
+        "role": "bounded",
+        "system_bytes": 4293,
+        "system_sha256": "a6ad6593f3d78d8851698e380116cf8ee64e1a127babd85cc8d713fa54d51518",
+        "temperature": 0.0,
+        "version": "research-model-request-v1"
+      },
+      "receipt_sha256": "674884249ebfdabb559181e24512a191c8d039d9c6fd552f0e41573162d52e79",
+      "request_identity": {
+        "assets": [
+          {
+            "context": "Table 1. Production counts; years are unitless.",
+            "filename": "DEMO.001.png",
+            "id": "DEMO.001",
+            "sha256": "deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d",
+            "size_bytes": 4333
+          }
+        ],
+        "recognition_receipt_sha256": null,
+        "request_identity_sha256": "3cb54ceaf36cdd3e1b237502f2220206fa1da7e91c6693f73213130615ff92a8",
+        "stage": "recognition",
+        "version": "regulation-graphics-request-v2"
+      },
+      "response_sha256": "01a2b92436591d9de5cd41fd7980d8637a9f72552d2e8b647438e1210cb5909d",
+      "response_text": "{\"version\": \"regulation-graphics-recognition-v1\", \"request_identity_sha256\": \"3cb54ceaf36cdd3e1b237502f2220206fa1da7e91c6693f73213130615ff92a8\", \"graphics\": [{\"id\": \"DEMO.001\", \"sha256\": \"deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d\", \"status\": \"complete\", \"kind\": \"table\", \"transcript\": \"Production counts\\nYear\\nCount\\n2024\\n12\\nunits\\nCounts are reported as units.\", \"elements\": [{\"id\": \"title\", \"kind\": \"heading\", \"text\": \"Production counts\", \"references\": [], \"precision\": \"not_numeric\", \"source\": \"image\"}, {\"id\": \"year\", \"kind\": \"column\", \"text\": \"Year\", \"references\": [], \"precision\": \"not_numeric\", \"source\": \"image\"}, {\"id\": \"count\", \"kind\": \"column\", \"text\": \"Count\", \"references\": [], \"precision\": \"not_numeric\", \"source\": \"image\"}, {\"id\": \"row\", \"kind\": \"row\", \"text\": \"2024\", \"references\": [], \"precision\": \"printed\", \"source\": \"image\"}, {\"id\": \"unit\", \"kind\": \"unit\", \"text\": \"units\", \"references\": [], \"precision\": \"not_numeric\", \"source\": \"image\"}, {\"id\": \"y\", \"kind\": \"cell\", \"text\": \"2024\", \"references\": [\"row\", \"year\"], \"precision\": \"printed\", \"source\": \"image\"}, {\"id\": \"n\", \"kind\": \"cell\", \"text\": \"12\", \"references\": [\"row\", \"count\", \"unit\"], \"precision\": \"printed\", \"source\": \"image\"}, {\"id\": \"note\", \"kind\": \"footnote\", \"text\": \"Counts are reported as units.\", \"references\": [], \"precision\": \"not_numeric\", \"source\": \"image\"}], \"unresolved\": []}]}",
+      "result": {
+        "graphics": [
+          {
+            "elements": [
+              {
+                "id": "title",
+                "kind": "heading",
+                "precision": "not_numeric",
+                "references": [],
+                "source": "image",
+                "text": "Production counts"
+              },
+              {
+                "id": "year",
+                "kind": "column",
+                "precision": "not_numeric",
+                "references": [],
+                "source": "image",
+                "text": "Year"
+              },
+              {
+                "id": "count",
+                "kind": "column",
+                "precision": "not_numeric",
+                "references": [],
+                "source": "image",
+                "text": "Count"
+              },
+              {
+                "id": "row",
+                "kind": "row",
+                "precision": "printed",
+                "references": [],
+                "source": "image",
+                "text": "2024"
+              },
+              {
+                "id": "unit",
+                "kind": "unit",
+                "precision": "not_numeric",
+                "references": [],
+                "source": "image",
+                "text": "units"
+              },
+              {
+                "id": "y",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row",
+                  "year"
+                ],
+                "source": "image",
+                "text": "2024"
+              },
+              {
+                "id": "n",
+                "kind": "cell",
+                "precision": "printed",
+                "references": [
+                  "row",
+                  "count",
+                  "unit"
+                ],
+                "source": "image",
+                "text": "12"
+              },
+              {
+                "id": "note",
+                "kind": "footnote",
+                "precision": "not_numeric",
+                "references": [],
+                "source": "image",
+                "text": "Counts are reported as units."
+              }
+            ],
+            "id": "DEMO.001",
+            "kind": "table",
+            "sha256": "deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d",
+            "status": "complete",
+            "transcript": "Production counts\nYear\nCount\n2024\n12\nunits\nCounts are reported as units.",
+            "unresolved": []
+          }
+        ],
+        "request_identity_sha256": "3cb54ceaf36cdd3e1b237502f2220206fa1da7e91c6693f73213130615ff92a8",
+        "version": "regulation-graphics-recognition-v1"
+      },
+      "trading_authority": false,
+      "version": "regulation-graphics-recognition-receipt-v1"
+    },
+    "review": {
+      "correlated_model_risk": true,
+      "guarantees_accuracy": false,
+      "machine_assessed": true,
+      "model_provenance": {
+        "billing_mode": "chatgpt_plan",
+        "configured_model": "gpt-6-luna",
+        "document_inputs": [
+          {
+            "filename": "DEMO.001.png",
+            "media_type": "image/png",
+            "sha256": "deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d",
+            "size_bytes": 4333
+          }
+        ],
+        "reasoning_effort": "high",
+        "response_id": "constructed-only",
+        "returned_model": "gpt-6-luna",
+        "role": "bounded"
+      },
+      "model_request": {
+        "effort": "high",
+        "max_tokens": 4096,
+        "model": "gpt-6-luna",
+        "prompt_bytes": 1763,
+        "prompt_sha256": "63f0b74b55afcb7284b73860f77524303af63bb3bf880d4f682decd12df0fee4",
+        "request_sha256": "e1922153338d0023a10f2c62acc97aa1fd8b3c3f52c28f748d58344d317b06aa",
+        "role": "bounded",
+        "system_bytes": 2830,
+        "system_sha256": "1948c2298e5f990e5843d8f566159f95b374e2e0119724f45a9bae50e4fe0955",
+        "temperature": 0.0,
+        "version": "research-model-request-v1"
+      },
+      "receipt_sha256": "d7dfd4bb02f095a01da185d7907304e49d6a9a56b2bb84a51f2a60a12de2caa5",
+      "request_identity": {
+        "assets": [
+          {
+            "context": "Table 1. Production counts; years are unitless.",
+            "filename": "DEMO.001.png",
+            "id": "DEMO.001",
+            "sha256": "deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d",
+            "size_bytes": 4333
+          }
+        ],
+        "recognition_receipt_sha256": "674884249ebfdabb559181e24512a191c8d039d9c6fd552f0e41573162d52e79",
+        "request_identity_sha256": "381286e85b2aca965c056b59e258c2b372f178cbbfbf3350c0ad3520d71d81bb",
+        "stage": "review",
+        "version": "regulation-graphics-request-v2"
+      },
+      "response_sha256": "2d9a631ec9e45f83edc757672d28a2d63ed32a82f9dffc7752a8b6107d0ce82b",
+      "response_text": "{\"version\": \"regulation-graphics-review-v1\", \"request_identity_sha256\": \"381286e85b2aca965c056b59e258c2b372f178cbbfbf3350c0ad3520d71d81bb\", \"recognition_receipt_sha256\": \"674884249ebfdabb559181e24512a191c8d039d9c6fd552f0e41573162d52e79\", \"graphics\": [{\"id\": \"DEMO.001\", \"sha256\": \"deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d\", \"material_complete\": true, \"checked_element_ids\": [\"title\", \"year\", \"count\", \"row\", \"unit\", \"y\", \"n\", \"note\"], \"checks\": {\"printed_text\": true, \"tables\": true, \"charts\": true, \"units_and_footnotes\": true, \"other_visual\": true}, \"errors\": []}]}",
+      "result": {
+        "graphics": [
+          {
+            "checked_element_ids": [
+              "title",
+              "year",
+              "count",
+              "row",
+              "unit",
+              "y",
+              "n",
+              "note"
+            ],
+            "checks": {
+              "charts": true,
+              "other_visual": true,
+              "printed_text": true,
+              "tables": true,
+              "units_and_footnotes": true
+            },
+            "errors": [],
+            "id": "DEMO.001",
+            "material_complete": true,
+            "sha256": "deff00f2d4882ff146131a5f8161cc0c42c866617a68ef41fe3ca3b44137ba3d"
+          }
+        ],
+        "recognition_receipt_sha256": "674884249ebfdabb559181e24512a191c8d039d9c6fd552f0e41573162d52e79",
+        "request_identity_sha256": "381286e85b2aca965c056b59e258c2b372f178cbbfbf3350c0ad3520d71d81bb",
+        "version": "regulation-graphics-review-v1"
+      },
+      "trading_authority": false,
+      "version": "regulation-graphics-review-receipt-v1"
+    }
+  }
+}

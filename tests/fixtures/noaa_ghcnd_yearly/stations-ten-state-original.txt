@@ -1,0 +1,10 @@
+USC00110187  37.5222  -89.2486  180.7 IL ANNA 4 N                           HCN      
+USC00123078  40.9892  -86.8814  206.0 IN FRANCESVILLE                                
+USC00130214  42.0783  -91.3019  278.3 IA ANAMOSA 3 SSW                               
+USC00210075  43.6064  -93.3019  374.9 MN ALBERT LEA 3SE                     HCN      
+USC00231216  39.7469  -94.2531  307.8 MO CAMERON                                     
+USC00320941  48.8217 -100.4528  493.5 ND BOTTINEAU                          HCN      
+USC00330563  40.3536  -83.7753  358.4 OH BELLEFONTAINE                               
+USC00391032  43.5525  -97.5017  431.9 SD BRIDGEWATER                                 
+USW00013980  37.1550  -98.0283  408.4 KS ANTHONY                            HCN      
+USW00024020  40.5233 -101.0344  928.1 NE HAYES CENTER 1NW                            

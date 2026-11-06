@@ -26,16 +26,46 @@ OBSERVED = {
 }
 
 
+@pytest.fixture
+def fixed_governed_clock(monkeypatch):
+    from tradingagents.strategies.orchestration import governed_market_data, preflight
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz is not None else NOW.replace(tzinfo=None)
+
+    # The adapter and both completion validators must share the fixture clock.
+    # Otherwise valid fixture bars become stale as the actual date advances.
+    monkeypatch.setattr(governed_market_data, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(preflight, "datetime", FixedDatetime)
+
+
 def _source(monkeypatch, *, mutation=None, now=NOW):
     monkeypatch.setenv("ALPACA_API_KEY", "offline-key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "offline-secret")
 
+    # OHLC values are observed; positive activity values are synthetic test data.
     def get(url, **kwargs):
-        ticker = url.split("/")[-2]
         session = date.fromisoformat(kwargs["params"]["start"][:10])
+        if url == "https://data.alpaca.markets/v2/stocks/bars":
+            body = {
+                "bars": {ticker: [dict(t=f"{session}T04:00:00Z", v=1, n=1, **dict(zip("ohlc", OBSERVED[ticker, session])))]
+                         for ticker in kwargs["params"]["symbols"].split(",")},
+                "next_page_token": None,
+            }
+            assert mutation is None  # Existing mutation cases exercise scalar scope.
+            import json
+            import requests
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(body).encode()
+            response._content_consumed = True
+            return response
+        ticker = url.split("/")[-2]
         body = {
             "symbol": ticker,
-            "bars": [dict(t=f"{session}T04:00:00Z", **dict(zip("ohlc", OBSERVED[ticker, session])))],
+            "bars": [dict(t=f"{session}T04:00:00Z", v=1, n=1, **dict(zip("ohlc", OBSERVED[ticker, session])))],
             "next_page_token": None,
         }
         if mutation:
@@ -71,7 +101,7 @@ def test_factory_defaults_to_primary_sip_and_rejects_raw_yahoo_selection():
             prices.build_price_source({"autoresearch": {"paper_ledger": {"pricing_version": version}}})
 
 
-def test_primary_governed_bar_needs_no_recovery_record(monkeypatch):
+def test_primary_governed_bar_needs_no_recovery_record(monkeypatch, fixed_governed_clock):
     source = _source(monkeypatch)
     result = resolve_governed_bars(
         price_source=source, metric_store=None, epoch_id="new-gen", session=SESSION,
@@ -129,10 +159,11 @@ def _executor_fixture(tmp_path):
     config = _config()
     config["autoresearch"]["paper_ledger"]["pricing_version"] = "raw-alpaca-sip-v1"
     ledger = _ledger(tmp_path)
-    benchmark = prices.AdjustedClose("SPY", SESSION, Decimal("650"), "yfinance-adjusted", NOW)
+    from tradingagents.strategies.orchestration.trading_calendar import previous_session
+    benchmark = prices.AdjustedClose("SPY", SESSION, Decimal("650"), "yfinance-adjusted", NOW, previous_session(SESSION), Decimal("650"))
     bundle = SessionInputBundle(SESSION, ("AYI",), {
         ("AYI", SESSION): prices.MarketBar("AYI", SESSION, *map(Decimal, OBSERVED["AYI", SESSION]), SOURCE, NOW, False)
-    }, (), {("SPY", SESSION): benchmark, ("BIL", SESSION): replace(benchmark, symbol="BIL", close=Decimal("91"))})
+    }, (), {("SPY", SESSION): benchmark, ("BIL", SESSION): replace(benchmark, symbol="BIL", close=Decimal("91"), previous_close=Decimal("91"))})
     return ledger, config, bundle, SessionExecutor
 
 
@@ -238,7 +269,7 @@ def test_epoch_context_accepts_current_primary_source_contract(tmp_path):
         ledger.close()
 
 
-def test_runtime_preflight_uses_current_primary_factory_and_real_resolver(monkeypatch, tmp_path):
+def test_runtime_preflight_uses_current_primary_factory_and_real_resolver(monkeypatch, tmp_path, fixed_governed_clock):
     from contextlib import contextmanager
     from types import SimpleNamespace
     from tradingagents.strategies.orchestration.preflight import run_preflight

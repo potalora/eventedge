@@ -1,0 +1,97 @@
+{
+  "data" : {
+    "id" : "CFPB-2026-0018-0001",
+    "type" : "documents",
+    "links" : {
+      "self" : "https://api.regulations.gov/v4/documents/CFPB-2026-0018-0001"
+    },
+    "attributes" : {
+      "additionalRins" : null,
+      "allowLateComments" : false,
+      "authorDate" : null,
+      "authors" : null,
+      "cfrPart" : "12 CFR Parts 1024 and 1026",
+      "commentEndDate" : "2026-08-11T03:59:59Z",
+      "commentStartDate" : "2026-07-09T04:00:00Z",
+      "effectiveDate" : null,
+      "exhibitLocation" : null,
+      "exhibitType" : null,
+      "frDocNum" : "2026-13834",
+      "frVolNum" : null,
+      "implementationDate" : null,
+      "media" : null,
+      "ombApproval" : null,
+      "paperLength" : 0,
+      "paperWidth" : 0,
+      "regWriterInstruction" : null,
+      "sourceCitation" : null,
+      "startEndPage" : "42382 - 42386",
+      "subject" : null,
+      "topics" : null,
+      "address1" : null,
+      "address2" : null,
+      "agencyId" : "CFPB",
+      "city" : null,
+      "category" : null,
+      "comment" : null,
+      "country" : null,
+      "displayProperties" : null,
+      "docAbstract" : null,
+      "docketId" : "CFPB-2026-0018",
+      "documentType" : "Proposed Rule",
+      "email" : null,
+      "fax" : null,
+      "field1" : null,
+      "field2" : null,
+      "fileFormats" : [ {
+        "fileUrl" : "https://downloads.regulations.gov/CFPB-2026-0018-0001/content.pdf",
+        "format" : "pdf",
+        "size" : 227775
+      }, {
+        "fileUrl" : "https://downloads.regulations.gov/CFPB-2026-0018-0001/content.html",
+        "format" : "html",
+        "size" : 39785
+      } ],
+      "firstName" : null,
+      "govAgency" : null,
+      "govAgencyType" : null,
+      "objectId" : "09000064b93764f9",
+      "lastName" : null,
+      "legacyId" : null,
+      "modifyDate" : "2026-09-09T09:00:20Z",
+      "organization" : null,
+      "originalDocumentId" : "CFPB_FRDOC_0001-1342",
+      "pageCount" : 0,
+      "phone" : null,
+      "postedDate" : "2026-07-09T04:00:00Z",
+      "postmarkDate" : null,
+      "reasonWithdrawn" : null,
+      "receiveDate" : "2026-07-09T04:00:00Z",
+      "restrictReason" : null,
+      "restrictReasonType" : null,
+      "stateProvinceRegion" : null,
+      "submitterRep" : null,
+      "submitterRepAddress" : null,
+      "submitterRepCityState" : null,
+      "subtype" : null,
+      "title" : "Request for Information: Promoting Access to Mortgage Credit",
+      "trackingNbr" : null,
+      "withdrawn" : false,
+      "zip" : null,
+      "withinCommentPeriod" : false,
+      "openForComment" : false
+    },
+    "relationships" : {
+      "attachments" : {
+        "data" : [ ],
+        "links" : {
+          "self" : "https://api.regulations.gov/v4/documents/CFPB-2026-0018-0001/relationships/attachments",
+          "related" : "https://api.regulations.gov/v4/documents/CFPB-2026-0018-0001/attachments"
+        }
+      }
+    }
+  },
+  "links" : {
+    "self" : "https://regulations.gov/v4/documents/CFPB-2026-0018-0001?include=attachments"
+  }
+}

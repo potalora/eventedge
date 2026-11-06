@@ -372,6 +372,75 @@ def test_policy_counts_full_weight_against_every_strategy_tag() -> None:
     assert [item.position_size_pct for item in accepted] == pytest.approx([0.02])
 
 
+@pytest.mark.parametrize("requested", [(0.12, 0.08), (0.15, 0.10)])
+def test_policy_rejects_rounding_residue_after_sequential_strategy_trim(requested) -> None:
+    # Retained gen_025 October 27 exposures leave 2.7345e-9 after AMT's trim.
+    context = _context(
+        size="10k",
+        positions=(
+            _position(
+                "AMTB", 0.12016539744188305, sector="Financial Services",
+                strategies=("earnings_call",),
+            ),
+            _position(
+                "ARLP", 0.0989840401691666, sector="Energy",
+                strategies=("earnings_call",),
+            ),
+            _position(
+                "GRC", 0.12096756965444569, sector="Industrials",
+                strategies=("earnings_call",),
+            ),
+        ),
+        sectors={"AMT": "Real Estate", "ACU": "Consumer Defensive"},
+    )
+    recommendations = [
+        _recommendation("AMT", requested[0], strategies=("earnings_call",)),
+        _recommendation("ACU", requested[1], strategies=("earnings_call",)),
+    ]
+
+    accepted, decisions = PortfolioPolicy().evaluate(recommendations, context)
+
+    assert [(item.ticker, item.position_size_pct) for item in accepted] == [
+        ("AMT", 0.05988299)
+    ]
+    assert [
+        (item.ticker, item.decision, item.reason, item.approved_weight)
+        for item in decisions
+    ] == [
+        ("AMT", "trimmed", "strategy:earnings_call", 0.05988299),
+        ("ACU", "rejected", "strategy:earnings_call", 0.0),
+    ]
+    assert [item.requested_weight for item in decisions] == list(requested)
+
+
+@pytest.mark.parametrize(
+    ("remaining", "approved"),
+    [(0.9e-9, 0.0), (3e-9, 0.0), (4.9e-9, 0.0), (5.1e-9, 1e-8)],
+)
+def test_policy_rejects_only_unusable_rounded_strategy_headroom(remaining, approved) -> None:
+    context = _context(
+        size="10k",
+        positions=(
+            _position(
+                "AMTB", 0.4 - remaining, sector="Financial Services",
+                strategies=("earnings_call",),
+            ),
+        ),
+        sectors={"ACU": "Consumer Defensive"},
+    )
+    recommendation = _recommendation("ACU", 0.08, strategies=("earnings_call",))
+
+    accepted, decisions = PortfolioPolicy().evaluate([recommendation], context)
+
+    assert [item.position_size_pct for item in accepted] == (
+        [approved] if approved else []
+    )
+    assert decisions[0].decision == ("trimmed" if approved else "rejected")
+    assert decisions[0].reason == "strategy:earnings_call"
+    assert decisions[0].requested_weight == 0.08
+    assert decisions[0].approved_weight == approved
+
+
 def test_policy_applies_event_cluster_cap_independently() -> None:
     existing = _position(
         "AAPL",

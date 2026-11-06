@@ -1,0 +1,28 @@
+[
+  {
+    "accession": "0001193125-26-418126",
+    "filename": "native_13d_cbl_publisher.txt",
+    "observed_at": "2026-10-11T15:13:42.749570+00:00",
+    "source_url": "https://www.sec.gov/Archives/edgar/data/910612/000119312526418126/0001193125-26-418126.txt",
+    "source_sha256": "24d7a5965d7c781dcccd156606aed50fb3989e953e7c0642682ae32c85eedf1a",
+    "source_bytes": 13393,
+    "sha256": "9a20d3f64dcf2604166997311e6188bcac7d7cc713e796780e56258cb963b94e",
+    "bytes": 13393,
+    "redactions": [
+      "ccc"
+    ]
+  },
+  {
+    "accession": "0001062993-26-005078",
+    "filename": "native_13d_adur_options.txt",
+    "observed_at": "2026-10-11T15:13:42.559461+00:00",
+    "source_url": "https://www.sec.gov/Archives/edgar/data/1863934/000106299326005078/0001062993-26-005078.txt",
+    "source_sha256": "08c8a6a2439c5c783f6c1f408917babc3adf5b5a68bafc2b2fbfd76202a9e454",
+    "source_bytes": 12119,
+    "sha256": "09519625fd82da4b0b98c7684b7ef9d14a20c12639eee3c5458bf4d5d45e162a",
+    "bytes": 12119,
+    "redactions": [
+      "ccc"
+    ]
+  }
+]

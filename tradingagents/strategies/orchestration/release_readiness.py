@@ -18,8 +18,13 @@ from contextlib import closing
 from datetime import date
 from pathlib import Path
 from typing import Any
+from tradingagents.strategies.execution.ids import stable_id
 
 from tradingagents.strategies.modules import get_paper_trade_strategies
+from tradingagents.strategies.orchestration.generation_config import (
+    FROZEN_CONFIG_NAME,
+    read_generation_config,
+)
 from tradingagents.strategies.orchestration.runtime_lock import (
     canonical_runtime_lock_path,
     runtime_lock,
@@ -59,7 +64,13 @@ def _accounting_and_staging(
     epoch_id: str,
     generation_id: str,
     policy_id: str | None,
+    *, central_epoch_commit: str | None = None,
 ) -> tuple[bool, bool]:
+    # The supported pipeline owns epochs in the central MetricStore. The same
+    # exact epoch/commit/session must bind every book's accepted records below.
+    if central_epoch_commit is not None and _session_epoch(
+            state_dir, session, generation_id, central_epoch_commit) != epoch_id:
+        return False, False
     accounting_complete = True
     staging_complete = True
     for cohort in COHORTS:
@@ -71,7 +82,7 @@ def _accounting_and_staging(
                     "SELECT generation_id, status, start_session, end_session FROM metric_epochs WHERE epoch_id = ?",
                     (epoch_id,),
                 ).fetchall()
-                if (
+                if not (not ledger_epoch and central_epoch_commit is not None) and (
                     len(ledger_epoch) != 1
                     or ledger_epoch[0][0] != generation_id
                     or ledger_epoch[0][1] not in {"open", "closed"}
@@ -110,11 +121,27 @@ def _accounting_and_staging(
                     ).fetchone()[0]:
                         accounting_complete = staging_complete = False
                 contexts = connection.execute(
-                    "SELECT epoch_id FROM session_execution_contexts WHERE session = ?",
+                    "SELECT epoch_id, economic_inputs_json, input_digest, market_digest FROM session_execution_contexts WHERE session = ?",
                     (session,),
                 ).fetchall()
-                if contexts != [(epoch_id,)]:
+                expected_benchmarks: set[str] = set()
+                if len(contexts) != 1 or contexts[0][0] != epoch_id:
                     accounting_complete = False
+                else:
+                    # The executor freezes exactly its configured symbols in
+                    # this accepted input document. Never reinterpret legacy
+                    # sessions using the reporting checkout's current defaults.
+                    _, payload, input_digest, market_digest = contexts[0]
+                    economic = json.loads(payload)
+                    market = economic["market"]
+                    declared = [row["symbol"] for row in market["benchmarks"]]
+                    if (not declared or any(not isinstance(symbol, str) or not symbol for symbol in declared)
+                            or len(set(declared)) != len(declared)
+                            or input_digest != stable_id("session_economic_inputs", economic)
+                            or market_digest != stable_id("session_market_inputs", market)):
+                        accounting_complete = False
+                    else:
+                        expected_benchmarks = set(declared)
                 if not _one_valid_row(connection, "session_runs", session):
                     accounting_complete = False
                 snapshots = connection.execute(
@@ -143,8 +170,9 @@ def _accounting_and_staging(
                     (session,),
                 ).fetchall()
                 if (
-                    len(benchmarks) != 2
-                    or {symbol for symbol, _ in benchmarks} != {"SPY", "BIL"}
+                    not expected_benchmarks
+                    or len(benchmarks) != len(expected_benchmarks)
+                    or {symbol for symbol, _ in benchmarks} != expected_benchmarks
                     or any(valid != 1 for _, valid in benchmarks)
                 ):
                     accounting_complete = False
@@ -159,7 +187,7 @@ def _accounting_and_staging(
                     != (policy_id or f"foundation-{cohort.split('_')[1]}")
                 ):
                     staging_complete = False
-        except (OSError, sqlite3.Error, ValueError, TypeError):
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             accounting_complete = False
             staging_complete = False
     return accounting_complete, staging_complete
@@ -222,12 +250,29 @@ def _candidate_and_health(
         for horizon in ("30d", "3m", "6m", "1y")
         for strategy in get_paper_trade_strategies()
     }
+    retired = {
+        strategy.name: strategy.retirement_reason
+        for strategy in get_paper_trade_strategies()
+        if getattr(strategy, "retirement_reason", None)
+    }
+    def classified(row):
+        if row.get("status") in HEALTHY_STRATEGY_STATUSES:
+            return True
+        evidence = row.get("evidence")
+        return (
+            row.get("status") == "disabled_by_policy"
+            and row.get("strategy") in retired
+            and row.get("signal_count") == 0
+            and isinstance(evidence, dict)
+            and evidence.get("reason") == retired[row["strategy"]]
+        )
+
     quarantined = any(row.get("outcome") == "quarantined" for row in recovery_rows)
     identities = {(row.get("policy_id"), row.get("strategy")) for row in health}
     health_complete = (
         len(health) == 48
         and identities == expected
-        and all(row.get("status") in HEALTHY_STRATEGY_STATUSES for row in health)
+        and all(classified(row) for row in health)
     )
     return not issues and not quarantined and bool(health), health_complete
 
@@ -263,6 +308,16 @@ def _assess_generation(
     if Path(generation.get("state_dir", "")).resolve() != state_dir:
         raise ValueError("candidate generation state directory is not canonical")
     _verify_worktree(repo, generation_id, generation, expected_commit)
+    operating_profile = None
+    if generation.get('config_file') is not None:
+        from .generation_config import read_generation_config
+        from .operating_contract import configured, profile_contract
+        _, frozen, digest = read_generation_config(generation['config_file'], generation['config_sha256'])
+        if configured(frozen):
+            operating_profile = profile_contract(frozen, profile_sha256=digest)
+            if policy_id is not None and policy_id != operating_profile.ledger_policy_id:
+                raise ValueError('candidate policy differs from frozen profile')
+            policy_id = operating_profile.ledger_policy_id
     history: dict[str, list[dict[str, Any]]] = {}
     for run in generation.get("run_history", []):
         if run.get("action") == "daily":
@@ -288,7 +343,8 @@ def _assess_generation(
             accounting = staging = candidates = health = False
         else:
             accounting, staging = _accounting_and_staging(
-                snapshot, session, epoch_id, generation_id, policy_id
+                snapshot, session, epoch_id, generation_id, policy_id,
+                **({'central_epoch_commit': expected_commit} if operating_profile is not None else {}),
             )
             candidates, health = _candidate_and_health(
                 snapshot, session, epoch_id, policy_id
@@ -301,14 +357,41 @@ def _assess_generation(
             "candidate_coverage_complete": candidates,
             "strategy_health_complete": health,
         }
-        row["ready"] = all(value for key, value in row.items() if key != "session")
+        if operating_profile is not None:
+            from .operational_report import build_operational_report
+            # assess_generation holds the exclusive runtime lock through this
+            # call. Canonical report readers inspect the same immutable state;
+            # the SQLite snapshot above independently checks financial phases.
+            verified = build_operational_report(repo, generation_id, session, snapshot_guaranteed=True,
+                _state_snapshot=snapshot)
+            completion = verified.get('completion', {})
+            bound = (completion.get('version') == operating_profile.version
+                and completion.get('generation_id') == generation_id
+                and completion.get('generation_commit') == expected_commit
+                and completion.get('profile_sha256') == operating_profile.profile_sha256
+                and completion.get('session') == session and completion.get('epoch_id') == epoch_id)
+            row['operational_continuity_complete'] = bound and completion.get('continuity_eligible') is True
+            row['workflow_complete'] = bound and completion.get('workflow_complete') is True
+            row['research_coverage_complete'] = False
+            row['strategy_health_complete'] = bound and completion.get('supported_research_complete') is True
+            row['epoch_id'] = epoch_id
+            row['completion_reason_codes'] = completion.get('reason_codes', ['completion_missing'])
+            row['ready'] = (row['operational_continuity_complete'] and accounting and staging
+                and candidates and row['strategy_health_complete'])
+        else:
+            row["ready"] = all(value for key, value in row.items() if key != "session")
         rows.append(row)
+    identity_complete = (operating_profile is None or len({row.get('epoch_id') for row in rows}) == 1
+        and all(row.get('epoch_id') is not None for row in rows))
     return {
         "generation_id": generation_id,
         "expected_commit": expected_commit,
+        **({'operational_continuity_complete': identity_complete and all(row['ready'] for row in rows),
+            'research_coverage_complete': False, 'profile_sha256': operating_profile.profile_sha256}
+           if operating_profile is not None else {}),
         "required_consecutive_sessions": sessions,
         "through": through.isoformat(),
-        "ready": all(row["ready"] for row in rows),
+        "ready": identity_complete and all(row["ready"] for row in rows),
         "sessions": rows,
     }
 
@@ -422,6 +505,7 @@ def assess_generation(
     ]
     paths = [
         manifest,
+        state / FROZEN_CONFIG_NAME,
         *(
             Path(str(db) + suffix)
             for db in databases
@@ -446,6 +530,21 @@ def assess_generation(
                         source = Path(str(database) + suffix)
                         if source.exists():
                             shutil.copyfile(source, Path(str(destination) + suffix))
+                # The canonical report shares the financial snapshot and
+                # reads copied immutable inputs. Read-only WAL opens against
+                # authoritative state can still create SQLite shm sidecars.
+                for name in ('source_inputs', 'runtime_recovery', 'decision_shadow'):
+                    source = state / name
+                    if source.exists():
+                        if source.is_symlink() or any(path.is_symlink() for path in source.rglob('*')):
+                            raise ValueError('immutable readiness evidence contains a symlink')
+                        shutil.copytree(source, snapshot / name, symlinks=False)
+                frozen_config = state / FROZEN_CONFIG_NAME
+                if frozen_config.exists():
+                    # Recovery receipts bind these exact regular-file bytes.
+                    # Include them in the same before/after identity checks.
+                    body, _, _ = read_generation_config(frozen_config)
+                    (snapshot / FROZEN_CONFIG_NAME).write_bytes(body)
                 if before != _fingerprint(paths):
                     raise ValueError("state changed during readiness assessment")
                 result = _assess_generation(

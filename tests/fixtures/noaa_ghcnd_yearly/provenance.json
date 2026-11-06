@@ -1,0 +1,121 @@
+{
+  "acquisition_vs_reference": "All originals acquired2026-10-19. Historical observation dates are NOT acquisition dates or historical point-in-time availability. NOAA files are mutable current vintages.",
+  "actual_catalog_findings": {
+    "extra_original_catalog_examples": [
+      "BR00A6-0010",
+      "US10adam008",
+      "US10box_001",
+      "CA1NS000227"
+    ],
+    "inventory_non_ascii_rows": 0,
+    "of_those_in_agricultural_states": 1674,
+    "rainfall_only_baseline": "US10adam008 PRCP-only eligible inventory overlaps2026 and has37actualPRCP rows; must not be excluded for lackingTMAX/TMIN.",
+    "strict_uppercase_alphanumeric_regex_rejected_real_catalog_ids": 3054,
+    "valid_utf8_station_name_rows": 11
+  },
+  "coverage_limits": [
+    "Representative ten-state10station roster, not full7877station native coverage.",
+    "Crossyear2day subsets test year routing/parsing, not30day feature readiness.",
+    "Actual missing2026Jan1MN TMIN must not be filled.",
+    "DesMoines currentCSV endsOct15, unlike complete mainroster endsOct16.",
+    "No synthetic baseline rows; corruption/missingness mutations in tests must be separately labeled controlled perturbations.",
+    "Recompressed subset gzip wrappers are derived; CSV/catalog/DLY payload lines remain exact original bytes.",
+    "Current official bulk response availability does not prove historical point-in-time availability or native end-to-end strategy health."
+  ],
+  "crossyear_selection_rule": "From actual annual2025 and annual2026 gzip bodies stream exact original Dec31/Jan1 TMAX/TMIN/PRCP lines for ten-state roster plus USW00014933; no field rewriting. Dedicated DesMoines gzip subsets select its three original lines per year. Preserve source order and actual missing MN TMIN.",
+  "extraction_statistics": {
+    "2025": {
+      "decoded_bytes_scanned": 1311113565,
+      "elapsed_seconds": 59.44905173196457,
+      "filename": "2025-crossyear-20251231-original.csv",
+      "rows": 33,
+      "rows_scanned": 36377147,
+      "sha256": "f67c27dbce2d57197a8743c297f12b80574b3f7058097caaafdc0b9b71ccb34a",
+      "stations": [
+        "USC00110187",
+        "USC00123078",
+        "USC00130214",
+        "USC00210075",
+        "USC00231216",
+        "USC00320941",
+        "USC00330563",
+        "USC00391032",
+        "USW00013980",
+        "USW00014933",
+        "USW00024020"
+      ]
+    },
+    "2026": {
+      "decoded_bytes_scanned": 3355080,
+      "elapsed_seconds": 0.16326762503013015,
+      "filename": "2026-crossyear-20260101-original.csv",
+      "rows": 32,
+      "rows_scanned": 92699,
+      "sha256": "b9c6092652ed91a959b693708ffd948d963d23c0b0501d3445a91d6e94378bc3",
+      "stations": [
+        "USC00110187",
+        "USC00123078",
+        "USC00130214",
+        "USC00210075",
+        "USC00231216",
+        "USC00320941",
+        "USC00330563",
+        "USC00391032",
+        "USW00013980",
+        "USW00014933",
+        "USW00024020"
+      ]
+    }
+  },
+  "numeric_oracles": "Independent fixed-width .dly cells compared against annualCSV integer value and M/Q/S flags; OBS_TIME unavailable in .dly is never invented. Convert exact integers using rational degreesF=32+9*value/50 and inches=value/254. This is not an AccessJSON rounding oracle.",
+  "observed_edge_selection_rule": "first encountered original subset row matching each named predicate; no mutations",
+  "original_parents": {
+    "2025.csv.gz": {
+      "acquired_at_utc": "2026-10-19T04:35:56.835874+00:00",
+      "bytes": 167367837,
+      "connect_timeout_seconds": 5,
+      "credential_use": false,
+      "elapsed_seconds": 2.225607,
+      "http_status": 200,
+      "maximum_body_bytes": 300000000,
+      "redirects": 0,
+      "retries": 0,
+      "sha256": "b161c52a734a80e94a176f4b14a24459da34f749d770267f18c9f5e2cba18bcc",
+      "source_url": "https://www.ncei.noaa.gov/pub/data/ghcn/daily/by_year/2025.csv.gz",
+      "total_timeout_seconds": 60
+    },
+    "2026.csv.gz": {
+      "acquired_at_utc": "2026-10-19T00:35:25.885530+00:00",
+      "sha256": "b4d8fbcbcf5ea4a932127d148bb29d9096922f8a16bd08992bdc62628fdc89f4",
+      "source_url": "https://www.ncei.noaa.gov/pub/data/ghcn/daily/by_year/2026.csv.gz"
+    },
+    "inventory.txt": {
+      "acquired_at_utc": "2026-10-19T00:35:24.287926+00:00",
+      "sha256": "c33ec006c4f35d0371e6f9ccfe3f656ae9de0b6f0f122794da07df7c971c48b5",
+      "source_url": "https://www.ncei.noaa.gov/pub/data/ghcn/daily/ghcnd-inventory.txt"
+    },
+    "official_static_station.body": {
+      "acquired_at_utc": "2026-10-19T00:33:35.421032+00:00",
+      "sha256": "8cf0e3c26406ec57f6416c10d65210de7662c9cad5413e713a3b0080c64c424e",
+      "source_url": "https://www.ncei.noaa.gov/pub/data/ghcn/daily/all/USW00014933.dly"
+    },
+    "selected-20260910-20261016-original.csv": {
+      "derivation": "original annual2026 lines selected by native core element, current ten-state catalog and Sep10-Oct16window; no field rewriting",
+      "sha256": "d75266eefce74994b44857dbcfdcfbd93b1ba2a9a0c3e2e2ba761de530f2d672"
+    },
+    "stations.txt": {
+      "acquired_at_utc": "2026-10-19T00:35:23.598197+00:00",
+      "sha256": "428eabc955883187935bce283766d5646e3ed7484b92eb0803874c0e8dd9b342",
+      "source_url": "https://www.ncei.noaa.gov/pub/data/ghcn/daily/ghcnd-stations.txt"
+    }
+  },
+  "public_safety": "Official NOAA public climate observations and station metadata only; no credentials, profiles, trading state or licensed provider payloads.",
+  "schema_version": 1,
+  "selection_rules": {
+    "catalogs": "unchanged original station lines and applicable core inventory lines for selected stations",
+    "crossyear": "Actual original annualCSV wire lines from both years; independent .dly originals retained separately, no reconstructedwirebaseline.",
+    "edges": "first encountered original subset row matching each named predicate; no mutations",
+    "main_csv": "all unchanged original lines for exact selected10stations in retained37day/core subset, original order",
+    "roster": "one station per native agricultural state with all111usable core station/date/element records in37days; preferUSW then lexicographic; prefer DesMoinesUSW00014933 inIA for independent dly match"
+  }
+}

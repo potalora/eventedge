@@ -1,0 +1,935 @@
+{
+  "version": "award-attribution-research-v1",
+  "reviewed_on": "2026-10-22",
+  "frozen_generation": "gen_023",
+  "frozen_session": "2026-10-21",
+  "frozen_commit": "56bdf1929a58778c6c58f435f2ad5a2e4b5d1729",
+  "unresolved_awards": 18,
+  "unique_recipient_ueis": 12,
+  "proposals": [
+    {
+      "uei": "QQBXQR679KM9",
+      "recipient_name": "CLARK CONSTRUCTION GROUP LLC",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Clark Construction Group private shareholders",
+      "ownership_basis": "privately_held",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000874_7014_70B01C26D00000021_7014/",
+        "https://www.clarkconstruction.com/sites/default/files/2023-01/Superstructure%20Spring%202016%20Low%20Res%20PDF.pdf",
+        "https://www.clarkconstruction.com/about-us",
+        "https://www.clarkconstruction.com/clark-industrial"
+      ],
+      "evidence_notes": [
+        "The company's Spring 2016 newsletter documents the transfer of CEI's ownership stake to existing Clark Construction Group owners and executives at the end of 2015. Native awards identify the same legal recipient and Clark Construction LLC parent.",
+        " ",
+        "T",
+        "h",
+        "e",
+        " ",
+        "c",
+        "u",
+        "r",
+        "r",
+        "e",
+        "n",
+        "t",
+        " ",
+        "C",
+        "l",
+        "a",
+        "r",
+        "k",
+        " ",
+        "I",
+        "n",
+        "d",
+        "u",
+        "s",
+        "t",
+        "r",
+        "i",
+        "a",
+        "l",
+        " ",
+        "p",
+        "a",
+        "g",
+        "e",
+        " ",
+        "e",
+        "x",
+        "p",
+        "l",
+        "i",
+        "c",
+        "i",
+        "t",
+        "l",
+        "y",
+        " ",
+        "d",
+        "e",
+        "s",
+        "c",
+        "r",
+        "i",
+        "b",
+        "e",
+        "s",
+        " ",
+        "C",
+        "l",
+        "a",
+        "r",
+        "k",
+        " ",
+        "a",
+        "s",
+        " ",
+        "p",
+        "r",
+        "i",
+        "v",
+        "a",
+        "t",
+        "e",
+        "l",
+        "y",
+        " ",
+        "h",
+        "e",
+        "l",
+        "d",
+        ";",
+        " ",
+        "i",
+        "n",
+        "d",
+        "e",
+        "p",
+        "e",
+        "n",
+        "d",
+        "e",
+        "n",
+        "t",
+        "l",
+        "y",
+        " ",
+        "v",
+        "e",
+        "r",
+        "i",
+        "f",
+        "i",
+        "e",
+        "d",
+        " ",
+        "2",
+        "0",
+        "2",
+        "6",
+        "-",
+        "1",
+        "0",
+        "-",
+        "2",
+        "2",
+        "."
+      ],
+      "confidence": "high",
+      "bounds": "The transfer document is historical; no current shareholder percentages or individual holdings are asserted. Current private status is corroborated; historical management transfer does not assert current individual holdings.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 3,
+      "native_parent_uei": "GFU6PHRQ8LM7",
+      "awards": [
+        {
+          "award_id": "70B01C26F00000874",
+          "award_key": "CONT_AWD_70B01C26F00000874_7014_70B01C26D00000021_7014",
+          "base_obligation_date": "2026-09-26",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000874_7014_70B01C26D00000021_7014/",
+          "detail_sha256": "02b15a5f54168d9d53757e45fc5db61bcae96a9775d9d6de2d678c637c004447"
+        },
+        {
+          "award_id": "70B01C26F00000952",
+          "award_key": "CONT_AWD_70B01C26F00000952_7014_70B01C26D00000021_7014",
+          "base_obligation_date": "2026-09-28",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000952_7014_70B01C26D00000021_7014/",
+          "detail_sha256": "7515e20099da6b9d299da0c66762612b8202814d036f3fc10f0bb8c00c5023ba"
+        },
+        {
+          "award_id": "70B01C26F00001079",
+          "award_key": "CONT_AWD_70B01C26F00001079_7014_70B01C26D00000021_7014",
+          "base_obligation_date": "2026-09-29",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001079_7014_70B01C26D00000021_7014/",
+          "detail_sha256": "6f30d6f0576973d5df65b5ec5719b826b853b614b34fc7685e3758fc57b5da15"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "LFH4SUCVA379",
+      "recipient_name": "ENVIRONMENTAL CHEMICAL CORPORATION",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Environmental Chemical Corporation employee owners",
+      "ownership_basis": "wholly_employee_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001125_7014_70B01C26D00000022_7014/",
+        "https://www.ecc.net/about-us/",
+        "https://www.ecc.net/why-ecc/"
+      ],
+      "evidence_notes": [
+        "The company's About page identifies employee ownership. The HTML counter immediately before EMPLOYEE-OWNED has data-to-value=\"100\"; intermediate animated values are not the ownership percentage. Native award detail identifies Environmental Chemical Corporation in Burlingame, California."
+      ],
+      "confidence": "high",
+      "bounds": "Current ownership review; no historical award-date ownership claim.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "LFH4SUCVA379",
+      "awards": [
+        {
+          "award_id": "70B01C26F00001125",
+          "award_key": "CONT_AWD_70B01C26F00001125_7014_70B01C26D00000022_7014",
+          "base_obligation_date": "2026-09-28",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001125_7014_70B01C26D00000022_7014/",
+          "detail_sha256": "933d6663c8ef4de31c96e3ae3c673c1d6f9285c6663bfbab3348a03131ff21f5"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "W31DQKBPJCD3",
+      "recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Kiewit employee shareholders through Kiewit Infrastructure West Co.",
+      "ownership_basis": "privately_employee_owned_parent",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001093_7014_70B01C26D00000025_7014/",
+        "https://www.gao.gov/assets/720/715122.pdf",
+        "https://swvconstructors.com/",
+        "https://www.kiewit.com/careers/"
+      ],
+      "evidence_notes": [
+        "GAO-21-372, printed page 20, identifies Southwest Valley Constructors as a subsidiary of Kiewit Infrastructure West. The recipient website confirms Kiewit affiliation; Kiewit's current Careers page identifies privately held employee ownership."
+      ],
+      "confidence": "high",
+      "bounds": "Preserve native parent EUKMSNED1371. The ownership chain beyond native detail comes from GAO and company sources.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 5,
+      "native_parent_uei": "EUKMSNED1371",
+      "awards": [
+        {
+          "award_id": "70B01C26F00001093",
+          "award_key": "CONT_AWD_70B01C26F00001093_7014_70B01C26D00000025_7014",
+          "base_obligation_date": "2026-09-30",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001093_7014_70B01C26D00000025_7014/",
+          "detail_sha256": "1a9a130ed0d27cf77de8135969a8e6373b3731eae0c1f2392239e7ab35ef66ee"
+        },
+        {
+          "award_id": "70B01C26F00001092",
+          "award_key": "CONT_AWD_70B01C26F00001092_7014_70B01C26D00000025_7014",
+          "base_obligation_date": "2026-09-30",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001092_7014_70B01C26D00000025_7014/",
+          "detail_sha256": "1506dce3acb271aca627f78d695796d2cdcc9e051399b17b5a0f77167db3d53e"
+        },
+        {
+          "award_id": "70B01C26F00000951",
+          "award_key": "CONT_AWD_70B01C26F00000951_7014_70B01C26D00000025_7014",
+          "base_obligation_date": "2026-09-25",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000951_7014_70B01C26D00000025_7014/",
+          "detail_sha256": "ab164e801a8ad578db7028724b9332dba24f791b38c020da556474bfa21af73c"
+        },
+        {
+          "award_id": "70B01C26F00000950",
+          "award_key": "CONT_AWD_70B01C26F00000950_7014_70B01C26D00000025_7014",
+          "base_obligation_date": "2026-09-25",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000950_7014_70B01C26D00000025_7014/",
+          "detail_sha256": "28ed5299b046c550e44fdf8e213fb0c83767d7d27c0d36b6f03f1cae904da81d"
+        },
+        {
+          "award_id": "70B01C26F00000947",
+          "award_key": "CONT_AWD_70B01C26F00000947_7014_70B01C26D00000025_7014",
+          "base_obligation_date": "2026-09-28",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000947_7014_70B01C26D00000025_7014/",
+          "detail_sha256": "da42245d15ae803ea509febe3fa1122cfc58d287109ebdfb7a42b46b76f26d82"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "XXNJCWMAKNH8",
+      "recipient_name": "BL HARBERT INTERNATIONAL LLC",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Harbert family through privately held BL Harbert International",
+      "ownership_basis": "family_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000878_7014_70B01C26D00000019_7014/",
+        "https://www.linkedin.com/company/blharbert/",
+        "https://harbertrealty.com/wp-content/uploads/2016/09/BL-Harbert-International-Awarded-Vesta2.pdf",
+        "https://blharbert.com/about/"
+      ],
+      "evidence_notes": [
+        "The company-authored LinkedIn profile identifies family ownership and privately held status. A BL Harbert press release dated August 2, 2016 independently identifies private ownership and the same Birmingham corporate address as the native award."
+      ],
+      "confidence": "high",
+      "bounds": "The current family-ownership statement is company-authored; the corroborating press release is historical. Exact ownership percentages are undisclosed.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "XXNJCWMAKNH8",
+      "awards": [
+        {
+          "award_id": "70B01C26F00000878",
+          "award_key": "CONT_AWD_70B01C26F00000878_7014_70B01C26D00000019_7014",
+          "base_obligation_date": "2026-09-29",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000878_7014_70B01C26D00000019_7014/",
+          "detail_sha256": "d3e97dcde57e1fcd3930f17a2e3ff6c722d54a89ee731a9fd2dc786162c61d1b"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "MYEKECP4M5H4",
+      "recipient_name": "PEACHTREE LUMBER COMPANY, INC",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Peachtree Lumber Company local private shareholders",
+      "ownership_basis": "locally_owned_s_corporation",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_12363N27C4000_12C2_-NONE-_-NONE-/",
+        "https://peachtreelumber.com/"
+      ],
+      "evidence_notes": [
+        "The company website identifies local ownership and the same Brasstown, North Carolina location as the native award. Native detail also identifies a Subchapter S Corporation and a self-parent UEI."
+      ],
+      "confidence": "high",
+      "bounds": "Individual shareholder names are undisclosed. Government private-sector classifications alone do not prove an unlisted company.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "MYEKECP4M5H4",
+      "awards": [
+        {
+          "award_id": "12363N27C4000",
+          "award_key": "CONT_AWD_12363N27C4000_12C2_-NONE-_-NONE-",
+          "base_obligation_date": "2026-10-06",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_12363N27C4000_12C2_-NONE-_-NONE-/",
+          "detail_sha256": "63d41460525989d1a28a238a91e68befe3dad934aa2c326884d87782c7056a2f"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "LBM4GLJNDK31",
+      "recipient_name": "KALEO, INC.",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Funds managed by Marathon Asset Management",
+      "ownership_basis": "private_fund_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_75A50126C00010_7505_-NONE-_-NONE-/",
+        "https://kaleo.com/marathon-asset-management-announces-acquisition-of-kaleo/",
+        "https://ir.tredegar.com/news-releases/news-release-details/tredegar-completes-sale-ownership-interest-kaleo/",
+        "https://kaleo.com/about/"
+      ],
+      "evidence_notes": [
+        "The company announced acquisition by Marathon-managed funds in November 2021. Tredegar's December 28, 2021 release confirms its ownership-interest sale closed. Kal\u00e9o's current board page identifies Marathon investment representatives."
+      ],
+      "confidence": "high",
+      "bounds": "Fund ownership is distinct from ownership of the fund manager. A manager acquisition does not prove direct listed-parent equity ownership of Kal\u00e9o.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "LBM4GLJNDK31",
+      "awards": [
+        {
+          "award_id": "75A50126C00010",
+          "award_key": "CONT_AWD_75A50126C00010_7505_-NONE-_-NONE-",
+          "base_obligation_date": "2026-09-28",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_75A50126C00010_7505_-NONE-_-NONE-/",
+          "detail_sha256": "dda82848600e2dac778e9fb729a25ccaa2596ce4afc2c95172ab13c48d995d7e"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "N9NJK877QJK9",
+      "recipient_name": "GUIDEHOUSE INC.",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Bain Capital Private Equity investment affiliate",
+      "ownership_basis": "private_equity_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_7571MN26F80170_7571_GS00F045DA_4732/",
+        "https://guidehouse.com/news/corporate-news/2023/guidehouse-completes-transaction-with-bain-capital",
+        "https://baincapitalprivateequity.com/portfolio"
+      ],
+      "evidence_notes": [
+        "Guidehouse's December 14, 2023 release confirms its acquisition by Bain Capital Private Equity from Veritas closed. Bain's current private equity portfolio lists Guidehouse. The native award's Veritas parent name is historical."
+      ],
+      "confidence": "high",
+      "bounds": "Do not promote stale Veritas parent UEI QD34AGJ37D53 into a global Bain mapping.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "QD34AGJ37D53",
+      "awards": [
+        {
+          "award_id": "7571MN26F80170",
+          "award_key": "CONT_AWD_7571MN26F80170_7571_GS00F045DA_4732",
+          "base_obligation_date": "2026-09-30",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_7571MN26F80170_7571_GS00F045DA_4732/",
+          "detail_sha256": "79ecafa0c00dee28b78fa8f33cf3a24e3201d105db307069e8555fcbff5e26e5"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "CZJKHV86FSB2",
+      "recipient_name": "KETCHUM INC.",
+      "proposed_status": "verified_listed_target",
+      "ticker": "OMC",
+      "cik": "0000029989",
+      "issuer_name": "OMNICOM GROUP INC.",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_75D30126F21224_7523_47QRAA23D0052_4732/",
+        "https://www.sec.gov/Archives/edgar/data/29989/000002998926000006/omc-20251231.htm",
+        "https://www.sec.gov/Archives/edgar/data/29989/000002998926000006/a2025q4exhibit21.htm",
+        "https://investor.omc.com/news/news-details/2025/Omnicom-Announces-Strategy-and-Executive-Leadership-Following-Acquisition-of-Interpublic/default.aspx"
+      ],
+      "evidence_notes": [
+        "Same-award detail identifies Omnicom Group Inc. as Ketchum's parent. Omnicom's 2025 SEC Form 10-K identifies Ketchum in its group and NYSE common stock OMC (CIK 29989). Exhibit 21 lists significant holding subsidiaries and does not name Ketchum."
+      ],
+      "confidence": "high",
+      "bounds": "Recipient UEI only; the native parent UEI is not added as a general mapping.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "HLPEFHHB6XL5",
+      "awards": [
+        {
+          "award_id": "75D30126F21224",
+          "award_key": "CONT_AWD_75D30126F21224_7523_47QRAA23D0052_4732",
+          "base_obligation_date": "2026-09-29",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_75D30126F21224_7523_47QRAA23D0052_4732/",
+          "detail_sha256": "61bd43a9da9655ddb30afac79800d88625620544bb2aa5ce0f275b80e0968894"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "FHKLJV1NP651",
+      "recipient_name": "SMITHS DETECTION INC.",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Funds advised by CVC Capital Partners",
+      "ownership_basis": "private_fund_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70T04026F7672N007_7013_70T04025D7672N004_7013/",
+        "https://www.smiths.com/news-and-insights/news/2026/completion-of-smiths-detection-sale"
+      ],
+      "evidence_notes": [
+        "Smiths Group's June 30, 2026 release confirms sale of Smiths Detection to funds advised by CVC Capital Partners. The award's September 28, 2026 base obligation date follows the completed disposal."
+      ],
+      "confidence": "high",
+      "bounds": "Former Smiths Group ownership does not support SMIN or SMGZY attribution after the disposal. Advising the acquiring funds does not establish listed-manager equity ownership.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "FHKLJV1NP651",
+      "awards": [
+        {
+          "award_id": "70T04026F7672N007",
+          "award_key": "CONT_AWD_70T04026F7672N007_7013_70T04025D7672N004_7013",
+          "base_obligation_date": "2026-09-28",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70T04026F7672N007_7013_70T04025D7672N004_7013/",
+          "detail_sha256": "30f3e2742391ca3fac2114d5f0c311a930a617ab39c2e945b96aeb9795aa0868"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "TWVGJRMK6Z78",
+      "recipient_name": "BRASFIELD & GORRIE LLC",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Brasfield & Gorrie private shareholders",
+      "ownership_basis": "privately_held",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000949_7014_70B01C26D00000020_7014/",
+        "https://www.brasfieldgorrie.com/about-us/"
+      ],
+      "evidence_notes": [
+        "The company's current About Us page identifies privately held status since inception. Native award detail identifies the same Birmingham legal recipient and a self-parent UEI."
+      ],
+      "confidence": "high",
+      "bounds": "Private profit sharing does not prove employee equity ownership. No named shareholders or percentages are asserted.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "TWVGJRMK6Z78",
+      "awards": [
+        {
+          "award_id": "70B01C26F00000949",
+          "award_key": "CONT_AWD_70B01C26F00000949_7014_70B01C26D00000020_7014",
+          "base_obligation_date": "2026-09-28",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000949_7014_70B01C26D00000020_7014/",
+          "detail_sha256": "3aefb55337f66d3808840e987d5fde219daa723d84b287c112be05832896db78"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "SQLVDBFQ4SD8",
+      "recipient_name": "WORKWEAR OUTFITTERS, LLC",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Redwood Capital Investments LLC investment subsidiary",
+      "ownership_basis": "private_holding_company_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70T05026F5900N032_7013_70B01C20D00000004_7014/",
+        "https://www.vfc.com/investors/news-events-presentations/press-releases/detail/1768/vf-corporation-completes-the-sale-of-the-occupational",
+        "https://www.prnewswire.com/news-releases/workwear-outfitters-leader-in-workwear-apparel--footwear-begins-new-era-as-stand-alone-company-301322560.html",
+        "https://wwof.com/who-we-are",
+        "https://www.linkedin.com/company/workwear-outfitters",
+        "https://www.stephens.com/uploads/shared/transactions-pdf/rv-retailer-deal-announcement_2018-07-02.pdf"
+      ],
+      "evidence_notes": [
+        "VF's June 28, 2021 release confirms sale to a Redwood subsidiary. Workwear Outfitters' own June 29 release confirms the former VF Workwear name and completed sale. Its current employer profile identifies privately held status and the award's Nashville address."
+      ],
+      "confidence": "high",
+      "bounds": "Do not map legacy VF Imagewear parent UEI H7MCPFKLJLK3 to VFC or globally to Redwood. Exact private-shareholder percentages are undisclosed.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "H7MCPFKLJLK3",
+      "awards": [
+        {
+          "award_id": "70T05026F5900N032",
+          "award_key": "CONT_AWD_70T05026F5900N032_7013_70B01C20D00000004_7014",
+          "base_obligation_date": "2026-09-23",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70T05026F5900N032_7013_70B01C20D00000004_7014/",
+          "detail_sha256": "814d3bb74bb154995322435843efd402e1f70179124b38c23005ad8711980330"
+        }
+      ],
+      "included_in_crosswalk": true,
+      "review_decision": "accepted"
+    },
+    {
+      "uei": "T9G9DELGRKX5",
+      "recipient_name": "LYDIG CONSTRUCTION, INC.",
+      "proposed_status": "verified_no_listed_target",
+      "ultimate_owner": "Lydig Construction management shareholder group",
+      "ownership_basis": "management_owned",
+      "ticker": "",
+      "cik": "",
+      "provenance": [
+        "https://api.usaspending.gov/api/v2/awards/CONT_AWD_47PB5326C0009_4740_-NONE-_-NONE-/",
+        "https://www.lydig.com/people/",
+        "https://www.spokanejournal.com/articles/80-parting-thoughts-with-lydig-construction-s-mark-bray",
+        "https://www.spokanejournal.com/articles/15415-meet-greet-with-lydig-construction-cfo-katie-burton",
+        "https://www.linkedin.com/company/lydig-construction",
+        "https://www.linkedin.com/posts/lydig-construction_we-are-proud-to-announce-the-promotion-of-activity-7065036382557130752-fE5J"
+      ],
+      "evidence_notes": [
+        "Lydig's official history documents a 1996 ownership transition. Company-authored 2023 promotion news confirms CFO Katie Burton is a co-owner; direct CFO interviews identify management shareholders. Explicit current controlling-owner evidence remains weaker than the accepted entries."
+      ],
+      "confidence": "medium",
+      "bounds": "Retain unresolved. The latest explicit management-owner evidence is from 2023; do not assert a current controlling owner or shareholder count.",
+      "reviewed_on": "2026-10-22",
+      "temporal_scope": "prospective_current_ownership",
+      "award_count": 1,
+      "native_parent_uei": "T9G9DELGRKX5",
+      "awards": [
+        {
+          "award_id": "47PB5326C0009",
+          "award_key": "CONT_AWD_47PB5326C0009_4740_-NONE-_-NONE-",
+          "base_obligation_date": "2026-09-22",
+          "native_source": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_47PB5326C0009_4740_-NONE-_-NONE-/",
+          "detail_sha256": "f66c71216d2f55c615ab7afa31456b0dacdd7e9f37e94e079f28884e3cd00d13"
+        }
+      ],
+      "included_in_crosswalk": false,
+      "review_decision": "deferred_unresolved"
+    }
+  ],
+  "native_award_identity_review": [
+    {
+      "award_id": "70B01C26F00000874",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000874_7014_70B01C26D00000021_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "CLARK CONSTRUCTION GROUP LLC",
+        "recipient_uei": "QQBXQR679KM9",
+        "parent_recipient_name": "CLARK CONSTRUCTION LLC",
+        "parent_recipient_uei": "GFU6PHRQ8LM7",
+        "business_categories": [
+          "Category Business",
+          "Limited Liability Corporation",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00001125",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001125_7014_70B01C26D00000022_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "ENVIRONMENTAL CHEMICAL CORPORATION",
+        "recipient_uei": "LFH4SUCVA379",
+        "parent_recipient_name": "ENVIRONMENTAL CHEMICAL CORPORATION",
+        "parent_recipient_uei": "LFH4SUCVA379",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00001093",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001093_7014_70B01C26D00000025_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "recipient_uei": "W31DQKBPJCD3",
+        "parent_recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "parent_recipient_uei": "EUKMSNED1371",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00001092",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001092_7014_70B01C26D00000025_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "recipient_uei": "W31DQKBPJCD3",
+        "parent_recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "parent_recipient_uei": "EUKMSNED1371",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00000952",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000952_7014_70B01C26D00000021_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "CLARK CONSTRUCTION GROUP LLC",
+        "recipient_uei": "QQBXQR679KM9",
+        "parent_recipient_name": "CLARK CONSTRUCTION LLC",
+        "parent_recipient_uei": "GFU6PHRQ8LM7",
+        "business_categories": [
+          "Category Business",
+          "Limited Liability Corporation",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00001079",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00001079_7014_70B01C26D00000021_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "CLARK CONSTRUCTION GROUP LLC",
+        "recipient_uei": "QQBXQR679KM9",
+        "parent_recipient_name": "CLARK CONSTRUCTION LLC",
+        "parent_recipient_uei": "GFU6PHRQ8LM7",
+        "business_categories": [
+          "Category Business",
+          "Limited Liability Corporation",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00000878",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000878_7014_70B01C26D00000019_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "BL HARBERT INTERNATIONAL LLC",
+        "recipient_uei": "XXNJCWMAKNH8",
+        "parent_recipient_name": "BL HARBERT INTERNATIONAL LLC",
+        "parent_recipient_uei": "XXNJCWMAKNH8",
+        "business_categories": [
+          "Category Business",
+          "Limited Liability Corporation",
+          "Not Designated a Small Business",
+          "Partnership or Limited Liability Partnership",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00000951",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000951_7014_70B01C26D00000025_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "recipient_uei": "W31DQKBPJCD3",
+        "parent_recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "parent_recipient_uei": "EUKMSNED1371",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "12363N27C4000",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_12363N27C4000_12C2_-NONE-_-NONE-/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "PEACHTREE LUMBER COMPANY, INC",
+        "recipient_uei": "MYEKECP4M5H4",
+        "parent_recipient_name": "PEACHTREE LUMBER COMPANY, INC",
+        "parent_recipient_uei": "MYEKECP4M5H4",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Small Business",
+          "Special Designations",
+          "Subchapter S Corporation",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "75A50126C00010",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_75A50126C00010_7505_-NONE-_-NONE-/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "KALEO, INC.",
+        "recipient_uei": "LBM4GLJNDK31",
+        "parent_recipient_name": "KALEO, INC.",
+        "parent_recipient_uei": "LBM4GLJNDK31",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Manufacturer of Goods",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00000950",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000950_7014_70B01C26D00000025_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "recipient_uei": "W31DQKBPJCD3",
+        "parent_recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "parent_recipient_uei": "EUKMSNED1371",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00000947",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000947_7014_70B01C26D00000025_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "recipient_uei": "W31DQKBPJCD3",
+        "parent_recipient_name": "SOUTHWEST VALLEY CONSTRUCTORS CO",
+        "parent_recipient_uei": "EUKMSNED1371",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "7571MN26F80170",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_7571MN26F80170_7571_GS00F045DA_4732/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "GUIDEHOUSE INC.",
+        "recipient_uei": "N9NJK877QJK9",
+        "parent_recipient_name": "VERITAS CAPITAL FUND MANAGEMENT, L.L.C.",
+        "parent_recipient_uei": "QD34AGJ37D53",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "75D30126F21224",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_75D30126F21224_7523_47QRAA23D0052_4732/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "KETCHUM INC.",
+        "recipient_uei": "CZJKHV86FSB2",
+        "parent_recipient_name": "OMNICOM GROUP INC.",
+        "parent_recipient_uei": "HLPEFHHB6XL5",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70T04026F7672N007",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70T04026F7672N007_7013_70T04025D7672N004_7013/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "SMITHS DETECTION INC.",
+        "recipient_uei": "FHKLJV1NP651",
+        "parent_recipient_name": "SMITHS DETECTION INC.",
+        "parent_recipient_uei": "FHKLJV1NP651",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Foreign Owned",
+          "Foreign-Owned and U.S.-Incorporated Business",
+          "Manufacturer of Goods",
+          "Not Designated a Small Business",
+          "Special Designations"
+        ]
+      }
+    },
+    {
+      "award_id": "70B01C26F00000949",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70B01C26F00000949_7014_70B01C26D00000020_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "BRASFIELD & GORRIE LLC",
+        "recipient_uei": "TWVGJRMK6Z78",
+        "parent_recipient_name": "BRASFIELD & GORRIE LLC",
+        "parent_recipient_uei": "TWVGJRMK6Z78",
+        "business_categories": [
+          "Category Business",
+          "Limited Liability Corporation",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "70T05026F5900N032",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_70T05026F5900N032_7013_70B01C20D00000004_7014/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "WORKWEAR OUTFITTERS, LLC",
+        "recipient_uei": "SQLVDBFQ4SD8",
+        "parent_recipient_name": "VF IMAGEWEAR, INC.",
+        "parent_recipient_uei": "H7MCPFKLJLK3",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Manufacturer of Goods",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    },
+    {
+      "award_id": "47PB5326C0009",
+      "source_url": "https://api.usaspending.gov/api/v2/awards/CONT_AWD_47PB5326C0009_4740_-NONE-_-NONE-/",
+      "retrieved_on": "2026-10-22",
+      "matches_frozen_uei_pair": true,
+      "native_recipient": {
+        "recipient_name": "LYDIG CONSTRUCTION, INC.",
+        "recipient_uei": "T9G9DELGRKX5",
+        "parent_recipient_name": "LYDIG CONSTRUCTION, INC.",
+        "parent_recipient_uei": "T9G9DELGRKX5",
+        "business_categories": [
+          "Category Business",
+          "Corporate Entity Not Tax Exempt",
+          "Not Designated a Small Business",
+          "Special Designations",
+          "U.S.-Owned Business"
+        ]
+      }
+    }
+  ],
+  "scope": "Public native award identity and ownership review only; no production state was modified.",
+  "detail_digest_basis": "SHA-256 of the captured public API detail serialized with json.dumps(response, indent=2), encoded as UTF-8; not raw HTTP response bytes."
+}

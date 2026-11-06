@@ -1,195 +1,76 @@
 from __future__ import annotations
 
-import logging
 from typing import Any
-
-import pandas as pd
 
 from .base import Candidate
 
-logger = logging.getLogger(__name__)
-
-# Regional bank / retailer ETFs as proxies for state economic conditions
-REGIONAL_ETFS = {
-    "regional_banks": "KRE",  # SPDR S&P Regional Banking ETF
-    "small_cap_value": "IWN",  # iShares Russell 2000 Value ETF
-    "retail": "XRT",  # SPDR S&P Retail ETF
-    "real_estate": "IYR",  # iShares US Real Estate ETF
-    "homebuilders": "XHB",  # SPDR S&P Homebuilders ETF
-    "homebuilders_focused": "ITB",  # iShares US Home Construction ETF
-    "broad_reit": "VNQ",  # Vanguard Real Estate ETF
-    "semiconductors": "SOXX",  # iShares Semiconductor ETF
-    "industrials": "XLI",  # Industrial Select Sector SPDR
-    "real_estate_sector": "XLRE",  # Real Estate Select Sector SPDR
-}
-
 
 class StateEconomicsStrategy:
-    """Trade regional ETFs using cross-sector momentum as a proxy for
-    state-level economic divergence.
+    """Opt-in source-vintage state releases; legacy proxy stays retired."""
 
-    Academic basis: Korniotis & Kumar (2013, JoF) show state economic
-    conditions predict local stock returns. Addoum et al. (2017) find
-    predictability strongest for difficult-to-arbitrage firms. Composite
-    leading indicator quintile spread: 1.43%/month.
-
-    Signal logic (backtest proxy):
-    1. Track regional bank, retail, homebuilder ETF momentum.
-    2. Regional economic strength → local companies outperform.
-    3. Go long top-performing regional ETFs.
-    4. Rebalance periodically.
-
-    True state-level indicator trading requires FRED state data (Phase 2+).
-    """
+    retirement_reason = "unsupported_state_event_proxy"
 
     name = "state_economics"
     track = "paper_trade"
     data_sources = ["yfinance", "fred", "openbb"]
 
-    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import (
-            HORIZON_PARAMS,
-        )
+    def __init__(self):
+        self._state_config = None
 
-        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
-        return {
-            "lookback_days": (10, 60),
-            "top_n": (1, 4),
-            "rebalance_days": hp["hold_days_range"],
-        }
+    def configure(self, config):
+        from ..data_sources.state_economics_policy import configured
+        enabled = config is not None and configured(config)
+        self._state_config = dict(config) if enabled else None
+        self.retirement_reason = None if enabled else 'unsupported_state_event_proxy'
+        self.data_sources = ['fred', 'edgar'] if enabled else ['yfinance', 'fred', 'openbb']
+
+    def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
+        return {}
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
-        from tradingagents.strategies.orchestration.cohort_orchestrator import (
-            HORIZON_PARAMS,
-        )
-
-        hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
-        return {
-            "lookback_days": 21,
-            "top_n": 2,
-            "rebalance_days": hp["hold_days_default"],
-        }
+        from tradingagents.strategies.orchestration.cohort_orchestrator import HORIZON_PARAMS
+        return {"rebalance_days": HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])["hold_days_default"]}
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
-        """Screen for regional ETFs using economic indicators + momentum composite.
-
-        Combines FRED economic indicators with ETF momentum for a
-        composite signal. Falls back to pure momentum if FRED unavailable.
-        """
-        prices = data.get("yfinance", {}).get("prices", {})
-        lookback = params.get("lookback_days", 21)
-        top_n = params.get("top_n", 2)
-
-        # Compute momentum scores
-        etf_scores: list[tuple[str, str, float, str]] = []
-        for name, ticker in REGIONAL_ETFS.items():
-            df = prices.get(ticker)
-            if df is None or df.empty:
-                continue
-            df = df.loc[:date]
-            if len(df) < lookback:
-                continue
-            close = df["Close"]
-            momentum = (close.iloc[-1] / close.iloc[-lookback]) - 1.0
-            observation = df.index[-1]
-            window_end = (
-                observation.date().isoformat()
-                if hasattr(observation, "date")
-                else str(observation)
-            )
-            etf_scores.append((name, ticker, momentum, window_end))
-
-        if not etf_scores:
+        """Retain genuine state releases; only reviewed exposures request a model."""
+        if self._state_config is None:
             return []
-
-        # Enrich with FRED economic indicator context
-        fred_data = data.get("fred", {})
-        fred_indicators = fred_data
-        econ_boost = {}
-        fred_observation_ids: list[str] = []
-        if fred_indicators:
-            # Check if unemployment is declining (bullish for regionals)
-            unemployment = fred_indicators.get("UNRATE")
-            if unemployment is not None and len(unemployment) >= 2:
-                if isinstance(unemployment, pd.Series):
-                    recent, prior = unemployment.iloc[-1], unemployment.iloc[-2]
-                else:
-                    values = sorted(unemployment.items())
-                    recent, prior = values[-1][1], values[-2][1]
-                if recent < prior:  # Declining unemployment
-                    econ_boost["KRE"] = 0.02  # Boost regional banks
-                    econ_boost["XRT"] = 0.01  # Boost retail
-                    econ_boost["XHB"] = 0.01  # Boost homebuilders
-
-            # Check initial claims (leading indicator)
-            claims = fred_indicators.get("ICSA")
-            if claims is not None and len(claims) >= 2:
-                if isinstance(claims, pd.Series):
-                    recent, prior = claims.iloc[-1], claims.iloc[-2]
-                else:
-                    values = sorted(claims.items())
-                    recent, prior = values[-1][1], values[-2][1]
-                if recent < prior:  # Declining claims = bullish
-                    econ_boost["IWN"] = 0.02  # Small-cap value benefits most
-
-            for series_name in ("UNRATE", "ICSA"):
-                series = fred_indicators.get(series_name)
-                if series is None or len(series) == 0:
-                    continue
-                if isinstance(series, pd.Series):
-                    observed = series.dropna().index[-1]
-                else:
-                    observed = sorted(series)[-1]
-                observed_text = (
-                    observed.date().isoformat()
-                    if hasattr(observed, "date")
-                    else str(observed)
-                )
-                fred_observation_ids.append(f"FRED:{series_name}:{observed_text}")
-
-        # Combine momentum + economic boost
-        combined_scores = []
-        for name, ticker, momentum, window_end in etf_scores:
-            boost = econ_boost.get(ticker, 0.0)
-            combined = momentum + boost
-            combined_scores.append(
-                (name, ticker, combined, momentum, boost, window_end)
-            )
-
-        combined_scores.sort(key=lambda x: x[2], reverse=True)
-
+        from ..data_sources.state_economics_policy import (
+            POLICY, aware, digest, release_events, verified_exposures,
+        )
+        source = data.get('fred', {})
+        snapshot = source.get('state_unemployment')
+        registry = source.get('state_exposure_registry')
+        universe = data.get('_state_economics_universe')
+        from ..orchestration.state_inputs import state_policy_scope
+        scope = state_policy_scope(data, self._state_config, date, universe=universe)
+        coverage = scope['source_coverage']
+        events = release_events(snapshot, lookback_days=self._state_config.get('state_release_lookback_days', 7))
+        if scope['available_at'] is None:
+            return []
+        cutoff = aware(scope['available_at'])
+        exposure_error = scope['exposure_registry_error'] is not None
+        exposures = ([] if exposure_error else verified_exposures(registry, universe=universe,
+            company_map=data.get('edgar', {}).get('company_tickers'), cutoff=cutoff.isoformat()))
         candidates = []
-        for name, ticker, combined, momentum, boost, window_end in combined_scores[
-            :top_n
-        ]:
-            # No hard min_return gate — let LLM judge context
-            metadata = {
-                "regional_sector": name,
-                "trailing_return": momentum,
-                "econ_boost": boost,
-                "composite_score": combined,
-                "source_observation_ids": sorted(
-                    [f"YFINANCE:{ticker}:{window_end}", *fred_observation_ids]
-                ),
-                "window_end": window_end,
-            }
-
-            # Add factor context from OpenBB
-            openbb_data = data.get("openbb", {})
-            factors = openbb_data.get("factors_fama_french", {})
-            if isinstance(factors, dict) and "factors" in factors:
-                metadata["fama_french"] = factors["factors"]
-
-            candidates.append(
-                Candidate(
-                    ticker=ticker,
-                    date=date,
-                    direction="long",
-                    score=combined,
-                    metadata=metadata,
-                )
-            )
-
+        for event in events:
+            matches = [row for row in exposures if row['state'] == event['state']]
+            for exposure in matches or [None]:
+                reason = ('incomplete_state_unemployment_coverage' if not coverage['complete'] else
+                          'invalid_state_exposure_registry' if exposure_error else
+                          'no_verified_state_exposure' if exposure is None else
+                          'missing_state_baseline' if event['previous_month_value'] is None else None)
+                metadata = {'state_economics_policy': POLICY, 'state_event': event,
+                    'state_exposure': exposure, 'state_source_coverage': coverage,
+                    'state_registry_sha256': digest(registry),
+                    'available_at': max(aware(event['available_at']), cutoff).isoformat(),
+                    'source_observation_ids': [event['source_observation_id']],
+                    'needs_llm_analysis': reason is None, 'analysis_type': 'state_economics'}
+                if reason:
+                    metadata['non_actionable_reason'] = reason
+                candidates.append(Candidate(ticker=exposure['ticker'] if exposure else '', date=date,
+                    direction='neutral', score=0.0, confidence=0.0, metadata=metadata,
+                    journal_only=reason is not None))
         return candidates
 
     def check_exit(
@@ -200,6 +81,7 @@ class StateEconomicsStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on rebalance schedule."""
         rebalance_days = params.get("rebalance_days", 30)
@@ -208,34 +90,6 @@ class StateEconomicsStrategy:
         return False, ""
 
     def build_propose_prompt(self, context: dict) -> str:
-        current = context.get("current_params", self.get_default_params())
-        results = context.get("recent_results", [])
-
-        results_text = ""
-        if results:
-            for r in results[-5:]:
-                results_text += (
-                    f"  params={r.get('params', {})}, "
-                    f"sharpe={r.get('sharpe', 0):.2f}, "
-                    f"return={r.get('total_return', 0):.2%}, "
-                    f"trades={r.get('num_trades', 0)}\n"
-                )
-
-        return f"""You are optimizing a State Economics strategy that rotates among
-regional ETFs (KRE, IWN, XRT, IYR, XHB, ITB, VNQ, SOXX, XLI, XLRE)
-based on trailing momentum as a proxy for state-level economic conditions.
-
-Investment horizon: 30 days. Rebalance window aligns with the portfolio
-evaluation cycle. Regional economic divergence is persistent over 1-3 months.
-
-Current parameters: {current}
-
-Parameter ranges:
-- lookback_days: 10-60 (trailing return window)
-- top_n: 1-4 (number of top ETFs to hold)
-- rebalance_days: 20-45 (rebalance frequency, target ~30 days)
-
-Recent backtest results:
-{results_text or "  No results yet."}
-
-Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
+        if self._state_config is None:
+            raise RuntimeError("state_economics is retired: unsupported_state_event_proxy")
+        return 'State release discovery and reviewed exposure scope are fixed; do not optimize source clocks or invent directional rules.'

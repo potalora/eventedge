@@ -1,14 +1,9 @@
-"""P1+P2: Earnings call transcript analysis.
+"""Earnings-event research using numerical surprises and sourced news.
 
-P1 — Earnings Call Tone & Deception Detection (Cohen et al. 2012):
-Detects hedging language, unusual Q&A evasion, tone shifts between
-prepared remarks and Q&A. Negative tone in Q&A predicts -2.7% drift.
-
-P2 — Cross-Referencing Guidance Revisions:
-Compares current call guidance to prior quarters and analyst consensus.
-Detects stealth downgrades (lowering without flagging).
-
-Data source: Finnhub (earnings_call_transcripts endpoint).
+The active Finnhub path supplies the earnings calendar and admitted company-news
+summaries. It does not acquire complete call transcripts, Q&A or prior-quarter
+comparators. Those capabilities require separately supplied original evidence;
+the analyzer selects its prompt from the explicit text_source identity.
 """
 
 from __future__ import annotations
@@ -17,12 +12,13 @@ import logging
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
 
 class EarningsCallStrategy:
-    """Paper-trade strategy analyzing earnings call transcripts via LLM."""
+    """Paper-trade earnings research with explicitly identified text evidence."""
 
     name = "earnings_call"
     track = "paper_trade"
@@ -36,9 +32,7 @@ class EarningsCallStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 6),
-            "analyze_qa_only": (True, False),
         }
 
     def get_default_params(self, horizon: str = "30d") -> dict[str, Any]:
@@ -49,17 +43,14 @@ class EarningsCallStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
             "max_positions": 4,
-            "analyze_qa_only": False,
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
         """Screen for recent earnings events and generate candidates.
 
-        Produces up to two candidates per event:
-        1. EPS surprise candidate (backtestable, quantitative)
-        2. Text analysis candidate (paper_only, needs LLM)
+        Combines numerical EPS surprise and available text into one candidate
+        per fiscal event. News remains identified as earnings_news.
 
         Expects data["finnhub"]["transcripts"] = list of dicts with
         {symbol, year, quarter, transcript_text, text_source,
@@ -147,7 +138,7 @@ class EarningsCallStrategy:
                     if num_analysts >= 10:
                         candidate.score = min(candidate.score * 1.15, 1.0)
 
-        return candidates[: params.get("max_positions", 4)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
 
     def check_exit(
         self,
@@ -157,20 +148,22 @@ class EarningsCallStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         hold_days = params.get("hold_days", 20)
         if holding_days >= hold_days:
             return True, "hold_period"
         # Stop loss at 5%
-        pnl_pct = (current_price - entry_price) / entry_price
+        pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
         if pnl_pct < -0.05:
             return True, "stop_loss"
         return False, ""
 
     def build_propose_prompt(self, context: dict) -> str:
         current = context.get("current_params", self.get_default_params())
-        return f"""You are optimizing an Earnings Call analysis strategy that uses LLM
-to detect tone shifts, deception, and guidance revisions in transcripts.
+        return f"""You are optimizing an earnings-event strategy using numerical EPS
+surprises and LLM analysis of earnings-news summaries. The active source does
+not supply call Q&A or prior-quarter transcripts; do not assume those inputs.
 
 Investment horizon: 30 days. Post-earnings drift is documented over 2-3 weeks.
 Exiting after 7 days leaves money on the table. Target 15-20 day holds to
@@ -180,8 +173,6 @@ Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (post-earnings drift window, target ~20 days)
-- min_conviction: 0.3-0.8
 - max_positions: 2-6
-- analyze_qa_only: true/false (Q&A section is more informative per research)
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

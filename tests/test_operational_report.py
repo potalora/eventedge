@@ -136,7 +136,7 @@ def test_optional_clef_status_is_reported_without_changing_financial_validity(na
     if kind != 'missing':
         evaluate_shadow(state_dir=state, generation=GENERATION, session=SESSION, epoch_id=EPOCH, generation_commit=COMMIT,
             signals=[{'event_key':'docket-1','ticker':'NVDA','strategy':'litigation','direction':'short',
-                      'metadata':{'docket_id':1,'llm_analysis':{'rationale':'Company faces a patent suit.'}}}],
+                      'metadata':{'docket_id':1,'llm_analysis':{'evidence_claim':'NVDA faces a patent suit.'}}}],
             data={'courtlistener':{'dockets':[{'docket_id':1,'case_name':'Patent holder v NVDA','nature_of_suit':'Patent'}]}},
             config={'enabled':True,'mode':'shadow'}, environ={})
         if kind == 'corrupt':
@@ -174,6 +174,50 @@ def test_multiple_daily_attempts_preserve_preflight_incident_without_tainting_cl
     assert report['sources']['recovered'][0]['provider'] == 'edgar'
     assert len(report['cohorts']) == 16
     assert report['accounting_valid'] is True
+
+
+def test_governed_preflight_success_preserves_separate_screen_failure(native_evidence):
+    repo, state, wire = native_evidence
+    failed = _attempt(repo, None, action='preflight', ordinal=1, return_code=1)
+    passed = _attempt(repo, None, action='preflight', ordinal=2)
+    artifact = json.loads(passed.read_text())
+    artifact.update(preflight_mode='governed', stderr='')
+    artifact['result'] = {'success': True, 'elapsed_s': 1.0,
+                          'preflight_mode': 'governed', 'governed_ok': True,
+                          'state_status': 'uninitialized', 'governed_probe_status': 'ready',
+                          'governed_bar_recoveries': [], 'governed_failure_map': {}}
+    passed.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=3)
+
+    report = _report(repo)
+    assert report['outcome'] == 'clean' and report['evidence_complete']
+    preflights = [row for row in report['attempts'] if row['action'] == 'preflight']
+    assert [(row['preflight_mode'], row['preflight_ok']) for row in preflights] == [
+        ('screen', False), ('governed', True)]
+    assert len(report['preflight_incidents']) == 1
+    assert report['preflight_incidents'][0]['attempt_id'] == failed.name
+    assert report['preflight_incidents'][0]['preflight_mode'] == 'screen'
+    markdown = render_operational_report(report)
+    assert f'{failed.name}: screen (source screening); failed' in markdown
+    assert f'{passed.name}: governed (price readiness); passed' in markdown
+    assert 'a successful governed price check does not establish source recovery' in markdown
+
+
+@pytest.mark.parametrize('mode,result_mode', [
+    (None, None), ('PRIVATE_SECRET', 'PRIVATE_SECRET'),
+    (['screen'], 'screen'), ('screen', 'governed'),
+])
+def test_report_rejects_unbound_or_conflicting_preflight_modes(native_evidence, mode, result_mode):
+    repo, state, wire = native_evidence
+    path = _attempt(repo, None, action='preflight', ordinal=1, return_code=1)
+    artifact = json.loads(path.read_text())
+    artifact['preflight_mode'] = mode
+    artifact['result']['preflight_mode'] = result_mode
+    path.write_text(json.dumps(artifact))
+    _attempt(repo, wire, ordinal=2)
+    report = _report(repo)
+    assert any(row['code'] == 'attempt_unreadable' for row in report['diagnostics'])
+    assert 'PRIVATE_SECRET' not in render_operational_report(report)
 
 
 def test_native_source_failures_reach_report_without_process_error_logs(native_evidence):
@@ -507,7 +551,53 @@ def test_cli_writes_deterministic_json_and_markdown_for_completed_session(native
     output=tmp_path/'output'
     assert main(['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
                  '--output-dir',str(output),'--snapshot-guaranteed'])==0
-    assert len(list(output.glob('*.json')))==len(list(output.glob('*.md')))==1
+    assert len(list(output.glob('*-operational-report.json')))==len(list(output.glob('*.md')))==1
+    assert len(list(output.glob('*-source-repair.json')))==1
+
+
+def test_cli_publishes_actionable_source_incident_without_rewriting_trading_evidence(native_evidence,tmp_path,capsys):
+    from scripts.generate_operational_report import main
+    repo,state,wire=native_evidence
+    source_path=next((state/'source_inputs').glob('*.json'))
+    envelope=SourceInputStore.decode(source_path.read_text())
+    envelope['payload']['edgar']={'error':'provider response invalid',
+        '_coverage':{'status':'failed','reason_code':'invalid_response'}}
+    envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
+    source_path.write_text(SourceInputStore.encode(envelope))
+    _attempt(repo,wire)
+    before_source=source_path.read_bytes()
+    before_manifest=(state.parent/'manifest.json').read_bytes()
+    output=tmp_path/'reports'
+    args=['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
+          '--output-dir',str(output),'--snapshot-guaranteed']
+    assert main(args)==2  # Existing contradictory clean evidence remains invalid.
+    summary=json.loads(capsys.readouterr().out)['reports'][0]
+    published=json.loads((output/f'{SESSION}-{GENERATION}-operational-report.json').read_text())
+    policy=published['source_incidents']
+    edgar=next(row for row in policy['open_incidents'] if row['provider']=='edgar')
+    assert edgar['status']=='repair_required'
+    assert summary['source_incidents']==policy
+    assert policy['alerts']
+    assert 'repair_required' in next(output.glob('*.md')).read_text()
+    assert main(args)==2
+    repeated=json.loads(capsys.readouterr().out)['reports'][0]
+    assert repeated['source_incidents']==policy
+    assert source_path.read_bytes()==before_source
+    assert (state.parent/'manifest.json').read_bytes()==before_manifest
+
+
+def test_source_policy_cannot_suppress_report_for_invalid_manifest(native_evidence,tmp_path,capsys):
+    from scripts.generate_operational_report import main
+    repo,state,wire=native_evidence
+    (state.parent/'manifest.json').write_text('{}')
+    output=tmp_path/'reports'
+    assert main(['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
+                 '--output-dir',str(output),'--snapshot-guaranteed'])==2
+    assert (output/f'{SESSION}-{GENERATION}-operational-report.json').is_file(), 'Invalid evidence still needs its diagnostic report'
+    published=json.loads((output/f'{SESSION}-{GENERATION}-operational-report.json').read_text())
+    assert published['source_incidents']['assessment_status']=='unavailable'
+    assert published['evidence_complete'] is False
+    assert {'code':'manifest_invalid'} in published['diagnostics']
 
 
 @pytest.mark.parametrize('damage',['missing','outcome_conflict','missing_artifact'])
@@ -592,6 +682,23 @@ def test_native_request_diagnostics_allow_success_none_and_zero_attempt_deadline
     assert any(row.get('attempts')==0 for row in report['sources']['unresolved'])
 
 
+def test_report_binds_transport_diagnostics_to_the_observed_source(native_evidence,tmp_path):
+    repo,state,wire=native_evidence
+    path=next((state/'source_inputs').glob('*.json'))
+    envelope=SourceInputStore.decode(path.read_text())
+    envelope['payload']['equity_universe']={'error':'deadline','_request_diagnostics':[{
+        'provider':'alpaca','operation':'assets','reason_code':'timeout',
+        'http_status':None,'attempts':0,'recovered':False}]}
+    envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
+    path.write_text(SourceInputStore.encode(envelope))
+    _attempt(repo,wire)
+    report=_report(repo)
+    diagnostic=next(row for row in report['sources']['unresolved'] if row['provider']=='alpaca')
+    assert diagnostic['source']=='equity_universe'
+    write_operational_report(report,tmp_path/'reports')
+    assert [row['provider'] for row in report['source_incidents']['open_incidents']]==['equity_universe']
+
+
 def test_wrong_shared_epoch_window_cannot_claim_accounting_valid(native_evidence):
     repo,state,wire=native_evidence
     with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
@@ -656,3 +763,37 @@ def test_shared_metric_epoch_is_authoritative_when_book_epoch_tables_are_empty(n
     assert report['outcome']=='clean'
     assert report['accounting_valid'] is True
     assert report['evidence_complete'] is True
+
+
+def test_report_and_cli_reuse_verified_inherited_exclusive_lock(native_evidence, monkeypatch, tmp_path):
+    repo, state, wire = native_evidence
+    _attempt(repo, wire)
+    from tradingagents.strategies.orchestration import operational_report as module
+    from tradingagents.strategies.orchestration.runtime_lock import runtime_lock, RuntimeLockBusy
+    from scripts import generate_operational_report as cli
+    lock_path = tmp_path / 'runtime.lock'
+    monkeypatch.setattr(module, 'canonical_runtime_lock_path', lambda root: lock_path)
+    monkeypatch.setattr(cli, 'canonical_runtime_lock_path', lambda root: lock_path)
+    with runtime_lock(lock_path, exclusive=True) as lock:
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_FD', str(lock.fd))
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_MODE', 'exclusive')
+        report = module.build_operational_report(repo, GENERATION, SESSION)
+        assert report['evidence_complete'], report['diagnostics']
+        assert cli.main(['--repo-root', str(repo), '--generation', GENERATION, '--date', SESSION,
+                         '--output-dir', str(tmp_path / 'reports')]) == 0
+        # Neither report path may release or downgrade the controller's lease.
+        with pytest.raises(RuntimeLockBusy):
+            with runtime_lock(lock_path, exclusive=False):
+                pass
+
+
+def test_invalid_recovery_receipt_cannot_authorize_complete_report(native_evidence):
+    repo, state, wire = native_evidence
+    _attempt(repo, wire)
+    directory = state / 'runtime_recovery'
+    directory.mkdir()
+    (directory / (SESSION + '.json')).write_text('{"version":"unknown"}')
+    report = _report(repo)
+    assert report['evidence_complete'] is False
+    assert report['performance_claims_withheld'] is True
+    assert {'code': 'recovery_receipt_invalid'} in report['diagnostics']

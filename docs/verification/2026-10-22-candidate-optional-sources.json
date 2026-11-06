@@ -1,0 +1,127 @@
+{
+  "scope": "candidate_optional_source_probe_not_deployed",
+  "production_read_only": true,
+  "started_at": "2026-10-22T08:45:36.599467+00:00",
+  "finished_at": "2026-10-22T08:45:42.611417+00:00",
+  "model_calls": 0,
+  "symbols": [
+    "AAPL",
+    "OMC",
+    "SPY",
+    "GLD",
+    "DE",
+    "VTI"
+  ],
+  "candidate_identity": {
+    "head": "56bdf1929a58778c6c58f435f2ad5a2e4b5d1729",
+    "tracked_diff_sha256": "cb85c0be10a458377263ae55ca0902aea4f027367641501684bb69abe2ae8ce1",
+    "code_files_sha256": "ffed1c9c129b430481193284e384eb4ee9293b4e1bf47d4056cad23997e50e04",
+    "scope": "candidate_development_source_probe_not_deployed"
+  },
+  "original_receipt_sha256": "8d21972394264ae43aa705024b42b6f15cf480920e5efbe6ee02dbdf628a3a62",
+  "profiles": {
+    "elapsed_seconds": 5.047,
+    "passed": [
+      "AAPL",
+      "OMC",
+      "DE"
+    ],
+    "errors": {
+      "SPY": {
+        "error": "OpenBB profile classification unavailable or invalid [invalid_response]",
+        "reason_code": "invalid_response"
+      },
+      "GLD": {
+        "error": "OpenBB profile classification unavailable or invalid [invalid_response]",
+        "reason_code": "invalid_response"
+      },
+      "VTI": {
+        "error": "OpenBB profile classification unavailable or invalid [invalid_response]",
+        "reason_code": "invalid_response"
+      }
+    }
+  },
+  "short_interest": {
+    "elapsed_seconds": 0.406,
+    "values": {
+      "AAPL": {
+        "short_interest": 120763539.0,
+        "short_pct_of_float": null,
+        "days_to_cover": 3.03,
+        "date": "2026-09-30"
+      },
+      "OMC": {
+        "short_interest": 24041243.0,
+        "short_pct_of_float": null,
+        "days_to_cover": 6.3,
+        "date": "2026-09-30"
+      },
+      "SPY": {
+        "short_interest": 98476070.0,
+        "short_pct_of_float": null,
+        "days_to_cover": 2.02,
+        "date": "2026-09-30"
+      },
+      "GLD": {
+        "short_interest": 8957421.0,
+        "short_pct_of_float": null,
+        "days_to_cover": 1.01,
+        "date": "2026-09-30"
+      },
+      "DE": {
+        "short_interest": 5745795.0,
+        "short_pct_of_float": null,
+        "days_to_cover": 4.31,
+        "date": "2026-09-30"
+      },
+      "VTI": {
+        "short_interest": 3378012.0,
+        "short_pct_of_float": null,
+        "days_to_cover": 1.12,
+        "date": "2026-09-30"
+      }
+    },
+    "errors": {},
+    "acquisition_status": "partial",
+    "archive_coverage": {
+      "required_settlement_date": "2026-09-30",
+      "publication_date": "2026-10-09",
+      "effective_as_of": "2026-10-22",
+      "acquired_at": "2026-10-22T08:45:41.654708+00:00",
+      "publication_day_ambiguous": false,
+      "publication_policy": "date_only_following_new_york_day_v1",
+      "schedule_version": "finra_publication_dates_reviewed_2026-10-22",
+      "schedule_source": "https://www.finra.org/filing-reporting/regulatory-filing-systems/short-interest",
+      "current_complete": true,
+      "historical_complete": false,
+      "history_scope": "sdk_requested_archives_with_reviewed_holiday_corrections"
+    },
+    "missing_historical_archive_count": 125,
+    "cold_cache": true,
+    "versions": {
+      "openbb-finra": "1.6.1",
+      "openbb-core": "1.6.13"
+    }
+  },
+  "factors": {
+    "elapsed_seconds": 0.559,
+    "latest": {
+      "Mkt-RF": 2.56,
+      "SMB": 0.34,
+      "HML": -3.54,
+      "RF": 0.29,
+      "observation_date": "2026-08-01",
+      "frequency": "monthly",
+      "model": "3",
+      "acquired_at": "2026-10-22T08:45:42.600660+00:00",
+      "available_at": "2026-10-22T08:45:42.600660+00:00",
+      "availability_basis": "forward_acquisition_time"
+    },
+    "history_count": 12
+  },
+  "limitations": [
+    "Six-symbol diagnostic sample; not all possible committee symbols.",
+    "Profile failures for funds require qualified classification, not an invented corporate sector.",
+    "Current short-interest completeness does not imply historical completeness."
+  ]
+}

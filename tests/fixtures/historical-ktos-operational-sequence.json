@@ -1,0 +1,71 @@
+{
+  "ticker": "KTOS",
+  "source_sha256": "30974a9b6e377bc28f2f6172a9ca2b8a2d50308534f09135b851d494b0984b07",
+  "source_payload_digest": "4b7f6d544f1edc55452f9afe88cd2f1fd03b39dd948a1fb62630942040c267a7",
+  "actual_source_acquired_at": "2026-10-10T00:35:58.118721+00:00",
+  "basis": "Retained Yahoo OHLC; source adapter requested auto_adjust=False. Historical prices are later-acquired evidence, not contemporary executable quotes.",
+  "sequence": [
+    {
+      "session": "2026-10-02",
+      "open": "43.29999923706055",
+      "high": "43.5099983215332",
+      "low": "42.130001068115234",
+      "close": "43.06999969482422",
+      "volume": 4433700,
+      "simulated_as_of": "2026-10-02T22:00:00+00:00"
+    },
+    {
+      "session": "2026-10-05",
+      "open": "43.79999923706055",
+      "high": "43.86000061035156",
+      "low": "41.7400016784668",
+      "close": "42.02000045776367",
+      "volume": 5563800,
+      "simulated_as_of": "2026-10-05T22:00:00+00:00"
+    },
+    {
+      "session": "2026-10-06",
+      "open": "42.150001525878906",
+      "high": "44.13999938964844",
+      "low": "41.9900016784668",
+      "close": "43.709999084472656",
+      "volume": 5172600,
+      "simulated_as_of": "2026-10-06T22:00:00+00:00"
+    },
+    {
+      "session": "2026-10-07",
+      "open": "42.83000183105469",
+      "high": "43.0",
+      "low": "40.93000030517578",
+      "close": "41.939998626708984",
+      "volume": 6324600,
+      "simulated_as_of": "2026-10-07T22:00:00+00:00"
+    },
+    {
+      "session": "2026-10-08",
+      "open": "42.29999923706055",
+      "high": "42.84000015258789",
+      "low": "41.689998626708984",
+      "close": "41.93000030517578",
+      "volume": 5369300,
+      "simulated_as_of": "2026-10-08T22:00:00+00:00"
+    }
+  ],
+  "constructed": [
+    "Earnings catalyst and deterministic model responses use existing offline fixture mapped to KTOS; not actual KTOS news.",
+    "Historical Yahoo OHLC delivered in simulated SIP HTTP responses solely to exercise supported execution boundary; this does not establish SIP provenance.",
+    "Per-session as-of clocks are simulated, strictly no returned bar after current simulated session. Actual retained acquisition is later than every simulated session.",
+    "5 percent protective stop selected to exercise lifecycle on this path; not a production parameter recommendation.",
+    "Other tickers, pre-sequence volatility history, benchmarks and zero corporate-action evidence remain constructed from existing fixture.",
+    "No source vintage, action absence, execution quality, strategy alpha or true PIT backtest claim.",
+    "Positive SIP trade count n=1 is constructed because the Yahoo frame has no trade count; exact OHLC and volume are retained."
+  ],
+  "expected_lifecycle": [
+    "2026-10-02 decision only",
+    "2026-10-05 next-open fill and protective stop staging",
+    "2026-10-06 held position",
+    "2026-10-07 intraday stop on retained low",
+    "2026-10-08 remain flat; immutable replay each day"
+  ],
+  "source_description": "Retained Yahoo research-source OHLC frame acquired during the October 9 readiness investigation; SHA256 binds full original artifact."
+}

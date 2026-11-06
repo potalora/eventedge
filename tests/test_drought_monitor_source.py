@@ -46,7 +46,7 @@ class TestProtocol:
 MOCK_DROUGHT_RESPONSE = [
     {
         "MapDate": "20250610",
-        "StatisticFormatID": 1,
+        "StatisticFormatID": 2,
         "StateAbbreviation": "IA",
         "None": 45.2,
         "D0": 20.1,
@@ -57,7 +57,7 @@ MOCK_DROUGHT_RESPONSE = [
     },
     {
         "MapDate": "20250610",
-        "StatisticFormatID": 1,
+        "StatisticFormatID": 2,
         "StateAbbreviation": "IL",
         "None": 60.0,
         "D0": 18.0,
@@ -117,13 +117,14 @@ class TestFetchCompositeScore:
         # Average: (0.653 + 0.355) / 2 = 0.504
         assert 0.4 < score < 0.6
 
-    def test_returns_zero_on_no_data(self, source):
+    def test_missing_requested_drought_is_unavailable(self, source):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = []
 
         with patch("requests.get", return_value=mock_resp):
-            assert source.fetch_composite_score(["IA"], "2025-06-10") == 0.0
+            with pytest.raises(SourceFetchError):
+                source.fetch_composite_score(["IA"], "2025-06-10")
 
     def test_returns_zero_on_failure(self, source):
         import requests as req
@@ -173,3 +174,4 @@ class TestFetchDispatch:
 def offline_request_policy(monkeypatch):
     monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
     monkeypatch.setattr('time.sleep', lambda _: None)
+    monkeypatch.setattr('tradingagents.strategies.data_sources.drought_monitor_source.current_session_date', lambda: '2025-06-10')

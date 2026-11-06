@@ -10,11 +10,14 @@ import numpy as np
 class TestCFTCSource:
     """Tests for CFTCSource data source."""
 
-    def test_cftc_source_positioning(self):
+    def test_cftc_source_positioning(self, monkeypatch):
         """Mock COT data -> correct percentiles and direction signals."""
         from tradingagents.strategies.data_sources.cftc_source import CFTCSource
 
         source = CFTCSource()
+
+        monkeypatch.setattr("tradingagents.strategies.data_sources.cftc_source._publication_scope",
+            lambda *args: {"expected_observation_date": "2026-03-29"})
 
         # Build mock COT DataFrame with 52 weeks of data
         np.random.seed(42)
@@ -353,6 +356,7 @@ class TestCommodityMacroStrategy:
             "cftc": {
                 "gold": {
                     "net_position": 80_000,
+                    "report_id": "gold-2026-10-06", "window_end": "2026-10-06",
                     "percentile": 0.50,
                     "wow_change": 0,
                     "direction_signal": "neutral",

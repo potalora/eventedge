@@ -1,0 +1,21 @@
+{
+  "model_calls": 0,
+  "production_changed": false,
+  "scope": "one explicit CFPB original, current acquisition",
+  "files": {
+    "regulation_detail_cfpb_0018.json": {
+      "url": "https://api.regulations.gov/v4/documents/CFPB-2026-0018-0001?include=attachments",
+      "observed_at": "2026-10-22T23:30:07.948027+00:00",
+      "bytes": 3014,
+      "sha256": "96f6523d9ac6b891f2f38504c83a7bd16ea21d7f35a72d5bbb5f8b04b589dec9",
+      "http_status": 200
+    },
+    "regulation_govinfo_cfpb_0018.htm": {
+      "url": "https://www.govinfo.gov/content/pkg/FR-2026-07-09/html/2026-13834.htm",
+      "observed_at": "2026-10-22T23:30:08.040378+00:00",
+      "bytes": 39785,
+      "sha256": "08285134b3b90f5116902f802f84211817b9eb145ec869ed01ec9ca0e3975a98",
+      "http_status": 200
+    }
+  }
+}

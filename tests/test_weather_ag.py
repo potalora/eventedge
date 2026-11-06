@@ -210,8 +210,8 @@ class TestGateLogic:
         result = strategy.screen(data, "2025-04-20", strategy.get_default_params())
         assert len(result) > 0
 
-    def test_momentum_gate_triggers(self, strategy):
-        """High momentum alone should trigger gate."""
+    def test_momentum_alone_cannot_substitute_for_weather_evidence(self, strategy):
+        """Price momentum does not establish a weather catalyst."""
         dates = pd.bdate_range("2025-06-01", periods=30)
         prices = {}
         for ticker in AG_TICKERS_FULL.values():
@@ -221,7 +221,7 @@ class TestGateLogic:
             )
         data = _make_data(prices)
         result = strategy.screen(data, "2025-07-10", strategy.get_default_params())
-        assert len(result) > 0
+        assert result == []
 
     def test_usda_crop_decline_gate_triggers(self, strategy, price_data):
         usda = {"crop_progress": {"CORN": [

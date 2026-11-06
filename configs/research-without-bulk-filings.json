@@ -1,0 +1,6 @@
+{
+  "autoresearch": {
+    "filing_research_policy": "disabled_v1",
+    "research_resilience_policy": "dependency_isolation_v1"
+  }
+}

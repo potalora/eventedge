@@ -337,10 +337,9 @@ def test_exact_governed_tickers_and_all_relevant_cohort_membership(
         benchmark_tickers=("SPY", "BIL"),
     )
 
-    assert snapshot.governed_tickers == ("BIL", "DUE", "OPEN", "PEND", "SPY")
+    assert snapshot.governed_tickers == ("BIL", "OPEN", "PEND", "SPY")
     assert dict(snapshot.cohort_ids_by_ticker) == {
         "BIL": COHORTS,
-        "DUE": (COHORTS[1],),
         "OPEN": (COHORTS[1],),
         "PEND": (COHORTS[0],),
         "SPY": COHORTS,

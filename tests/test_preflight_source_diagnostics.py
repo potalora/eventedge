@@ -29,7 +29,8 @@ class _Engine:
     def __init__(self, data):
         self.data = data
 
-    def _fetch_all_data(self, start, end):
+    def _fetch_all_data(self, start, end, *, acquisition_purpose):
+        assert acquisition_purpose == "screen_diagnostic"
         return self.data
 
 
@@ -59,6 +60,20 @@ def test_semantic_failure_after_http_success_survives_wire_and_result():
     assert result["screen_source_failures"] == [_failure()]
     assert "API_SECRET" not in json.dumps(result)
     assert "secret_url" not in json.dumps(result)
+
+
+def test_fred_maintenance_http_200_survives_safe_wire():
+    from tradingagents.strategies.orchestration.preflight import _screen_source_failure
+    payload = {'_coverage': {'reason_code': 'provider_maintenance'},
+               '_request_diagnostics': [{'reason_code': 'provider_maintenance', 'http_status': 200, 'attempts': 3}]}
+    row = _screen_source_failure('fred', payload)
+    assert row == {'source': 'fred', 'reason_code': 'provider_maintenance', 'http_status': 200,
+                   'attempts': 3, 'operation_count': 1}
+    wire = {'ok': False, 'preflight_mode': 'screen', 'screen_ok': False,
+            'screen_failure_count': 1, 'screen_source_failures': [row]}
+    assert normalize_preflight_report(wire, mode='screen', trading_date='2026-10-07') is not None
+    row['source'] = 'noaa'
+    assert normalize_preflight_report(wire, mode='screen', trading_date='2026-10-07') is None
 
 
 @pytest.mark.parametrize("mode", ["screen", "all"])
@@ -191,7 +206,7 @@ def test_managed_archive_retains_safe_source_diagnostics(mode, failed, monkeypat
     report = run_preflight({}, "2026-10-07", engine=_Engine(data), mode=mode)
     wire = normalize_preflight_report(report, mode=mode, trading_date="2026-10-07")
     process = subprocess.CompletedProcess([], int(failed), stdout=json.dumps(wire, indent=2), stderr="")
-    monkeypatch.setattr(generation_manager.subprocess, "run", lambda *args, **kwargs: process)
+    monkeypatch.setattr(generation_manager, "_run_preflight_worker", lambda *args, **kwargs: process)
     manager = object.__new__(generation_manager.GenerationManager)
     manager._repo_root = tmp_path
     manager._venv_python = Path(sys.executable)

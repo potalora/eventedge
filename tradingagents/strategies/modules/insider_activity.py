@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+import math
 
 from .base import Candidate
+from .admission import admit_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +15,7 @@ def _source_filing_key(filing: dict) -> str:
         filing.get("accession_number") or filing.get("filing_id") or filing.get("id")
     )
     if native:
-        return str(native)
+        return "|".join(str(v) for v in (native, filing.get("owner_cik") or filing.get("owner_name", ""), filing.get("transaction_id") or (filing.get("transaction_date"), filing.get("transaction_code"), filing.get("acquired_disposed"), filing.get("shares"), filing.get("price_per_share"))))
     observed = filing.get("filing_date") or filing.get("transaction_date")
     if not observed:
         return ""
@@ -59,7 +61,6 @@ class InsiderActivityStrategy:
             "hold_days": hp["hold_days_range"],
             "min_cluster_size": (2, 5),
             "min_sell_threshold": (2, 5),
-            "min_conviction": (0.3, 0.8),
             "max_positions": (2, 5),
         }
 
@@ -73,7 +74,6 @@ class InsiderActivityStrategy:
             "hold_days": hp["hold_days_default"],
             "min_cluster_size": 2,
             "min_sell_threshold": 2,
-            "min_conviction": 0.5,
             "max_positions": 3,
         }
 
@@ -85,6 +85,13 @@ class InsiderActivityStrategy:
         """
         edgar_data = data.get("edgar", {})
         form4s = edgar_data.get("form4", {})
+        qualified = 'form4_qualification' in edgar_data
+        if qualified:
+            from ..data_sources.form4_evidence import validate_form4_window
+            qualification = validate_form4_window(edgar_data['form4_qualification'])
+            form4s = {}
+            for row in qualification['admitted_transactions']:
+                form4s.setdefault(row['ticker'], []).append(row)
 
         if not form4s:
             return []
@@ -97,9 +104,21 @@ class InsiderActivityStrategy:
             if not filings:
                 continue
 
-            # Separate buys from sells using parsed transaction_type
-            buys = [f for f in filings if f.get("transaction_type") == "buy"]
-            sells = [f for f in filings if f.get("transaction_type") == "sell"]
+            # Economic transactions, not XML row counts or awards/exercises.
+            unique = {}
+            for f in filings:
+                owner = str(f.get("owner_cik") or f.get("owner_name") or "").strip().casefold()
+                try:
+                    shares, price = float(f.get("shares", 0)), float(f.get("price_per_share", 0))
+                except (TypeError, ValueError):
+                    continue
+                if not owner or not all(math.isfinite(v) and v > 0 for v in (shares, price)):
+                    continue
+                identity = (owner, f.get("transaction_id") or (_source_filing_key(f), f.get("transaction_date"), f.get("transaction_code"), shares, price))
+                unique.setdefault(identity, f)
+            economic_flag = 'economic_purchase_sale' if qualified else 'open_market'
+            buys = [f for f in unique.values() if f.get(economic_flag) is True and f.get("transaction_type") == "buy" and f.get("transaction_code") == "P" and f.get("acquired_disposed") == "A"]
+            sells = [f for f in unique.values() if f.get(economic_flag) is True and f.get("transaction_type") == "sell" and f.get("transaction_code") == "S" and f.get("acquired_disposed") == "D"]
 
             # Skip if no parsed transaction data — metadata-only filings
             # aren't actionable (LLM can't distinguish buys from awards)
@@ -107,20 +126,18 @@ class InsiderActivityStrategy:
                 continue
 
             # Buy cluster signal: multiple insiders buying
-            if len(buys) >= min_cluster:
-                unique_buyers = {
-                    f.get("owner_name", "") for f in buys if f.get("owner_name")
-                }
+            unique_buyers = {str(f.get("owner_cik") or f.get("owner_name")).strip().casefold() for f in buys}
+            if len(unique_buyers) >= min_cluster:
                 officer_buys = [f for f in buys if f.get("is_officer")]
                 total_shares = sum(f.get("shares", 0) for f in buys)
                 total_value = sum(
                     f.get("shares", 0) * f.get("price_per_share", 0) for f in buys
                 )
 
-                # Score: cluster size × officer bonus × open-market premium, normalized to [0, 1]
-                open_market = [f for f in buys if f.get("transaction_code") == "P"]
+                # Qualified purchase codes carry no exchange-execution premium.
+                open_market = [] if qualified else [f for f in buys if f.get("transaction_code") == "P"]
                 raw = (
-                    len(buys)
+                    len(unique_buyers)
                     * (1.5 if officer_buys else 1.0)
                     * (2.0 if open_market else 1.0)
                 )
@@ -135,19 +152,22 @@ class InsiderActivityStrategy:
                         direction="long",
                         score=float(score),
                         metadata={
-                            "cluster_size": len(buys),
+                            "cluster_size": len(unique_buyers),
                             "unique_buyers": len(unique_buyers),
                             "officer_buys": len(officer_buys),
                             "total_shares": total_shares,
                             "total_value": round(total_value, 2),
-                            "open_market_buys": len(open_market),
-                            "filings": buys[:5],
+                            **({'economic_purchase_count': len(buys),
+                                'exchange_execution_status': 'unknown'} if qualified
+                               else {'open_market_buys': len(open_market)}),
+                            "filings": buys if qualified else buys[:5],
                             "filing_keys": sorted(
                                 _source_filing_key(filing)
                                 for filing in buys
                                 if _source_filing_key(filing)
                             ),
                             "needs_llm_analysis": True,
+                            "deterministic_evidence_complete": all(f.get("filing_date") and _source_filing_key(f) for f in buys),
                             "analysis_type": "insider_activity",
                             "cluster_type": "buy_cluster",
                             **(
@@ -189,13 +209,14 @@ class InsiderActivityStrategy:
                             "unique_sellers": len(unique_sellers),
                             "officer_sells": len(officer_sells),
                             "total_sell_shares": total_sell_shares,
-                            "filings": sells[:5],
+                            "filings": sells if qualified else sells[:5],
                             "filing_keys": sorted(
                                 _source_filing_key(filing)
                                 for filing in sells
                                 if _source_filing_key(filing)
                             ),
                             "needs_llm_analysis": True,
+                            "deterministic_evidence_complete": all(f.get("filing_date") and _source_filing_key(f) for f in sells),
                             "analysis_type": "insider_activity",
                             "cluster_type": "sell_pattern",
                             **(
@@ -212,6 +233,19 @@ class InsiderActivityStrategy:
                         },
                     )
                 )
+
+        for candidate in candidates:
+            if qualified:
+                from ..orchestration.form4_inputs import make_form4_context
+                from ..data_sources.form4_evidence import POLICY
+                candidate.metadata.update(form4_evidence_policy=POLICY,
+                    form4_context=make_form4_context(qualification, ticker=candidate.ticker,
+                        cluster_type=candidate.metadata['cluster_type']),
+                    non_actionable_reason='form4_qualification_only')
+                candidate.journal_only = True
+            if not candidate.metadata.get("deterministic_evidence_complete"):
+                candidate.journal_only = True
+                candidate.metadata["non_actionable_reason"] = "incomplete_insider_inputs"
 
         # Enrich with OpenBB insider data for officer titles and sector
         openbb_data = data.get("openbb", {})
@@ -245,7 +279,7 @@ class InsiderActivityStrategy:
                     )
 
         candidates.sort(key=lambda c: c.score, reverse=True)
-        return candidates[: params.get("max_positions", 3)]
+        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 3)))
 
     def check_exit(
         self,
@@ -255,6 +289,7 @@ class InsiderActivityStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period or stop loss (10%)."""
         hold_days = params.get("hold_days", 25)
@@ -262,7 +297,7 @@ class InsiderActivityStrategy:
             return True, "hold_period"
 
         if entry_price > 0:
-            pnl_pct = (current_price - entry_price) / entry_price
+            pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
             if pnl_pct <= -0.10:
                 return True, "stop_loss"
 
@@ -284,7 +319,6 @@ Parameter ranges:
 - hold_days: 20-45 (target ~25-30 days)
 - min_cluster_size: 2-5 (minimum insiders buying for long signal)
 - min_sell_threshold: 2-5 (minimum insider sells for short signal)
-- min_conviction: 0.3-0.8
 - max_positions: 2-5
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

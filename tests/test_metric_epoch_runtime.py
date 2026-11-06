@@ -58,11 +58,24 @@ def _models(**changes: str | None) -> dict[str, str | None]:
     return models
 
 
-@pytest.mark.parametrize("key", ["llm_effort", "portfolio_committee_model"])
+@pytest.mark.parametrize("key", ["llm_effort", "portfolio_committee_model",
+                                 "thesis_model", "thesis_effort", "portfolio_committee_effort"])
 def test_analysis_effort_and_committee_override_are_semantic_identity(key):
     before = _context(models=_models(**{key: "low"}))
     after = _context(models=_models(**{key: "high"}))
     assert before.behavior_hash != after.behavior_hash
+
+
+def test_next_candidate_sol_roles_rotate_identity_from_prior_astra_roles():
+    ar = DEFAULT_CONFIG["autoresearch"]
+    models = _models(autoresearch_model=ar["autoresearch_model"], llm_effort=ar["llm_effort"],
+        thesis_model=ar["thesis_model"], thesis_effort=ar["thesis_effort"],
+        portfolio_committee_model=ar["paper_trade"]["portfolio_committee_model"],
+        portfolio_committee_effort=ar["paper_trade"]["portfolio_committee_effort"])
+    prior = {**models, "thesis_model": "gpt-6-astra", "portfolio_committee_model": "gpt-6-astra"}
+    assert models["autoresearch_model"] == prior["autoresearch_model"] == "gpt-6-luna"
+    assert models["thesis_model"] == models["portfolio_committee_model"] == "gpt-6.1-sol"
+    assert _context(models=models).behavior_hash != _context(models=prior).behavior_hash
 
 
 def _execution_policy(**changes: object) -> dict[str, object]:
@@ -165,10 +178,10 @@ def _executor(tmp_path: Path, name: str, config_changes: dict | None = None):
 
 
 def test_contract_versions_are_centralized_exact_values() -> None:
-    assert POLICY_DOCUMENT_VERSION == "execution-policy-v3"
-    assert EXECUTION_CLOCK_VERSION == "exact-next-xnys-open-v1"
+    assert POLICY_DOCUMENT_VERSION == "execution-policy-v4"
+    assert EXECUTION_CLOCK_VERSION == "causal-xnys-open-stops-v2"
     assert PRICING_VERSION == "raw-unadjusted-daily-ohlc-v1"
-    assert COST_MODEL_VERSION == "adverse-equity-fill-v1"
+    assert COST_MODEL_VERSION == "equity-10bps-act365-v2"
 
 
 def test_epoch_context_is_stable_across_order_and_state_paths(tmp_path) -> None:
@@ -640,3 +653,12 @@ def test_nontext_policy_id_fails_before_any_state_creation(tmp_path) -> None:
             generation_commit="test-commit",
         )
     assert not state.exists()
+
+
+def test_disabling_strategy_is_a_bound_semantic_epoch_change():
+    baseline = _context()
+    assert _context(disabled_strategies={}).config_hash == baseline.config_hash
+    changed = _context(disabled_strategies={'filing_analysis': 'missing_evidence_contract'})
+    assert changed.config_hash != baseline.config_hash
+    with pytest.raises(ValueError, match='disabled'):
+        _context(disabled_strategies={'unknown': 'missing_evidence_contract'})

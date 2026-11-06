@@ -1,0 +1,44 @@
+{
+  "scope": "Unmodified original-size official PNG source fixtures. No native recognition/model success is asserted.",
+  "graphics": [
+    {
+      "document_number": "2026-20360",
+      "id": "EP05OC26.002",
+      "url": "https://img.federalregister.gov/EP05OC26.002/EP05OC26.002_original_size.png",
+      "size": 82406,
+      "sha256": "5b5554e68336afb12a118467e03490cfa03979f144df6c29c76b126d2d976271",
+      "dimensions": [
+        1843,
+        2667
+      ],
+      "filename": "EP05OC26.002.png",
+      "case": "large_header_table"
+    },
+    {
+      "document_number": "2026-20360",
+      "id": "EP05OC26.003",
+      "url": "https://img.federalregister.gov/EP05OC26.003/EP05OC26.003_original_size.png",
+      "size": 91425,
+      "sha256": "b1bc853ca66820a5ae518829765a34d8b54e3a17292d9b09a0d2f6b4267fc5ee",
+      "dimensions": [
+        1837,
+        2667
+      ],
+      "filename": "EP05OC26.003.png",
+      "case": "large_table_continuation"
+    },
+    {
+      "document_number": "2026-20360",
+      "id": "EP05OC26.007",
+      "url": "https://img.federalregister.gov/EP05OC26.007/EP05OC26.007_original_size.png",
+      "size": 8799,
+      "sha256": "ebb55f7279360b89cb6ae566515880170243dec77ee80842fdf3035bd187d5e7",
+      "dimensions": [
+        1639,
+        513
+      ],
+      "filename": "EP05OC26.007.png",
+      "case": "small_complete_table"
+    }
+  ]
+}

@@ -17,7 +17,7 @@ from types import MappingProxyType
 
 from tradingagents.strategies.data_sources.yfinance_source import normalize_tickers
 from tradingagents.strategies.metrics.calendar import XNYSCalendar
-from tradingagents.strategies.metrics.models import OUTCOME_WINDOWS, MetricEpoch
+from tradingagents.strategies.metrics.models import MetricEpoch
 from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
@@ -470,35 +470,6 @@ def _bounded_count(
         raise PreflightStateError(f"{label} is unbounded")
 
 
-def _outcome_tickers(
-    ledger: PortfolioLedger,
-    observer: _Observer,
-    *,
-    session: date,
-    epoch_id: str,
-) -> set[str]:
-    calendar = XNYSCalendar()
-    earliest = session
-    for _ in range(max(OUTCOME_WINDOWS)):
-        earliest = calendar.previous_session(earliest)
-    _bounded_count(
-        observer,
-        "SELECT COUNT(*) FROM signals WHERE epoch_id = ? "
-        "AND reference_session >= ? AND reference_session <= ?",
-        (epoch_id, earliest.isoformat(), session.isoformat()),
-        "outcome signal set",
-    )
-    tickers: set[str] = set()
-    for signal in ledger.read_signals(earliest, session, epoch_id=epoch_id):
-        entry_session = calendar.next_session(signal.reference_session)
-        if entry_session == session or any(
-            calendar.held_session(entry_session, window) == session
-            for window in OUTCOME_WINDOWS
-        ):
-            tickers.add(_ticker(signal.ticker))
-    return tickers
-
-
 def _cohort_tickers(
     ledger: PortfolioLedger,
     observer: _Observer,
@@ -533,16 +504,8 @@ def _cohort_tickers(
         (cohort_id, encoded_session, encoded_session),
         "pending intent provenance set",
     )
-    tickers = {_ticker(position["ticker"]) for position in ledger.open_positions()}
-    for intent in ledger.pending_intents(session):
-        signals = ledger.signals_for_intent(intent.intent_id)
-        provenance = {_ticker(signal.ticker) for signal in signals}
-        if len(provenance) != 1:
-            raise PreflightStateError("pending intent ticker provenance is ambiguous")
-        tickers.update(provenance)
-    tickers.update(
-        _outcome_tickers(ledger, observer, session=session, epoch_id=epoch_id)
-    )
+    from .market_dependencies import portfolio_tickers
+    tickers = set(portfolio_tickers(ledger, session))
     if len(tickers) > _MAX_TICKERS:
         raise PreflightStateError("governed ticker set is unbounded")
     if len(set(normalize_tickers(sorted(tickers)))) != len(tickers):

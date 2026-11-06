@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Any
 
 import numpy as np
@@ -24,10 +25,48 @@ CONTRACT_VERSION = 'source-inputs-v1'
 MAX_BYTES = 16 * 1024 * 1024
 MAX_DEPTH = 48
 MAX_NODES = 500_000
+REGULATION_GRAPHICS_MAX_BYTES = 32 * 1024 * 1024
+FULL_FILING_MAX_BYTES = 512 * 1024 * 1024
+FULL_FILING_MAX_NODES = 8_000_000
 
 
 class SourceInputError(ValueError):
     """A source document cannot safely authorize observation reuse."""
+
+
+def _capacity(max_bytes=None, max_nodes=None) -> tuple[int, int]:
+    byte_limit = MAX_BYTES if max_bytes is None else max_bytes
+    node_limit = MAX_NODES if max_nodes is None else max_nodes
+    if (type(byte_limit) is not int or not 1 <= byte_limit <= FULL_FILING_MAX_BYTES
+            or type(node_limit) is not int or not 1 <= node_limit <= FULL_FILING_MAX_NODES):
+        raise SourceInputError('invalid source capacity')
+    return byte_limit, node_limit
+
+
+def source_codec_limits(config: Mapping, *, source: str | None = None) -> dict[str, int]:
+    """Complete corpora have explicit finite capacity; other stores keep defaults."""
+    ar_config = config.get('autoresearch', {})
+    from .regulation_publication_policy import configured as publication_configured
+    linked_publications = publication_configured(ar_config)
+    if ((ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
+            and source in (None, 'edgar'))
+            or (ar_config.get('congress_disclosure_policy') == 'display_audit_only_v1'
+                and source in (None, 'congress'))):
+        return {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES}
+    if (ar_config.get('regulation_evidence_policy') == 'complete_document_text_v1'
+            and (ar_config.get('regulation_retrieval_policy') == 'verified_government_copy_v3'
+                 or linked_publications)
+            and source in (None, 'regulations')):
+        return {'max_bytes': REGULATION_GRAPHICS_MAX_BYTES, 'max_nodes': MAX_NODES}
+    return {}
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None:
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise SourceInputError('invalid source acquisition deadline')
+        if time.monotonic() >= deadline:
+            raise SourceInputError('source acquisition deadline exhausted')
 
 
 def _dtype(value: str) -> str:
@@ -43,15 +82,19 @@ def _transform(value: Any, *, decoding: bool, depth: int = 0, budget: list[int] 
     budget[0] -= 1
     if depth > MAX_DEPTH or budget[0] < 0:
         raise SourceInputError('source document exceeds structural bounds')
-    def walk(item: Any) -> Any:
-        return _transform(item, decoding=decoding, depth=depth + 1, budget=budget)
-    if decoding:
-        if value is None or type(value) in (str, bool, int):
-            return value
-        if type(value) is float:
+    # Built-in leaves dominate full filing corpora; keep their accounting above
+    # this fast path while avoiding the pandas/NumPy dispatch for each leaf.
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        if decoding:
             if not math.isfinite(value):
                 raise SourceInputError('noncanonical JSON number')
             return value
+        return value if math.isfinite(value) else {'$type': 'float', 'value': str(value)}
+    def walk(item: Any) -> Any:
+        return _transform(item, decoding=decoding, depth=depth + 1, budget=budget)
+    if decoding:
         if isinstance(value, list):
             return [walk(item) for item in value]
         if not isinstance(value, dict) or '$type' not in value:
@@ -154,10 +197,6 @@ def _transform(value: Any, *, decoding: bool, depth: int = 0, budget: list[int] 
         return [walk(item) for item in value]
     if isinstance(value, np.generic):
         return walk(value.item())
-    if type(value) is float:
-        return value if math.isfinite(value) else {'$type': 'float', 'value': str(value)}
-    if value is None or type(value) in (str, int, bool):
-        return value
     raise SourceInputError('unsupported source value type')
 
 
@@ -177,6 +216,10 @@ def configuration_fingerprint(config: Mapping[str, Any]) -> str:
 def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horizon: bool = False) -> str:
     """Bind effective credential fallbacks without saving credentials in documents."""
     ar = dict(config.get('autoresearch', {}))
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(ar)
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(ar)
     credentials = {
         'fmp_api_key': 'FMP_API_KEY', 'fred_api_key': 'FRED_API_KEY',
         'finnhub_api_key': 'FINNHUB_API_KEY', 'regulations_api_key': 'REGULATIONS_API_KEY',
@@ -185,7 +228,13 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     }
     for key, environment in credentials.items():
         ar[key] = ar.get(key) or os.environ.get(environment, '')
-    omitted = {'state_dir', 'source_cache_dir', 'source_cache_ttl_s'}
+    if ar.get('equity_universe_policy'):
+        # The asset-master adapter consumes environment credentials exclusively.
+        ar['equity_universe_credentials'] = {
+            'key': os.environ.get('ALPACA_API_KEY', '').strip(),
+            'secret': os.environ.get('ALPACA_SECRET_KEY', '').strip(),
+        }
+    omitted = {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
     if exclude_horizon:
         omitted.add('horizon')
     effective = dict(config)
@@ -194,6 +243,49 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     effective['autoresearch'] = {key: value for key, value in ar.items() if key not in omitted}
     return configuration_fingerprint(effective)
 
+
+
+PUBLIC_CONFIGURATION_KEY = '_source_public_configuration'
+PUBLIC_CONFIGURATION_VERSION = 'source-public-configuration-v1'
+_SOURCE_CREDENTIALS = frozenset({'fmp_api_key', 'fred_api_key', 'finnhub_api_key',
+    'regulations_api_key', 'courtlistener_token', 'noaa_cdo_token', 'usda_nass_api_key',
+    'equity_universe_credentials'})
+
+
+def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
+    """Bind effective frozen behavior without reading or retaining credentials.
+
+    Credential-sensitive acquisition/cache identities keep their original
+    fingerprint. This additional declaration is retained inside the existing
+    accepted payload so historical completion can verify public behavior.
+    """
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(dict(config.get('autoresearch', {})))
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(dict(config.get('autoresearch', {})))
+    effective = dict(config)
+    effective.pop('decision_shadow', None)
+    omitted = _SOURCE_CREDENTIALS | {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
+    effective['autoresearch'] = {key: value for key, value in config.get('autoresearch', {}).items() if key not in omitted}
+    return configuration_fingerprint(effective)
+
+
+def public_source_configuration_declaration(config: Mapping[str, Any]) -> dict:
+    """Generation-bound, secret-free facts; never a new authority/success flag."""
+    ar = config.get('autoresearch', {})
+    from .enrichment_capabilities import configured as enrichment_configured
+    enrichment_configured(dict(ar))
+    from .congress_audit_continuity import configured as congress_continuity_configured
+    congress_continuity_configured(dict(ar))
+    if ar.get('stabilization_profile_policy') != 'supported_sixteen_books_v1':
+        return {}
+    import re
+    policy = ar.get('paper_ledger', {}).get('policy_id')
+    match = re.search(r'(?:^|-)generation-config-([a-f0-9]{64})$', policy) if isinstance(policy, str) else None
+    if match is None:
+        raise ValueError('invalid_source_public_configuration')
+    return {PUBLIC_CONFIGURATION_KEY: {'version': PUBLIC_CONFIGURATION_VERSION,
+        'profile_sha256': match[1], 'configuration_sha256': public_source_configuration_fingerprint(config)}}
 
 def registered_source_fingerprint(configuration: str, source: Any) -> str:
     settings = {'configuration': configuration}
@@ -222,7 +314,25 @@ def successful_source(payload: Any) -> bool:
         or coverage.get('status') not in ('success', 'success_empty', 'complete')
     ):
         return False
+    if 'coverage' in payload and (
+        not isinstance(payload['coverage'], Mapping)
+        or _declared_incomplete(payload['coverage'])
+    ):
+        return False
     return True
+
+
+def _declared_incomplete(coverage: Any) -> bool:
+    """Reject partial subscopes without inventing a universal source schema."""
+    if isinstance(coverage, Mapping):
+        return (
+            ('complete' in coverage and coverage['complete'] is not True)
+            or coverage.get('status') in ('failed', 'partial', 'incomplete', 'unavailable')
+            or any(_declared_incomplete(value) for value in coverage.values())
+        )
+    return isinstance(coverage, (list, tuple)) and any(
+        _declared_incomplete(value) for value in coverage
+    )
 
 
 def _utc(value: datetime) -> datetime:
@@ -232,18 +342,27 @@ def _utc(value: datetime) -> datetime:
 
 
 class SourceInputStore:
-    def __init__(self, cache_dir: str | Path, *, accepted_dir: str | Path | None = None, ttl_s: float = 300):
+    def __init__(self, cache_dir: str | Path, *, accepted_dir: str | Path | None = None,
+                 ttl_s: float = 300, max_bytes: int | None = None, max_nodes: int | None = None):
         if not math.isfinite(float(ttl_s)) or not 0 < float(ttl_s) <= 300:
             raise SourceInputError('cache ttl must be between zero and 300 seconds')
         self.cache_dir = Path(cache_dir)
         self.accepted_dir = Path(accepted_dir) if accepted_dir is not None else None
         self.ttl_s = float(ttl_s)
+        _capacity(max_bytes, max_nodes)
+        self._codec_limits = {'max_bytes': max_bytes, 'max_nodes': max_nodes}
+
+    @property
+    def codec_limits(self) -> dict[str, int | None]:
+        return dict(self._codec_limits)
 
     @staticmethod
-    def encode(payload: Any) -> str:
+    def encode(payload: Any, *, max_bytes: int | None = None, max_nodes: int | None = None) -> str:
+        byte_limit, node_limit = _capacity(max_bytes, max_nodes)
         try:
-            encoded = json.dumps(_transform(payload, decoding=False), allow_nan=False, separators=(',', ':'), sort_keys=True)
-            if len(encoded.encode()) > MAX_BYTES:
+            encoded = json.dumps(_transform(payload, decoding=False, budget=[node_limit]),
+                                 allow_nan=False, separators=(',', ':'), sort_keys=True)
+            if len(encoded.encode()) > byte_limit:
                 raise SourceInputError('source document exceeds byte limit')
             return encoded
         except SourceInputError:
@@ -252,9 +371,10 @@ class SourceInputStore:
             raise SourceInputError('invalid source document') from error
 
     @staticmethod
-    def decode(encoded: str) -> Any:
+    def decode(encoded: str, *, max_bytes: int | None = None, max_nodes: int | None = None) -> Any:
+        byte_limit, node_limit = _capacity(max_bytes, max_nodes)
         try:
-            if not isinstance(encoded, str) or len(encoded.encode()) > MAX_BYTES:
+            if not isinstance(encoded, str) or len(encoded.encode()) > byte_limit:
                 raise SourceInputError('source document exceeds byte limit')
             def pairs(entries):
                 result = {}
@@ -263,7 +383,7 @@ class SourceInputStore:
                         raise SourceInputError('duplicate JSON field')
                     result[key] = value
                 return result
-            return _transform(json.loads(encoded, object_pairs_hook=pairs), decoding=True)
+            return _transform(json.loads(encoded, object_pairs_hook=pairs), decoding=True, budget=[node_limit])
         except SourceInputError:
             raise
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError, AttributeError) as error:
@@ -280,31 +400,58 @@ class SourceInputStore:
         return root / (configuration_fingerprint(slot) + '.json')
 
     def _read(self, path: Path, identity: Mapping) -> dict:
-        if path.stat().st_size > MAX_BYTES:
+        byte_limit, _ = _capacity(**self._codec_limits)
+        if path.stat().st_size > byte_limit:
             raise SourceInputError('source document exceeds byte limit')
-        document = self.decode(path.read_text())
+        document = self.decode(path.read_text(), **self._codec_limits)
         if not isinstance(document, dict) or set(document) != {'version', 'identity', 'acquired_at', 'payload', 'digest'}:
             raise SourceInputError('invalid source envelope')
         if document['version'] != CONTRACT_VERSION or document['identity'] != dict(identity):
             raise SourceInputError('source identity mismatch')
-        if document['digest'] != hashlib.sha256(self.encode(document['payload']).encode()).hexdigest():
+        if document['digest'] != hashlib.sha256(self.encode(document['payload'], **self._codec_limits).encode()).hexdigest():
             raise SourceInputError('source payload digest mismatch')
         _utc(document['acquired_at'])
         return document
 
-    def _write(self, path: Path, identity: Mapping, payload: Any, acquired_at: datetime, *, exclusive: bool) -> None:
+    @staticmethod
+    def _reject_owned(path: Path, inode: tuple[int, int] | None) -> None:
+        """Retain our rejected publication without evicting a concurrent winner."""
+        if inode is None:
+            return
+        try:
+            existing = path.lstat()
+        except FileNotFoundError:
+            return
+        if (existing.st_dev, existing.st_ino) != inode:
+            return
+        rejected = path.parent / 'rejected'
+        rejected.mkdir(exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=rejected, prefix=path.stem + '-', suffix='.json')
+        os.close(fd)
+        # Frozen names are exclusive-only and never overwritten by this store.
+        # Matching the inode restricts retirement to this invocation's file.
+        os.replace(path, name)
+
+    def _write(self, path: Path, identity: Mapping, payload: Any, acquired_at: datetime, *,
+               exclusive: bool, deadline: float | None = None) -> tuple[int, int] | None:
+        _check_deadline(deadline)
         document = {'version': CONTRACT_VERSION, 'identity': dict(identity), 'acquired_at': _utc(acquired_at),
-                    'payload': payload, 'digest': hashlib.sha256(self.encode(payload).encode()).hexdigest()}
-        encoded = self.encode(document)
+                    'payload': payload, 'digest': hashlib.sha256(self.encode(payload, **self._codec_limits).encode()).hexdigest()}
+        encoded = self.encode(document, **self._codec_limits)
+        _check_deadline(deadline)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(dir=path.parent, prefix='.source-')
+        published = None
         try:
             with os.fdopen(fd, 'w') as stream:
                 stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
+            _check_deadline(deadline)
             if exclusive:
+                info = Path(name).stat()
                 os.link(name, path)
+                published = (info.st_dev, info.st_ino)
             else:
                 os.replace(name, path)
             directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -312,6 +459,11 @@ class SourceInputStore:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+            _check_deadline(deadline)
+            return published
+        except (OSError, SourceInputError):
+            self._reject_owned(path, published)
+            raise
         finally:
             Path(name).unlink(missing_ok=True)
 
@@ -345,16 +497,27 @@ class SourceInputStore:
         except (OSError, SourceInputError) as error:
             raise SourceInputError(f'frozen source bundle rejected: {error}') from error
 
-    def freeze(self, identity: Mapping, payload: Any, *, acquired_at: datetime | None = None) -> Any:
+    def freeze(self, identity: Mapping, payload: Any, *, acquired_at: datetime | None = None,
+               deadline: float | None = None) -> Any:
+        _check_deadline(deadline)
         existing = self.load_frozen(identity)
+        _check_deadline(deadline)
         if existing is not None:
             return existing
+        path = self._path(identity, frozen=True)
+        published = None
         try:
-            self._write(self._path(identity, frozen=True), identity, payload,
-                        acquired_at or datetime.now(timezone.utc), exclusive=True)
+            published = self._write(path, identity, payload,
+                        acquired_at or datetime.now(timezone.utc), exclusive=True, deadline=deadline)
         except FileExistsError:
             pass  # A concurrent first writer owns the accepted observations.
-        return self.load_frozen(identity)
+        try:
+            result = self.load_frozen(identity)
+            _check_deadline(deadline)
+        except (OSError, SourceInputError):
+            self._reject_owned(path, published)
+            raise
+        return result
 
 
 def daily_source_store(owner: Any, session: str) -> tuple[SourceInputStore, dict[str, str]]:
@@ -370,7 +533,8 @@ def daily_source_store(owner: Any, session: str) -> tuple[SourceInputStore, dict
     state_dir = Path(ar.get('state_dir', 'data/state'))
     cache_dir = ar.get('source_cache_dir') or os.environ.get('EVENTEDGE_SOURCE_CACHE_DIR') or state_dir / 'source_cache'
     return SourceInputStore(cache_dir, accepted_dir=state_dir / 'source_inputs',
-                            ttl_s=ar.get('source_cache_ttl_s', 300)), identity
+                            ttl_s=ar.get('source_cache_ttl_s', 300),
+                            **source_codec_limits(config)), identity
 
 
 def daily_volatility_store(owner: Any, session: str) -> tuple[SourceInputStore, dict[str, str]]:

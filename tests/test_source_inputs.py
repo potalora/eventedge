@@ -137,7 +137,7 @@ def test_queued_source_deadline_starts_at_acquisition_not_worker_start(tmp_path,
 def _daily_state(tmp_path, fetcher):
     from types import SimpleNamespace
     from tradingagents.strategies.orchestration.daily_pipeline import DailyRunState
-    engine = SimpleNamespace(_fetch_all_data=fetcher)
+    engine = SimpleNamespace(_fetch_all_data=fetcher, pending_late_signals=lambda *args: [])
     cohort = {'engine': engine, 'config': SimpleNamespace(horizon='30d'),
               'executor': SimpleNamespace(validated_execution_reference_bars=lambda *args: {})}
     screened = []
@@ -220,6 +220,37 @@ def test_invalid_or_unsuccessful_coverage_cannot_authorize_cache(tmp_path, cover
     assert not store.save_cached(IDENTITY, {'_coverage': coverage, 'value': 1}, acquired_at=NOW)
 
 
+@pytest.mark.parametrize('coverage', [
+    {'mode': 'bounded_sample', 'complete': False},
+    {'securities class action': {'complete': False, 'has_next': True}},
+    {'complete': True, 'issuer_attribution': {'complete': False, 'unresolved': 50}},
+    {'complete': True, 'pages': [{'status': 'failed'}]},
+    {'complete': 1},
+    {'complete': None},
+    'complete',
+    None,
+])
+def test_declared_partial_coverage_never_cached_or_reused(tmp_path, coverage):
+    store = SourceInputStore(tmp_path)
+    payload = {'records': [{'id': 'retained-partial-record'}], 'coverage': coverage}
+    assert not store.save_cached(IDENTITY, payload, acquired_at=NOW)
+    # Reproduce a valid old cache envelope, written before coverage was checked.
+    store._write(store._path(IDENTITY, frozen=False), IDENTITY, payload, NOW, exclusive=False)
+    assert store.load_cached(IDENTITY, now=NOW) is None
+
+
+def test_complete_nested_coverage_cache_and_failed_frozen_evidence_are_preserved(tmp_path):
+    store = SourceInputStore(tmp_path / 'cache', accepted_dir=tmp_path / 'accepted')
+    complete = {'records': [], 'coverage': {
+        'query': {'complete': True, 'has_next': False, 'returned': 0},
+    }}
+    assert store.save_cached(IDENTITY, complete, acquired_at=NOW)
+    assert store.load_cached(IDENTITY, now=NOW) == complete
+    incomplete = {'records': [1], 'coverage': {'complete': False}}
+    assert store.freeze(FROZEN, incomplete, acquired_at=NOW) == incomplete
+    assert store.load_frozen(FROZEN) == incomplete
+
+
 def test_codec_byte_limit_is_enforced_before_decode(monkeypatch):
     import tradingagents.strategies.orchestration.source_inputs as module
     monkeypatch.setattr(module, 'MAX_BYTES', 100)
@@ -240,3 +271,28 @@ def test_freeze_durably_syncs_file_and_parent_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(os, 'fsync', sync)
     SourceInputStore(tmp_path / 'cache', accepted_dir=tmp_path / 'accepted').freeze(FROZEN, {}, acquired_at=NOW)
     assert synced == [False, True]
+
+
+@pytest.mark.parametrize('source', [None, 'regulations'])
+def test_complete_regulatory_graphics_have_finite_prospective_codec_capacity(source):
+    from tradingagents.strategies.orchestration.source_inputs import source_codec_limits, MAX_NODES
+    config = {'autoresearch': {'regulation_evidence_policy':'complete_document_text_v1',
+        'regulation_retrieval_policy':'verified_government_copy_v3'}}
+    assert source_codec_limits(config, source=source) == {'max_bytes':32*1024**2, 'max_nodes':MAX_NODES}
+    # Actual three graphic-bearing rules alone occupy 17,035,497 typed bytes.
+    # The old bound fails visibly; prospective capacity roundtrips without loss.
+    payload = {'material':'x'*(17*1024**2)}
+    with pytest.raises(SourceInputError, match='byte limit'):
+        SourceInputStore.encode(payload)
+    encoded = SourceInputStore.encode(payload, **source_codec_limits(config, source=source))
+    assert SourceInputStore.decode(encoded, **source_codec_limits(config, source=source)) == payload
+
+
+@pytest.mark.parametrize('policy', [None, 'verified_government_copy_v1', 'verified_government_copy_v2'])
+def test_legacy_regulation_codec_capacity_unchanged(policy):
+    from tradingagents.strategies.orchestration.source_inputs import source_codec_limits
+    config = {'autoresearch':{'regulation_evidence_policy':'complete_document_text_v1',
+        'regulation_retrieval_policy':policy}}
+    assert source_codec_limits(config, source='regulations') == {}
+    config['autoresearch']['regulation_retrieval_policy']='verified_government_copy_v3'
+    assert source_codec_limits(config, source='fred') == {}

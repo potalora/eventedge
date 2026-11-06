@@ -1,0 +1,101 @@
+{
+  "data" : {
+    "id" : "EPA-R10-OAR-2026-3763-0012",
+    "type" : "documents",
+    "links" : {
+      "self" : "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-3763-0012"
+    },
+    "attributes" : {
+      "additionalRins" : null,
+      "allowLateComments" : false,
+      "authorDate" : null,
+      "authors" : null,
+      "cfrPart" : "40 CFR Part 52",
+      "commentEndDate" : "2026-11-03T04:59:59Z",
+      "commentStartDate" : "2026-10-01T04:00:00Z",
+      "effectiveDate" : null,
+      "exhibitLocation" : null,
+      "exhibitType" : null,
+      "frDocNum" : "2026-20101",
+      "frVolNum" : null,
+      "implementationDate" : null,
+      "media" : null,
+      "ombApproval" : null,
+      "paperLength" : 0,
+      "paperWidth" : 0,
+      "regWriterInstruction" : null,
+      "sourceCitation" : null,
+      "startEndPage" : "62380 - 62383",
+      "subject" : null,
+      "topics" : [ "Environmental Protection", "Air Pollution Control", "Carbon Monoxide", "Incorporation by Reference", "Intergovernmental Relations", "Lead", "Nitrogen Dioxide", "Ozone", "Particulate Matter", "Reporting and Recordkeeping Requirements", "Sulfur Oxides", "Volatile Organic Compounds" ],
+      "address1" : null,
+      "address2" : null,
+      "agencyId" : "EPA",
+      "city" : null,
+      "category" : null,
+      "comment" : null,
+      "country" : null,
+      "displayProperties" : [ {
+        "name" : "pageCount",
+        "label" : "Page Count",
+        "tooltip" : "Number of pages In the content file"
+      } ],
+      "docAbstract" : null,
+      "docketId" : "EPA-R10-OAR-2026-3763",
+      "documentType" : "Proposed Rule",
+      "email" : null,
+      "fax" : null,
+      "field1" : null,
+      "field2" : null,
+      "fileFormats" : [ {
+        "fileUrl" : "https://downloads.regulations.gov/EPA-R10-OAR-2026-3763-0012/content.pdf",
+        "format" : "pdf",
+        "size" : 236723
+      }, {
+        "fileUrl" : "https://downloads.regulations.gov/EPA-R10-OAR-2026-3763-0012/content.html",
+        "format" : "html",
+        "size" : 25343
+      } ],
+      "firstName" : null,
+      "govAgency" : null,
+      "govAgencyType" : null,
+      "objectId" : "09000064b95fa832",
+      "lastName" : null,
+      "legacyId" : null,
+      "modifyDate" : "2026-10-01T20:03:25Z",
+      "organization" : null,
+      "originalDocumentId" : "EPA_FRDOC_0001-33191",
+      "pageCount" : 4,
+      "phone" : null,
+      "postedDate" : "2026-10-01T04:00:00Z",
+      "postmarkDate" : null,
+      "reasonWithdrawn" : null,
+      "receiveDate" : "2026-10-01T04:00:00Z",
+      "restrictReason" : null,
+      "restrictReasonType" : null,
+      "stateProvinceRegion" : null,
+      "submitterRep" : null,
+      "submitterRepAddress" : null,
+      "submitterRepCityState" : null,
+      "subtype" : null,
+      "title" : "Air Quality State Implementation Plans; Approvals and Promulgations: Oregon; Lane County Title 36 Rule",
+      "trackingNbr" : null,
+      "withdrawn" : false,
+      "zip" : null,
+      "openForComment" : true,
+      "withinCommentPeriod" : true
+    },
+    "relationships" : {
+      "attachments" : {
+        "data" : [ ],
+        "links" : {
+          "self" : "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-3763-0012/relationships/attachments",
+          "related" : "https://api.regulations.gov/v4/documents/EPA-R10-OAR-2026-3763-0012/attachments"
+        }
+      }
+    }
+  },
+  "links" : {
+    "self" : "https://regulations.gov/v4/documents/EPA-R10-OAR-2026-3763-0012?include=attachments"
+  }
+}

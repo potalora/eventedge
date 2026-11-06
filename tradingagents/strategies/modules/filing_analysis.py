@@ -1,60 +1,28 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any
 
 from .base import Candidate
+from .admission import admit_candidates
+from ..data_sources.edgar_source import normalize_filing_form, filing_form_family
 
 logger = logging.getLogger(__name__)
 
-# Major public companies with common WARN notice filings
-KNOWN_EMPLOYERS: dict[str, str] = {
-    "amazon": "AMZN",
-    "google": "GOOGL",
-    "alphabet": "GOOGL",
-    "meta": "META",
-    "facebook": "META",
-    "microsoft": "MSFT",
-    "apple": "AAPL",
-    "tesla": "TSLA",
-    "ford": "F",
-    "general motors": "GM",
-    "boeing": "BA",
-    "lockheed": "LMT",
-    "intel": "INTC",
-    "walmart": "WMT",
-    "target": "TGT",
-    "disney": "DIS",
-    "netflix": "NFLX",
-    "uber": "UBER",
-    "lyft": "LYFT",
-    "salesforce": "CRM",
-    "cisco": "CSCO",
-    "ibm": "IBM",
-    "dell": "DELL",
-    "hp ": "HPQ",
-    "goldman sachs": "GS",
-    "morgan stanley": "MS",
-    "jpmorgan": "JPM",
-    "citigroup": "C",
-    "wells fargo": "WFC",
-}
-
-
 class FilingAnalysisStrategy:
-    """Unified filing analysis strategy (merges P3 filing_changes + P8 warn_act + P9 exec_comp).
+    """Analyze SEC filing contents for material events and compensation changes.
 
     Processes all EDGAR filing types in a single pass:
     - 10-K/10-Q: material changes analysis (from P3)
     - DEF 14A: executive compensation analysis (from P9)
-    - Any filing from a known WARN employer: layoff risk signal (from P8)
+    - 8-K/SC 13D/SC 13G: source-text analysis; filing occurrence alone is not a thesis.
 
     Academic basis:
     - Cohen et al. (2020, JoF "Lazy Prices"): 10-K/10-Q language changes
       predict 3.5-4.5%/year underperformance.
     - Core et al. (1999, JFE), Bebchuk & Fried (2004): compensation design
       linked to firm value.
-    - WARN Act: 60-day advance layoff notice is public but under-monitored.
     """
 
     name = "filing_analysis"
@@ -69,11 +37,9 @@ class FilingAnalysisStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_range"],
-            "min_conviction": (0.3, 0.7),
-            "max_positions": (3, 8),
             "forms_to_analyze": (
                 ["10-K", "10-Q"],
-                ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
+                ["10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"],
             ),
         }
 
@@ -85,57 +51,57 @@ class FilingAnalysisStrategy:
         hp = HORIZON_PARAMS.get(horizon, HORIZON_PARAMS["30d"])
         return {
             "hold_days": hp["hold_days_default"],
-            "min_conviction": 0.5,
-            "max_positions": 5,
-            "forms_to_analyze": ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"],
+            "forms_to_analyze": ["10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"],
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
-        """Screen EDGAR filings for material changes, exec comp shifts, and WARN signals."""
+        """Screen EDGAR filings for material changes, exec comp shifts and material events."""
         edgar_data = data.get("edgar", {})
-        filings = edgar_data.get("filings", [])
+        evidence_graph = edgar_data.get("filing_evidence", {})
+        full_evidence = evidence_graph.get("policy") == "complete_submission_v1"
+        corpus = evidence_graph.get("corpus", {}) if full_evidence else {}
+        filings = [*edgar_data.get("filings", []), *edgar_data.get("activist_13d", []), *edgar_data.get("passive_13g", [])]
 
         if not filings:
             return []
 
         forms_to_analyze = params.get("forms_to_analyze", ["10-K", "10-Q", "DEF 14A"])
+        forms_to_analyze = {filing_form_family(form) for form in forms_to_analyze}
         candidates = []
 
         for filing in filings:
-            form_type = filing.get("form_type", "")
+            form_type = normalize_filing_form(filing.get("form_type", ""))
+            form_family = filing_form_family(form_type)
             entity_name = filing.get("entity_name", "")
             ticker = filing.get("ticker", "")
+            binding = filing.get("issuer_binding", {}) if full_evidence else {}
+            execution_verified = (binding.get("status") == "verified"
+                                  and binding.get("execution_status") == "verified"
+                                  and isinstance(binding.get("ticker"), str) and bool(binding["ticker"]))
+            if full_evidence:
+                ticker = binding["ticker"] if execution_verified else ""
             filing_identity = {
                 "accession_number": filing.get("accession_number")
                 or filing.get("adsh"),
                 "file_url": filing.get("file_url", ""),
+                "source_ciks": list(filing.get("ciks", [])),
             }
 
-            # Check for WARN employer match (from P8)
-            warn_ticker = self._resolve_warn_ticker(entity_name)
-            if warn_ticker:
-                candidates.append(
-                    Candidate(
-                        ticker=warn_ticker,
-                        date=date,
-                        direction="short",
-                        score=0.3,
-                        metadata={
-                            "form_type": form_type,
-                            "entity_name": entity_name,
-                            "file_date": filing.get("file_date", ""),
-                            "needs_llm_analysis": False,
-                            "analysis_type": "warn_act",
-                            "signal_source": "edgar_filing_proxy",
-                            **filing_identity,
-                        },
-                    )
-                )
+            if full_evidence:
+                filing_identity.update({
+                    "full_filing_evidence_policy": "complete_submission_v1",
+                    "filing_evidence_ref": filing.get("filing_evidence_ref"),
+                    "prior_evidence_ref": filing.get("prior_evidence_ref"),
+                    "comparison_binding": deepcopy(filing.get("comparison_binding")),
+                    "filing_assessment_scope": filing.get("filing_assessment_scope"),
+                    "prior_status": filing.get("prior_status"),
+                    "issuer_binding": deepcopy(binding),
+                    "filing_evidence_status": filing.get("filing_evidence_status", "unavailable"),
+                })
 
             # 10-K / 10-Q → material changes analysis (from P3)
             if form_type in ("10-K", "10-Q") and form_type in forms_to_analyze:
                 current_text = filing.get("current_text", "")
-                has_text = bool(current_text.strip())
                 candidates.append(
                     Candidate(
                         ticker=ticker,
@@ -149,8 +115,8 @@ class FilingAnalysisStrategy:
                             "file_url": filing.get("file_url", ""),
                             "current_text": current_text,
                             "prior_text": filing.get("prior_text", ""),
-                            "needs_llm_analysis": has_text,
-                            "analysis_type": "filing_change",
+                            "needs_llm_analysis": True,
+                            "analysis_type": ("filing_current_only" if full_evidence and filing.get("filing_assessment_scope") == "current_only" else "filing_change"),
                             **filing_identity,
                         },
                     )
@@ -159,7 +125,6 @@ class FilingAnalysisStrategy:
             # DEF 14A → exec comp analysis (from P9)
             elif form_type == "DEF 14A" and form_type in forms_to_analyze:
                 proxy_text = filing.get("proxy_text", "")
-                has_text = bool(proxy_text.strip())
                 candidates.append(
                     Candidate(
                         ticker=ticker,
@@ -172,7 +137,7 @@ class FilingAnalysisStrategy:
                             "file_date": filing.get("file_date", ""),
                             "file_url": filing.get("file_url", ""),
                             "proxy_text": proxy_text,
-                            "needs_llm_analysis": has_text,
+                            "needs_llm_analysis": True,
                             "analysis_type": "exec_comp",
                             **filing_identity,
                         },
@@ -182,7 +147,6 @@ class FilingAnalysisStrategy:
             # 8-K → material event announcement
             elif form_type == "8-K" and form_type in forms_to_analyze:
                 event_text = filing.get("current_text", "")
-                has_text = bool(event_text.strip())
                 candidates.append(
                     Candidate(
                         ticker=ticker,
@@ -195,7 +159,7 @@ class FilingAnalysisStrategy:
                             "file_date": filing.get("file_date", ""),
                             "file_url": filing.get("file_url", ""),
                             "current_text": event_text[:5000],
-                            "needs_llm_analysis": has_text,
+                            "needs_llm_analysis": True,
                             "analysis_type": "material_event",
                             **filing_identity,
                         },
@@ -203,23 +167,32 @@ class FilingAnalysisStrategy:
                 )
 
             # SC 13D/13G → activist or large passive stake
-            elif form_type in ("SC 13D", "SC 13G") and form_type in forms_to_analyze:
+            elif form_family in ("SCHEDULE 13D", "SCHEDULE 13G") and form_family in forms_to_analyze:
                 stake_text = filing.get("current_text", "")
-                has_text = bool(stake_text.strip())
-                is_activist = form_type == "SC 13D"
+                is_activist = form_family == "SCHEDULE 13D"
+                # Schedule 13 reporters may differ from the subject issuer.
+                # Generic EDGAR display-name tickers are not subject attribution.
+                subject_ticker = (binding.get("ticker") if execution_verified and binding.get("role") == "SUBJECT-COMPANY"
+                                  else None) if full_evidence else filing.get("subject_ticker")
+                if full_evidence and not subject_ticker:
+                    ticker = ""
                 candidates.append(
                     Candidate(
-                        ticker=ticker,
+                        ticker=subject_ticker or ticker,
+                        journal_only=not bool(subject_ticker),
                         date=date,
                         direction="long",  # Activist stakes are typically bullish
                         score=0.7 if is_activist else 0.4,
                         metadata={
                             "form_type": form_type,
+                            "source_form_type": filing.get("source_form_type", filing.get("form_type", "")),
+                            "subject_attribution_verified": bool(subject_ticker),
+                            **({"non_actionable_reason": "unverified_subject_issuer"} if not subject_ticker else {}),
                             "entity_name": entity_name,
                             "file_date": filing.get("file_date", ""),
                             "file_url": filing.get("file_url", ""),
                             "current_text": stake_text[:5000],
-                            "needs_llm_analysis": has_text,
+                            "needs_llm_analysis": True,
                             "analysis_type": "activist_stake"
                             if is_activist
                             else "passive_stake",
@@ -228,14 +201,45 @@ class FilingAnalysisStrategy:
                     )
                 )
 
-        # Deduplicate by ticker (keep highest score)
-        by_ticker: dict[str, Candidate] = {}
-        for c in candidates:
-            if not c.ticker:
+        # Preserve distinct source-native events until the committee decision view.
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            identity = (candidate.ticker, candidate.metadata.get("accession_number") or candidate.metadata.get("file_url"), candidate.metadata["analysis_type"])
+            if identity in seen:
                 continue
-            if c.ticker not in by_ticker or c.score > by_ticker[c.ticker].score:
-                by_ticker[c.ticker] = c
-        unique = sorted(by_ticker.values(), key=lambda c: c.score, reverse=True)
+            seen.add(identity)
+            if full_evidence:
+                for field in ("current_text", "prior_text", "proxy_text"):
+                    candidate.metadata.pop(field, None)
+                reference = candidate.metadata.get("filing_evidence_ref")
+                evidence = corpus.get(reference) if isinstance(reference, str) else None
+                units = evidence.get("units", []) if isinstance(evidence, dict) else []
+                complete = (isinstance(evidence, dict) and evidence.get("accession") == reference
+                            and evidence.get("structural_status") == "complete"
+                            and isinstance(units, list) and bool(units)
+                            and all(isinstance(unit, dict) and isinstance(unit.get("text"), str)
+                                    and bool(unit["text"].strip()) for unit in units))
+                binding = candidate.metadata["issuer_binding"]
+                if not complete:
+                    candidate.journal_only = True
+                    insufficient = isinstance(evidence, dict) and evidence.get("structural_status") == "insufficient"
+                    candidate.metadata["filing_evidence_status"] = (
+                        "insufficient" if insufficient else "unavailable")
+                    candidate.metadata["non_actionable_reason"] = (
+                        "incomplete_filing_evidence" if insufficient else "missing_source_text")
+                elif binding.get("status") != "verified":
+                    candidate.journal_only = True
+                    candidate.metadata["non_actionable_reason"] = "unresolved_source_issuer"
+                elif binding.get("execution_status") != "verified" or not binding.get("ticker"):
+                    candidate.journal_only = True
+                    candidate.metadata["non_actionable_reason"] = "unresolved_execution_security"
+            else:
+                text = candidate.metadata.get("current_text") or candidate.metadata.get("proxy_text")
+                if not text:
+                    candidate.journal_only = True
+                    candidate.metadata["non_actionable_reason"] = "missing_source_text"
+            unique.append(candidate)
 
         # Enrich with analyst consensus for contradiction detection
         openbb_data = data.get("openbb", {})
@@ -253,15 +257,8 @@ class FilingAnalysisStrategy:
             if isinstance(profile_data, dict) and ticker in profile_data:
                 candidate.metadata["sector"] = profile_data[ticker].get("sector", "")
 
-        return unique[: params.get("max_positions", 5)]
-
-    def _resolve_warn_ticker(self, entity_name: str) -> str:
-        """Best-effort match of entity name to ticker via KNOWN_EMPLOYERS."""
-        entity_lower = entity_name.lower()
-        for name, ticker in KNOWN_EMPLOYERS.items():
-            if name in entity_lower:
-                return ticker
-        return ""
+        return admit_candidates(self.name, unique, params.get("analysis_budget"),
+                                filing_corpus=corpus if full_evidence else None)
 
     def check_exit(
         self,
@@ -271,6 +268,7 @@ class FilingAnalysisStrategy:
         holding_days: int,
         params: dict,
         data: dict,
+        direction: str = "long",
     ) -> tuple[bool, str]:
         """Exit on hold period."""
         hold_days = params.get("hold_days", 25)
@@ -285,14 +283,12 @@ EDGAR filings: 10-K/10-Q (material changes), DEF 14A (exec comp),
 8-K (material events), SC 13D (activist stakes), SC 13G (large passive stakes).
 
 Investment horizon: 30 days. Filing implications unfold over weeks as
-analysts digest. SC 13D activist stakes are well-documented alpha sources.
+analysts digest. Filing occurrence does not by itself establish a directional thesis.
 
 Current parameters: {current}
 
 Parameter ranges:
 - hold_days: 20-45 (target ~25-30 days)
-- min_conviction: 0.3-0.7
-- max_positions: 3-8
-- forms_to_analyze: subset of ["10-K", "10-Q", "DEF 14A", "8-K", "SC 13D", "SC 13G"]
+- forms_to_analyze: subset of ["10-K", "10-Q", "DEF 14A", "8-K", "SCHEDULE 13D", "SCHEDULE 13G"]
 
 Suggest 3 parameter combinations. Return JSON array of 3 param dicts."""

@@ -93,6 +93,11 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     Returns:
         A DataSourceRegistry with available sources registered.
     """
+    config = config or {}
+    if ('noaa_delivery_policy' in config
+            and config['noaa_delivery_policy'] != 'ghcnd_yearly_v1'):
+        raise ValueError('invalid_noaa_delivery_policy')
+
     from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
     from tradingagents.strategies.data_sources.edgar_source import EDGARSource
     from tradingagents.strategies.data_sources.usaspending_source import USASpendingSource
@@ -102,7 +107,6 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     from tradingagents.strategies.data_sources.regulations_source import RegulationsSource
     from tradingagents.strategies.data_sources.courtlistener_source import CourtListenerSource
 
-    config = config or {}
     registry = DataSourceRegistry()
 
     registry.register(YFinanceSource())
@@ -111,7 +115,9 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     registry.register(EDGARSource(user_agent=edgar_ua))
 
     registry.register(USASpendingSource())
-    registry.register(CongressSource(fmp_api_key=config.get("fmp_api_key")))
+    congress_options = ({'disclosure_policy': config['congress_disclosure_policy']}
+                        if config.get('congress_disclosure_policy') is not None else {})
+    registry.register(CongressSource(fmp_api_key=config.get("fmp_api_key"), **congress_options))
 
     # API-key sources (free keys)
     registry.register(FREDSource(api_key=config.get("fred_api_key")))
@@ -122,8 +128,12 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     registry.register(RegulationsSource(api_key=config.get("regulations_api_key")))
     registry.register(CourtListenerSource(token=config.get("courtlistener_token")))
 
-    from tradingagents.strategies.data_sources.noaa_source import NOAASource
-    registry.register(NOAASource(token=config.get("noaa_cdo_token")))
+    if config.get('noaa_delivery_policy') == 'ghcnd_yearly_v1':
+        from tradingagents.strategies.data_sources.noaa_yearly_source import NOAAYearlySource
+        registry.register(NOAAYearlySource())
+    else:
+        from tradingagents.strategies.data_sources.noaa_source import NOAASource
+        registry.register(NOAASource(token=config.get("noaa_cdo_token")))
 
     from tradingagents.strategies.data_sources.usda_source import USDASource
     registry.register(USDASource(api_key=config.get("usda_nass_api_key")))

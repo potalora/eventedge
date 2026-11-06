@@ -323,7 +323,7 @@ class TestGenerationDailyRun:
         process = MagicMock(
             returncode=0, stdout=json.dumps(report, indent=2), stderr=""
         )
-        monkeypatch.setattr(gm.subprocess, "run", lambda *args, **kwargs: process)
+        monkeypatch.setattr(gm, "_run_preflight_worker", lambda *args, **kwargs: process)
         before = identity()
 
         results = manager.run_preflight("2026-08-06", mode="screen")
@@ -409,7 +409,67 @@ class TestGenerationDailyRun:
         with runtime_lock(manager._runtime_lock_path, exclusive=True):
             pass
 
-    def test_subprocess_inherits_verified_lock_fd_and_mode(
+    @pytest.mark.parametrize("leader_exits", [False, True])
+    def test_daily_worker_timeout_owns_descendants_and_retains_full_output(
+        self, tmp_path, manager, monkeypatch, leader_exits
+    ):
+        import time
+        import tradingagents.strategies.orchestration.generation_manager as gm_mod
+        from tradingagents.strategies.orchestration.runtime_lock import runtime_lock
+
+        worker_dir = tmp_path / ("leader-exits" if leader_exits else "leader-waits")
+        scripts = worker_dir / "scripts"
+        scripts.mkdir(parents=True)
+        pid_file = tmp_path / f"grandchild-{leader_exits}.pid"
+        script = scripts / "run_cohorts.py"
+        lock_file = tmp_path / f"lock-{leader_exits}.txt"
+        script.write_text(
+            "import os, subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            f"open({str(lock_file)!r}, 'w').write('|'.join([os.environ.get('EVENTEDGE_RUNTIME_LOCK_FD', ''), os.environ.get('EVENTEDGE_RUNTIME_LOCK_MODE', '')]))\n"
+            "sys.stdout.write('O' * 70000); sys.stdout.flush()\n"
+            "sys.stderr.write('E' * 70000); sys.stderr.flush()\n"
+            + ("sys.exit(0)\n" if leader_exits else "time.sleep(30)\n")
+        )
+        manager._venv_python = Path(sys.executable)
+        monkeypatch.setattr(gm_mod, "_GENERATION_TIMEOUT_S", 0.5)
+        gen_data = {
+            "gen_id": "gen_test", "git_commit": "test", "state_dir": str(tmp_path),
+            "worktree_path": str(worker_dir),
+        }
+        started = time.monotonic()
+        with runtime_lock(manager._runtime_lock_path, exclusive=True) as lock:
+            result = manager._run_cohorts_subprocess(
+                gen_data, ["--date", "2026-08-06"], inherited_lock=lock
+            )
+        elapsed = time.monotonic() - started
+        assert result["error"] == "Timed out after 0.5s"
+        assert elapsed < 6, f"daily worker cleanup took {elapsed:.2f}s"
+        evidence = json.loads(Path(result["evidence_path"]).read_text())
+        assert evidence["process_status"] == "timeout"
+        assert len(evidence["stdout"]) >= 70000
+        assert len(evidence["stderr"]) >= 70000
+        assert evidence["stdout"].startswith("O")
+        assert evidence["stderr"].startswith("E")
+        assert lock_file.read_text() == f"{lock.fd}|exclusive"
+        with runtime_lock(manager._runtime_lock_path, exclusive=True):
+            pass
+        child_pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+                stat_file = Path(f"/proc/{child_pid}/stat")
+                if stat_file.exists() and stat_file.read_text().split()[2] == "Z":
+                    break
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("daily worker descendant survived timeout cleanup")
+
+    def test_worker_inherits_verified_lock_fd_and_mode(
         self, git_repo, manager
     ):
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
@@ -418,7 +478,7 @@ class TestGenerationDailyRun:
         info = manager.start_generation("inherited lock handoff")
         captured = {}
 
-        def capture_run(*args, **kwargs):
+        def capture_worker(*args, **kwargs):
             captured.update(kwargs)
             return MagicMock(
                 returncode=0, stdout=_valid_daily_stdout(), stderr=""
@@ -431,7 +491,7 @@ class TestGenerationDailyRun:
             "worktree_path": info.worktree_path,
         }
         with runtime_lock(manager._runtime_lock_path, exclusive=True) as lock:
-            with patch.object(gm_mod.subprocess, "run", side_effect=capture_run):
+            with patch.object(gm_mod, "_run_preflight_worker", side_effect=capture_worker):
                 manager._run_cohorts_subprocess(
                     gen_data, ["--date", "2026-08-06"], inherited_lock=lock
                 )
@@ -470,13 +530,11 @@ class TestGenerationDailyRun:
         """Verify that _run_cohorts_subprocess sets the right env vars."""
         info = manager.start_generation("env test")
 
-        # Mock subprocess.run at module level, but only for non-git calls
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
         captured_calls = []
 
-        def capture_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get("args", [])
+        def capture_worker(cmd, **kwargs):
             captured_calls.append((cmd, kwargs))
             mock_result = MagicMock()
             mock_result.returncode = 0
@@ -484,14 +542,14 @@ class TestGenerationDailyRun:
             mock_result.stderr = ""
             return mock_result
 
-        # Directly call _run_cohorts_subprocess with a mocked subprocess
+        # Directly call _run_cohorts_subprocess with the owned worker mocked.
         gen_data = {
             "gen_id": info.gen_id,
             "git_commit": info.git_commit,
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
-        with patch.object(gm_mod.subprocess, "run", side_effect=capture_run):
+        with patch.object(gm_mod, "_run_preflight_worker", side_effect=capture_worker):
             manager._run_cohorts_subprocess(gen_data, ["--date", "2026-03-31"])
 
         assert len(captured_calls) == 1
@@ -548,7 +606,7 @@ class TestGenerationDailyRun:
         import tradingagents.strategies.orchestration.generation_manager as gm_mod
 
         process = MagicMock(returncode=0, stdout=_valid_daily_stdout(), stderr="")
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             first = manager._run_cohorts_subprocess(
                 {
                     "gen_id": info.gen_id,
@@ -608,7 +666,7 @@ class TestGenerationDailyRun:
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
-        with patch.object(gm_mod.subprocess, "run", side_effect=raised):
+        with patch.object(gm_mod, "_run_preflight_worker", side_effect=raised):
             result = manager._run_cohorts_subprocess(
                 gen_data,
                 ["--date", "2026-09-06"],
@@ -635,7 +693,7 @@ class TestGenerationDailyRun:
         monkeypatch.setenv("ARCHIVE_API_KEY", secret)
         process = MagicMock(returncode=0, stdout=_valid_daily_stdout(), stderr="")
         with (
-            patch.object(gm_mod.subprocess, "run", return_value=process),
+            patch.object(gm_mod, "_run_preflight_worker", return_value=process),
             patch.object(
                 gm_mod,
                 "persist_run_evidence",
@@ -671,7 +729,7 @@ class TestGenerationDailyRun:
 
         timeout = subprocess.TimeoutExpired(["worker"], 3600, output=b"partial")
         with (
-            patch.object(gm_mod.subprocess, "run", side_effect=timeout),
+            patch.object(gm_mod, "_run_preflight_worker", side_effect=timeout),
             patch.object(
                 gm_mod,
                 "persist_run_evidence",
@@ -712,7 +770,7 @@ class TestGenerationDailyRun:
             returncode=1, stdout=json.dumps(report, indent=2), stderr=""
         )
         with (
-            patch.object(gm_mod.subprocess, "run", return_value=process),
+            patch.object(gm_mod, "_run_preflight_worker", return_value=process),
             patch.object(
                 gm_mod,
                 "persist_run_evidence",
@@ -1087,7 +1145,7 @@ class TestGenerationDailyRun:
             stderr="ERROR: 16/16 cohorts failed",
         )
 
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             results = manager.run_daily("2026-08-10")
 
         result = results[info.gen_id]
@@ -1127,7 +1185,7 @@ class TestGenerationDailyRun:
             "state_dir": info.state_dir,
             "worktree_path": info.worktree_path,
         }
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             result = manager._run_cohorts_subprocess(gen_data, ["--date", "2026-03-31"])
 
         assert result["success"] is False
@@ -1161,7 +1219,7 @@ class TestGenerationDailyRun:
             ),
             stderr="",
         )
-        with patch.object(gm_mod.subprocess, "run", return_value=process):
+        with patch.object(gm_mod, "_run_preflight_worker", return_value=process):
             results = manager.run_daily("2026-03-31")
 
         result = results[info.gen_id]
@@ -1492,7 +1550,7 @@ class TestRunLogPersistence:
             )
             stderr = ""
 
-        monkeypatch.setattr(gm.subprocess, "run", lambda *a, **k: _Proc())
+        monkeypatch.setattr(gm, "_run_preflight_worker", lambda *a, **k: _Proc())
         result = mgr._run_cohorts_subprocess(
             gen_data, ["run-daily", "--date", "2026-05-29"]
         )
@@ -1500,3 +1558,173 @@ class TestRunLogPersistence:
         log = state_dir / "last_run_output.log"
         assert log.exists()
         assert "Regulations.gov fetch: 20 proposed rules" in log.read_text()
+
+
+@pytest.mark.parametrize("action", ["start", "pause", "resume", "retire"])
+def test_lifecycle_refuses_inflight_daily_without_side_effects(manager, monkeypatch, action):
+    """An acknowledged operator change cannot be lost by an in-flight writer."""
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
+
+    info = manager.start_generation("existing")
+    before_worktrees = set(manager._worktrees_dir.iterdir())
+
+    def worker(*args, **kwargs):
+        before = manager._manifest_path.read_bytes()
+        with pytest.raises(RuntimeLockBusy):
+            if action == "start":
+                manager.start_generation("racing")
+            elif action == "retire":
+                manager.retire_generation(info.gen_id)
+            else:
+                getattr(manager, f"{action}_generation")(info.gen_id)
+        assert manager._manifest_path.read_bytes() == before
+        assert set(manager._worktrees_dir.iterdir()) == before_worktrees
+        return {"outcome": "clean", "success": True, "elapsed_s": 0.0}
+
+    monkeypatch.setattr(manager, "_run_cohorts_subprocess", worker)
+    assert manager.run_daily("2026-10-09")[info.gen_id]["success"]
+    manager.pause_generation(info.gen_id)
+    assert manager.get_generation(info.gen_id).status == "paused"
+
+
+@pytest.mark.parametrize("damage", ["truncated", "missing_roster", "wrong_roster", "duplicate_id", "bad_status", "bad_history"])
+def test_invalid_existing_manifest_is_preserved_and_never_run(manager, monkeypatch, damage):
+    manager.start_generation("existing")
+    manifest = json.loads(manager._manifest_path.read_text())
+    if damage == "truncated":
+        raw = b'{"generations": ['
+    else:
+        if damage == "missing_roster":
+            manifest = {}
+        elif damage == "wrong_roster":
+            manifest["generations"] = {}
+        elif damage == "duplicate_id":
+            manifest["generations"] *= 2
+        elif damage == "bad_status":
+            manifest["generations"][0]["status"] = "typo"
+        else:
+            manifest["generations"][0]["run_history"] = "not a list"
+        raw = json.dumps(manifest).encode()
+    manager._manifest_path.write_bytes(raw)
+    worker = MagicMock()
+    monkeypatch.setattr(manager, "_run_cohorts_subprocess", worker)
+    with pytest.raises(ValueError, match="manifest"):
+        manager.run_daily("2026-10-09")
+    assert manager._manifest_path.read_bytes() == raw
+    worker.assert_not_called()
+
+
+def test_corrupt_manifest_daily_cli_fails_without_overwriting(manager, monkeypatch, capsys):
+    from scripts import run_generations
+
+    raw = b'{"generations": ['
+    manager._manifest_path.write_bytes(raw)
+    monkeypatch.setattr(run_generations, "_repo_root", lambda: str(manager._repo_root))
+    monkeypatch.setattr(sys, "argv", ["run_generations.py", "run-daily", "--date", "2026-10-09"])
+    with pytest.raises(SystemExit) as error:
+        run_generations.main()
+    assert error.value.code != 0
+    assert "manifest" in capsys.readouterr().err.lower()
+    assert manager._manifest_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("state_kind", ["missing", "old_schema", "ready", "busy"])
+def test_compare_opens_only_existing_state_under_shared_lock(tmp_path, monkeypatch, capsys, state_kind):
+    from contextlib import contextmanager
+    from copy import deepcopy
+    from decimal import Decimal
+    from types import SimpleNamespace
+    import sqlite3
+    from scripts import run_cohorts
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.strategies.metrics.store import MetricStore
+    from tradingagents.strategies.orchestration import cohort_orchestrator
+    from tradingagents.strategies.orchestration.runtime_lock import runtime_lock, RuntimeLockBusy
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+
+    state = tmp_path / 'state'
+    config = deepcopy(DEFAULT_CONFIG)
+    config['autoresearch']['state_dir'] = str(state)
+    cohort = next(row for row in cohort_orchestrator.build_default_cohorts(config) if row.name == 'horizon_3m_size_100k')
+    monkeypatch.setattr(cohort_orchestrator, 'build_default_cohorts', lambda _: [cohort])
+    lock_path = tmp_path / 'runtime.lock'
+    lock_modes = []
+
+    @contextmanager
+    def lock_context(*, exclusive):
+        lock_modes.append(exclusive)
+        with runtime_lock(lock_path, exclusive=exclusive) as lock:
+            yield lock
+
+    monkeypatch.setattr(run_cohorts, '_runtime_lock_context', lock_context)
+    if state_kind in {'ready', 'busy'}:
+        ledger = PortfolioLedger(state / cohort.name / 'portfolio.db', cohort.name, Decimal('100000.0'))
+        ledger.close()
+        MetricStore(state / 'metrics_v2.sqlite3')
+    elif state_kind == 'old_schema':
+        state.mkdir()
+        with sqlite3.connect(state / 'metrics_v2.sqlite3') as connection:
+            connection.execute('CREATE TABLE legacy(value TEXT)')
+    before = {p.relative_to(state): p.read_bytes() for p in state.rglob('*') if p.is_file()}
+    args = SimpleNamespace(no_llm=True)
+    if state_kind == 'busy':
+        with runtime_lock(lock_path, exclusive=True):
+            with pytest.raises(SystemExit):
+                run_cohorts._run_compare(args, config, 'gen_001', 'a' * 40)
+    elif state_kind == 'ready':
+        run_cohorts._run_compare(args, config, 'gen_001', 'a' * 40)
+        assert json.loads(capsys.readouterr().out)['epoch'] is None
+    else:
+        with pytest.raises((FileNotFoundError, sqlite3.DatabaseError)):
+            run_cohorts._run_compare(args, config, 'gen_001', 'a' * 40)
+    assert lock_modes == [False]
+    after = {p.relative_to(state): p.read_bytes() for p in state.rglob('*') if p.is_file()}
+    assert after == before
+
+
+@pytest.mark.parametrize('operation', ['daily', 'preflight'])
+def test_manager_reuses_controller_exclusive_lease_without_downgrading(manager, monkeypatch, operation):
+    from tradingagents.strategies.orchestration.runtime_lock import runtime_lock, RuntimeLockBusy
+
+    info = manager.start_generation('pinned whole-cycle roster')
+    seen = []
+
+    def worker(*args, inherited_lock=None, **kwargs):
+        assert inherited_lock.inherited and inherited_lock.exclusive
+        seen.append(inherited_lock.fd)
+        # A concurrent lifecycle change remains excluded even during preflight.
+        with pytest.raises(RuntimeLockBusy):
+            manager.pause_generation(info.gen_id)
+        return {'outcome': 'clean', 'success': True, 'elapsed_s': 0.0}
+
+    monkeypatch.setattr(manager, '_run_cohorts_subprocess', worker)
+    with runtime_lock(manager._runtime_lock_path, exclusive=True) as lease:
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_FD', str(lease.fd))
+        monkeypatch.setenv('EVENTEDGE_RUNTIME_LOCK_MODE', 'exclusive')
+        if operation == 'daily':
+            manager.run_daily('2026-10-13')
+        else:
+            manager.run_preflight('2026-10-13')
+        assert seen == [lease.fd]
+        with pytest.raises(RuntimeLockBusy):
+            with runtime_lock(manager._runtime_lock_path, exclusive=False):
+                pytest.fail('nested command released or downgraded controller lease')
+    with runtime_lock(manager._runtime_lock_path, exclusive=True):
+        pass
+
+
+@pytest.mark.parametrize('fd,mode', [('bad', 'exclusive'), ('999999', 'exclusive'), (None, 'exclusive'), ('3', None), ('3', 'shared')])
+def test_manager_rejects_unverified_controller_lease_before_work(manager, monkeypatch, fd, mode):
+    from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockInvalid
+
+    manager.start_generation('reject unverified lease')
+    worker = MagicMock()
+    monkeypatch.setattr(manager, '_run_cohorts_subprocess', worker)
+    for name, value in [('EVENTEDGE_RUNTIME_LOCK_FD', fd), ('EVENTEDGE_RUNTIME_LOCK_MODE', mode)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeLockInvalid):
+        manager.run_preflight('2026-10-13')
+    worker.assert_not_called()

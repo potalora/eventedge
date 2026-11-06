@@ -1,0 +1,56 @@
+{
+  "started_at": "2026-10-22T08:43:21.344838+00:00",
+  "finished_at": "2026-10-22T08:43:23.947364+00:00",
+  "elapsed_seconds": 2.603,
+  "scope": "candidate_public_provider_probe",
+  "production_changed": false,
+  "model_calls": 0,
+  "source_code_sha256": "73f7d6034e991de9db346124fd73d5172a734e6c4193d00a8abea141a452611f",
+  "reference_session": "2026-10-21",
+  "vintage_as_of": "2026-10-22",
+  "status": "passed",
+  "commodities": {
+    "gold": {
+      "observation_date": "2026-10-13",
+      "lookback_observations": 52,
+      "acquired_at": "2026-10-22T08:43:23.325266+00:00",
+      "available_at": "2026-10-22T08:43:23.847646+00:00"
+    },
+    "silver": {
+      "observation_date": "2026-10-13",
+      "lookback_observations": 52,
+      "acquired_at": "2026-10-22T08:43:23.325266+00:00",
+      "available_at": "2026-10-22T08:43:23.871814+00:00"
+    },
+    "crude_oil": {
+      "observation_date": "2026-10-13",
+      "lookback_observations": 52,
+      "acquired_at": "2026-10-22T08:43:23.325266+00:00",
+      "available_at": "2026-10-22T08:43:23.896017+00:00"
+    },
+    "nat_gas": {
+      "observation_date": "2026-10-13",
+      "lookback_observations": 52,
+      "acquired_at": "2026-10-22T08:43:23.325266+00:00",
+      "available_at": "2026-10-22T08:43:23.920993+00:00"
+    },
+    "copper": {
+      "observation_date": "2026-10-13",
+      "lookback_observations": 52,
+      "acquired_at": "2026-10-22T08:43:23.325266+00:00",
+      "available_at": "2026-10-22T08:43:23.944296+00:00"
+    }
+  },
+  "coverage": {
+    "mode": "official_publication_calendar",
+    "expected_observation_date": "2026-10-13",
+    "expected_release_at": "2026-10-16T15:30:00-04:00",
+    "release_schedule_url": "https://www.cftc.gov/MarketReports/CommitmentsofTraders/ReleaseSchedule/index.htm",
+    "release_schedule_sha256": "6bfe461151c6097b1154319de862a21a71015df053f9cb811020f6918c877151",
+    "release_schedule_acquired_at": "2026-10-22T08:43:23.803654+00:00",
+    "publication_cutoff": "2026-10-21T23:59:59.999999-04:00",
+    "publication_assessed_at": "2026-10-22T08:43:23.534538+00:00",
+    "archive_acquired_at": "2026-10-22T08:43:23.325266+00:00",
+    "complete": true
+  }
+}

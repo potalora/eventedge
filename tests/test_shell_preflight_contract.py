@@ -180,3 +180,31 @@ def test_report_failure_is_visible_after_valid_daily(tmp_path):
     assert sum('run-daily' in call for call in _calls(calls_path)) == 1
     log = (tmp_path / 'logs/daily_2026-08-06.log').read_text()
     assert 'OPERATIONAL REPORT INCOMPLETE' in log
+
+
+@pytest.mark.parametrize("wrapper", ["daily_trading.sh", "preflight.sh"])
+@pytest.mark.parametrize("ny_date", ["2026-10-09", "2026-01-09"])
+def test_wrappers_use_friday_new_york_after_utc_midnight(tmp_path, wrapper, ny_date):
+    env, calls_path = _shell_environment(tmp_path)
+    env["TZ"] = "UTC"
+    env["NY_DATE"] = ny_date
+    _write_executable(tmp_path / "bin/date", '''#!/usr/bin/env bash
+if [ "${TZ:-}" = "America/New_York" ]; then
+    case "${1:-}" in
+        +%Y-%m-%d) echo "$NY_DATE" ;;
+        +%u) echo 5 ;;
+        *) echo Friday ;;
+    esac
+else
+    case "${1:-}" in
+        +%Y-%m-%d) echo 2026-10-10 ;;
+        +%u) echo 6 ;;
+        *) echo Saturday ;;
+    esac
+fi
+''')
+    result = subprocess.run(["bash", str(REPO_ROOT / "scripts" / wrapper)], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    calls = _calls(calls_path)
+    assert calls, "Friday's session was skipped using Saturday's UTC date"
+    assert all(f"--date {ny_date}" in call for call in calls)
