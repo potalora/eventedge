@@ -214,38 +214,98 @@ def validate_repair_request(
     return request
 
 
-def build_repair_requests(
-    report_bytes,
-    markdown_bytes,
-    *,
-    expected_generation,
-    expected_commit,
-    expected_session,
-    now=None,
-):
-    """Project the current repair-required snapshot, independent of alert transitions.
+def _canonical_report_pair(raw, markdown, generation, commit, session):
+    report = _decode(raw, MAX_REPORT_BYTES)
+    if (type(report) is not dict
+            or raw != (json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+            or type(markdown) is not bytes or len(markdown) > MAX_REPORT_BYTES
+            or markdown != render_operational_report(report).encode()
+            or (report["generation_id"], report["generation_commit"], report["session"])
+            != (generation, commit, session)):
+        raise ValueError("source repair report pair mismatch")
+    return report
 
-    The report is an observation proposal, not authoritative repair evidence. The
-    broker must call the evidence exporter before admitting an automatic attempt.
-    """
+
+def _previous_pair_for(report, capture, directory):
+    # Ordinary and first-session reports have no dependency on earlier files.
+    if not any(row.get("status") == "repair_required" and row.get("observation") == "unknown"
+               for row in report["source_incidents"]["open_incidents"] if isinstance(row, dict)):
+        return None
+    day = previous_session(_session(report["session"])).isoformat()
+    generation = report["generation_id"]
+    if not _GENERATION.fullmatch(generation):
+        raise ValueError("invalid retained incident generation")
+    stem = Path(directory) / f"{day}-{generation}-operational-report"
+    return tuple(capture.read(stem.with_suffix(ext), MAX_REPORT_BYTES) for ext in (".json", ".md"))
+
+
+def _retained_incidents(report, previous_pair):
+    if previous_pair is None:
+        raise ValueError("unknown or uncorroborated repair incident")
+    generation, commit, session = (report[key] for key in ("generation_id", "generation_commit", "session"))
+    prior_day = previous_session(_session(session))
+    prior = _canonical_report_pair(*previous_pair, generation, commit, prior_day.isoformat())
+    configuration = report["sources"]["configuration"]
+    summary = report["source_incidents"]
+    if (summary["history_status"] != "available"
+            or prior["source_incidents"]["assessment_status"] != "available"
+            or prior["sources"]["configuration"] != configuration
+            or type(report.get("profile_sha256")) is not str
+            or not _DIGEST.fullmatch(report["profile_sha256"])
+            or prior.get("profile_sha256") != report["profile_sha256"]
+            or _json_bytes(assess_source_incidents(report, prior)) != _json_bytes(summary)):
+        raise ValueError("uncorroborated retained incident history")
+    from zoneinfo import ZoneInfo
+    acquired = datetime.fromisoformat(prior["sources"]["acquired_at"])
+    if acquired.utcoffset() is None or acquired.astimezone(ZoneInfo("America/New_York")).date() != prior_day:
+        raise ValueError("retained history acquisition session mismatch")
+    prior_rows = {row["provider"]: row for row in prior["source_incidents"]["open_incidents"]}
+    observed = {row["provider"]: row for row in assess_source_incidents(prior)["open_incidents"]}
+    prior_digest = hashlib.sha256(previous_pair[0] + b"\0" + previous_pair[1]).hexdigest()
+    retained = []
+    for row in summary["open_incidents"]:
+        if row["status"] != "repair_required" or row["observation"] != "unknown":
+            continue
+        old = prior_rows[row["provider"]]
+        if (not _session(row["first_failed_session"]) <= _session(row["last_failed_session"]) <= prior_day
+                or row["consecutive_failed_sessions"] != 0
+                or row["reason_code"] not in REPAIR_REASONS
+                or old["observation"] == "failed" and (
+                    old["last_failed_session"] != prior_day.isoformat()
+                    or any(observed.get(row["provider"], {}).get(key) != old[key]
+                           for key in ("observation", "reason_code", "http_status")))):
+            raise ValueError("uncorroborated prior repair incident")
+        if old["observation"] == "unknown":
+            current_prior = observed.get(row["provider"], {})
+            recovered = (not current_prior and prior.get("evidence_complete") is True and
+                         prior["sources"]["observations"].get(row["provider"]) in {"success", "success_empty", "complete"})
+            if (prior["source_incidents"]["history_status"] != "available"
+                    or old["last_failed_session"] >= prior_day.isoformat()
+                    or current_prior.get("observation") == "failed" or recovered):
+                raise ValueError("uncorroborated prior unknown observation")
+        identity = dict(version=VERSION, generation_id=generation, generation_commit=commit,
+                        configuration=configuration, provider=row["provider"],
+                        first_failed_session=row["first_failed_session"])
+        retained.append({"incident_id": _incident_id(identity), "provider": row["provider"],
+                         "configuration": configuration, "first_failed_session": row["first_failed_session"],
+                         "last_failed_session": row["last_failed_session"], "previous_report_sha256": prior_digest})
+    return retained
+
+
+def build_repair_requests(report_bytes, markdown_bytes, *, expected_generation, expected_commit,
+                          expected_session, now=None, previous_pair=None):
+    """Propose current actions only. Unobserved history never admits a repair."""
+    projected, _ = _project_repair_snapshot(report_bytes, markdown_bytes, expected_generation=expected_generation,
+        expected_commit=expected_commit, expected_session=expected_session, now=now, previous_pair=previous_pair)
+    return projected
+
+
+def _project_repair_snapshot(report_bytes, markdown_bytes, *, expected_generation, expected_commit,
+                             expected_session, now=None, previous_pair=None):
     now = _now(now)
     _scope(expected_generation, expected_commit, expected_session, now)
-    report = _decode(report_bytes, MAX_REPORT_BYTES)
-    if type(report) is not dict:
-        raise ValueError("invalid source repair report")
     try:
-        canonical = (
-            json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n"
-        ).encode()
-        if (
-            canonical != report_bytes
-            or type(markdown_bytes) is not bytes
-            or len(markdown_bytes) > MAX_REPORT_BYTES
-            or markdown_bytes != render_operational_report(report).encode()
-            or (report["generation_id"], report["generation_commit"], report["session"])
-            != (expected_generation, expected_commit, expected_session)
-        ):
-            raise ValueError("source repair report pair mismatch")
+        report = _canonical_report_pair(report_bytes, markdown_bytes, expected_generation, expected_commit, expected_session)
         summary, sources = report["source_incidents"], report["sources"]
         configuration = sources["configuration"]
         acquired = datetime.fromisoformat(sources["acquired_at"])
@@ -274,6 +334,7 @@ def build_repair_requests(
             for row in assess_source_incidents(report)["open_incidents"]
         }
         result = {"requests": [], "requires_user": []}
+        retained = []
         seen = set()
         digest = hashlib.sha256(report_bytes + b"\0" + markdown_bytes).hexdigest()
         for row in rows:
@@ -296,6 +357,10 @@ def build_repair_requests(
                 raise ValueError("invalid source repair incident")
             seen.add(row["provider"])
             if row["status"] != "repair_required":
+                continue
+            if row["observation"] == "unknown":
+                if not retained:
+                    retained = _retained_incidents(report, previous_pair)
                 continue
             current = observed.get(row["provider"])
             if (
@@ -330,7 +395,7 @@ def build_repair_requests(
                 )
             else:
                 result["requests"].append(validate_repair_request(request, now=now))
-        return result
+        return result, retained
     except (
         KeyError,
         TypeError,
@@ -352,6 +417,7 @@ class _Capture:
     def __init__(self, root):
         self.root = Path(root).absolute()
         self.files = {}
+        self.missing = {}
         self.total = 0
 
     @staticmethod
@@ -423,7 +489,21 @@ class _Capture:
             self.total += len(data)
         return data
 
+    def read_optional(self, relative, limit):
+        try:
+            data = self.read(relative, limit)
+        except FileNotFoundError:
+            if relative in self.files:
+                raise EvidenceChangedDuringCapture("optional evidence disappeared")
+            self.missing[relative] = limit
+            return None
+        if relative in self.missing:
+            raise EvidenceChangedDuringCapture("optional evidence appeared")
+        return data
+
     def verify(self):
+        for path, limit in tuple(self.missing.items()):
+            self.read_optional(path, limit)
         for path in tuple(self.files):
             self.read(path)
 
@@ -557,8 +637,9 @@ def current_repair_requests(repo_root, *, now=None):
             metadata = _metadata(capture, generation)
             if _head(capture, generation) != metadata["git_commit"]:
                 raise ValueError("active generation HEAD mismatch")
+            raw, markdown = _report_pair(capture, generation, session)
             projected = build_repair_requests(
-                *_report_pair(capture, generation, session),
+                raw, markdown, previous_pair=_previous_pair_for(_decode(raw, MAX_REPORT_BYTES), capture, "docs/reports"),
                 expected_generation=generation,
                 expected_commit=metadata["git_commit"],
                 expected_session=session,
@@ -609,6 +690,7 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
             projected = build_repair_requests(
                 report_bytes,
                 markdown_bytes,
+                previous_pair=_previous_pair_for(_decode(report_bytes, MAX_REPORT_BYTES), capture, "docs/reports"),
                 expected_generation=generation,
                 expected_commit=commit,
                 expected_session=session,
@@ -888,8 +970,9 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
 
 def publish_repair_proposal(report, paths, *, now=None):
     """Publish an adjacent atomic proposal; stale reports keep publishing normally."""
-    raw = Path(paths["json"]).read_bytes()
-    markdown = Path(paths["markdown"]).read_bytes()
+    capture = _Capture(Path(paths["json"]).parent)
+    raw = capture.read(Path(paths["json"]).name, MAX_REPORT_BYTES)
+    markdown = capture.read(Path(paths["markdown"]).name, MAX_REPORT_BYTES)
     result = {
         "version": PROPOSAL_VERSION,
         "generation_id": report["generation_id"],
@@ -908,6 +991,7 @@ def publish_repair_proposal(report, paths, *, now=None):
                 build_repair_requests(
                     raw,
                     markdown,
+                    previous_pair=_previous_pair_for(report, capture, "."),
                     expected_generation=report["generation_id"],
                     expected_commit=report["generation_commit"],
                     expected_session=report["session"],
@@ -915,8 +999,11 @@ def publish_repair_proposal(report, paths, *, now=None):
                 )
             )
             result["status"] = "eligible"
-    except (ValueError, TypeError, KeyError):
+    except EvidenceChangedDuringCapture:
+        raise
+    except (OSError, ValueError, TypeError, KeyError):
         pass
+    capture.verify()
     destination = Path(paths["json"]).with_name(
         f"{report['session']}-{report['generation_id']}-source-repair.json"
     )

@@ -486,7 +486,7 @@ def test_cli_has_only_source_owned_request_and_export_operations():
         text=True,
     )
     assert result.returncode == 0
-    assert "{requests,interventions,export}" in result.stdout
+    assert "{requests,interventions,verify-projections,export}" in result.stdout
     assert "--command" not in result.stdout
 
 

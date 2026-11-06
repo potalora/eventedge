@@ -17,6 +17,7 @@ from tradingagents.strategies.orchestration.runtime_lock import (
 )
 from tradingagents.strategies.orchestration.source_repair_intervention import (
     refresh_intervention_proposals,
+    verify_current_projections,
 )
 from tradingagents.strategies.orchestration.source_repair import (
     EvidenceChangedDuringCapture,
@@ -40,6 +41,8 @@ def main(argv=None):
         "interventions", help="Refresh urgent source intervention report artifacts only"
     )
     interventions.add_argument("--repo-root", required=True, type=Path)
+    verify = commands.add_parser("verify-projections", help="Compare current report projections with independently derived bytes")
+    verify.add_argument("--repo-root", required=True, type=Path)
     export = commands.add_parser(
         "export", help="Corroborate and snapshot one exact source incident"
     )
@@ -52,6 +55,8 @@ def main(argv=None):
             result = current_repair_requests(arguments.repo_root)
         elif arguments.operation == "interventions":
             result = refresh_intervention_proposals(arguments.repo_root)
+        elif arguments.operation == "verify-projections":
+            result = verify_current_projections(arguments.repo_root)
         else:
             request_path = arguments.request_file.absolute()
             raw = _Capture(request_path.parent).read(
@@ -64,6 +69,13 @@ def main(argv=None):
                 arguments.repo_root, request, arguments.output_dir
             )
         print(json.dumps(result, sort_keys=True, allow_nan=False))
+        if arguments.operation == "interventions":
+            if (not result["proposals"] or len(result["proposals"]) != len(result["enrichment_monitors"])
+                    or any(row["status"] != "available" or not row["path"] or row["diagnostics"]
+                           for row in result["proposals"])
+                    or any(row["status"] not in {"complete","degraded","held"} or not row["path"]
+                           for row in result["enrichment_monitors"])):
+                return 2
         return 0
     except EvidenceChangedDuringCapture:
         # Only projection may ask the broker for a fresh bounded subprocess.

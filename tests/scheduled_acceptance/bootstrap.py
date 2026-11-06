@@ -237,6 +237,19 @@ def _install():
         boundary = ({'fixture_boundary':'noaa_yearly_original_lines',
                      'fixture_original_acquisition_date':'2026-10-19'} if _yearly else {})
         trace('http',method=method,url=url,params=safe_params,**boundary)
+        if (fault == 'court_exhausted_issuer_pages' and '--preflight' not in sys.argv
+                and url.startswith('https://www.courtlistener.com/api/rest/v4/search/')):
+            # Constructed paginated HTTP responses keep the real collector and
+            # its ten-request limit in the scheduled workflow.
+            from urllib.parse import parse_qsl, urlencode, urlsplit
+            endpoint = url.split('?', 1)[0]
+            query = dict(params or parse_qsl(urlsplit(url).query))
+            page = int(query.get('page', '1'))
+            response = fixture.response({'count': 100, 'results': [{'docket_id': page, 'caseName': 'Fixture dispute',
+                'court': 'fixture', 'dateFiled': current['session']}],
+                'next': endpoint + '?' + urlencode({**query, 'page': str(page + 1)})})
+            response.url = url
+            return response
         if current.get('regulation_graphics'):
             from scheduled_acceptance.regulation_graphics_fixture import response
             graphic_response = response(fixture, url, params, fault)
