@@ -3,6 +3,7 @@
 This validator returns no records. Only the normal complete-scope validator
 can admit litigation evidence to a strategy.
 """
+from collections import Counter
 from datetime import date, datetime, timedelta
 import math
 from zoneinfo import ZoneInfo
@@ -79,7 +80,7 @@ def _validate(payload, expected_scope, session, acquired):
     queries, expected = coverage["queries"], declared_queries(selected)
     _require(type(queries) is list and len(queries) == len(expected) and 0 < len(queries) <= 10)
     pages = 0
-    completed_ids = set()
+    completed_occurrences = Counter()
     for i, (query, spec) in enumerate(zip(queries, expected)):
         native = query["coverage"]
         _require(spec["kind"] == "issuer_search" and all(query.get(k) == v for k,v in spec.items())
@@ -88,21 +89,33 @@ def _validate(payload, expected_scope, session, acquired):
                  and _int(native["pages"], 1, 10) and type(native["total"]) is int and native["total"] >= 0)
         pages += native["pages"]
         if i == len(queries) - 1:
-            _require(query["status"] == "failed" and native["complete"] is False
+            _require(set(query) == set(spec) | {"status","returned","reason_code","http_status","coverage"}
+                     and set(native) == {"mode","query","complete","date_filed_after","date_filed_before","pages","total"}
+                     and query["status"] == "failed" and native["complete"] is False
                      and query["reason_code"] == "invalid_response" and query["http_status"] is None
-                     and _int(query["returned"], 0, 0) and "docket_ids" not in query
-                     and "termination" not in native and "count_validation" not in native and "has_next" not in native)
+                     and _int(query["returned"], 0, 0))
             # Rows can overlap across issuer searches. Dockets outside every
             # completed query must have come from the sole failed search.
-            _require(native["total"] >= len(ids - completed_ids) and len(ids) >= native["pages"] - 1)
+            # With every recorded GET successful, reaching the cap on a
+            # subsequent page means each recorded page supplied a distinct row.
+            _require(native["total"] >= max(len(ids - completed_occurrences.keys()), native["pages"])
+                     and len(ids) >= native["pages"])
         else:
             returned = query["docket_ids"]
-            _require(query["status"] == "complete" and native["complete"] is True and native["has_next"] is False
+            _require(set(query) == set(spec) | {"status","returned","coverage","docket_ids"}
+                     and set(native) == {"mode","query","complete","date_filed_after","date_filed_before","pages","total",
+                                         "has_next","termination","count_validation"}
+                     and query["status"] == "complete" and native["complete"] is True and native["has_next"] is False
                      and native["termination"] == "null_next" and type(returned) is list
                      and len(returned) == len(set(returned)) and all(type(key) is int and key in ids for key in returned)
+                     and len(returned) >= native["pages"] - 1
                      and type(query["returned"]) is int and query["returned"] == len(returned)
                      and native["count_validation"] == "exact_population_match" and native["total"] == len(returned))
-            completed_ids.update(returned)
+            completed_occurrences.update(returned)
+    for row in rows:
+        # Only merging another completed search appends an additional
+        # native record. Failed partial rows only supply previously unseen IDs.
+        _require(len(row.get("additional_native_records", [])) == max(0, completed_occurrences[row["docket_id"]] - 1))
     requests = payload["_request_diagnostics"]
     _require(type(requests) is list and len(requests) == pages <= coverage["requests"])
     for request in requests:

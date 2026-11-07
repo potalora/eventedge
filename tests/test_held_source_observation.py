@@ -70,6 +70,45 @@ def test_qualified_court_hold_requires_bound_failed_query_and_request_receipts()
             monitor.validate_held_court_observation(damaged, selected, session, acquired)
 
 
+def test_completed_query_pages_and_native_occurrences_require_recorded_dockets():
+    from tradingagents.strategies.orchestration.held_court_observation import validate_held_court_observation
+
+    original, selected, session, acquired = partial_court()
+    paged = deepcopy(original)
+    first, last = paged["coverage"]["queries"]
+    first["coverage"]["pages"] += 1
+    last["coverage"]["pages"] -= 1
+    duplicate = deepcopy(original)
+    row = duplicate["dockets"][0]
+    row["additional_native_records"] = [deepcopy(row["native_record"])]
+    for invalid in (paged, duplicate):
+        invalid["coverage"]["evidence_sha256"] = evidence_digest(invalid)
+        with pytest.raises(ValueError):
+            validate_held_court_observation(invalid, selected, session, acquired)
+
+
+def test_same_docket_in_two_completed_issuers_has_two_native_records():
+    from tradingagents.strategies.orchestration.held_court_observation import validate_held_court_observation
+    payload, _, session, acquired = partial_court()
+    selected = scope(("A Corp", "B Corp", "C Corp"))
+    defs = declared_queries(selected)
+    coverage = payload["coverage"]
+    old, failed = coverage["queries"]
+    first_id = payload["dockets"][0]["docket_id"]
+    completed = []
+    for spec in defs[:-1]:
+        query = deepcopy(old)
+        query.update(spec, docket_ids=[first_id], returned=1)
+        query["coverage"].update(query=spec["query"], total=1)
+        completed.append(query)
+    failed.update(defs[-1])
+    failed["coverage"].update(query=defs[-1]["query"], pages=6)
+    payload["dockets"][0]["additional_native_records"] = [deepcopy(payload["dockets"][0]["native_record"])]
+    coverage.update(scope=selected, scope_sha256=digest(selected), queries=[*completed, failed])
+    coverage["evidence_sha256"] = evidence_digest(payload)
+    validate_held_court_observation(payload, selected, session, acquired)
+
+
 def test_unavailable_projection_command_returns_failure_with_visible_results(monkeypatch, capsys, tmp_path):
     from scripts import source_repair
     monkeypatch.setattr(source_repair, "refresh_intervention_proposals", lambda *args, **kwargs: {
