@@ -597,6 +597,52 @@ def verify_current_projections(repo_root, *, now=None):
     return _current_projections(repo_root, now=now, verify=True)
 
 
+def _awaiting_first_report(capture, manifest, row, clock):
+    """Only a positively identified empty scaffold has nothing to publish."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from .generation_config import FROZEN_CONFIG_NAME, MAX_CONFIG_BYTES, read_generation_config
+    from .generation_manager import GenerationManager
+    from .source_repair import _git
+
+    generation = row["gen_id"]
+    rows = manifest["generations"]
+    if len(rows) > 256:
+        return False
+    GenerationManager._validate_manifest(manifest)
+    if (row.get("run_history") != []
+            or [item["gen_id"] for item in rows if item["status"] == "active"] != [generation]
+            or max(int(item["gen_id"][4:]) for item in rows) != int(generation[4:])):
+        return False
+    created = row.get("created_at")
+    if type(created) is not str or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)?", created):
+        return False
+    # Legacy GenerationManager stores UTC timestamps without a suffix.
+    if datetime.fromisoformat(created).replace(tzinfo=timezone.utc) > clock:
+        return False
+    state = Path("data/generations") / generation
+    profile = state / FROZEN_CONFIG_NAME
+    worktree = capture.root / ".worktrees" / generation
+    if (row["state_dir"] != str(capture.root / state) or row["worktree_path"] != str(worktree)
+            or row.get("config_file") != str(capture.root / profile)
+            or type(row.get("config_sha256")) is not str or not _DIGEST.fullmatch(row["config_sha256"])
+            or capture.read_optional("data/generations/.pending-start.json", MAX_REPORT_BYTES) is not None
+            or capture.directory_names(state, 1) != {FROZEN_CONFIG_NAME}):
+        return False
+    gitdir = Path(_git(worktree, "rev-parse", "--absolute-git-dir")).relative_to(capture.root)
+    if capture.read(gitdir / "gitdir", 4096) != (str(worktree / ".git") + "\n").encode():
+        return False
+    raw = capture.read(profile, MAX_CONFIG_BYTES)
+    body, _, _ = read_generation_config(capture.root / profile, row["config_sha256"])
+    if raw != body:
+        raise EvidenceChangedDuringCapture("generation configuration changed during capture")
+    for directory in ("docs/reports", "docs/reports/source-repair"):
+        if any(f"-{generation}-" in name for name in capture.directory_names(directory, 4096)):
+            return False
+    return True
+
+
 def _current_projections(repo_root, *, now, verify):
     """Trusted report-artifact refresh only; never rerun trading or model work."""
     from .decision_clock import latest_completed_session
@@ -639,7 +685,19 @@ def _current_projections(repo_root, *, now, verify):
                 raise ValueError("intervention active generation HEAD mismatch")
             report, paths = None, None
             try:
-                raw, _ = _report_pair(capture, generation, session)
+                try:
+                    raw, _ = _report_pair(capture, generation, session)
+                except FileNotFoundError:
+                    if verify or not _awaiting_first_report(capture, manifest, metadata, clock):
+                        raise
+                    # This is a publication result only. The native monitor owns
+                    # startup deadlines and heartbeat health. Verification still
+                    # requires actual sidecars before any marker can be cleared.
+                    pending = {"generation_id": generation, "generation_commit": metadata["git_commit"],
+                               "path": None, "status": "awaiting_first_report", "diagnostics": ["first_report_pending"]}
+                    results.append(dict(pending, cases_count=0))
+                    enrichment_results.append(pending)
+                    continue
                 report = _decode(raw, MAX_REPORT_BYTES)
                 paths = {
                     "json": folder / f"{session}-{generation}-operational-report.json",

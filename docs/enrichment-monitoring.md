@@ -94,3 +94,13 @@ manifest digest to the report, profile, source configuration, both artifact
 digests and their separate statuses. A verification failure returns a nonzero
 exit status. The publishing `interventions` command also returns a nonzero
 status when either current projection is unavailable.
+
+Before the first publication, an active generation can have a verified frozen
+configuration and worktree, an empty run history and a state directory
+containing only its configuration. If that generation is the newest and sole
+active generation, and both report directories contain no artifact for it,
+ordinary projection returns `awaiting_first_report` for both outputs. It checks
+the bounded directory inventories again under the same runtime lease. This
+status describes publication only. The runtime monitor checks heartbeat and
+first-session deadlines independently. Explicit projection verification still
+requires the two published artifacts.

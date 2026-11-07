@@ -30,6 +30,16 @@ from tradingagents.strategies.orchestration.source_repair import (
 )
 
 
+def _publication_finished(source, enrichment):
+    if source["status"] == "awaiting_first_report":
+        return (set(enrichment) == {"generation_id", "generation_commit", "status", "path", "diagnostics"}
+                and enrichment["status"] == "awaiting_first_report"
+                and enrichment["path"] is None and enrichment["diagnostics"] == ["first_report_pending"]
+                and source == dict(enrichment, cases_count=0))
+    return (source["status"] == "available" and bool(source["path"]) and not source["diagnostics"]
+            and enrichment["status"] in {"complete", "degraded", "held"} and bool(enrichment["path"]))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="operation", required=True)
@@ -71,10 +81,8 @@ def main(argv=None):
         print(json.dumps(result, sort_keys=True, allow_nan=False))
         if arguments.operation == "interventions":
             if (not result["proposals"] or len(result["proposals"]) != len(result["enrichment_monitors"])
-                    or any(row["status"] != "available" or not row["path"] or row["diagnostics"]
-                           for row in result["proposals"])
-                    or any(row["status"] not in {"complete","degraded","held"} or not row["path"]
-                           for row in result["enrichment_monitors"])):
+                    or not all(_publication_finished(source, enrichment) for source, enrichment in
+                               zip(result["proposals"], result["enrichment_monitors"]))):
                 return 2
         return 0
     except EvidenceChangedDuringCapture:

@@ -417,6 +417,7 @@ class _Capture:
     def __init__(self, root):
         self.root = Path(root).absolute()
         self.files = {}
+        self.directories = {}
         self.missing = {}
         self.total = 0
 
@@ -489,6 +490,30 @@ class _Capture:
             self.total += len(data)
         return data
 
+    def directory_names(self, relative, limit):
+        """Bounded no-follow directory inventory, rechecked at the end of capture."""
+        path = Path(relative)
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            raise ValueError("invalid evidence directory")
+        fd = _open_parent_directory(self.root / path / ".entry", create=False)
+        try:
+            before = self._token(os.fstat(fd))
+            sample = (limit, before)
+            if self.directories.get(relative, sample) != sample:
+                raise EvidenceChangedDuringCapture("directory changed during capture")
+            names = set()
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if len(names) >= limit:
+                        raise ValueError("evidence directory bound")
+                    names.add(entry.name)
+            if before != self._token(os.fstat(fd)):
+                raise EvidenceChangedDuringCapture("directory changed during capture")
+            self.directories[relative] = sample
+            return names
+        finally:
+            os.close(fd)
+
     def read_optional(self, relative, limit):
         try:
             data = self.read(relative, limit)
@@ -502,6 +527,8 @@ class _Capture:
         return data
 
     def verify(self):
+        for path, (limit, _) in tuple(self.directories.items()):
+            self.directory_names(path, limit)
         for path, limit in tuple(self.missing.items()):
             self.read_optional(path, limit)
         for path in tuple(self.files):
