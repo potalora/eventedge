@@ -13,7 +13,7 @@ pytestmark = pytest.mark.scheduled_acceptance
 
 
 @pytest.mark.parametrize('missing_symbol', [True, False])
-def test_query_enrichment_is_visible_without_repair_or_report_rewrite(tmp_path, missing_symbol):
+def test_query_enrichment_is_visible_without_repair_or_report_rewrite(tmp_path, missing_symbol, monkeypatch, capsys):
     from tradingagents.strategies.data_sources.finra_bulk import SCHEMA
     harness = create_harness(tmp_path, profile_variant='stabilization_v2')
     # Constructed external API rows are stored in a disposable fixture DB.
@@ -33,6 +33,25 @@ def test_query_enrichment_is_visible_without_repair_or_report_rewrite(tmp_path, 
     protected = {path: path.read_bytes() for path in (stem.with_suffix('.json'), stem.with_suffix('.md'))}
     inputs = {path: path.read_bytes() for path in (harness.state/'source_inputs').rglob('*.json')}
     before_io = [row for row in harness.trace() if row['kind'] in {'http','sdk','model'}]
+    if not missing_symbol:
+        # Exercise the transient result against the same accepted sixteen-book
+        # evidence that the next, fresh CLI process must publish and verify.
+        from datetime import datetime
+        from scripts import source_repair as cli
+        from tradingagents.strategies.orchestration import source_repair as contract
+        original_verify = contract._Capture.verify
+        def replace_before_verify(capture):
+            if capture.root == folder:
+                path = stem.with_suffix('.json')
+                replacement = path.with_suffix('.replacement')
+                replacement.write_bytes(protected[path])
+                replacement.replace(path)
+            return original_verify(capture)
+        with monkeypatch.context() as patch:
+            patch.setattr(contract, '_now', lambda *_: datetime.fromisoformat('2026-10-14T22:00:00+00:00'))
+            patch.setattr(contract._Capture, 'verify', replace_before_verify)
+            assert cli.main(['interventions', '--repo-root', str(harness.repo)]) == 75
+            assert 'evidence changed during capture' in capsys.readouterr().err
     result = subprocess.run([str(harness.python), str(harness.repo/'scripts/source_repair.py'),
         'interventions', '--repo-root', str(harness.repo)], cwd=harness.repo, env=harness.env,
         capture_output=True, text=True, timeout=30)

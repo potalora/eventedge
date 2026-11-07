@@ -1,12 +1,13 @@
 """Projection retries fresh captures; export and invalid evidence still fail closed."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
 import pytest
 
-from test_source_repair import NOW, evidence as evidence
+from test_source_repair import NOW, evidence as evidence, pair
 from tradingagents.strategies.orchestration import source_repair as contract
 from tradingagents.strategies.orchestration import source_repair_intervention as projector
 from scripts import source_repair as cli
@@ -81,9 +82,19 @@ def test_projection_recaptures_after_actual_report_or_outcome_replacement(
     original_verify, original_read = contract._Capture.verify, contract._Capture.read
 
     def replace(path):
-        replacement = path.with_name(".race-replacement")
-        replacement.write_bytes(path.read_bytes())
-        replacement.replace(path)
+        if path == report_path:
+            changed = json.loads(report_path.read_bytes())
+            changed.update(outcome="incomplete", evidence_complete=False)
+            raw, markdown = pair(changed)
+            files = [(report_path, raw), (report_path.with_suffix(".md"), markdown)]
+        else:
+            outcome = json.loads(outcome_path.read_bytes())
+            outcome.update(state="failed", reason_code="repair_failed")
+            files = [(outcome_path, json.dumps(outcome).encode())]
+        for destination, body in files:
+            replacement = destination.with_name(".race-replacement")
+            replacement.write_bytes(body)
+            replacement.replace(destination)
         replaced.append(path)
 
     def verify(capture):
@@ -107,12 +118,30 @@ def test_projection_recaptures_after_actual_report_or_outcome_replacement(
     assert "evidence changed during capture" in first.err
     assert "race-replacement" not in first.err
     assert replaced
-    assert cli.main(["interventions", "--repo-root", str(root)]) == 0
+    # The source-only fixture has no frozen enrichment profile or decision inputs.
+    # A stable recapture can publish its current case while the batch must fail.
+    assert cli.main(["interventions", "--repo-root", str(root)]) == 2
     result = json.loads(capsys.readouterr().out)
-    proposal = json.loads(Path(result["proposals"][0]["path"]).read_bytes())
-    assert proposal["status"] == "available"
-    assert len(proposal["cases"]) == 1
-    assert proposal["cases"][0]["incident_id"] == request["incident_id"]
+    source, = result["proposals"]
+    enrichment, = result["enrichment_monitors"]
+    assert source["status"] == "available" and source["cases_count"] == 1 and source["diagnostics"] == []
+    assert enrichment["status"] == "unavailable" and enrichment["diagnostics"] == ["accepted_enrichment_unavailable"]
+    proposal = json.loads(Path(source["path"]).read_bytes())
+    monitor = json.loads(Path(enrichment["path"]).read_bytes())
+    raw, markdown = report_path.read_bytes(), report_path.with_suffix(".md").read_bytes()
+    digest = hashlib.sha256(raw + b"\0" + markdown).hexdigest()
+    assert proposal["report_sha256"] == monitor["report_sha256"] == digest
+    assert (digest == request["report_sha256"]) is (stage == "outcome")
+    expected = projector.build_intervention_cases(raw, markdown, [json.loads(outcome_path.read_bytes())],
+        expected_generation=request["generation_id"], expected_commit=request["generation_commit"],
+        expected_session=request["session"], now=NOW)
+    assert proposal["status"] == "available" and proposal["cases"] == expected
+    case, = proposal["cases"]
+    assert case["incident_id"] == request["incident_id"]
+    assert case["reason_code"] == ("repair_failed" if stage == "outcome" else "assessment_required")
+    assert monitor["status"] == "unavailable" and monitor["diagnostics"] == enrichment["diagnostics"]
+    assert monitor["accepted_enrichment_sha256"] is None and monitor["healthy_scope"] == []
+    assert cli.main(["verify-projections", "--repo-root", str(root)]) == 2
 
 
 @pytest.mark.parametrize("operation", ["requests", "export"])
