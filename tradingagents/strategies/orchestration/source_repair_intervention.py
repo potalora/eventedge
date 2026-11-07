@@ -21,6 +21,8 @@ from .source_repair import (
     _decode,
     _json_bytes,
     _session,
+    _previous_pair_for,
+    _project_repair_snapshot,
     build_repair_requests,
 )
 
@@ -306,6 +308,7 @@ def build_intervention_cases(
     expected_commit,
     expected_session,
     now=None,
+    previous_pair=None,
 ):
     """Build current urgent cases; report gaps and stale identity never imply recovery."""
     projected = build_repair_requests(
@@ -314,9 +317,12 @@ def build_intervention_cases(
         expected_generation=expected_generation,
         expected_commit=expected_commit,
         expected_session=expected_session,
-        now=now,
+        now=now, previous_pair=previous_pair,
     )
-    report = _decode(report_bytes, MAX_REPORT_BYTES)
+    return _cases_for_snapshot(_decode(report_bytes, MAX_REPORT_BYTES), projected, broker_outcomes)
+
+
+def _cases_for_snapshot(report, projected, broker_outcomes):
     if type(broker_outcomes) is not list or len(broker_outcomes) > MAX_OUTCOMES:
         raise ValueError("source outcome count exceeds bound")
     outcomes = {}
@@ -334,9 +340,9 @@ def build_intervention_cases(
             "version": VERSION,
             "case_id": _case_id(request["incident_id"], reason),
             "incident_id": request["incident_id"],
-            "generation_id": expected_generation,
-            "generation_commit": expected_commit,
-            "session": expected_session,
+            "generation_id": request["generation_id"],
+            "generation_commit": request["generation_commit"],
+            "session": request["session"],
             "provider": request["provider"],
             "configuration": request["configuration"],
             "reason_code": reason,
@@ -449,6 +455,13 @@ def _publish_sidecar(destination, data):
         os.close(descriptor)
 
 
+def _publish_or_verify(destination, data, verify_capture):
+    if verify_capture is None:
+        _publish_sidecar(destination, data)
+    elif verify_capture.read(destination.relative_to(verify_capture.root), MAX_REPORT_BYTES) != data:
+        raise ValueError("published projection differs from independently derived artifact")
+
+
 def publish_intervention_proposal(
     report,
     paths,
@@ -457,6 +470,7 @@ def publish_intervention_proposal(
     expected_generation=None,
     expected_commit=None,
     expected_session=None,
+    _verify_capture=None,
 ):
     """Publish sanitized cases; malformed outcomes become explicit assessment cases.
 
@@ -491,7 +505,7 @@ def publish_intervention_proposal(
         or markdown_path.name != basename + ".md"
     ):
         raise ValueError("noncanonical intervention report pair path")
-    capture = _Capture(json_path.parent)
+    capture = _verify_capture or _Capture(json_path.parent)
     raw, markdown = (
         capture.read(json_path.name, MAX_REPORT_BYTES),
         capture.read(markdown_path.name, MAX_REPORT_BYTES),
@@ -510,28 +524,27 @@ def publish_intervention_proposal(
         envelope.update(status="stale", diagnostics=["stale_report"])
     else:
         try:
-            projected = build_repair_requests(
+            current_report = _decode(raw, MAX_REPORT_BYTES)
+            previous_pair = _previous_pair_for(current_report, capture, ".")
+            projected, retained = _project_repair_snapshot(
                 raw,
                 markdown,
                 expected_generation=generation,
                 expected_commit=commit,
                 expected_session=session,
-                now=now,
+                now=now, previous_pair=previous_pair,
             )
             outcomes = []
             for request in projected["requests"] + projected["requires_user"]:
                 name = "source-repair/" + request["incident_id"] + ".json"
                 try:
-                    outcome = validate_broker_outcome(
-                        _decode(
-                            capture.read(name, MAX_OUTCOME_BYTES), MAX_OUTCOME_BYTES
-                        )
-                    )
+                    outcome_bytes = capture.read_optional(name, MAX_OUTCOME_BYTES)
+                    if outcome_bytes is None:
+                        continue
+                    outcome = validate_broker_outcome(_decode(outcome_bytes, MAX_OUTCOME_BYTES))
                     if outcome["incident_id"] != request["incident_id"]:
                         raise ValueError("outcome file identity mismatch")
                     outcomes.append(outcome)
-                except FileNotFoundError:
-                    continue  # Absence alone makes no claim that a worker failed.
                 except EvidenceChangedDuringCapture:
                     raise
                 except (ValueError, OSError, TypeError, KeyError):
@@ -547,19 +560,13 @@ def publish_intervention_proposal(
                             "publication_url": None,
                         }
                     )
-            envelope["cases"] = build_intervention_cases(
-                raw,
-                markdown,
-                outcomes,
-                expected_generation=generation,
-                expected_commit=commit,
-                expected_session=session,
-                now=now,
-            )
+            envelope["cases"] = _cases_for_snapshot(current_report, projected, outcomes)
+            if retained:
+                envelope.update(version="eventedge-source-intervention-proposal-v2", retained_unknown=retained)
             envelope["status"] = "available"
         except EvidenceChangedDuringCapture:
             raise
-        except (ValueError, TypeError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError):
             envelope.update(
                 status="unavailable", cases=[], diagnostics=["report_unavailable"]
             )
@@ -572,7 +579,7 @@ def publish_intervention_proposal(
         / "source-repair"
         / f"{session}-{generation}-source-intervention.json"
     )
-    _publish_sidecar(destination, data)
+    _publish_or_verify(destination, data, _verify_capture)
     return {
         "path": str(destination),
         "status": envelope["status"],
@@ -582,6 +589,61 @@ def publish_intervention_proposal(
 
 
 def refresh_intervention_proposals(repo_root, *, now=None):
+    return _current_projections(repo_root, now=now, verify=False)
+
+
+def verify_current_projections(repo_root, *, now=None):
+    """Rederive current artifacts under the shared lease. No publication or repair."""
+    return _current_projections(repo_root, now=now, verify=True)
+
+
+def _awaiting_first_report(capture, manifest, row, clock):
+    """Only a positively identified empty scaffold has nothing to publish."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from .generation_config import FROZEN_CONFIG_NAME, MAX_CONFIG_BYTES, read_generation_config
+    from .generation_manager import GenerationManager
+    from .source_repair import _git
+
+    generation = row["gen_id"]
+    rows = manifest["generations"]
+    if len(rows) > 256:
+        return False
+    GenerationManager._validate_manifest(manifest)
+    if (row.get("run_history") != []
+            or [item["gen_id"] for item in rows if item["status"] == "active"] != [generation]
+            or max(int(item["gen_id"][4:]) for item in rows) != int(generation[4:])):
+        return False
+    created = row.get("created_at")
+    if type(created) is not str or not re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)?", created):
+        return False
+    # Legacy GenerationManager stores UTC timestamps without a suffix.
+    if datetime.fromisoformat(created).replace(tzinfo=timezone.utc) > clock:
+        return False
+    state = Path("data/generations") / generation
+    profile = state / FROZEN_CONFIG_NAME
+    worktree = capture.root / ".worktrees" / generation
+    if (row["state_dir"] != str(capture.root / state) or row["worktree_path"] != str(worktree)
+            or row.get("config_file") != str(capture.root / profile)
+            or type(row.get("config_sha256")) is not str or not _DIGEST.fullmatch(row["config_sha256"])
+            or capture.read_optional("data/generations/.pending-start.json", MAX_REPORT_BYTES) is not None
+            or capture.directory_names(state, 1) != {FROZEN_CONFIG_NAME}):
+        return False
+    gitdir = Path(_git(worktree, "rev-parse", "--absolute-git-dir")).relative_to(capture.root)
+    if capture.read(gitdir / "gitdir", 4096) != (str(worktree / ".git") + "\n").encode():
+        return False
+    raw = capture.read(profile, MAX_CONFIG_BYTES)
+    body, _, _ = read_generation_config(capture.root / profile, row["config_sha256"])
+    if raw != body:
+        raise EvidenceChangedDuringCapture("generation configuration changed during capture")
+    for directory in ("docs/reports", "docs/reports/source-repair"):
+        if any(f"-{generation}-" in name for name in capture.directory_names(directory, 4096)):
+            return False
+    return True
+
+
+def _current_projections(repo_root, *, now, verify):
     """Trusted report-artifact refresh only; never rerun trading or model work."""
     from .decision_clock import latest_completed_session
     from .runtime_lock import canonical_runtime_lock_path
@@ -601,10 +663,12 @@ def refresh_intervention_proposals(repo_root, *, now=None):
         raise ValueError("intervention refresh requires canonical checkout")
     results = []
     enrichment_results = []
+    folder = capture.root / "docs/reports"
+    verified = []
+    report_capture = _Capture(folder) if verify else None
     with _readonly_runtime_lock(lock):
-        manifest = _decode(
-            capture.read("data/generations/manifest.json"), MAX_REPORT_BYTES
-        )
+        manifest_bytes = capture.read("data/generations/manifest.json", MAX_REPORT_BYTES)
+        manifest = _decode(manifest_bytes, MAX_REPORT_BYTES)
         generations = [
             row["gen_id"]
             for row in manifest["generations"]
@@ -621,9 +685,20 @@ def refresh_intervention_proposals(repo_root, *, now=None):
                 raise ValueError("intervention active generation HEAD mismatch")
             report, paths = None, None
             try:
-                raw, _ = _report_pair(capture, generation, session)
+                try:
+                    raw, _ = _report_pair(capture, generation, session)
+                except FileNotFoundError:
+                    if verify or not _awaiting_first_report(capture, manifest, metadata, clock):
+                        raise
+                    # This is a publication result only. The native monitor owns
+                    # startup deadlines and heartbeat health. Verification still
+                    # requires actual sidecars before any marker can be cleared.
+                    pending = {"generation_id": generation, "generation_commit": metadata["git_commit"],
+                               "path": None, "status": "awaiting_first_report", "diagnostics": ["first_report_pending"]}
+                    results.append(dict(pending, cases_count=0))
+                    enrichment_results.append(pending)
+                    continue
                 report = _decode(raw, MAX_REPORT_BYTES)
-                folder = capture.root / "docs/reports"
                 paths = {
                     "json": folder / f"{session}-{generation}-operational-report.json",
                     "markdown": folder
@@ -637,6 +712,7 @@ def refresh_intervention_proposals(repo_root, *, now=None):
                         expected_generation=generation,
                         expected_commit=metadata["git_commit"],
                         expected_session=session,
+                        _verify_capture=report_capture,
                     )
                 )
             except EvidenceChangedDuringCapture:
@@ -656,11 +732,42 @@ def refresh_intervention_proposals(repo_root, *, now=None):
             try:
                 from .enrichment_monitor import publish_enrichment_monitor
                 enrichment_results.append(publish_enrichment_monitor(
-                    capture.root, report, paths, metadata=metadata, now=clock))
+                    capture.root, report, paths, metadata=metadata, now=clock, _verify_capture=report_capture))
             except EvidenceChangedDuringCapture:
                 raise
             except (OSError, ValueError, TypeError, KeyError):
                 enrichment_results.append({"path": None, "status": "unavailable",
                     "generation_id": generation, "diagnostics": ["enrichment_monitor_unavailable"]})
+            if verify:
+                verified.append(_verified_generation(report_capture, report, metadata, results[-1], enrichment_results[-1]))
+        if report_capture is not None:
+            report_capture.verify()
         capture.verify()
+    if verify:
+        return {"version":"eventedge-verified-projections-v1",
+                "active_manifest_sha256":hashlib.sha256(manifest_bytes).hexdigest(), "generations":verified}
     return {"proposals": results, "enrichment_monitors": enrichment_results}
+
+
+def _verified_generation(capture, report, metadata, source, enrichment):
+    from pathlib import Path
+    if (source["status"] != "available" or source["diagnostics"]
+            or enrichment["status"] not in {"complete","degraded","held"} or not source["path"] or not enrichment["path"]):
+        raise ValueError("current projection proof unavailable")
+
+    def artifact(row):
+        path = Path(row["path"])
+        raw = capture.read(path.relative_to(capture.root), MAX_REPORT_BYTES)
+        return _decode(raw, MAX_REPORT_BYTES), {
+            "path":str(path), "status":row["status"], "sha256":hashlib.sha256(raw).hexdigest()}
+
+    proposal, checked_source = artifact(source)
+    monitor, checked_enrichment = artifact(enrichment)
+    checked_source.update(cases_count=len(proposal["cases"]), retained_unknown_count=len(proposal.get("retained_unknown", [])))
+    workflow, continuity = monitor["workflow_complete"], monitor["continuity_eligible"]
+    if (proposal["report_sha256"] != monitor["report_sha256"] or type(workflow) is not bool
+            or type(continuity) is not bool or report["profile_sha256"] != metadata["config_sha256"]):
+        raise ValueError("verified projection identity mismatch")
+    return {key: report[key] for key in ("generation_id","generation_commit","session","profile_sha256")} | {
+        "report_sha256":proposal["report_sha256"], "configuration":monitor["configuration"],
+        "workflow_complete":workflow, "continuity_eligible":continuity, "source":checked_source, "enrichment":checked_enrichment}

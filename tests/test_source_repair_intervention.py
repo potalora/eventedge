@@ -535,3 +535,112 @@ def test_evidence_qualification_options_remain_fixed_and_reject_tampering():
     case["options"][0]["next_step"] = "Fabricate an earlier healthy acquisition."
     with pytest.raises(ValueError):
         api().render_intervention_case(case)
+
+
+def retained_transition(tmp_path):
+    """The actual incident reducer retains yesterday's case across incomplete evidence."""
+    from tradingagents.strategies.orchestration.operational_report import write_operational_report
+    prior = report("2026-10-05")
+    prior["profile_sha256"] = "e" * 64
+    previous_paths = write_operational_report(prior, tmp_path)
+    value = report(healthy=True)
+    value.update(evidence_complete=False, profile_sha256=prior["profile_sha256"])
+    value["sources"]["observations"]["regulations"] = "failed"
+    value["sources"]["unresolved"].append(
+        {"provider": "regulations", "reason_code": "http_error", "http_status": 403}
+    )
+    paths = write_operational_report(value, tmp_path)
+    return prior, previous_paths, value, paths
+
+
+def test_retained_unknown_published_separately_from_current_admission(tmp_path):
+    from test_source_repair import build as requests
+    prior, _, current, paths = retained_transition(tmp_path)
+    result = api().publish_intervention_proposal(current, paths, now=NOW)
+    assert result["status"] == "available"
+    envelope = json.loads(open(result["path"]).read())
+    assert envelope["version"] == "eventedge-source-intervention-proposal-v2"
+    assert [c["provider"] for c in envelope["cases"]] == ["regulations"]
+    row, = envelope["retained_unknown"]
+    old, = requests(prior, now=NOW.replace(day=5))["requests"]
+    assert row == {"provider": "fred", "incident_id": old["incident_id"],
+        "configuration": old["configuration"], "first_failed_session": prior["session"],
+        "last_failed_session": prior["session"], "previous_report_sha256": old["report_sha256"]}
+    fresh = requests(current, previous_pair=pair(prior))
+    assert fresh["requests"] == []
+    assert [r["provider"] for r in fresh["requires_user"]] == ["regulations"]
+    assert result == api().publish_intervention_proposal(current, paths, now=NOW)
+
+
+@pytest.mark.parametrize("damage", ["missing_pair", "markdown", "config", "commit", "profile", "last_failure", "other_row"])
+def test_retention_requires_congruent_prior_pair_and_full_current_reducer(tmp_path, damage):
+    prior, previous_paths, current, paths = retained_transition(tmp_path)
+    if damage == "missing_pair":
+        previous_paths["json"].unlink()
+    elif damage == "markdown":
+        previous_paths["markdown"].write_bytes(b"altered")
+    elif damage in {"config", "commit", "profile"}:
+        if damage == "config":
+            prior["sources"]["configuration"] = prior["source_incidents"]["configuration"] = "changed"
+        else:
+            prior["generation_commit" if damage == "commit" else "profile_sha256"] = "e" * (40 if damage == "commit" else 63)
+        previous_paths["json"].write_bytes(pair(prior)[0])
+        previous_paths["markdown"].write_bytes(pair(prior)[1])
+    else:
+        rows = current["source_incidents"]["open_incidents"]
+        if damage == "other_row":
+            rows[-1]["status"] = "degraded"
+        else:
+            rows[0]["last_failed_session"] = current["session"]
+        paths["json"].write_bytes(pair(current)[0])
+        paths["markdown"].write_bytes(pair(current)[1])
+    result = api().publish_intervention_proposal(current, paths, now=NOW)
+    assert result["status"] == "unavailable"
+    assert result["cases_count"] == 0
+
+
+def test_semantic_verification_refuses_omitted_required_case_even_with_matching_count(tmp_path):
+    from pathlib import Path
+    from tradingagents.strategies.orchestration.operational_report import write_operational_report
+    from tradingagents.strategies.orchestration.source_repair import _Capture, _json_bytes
+    value = report(reason="http_error", status=403)
+    paths = write_operational_report(value, tmp_path)
+    receipt = api().publish_intervention_proposal(value, paths, now=NOW)
+    path = Path(receipt["path"])
+    proposal = json.loads(path.read_bytes())
+    assert len(proposal["cases"]) == receipt["cases_count"] == 1
+    proposal["cases"].clear()
+    receipt["cases_count"] = 0
+    path.write_bytes(_json_bytes(proposal))
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    with pytest.raises(ValueError, match="independently derived"):
+        api().publish_intervention_proposal(value, paths, now=NOW, _verify_capture=_Capture(tmp_path))
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("damage", [None, "current_failure", "false_healthy", "missing_history"])
+def test_prior_already_unknown_is_only_a_continuity_witness(tmp_path, damage):
+    from test_source_repair import build as requests
+    from tradingagents.strategies.orchestration.operational_report import write_operational_report
+    from tradingagents.strategies.orchestration.source_incidents import assess_source_incidents
+    origin = report("2026-10-02")
+    origin["profile_sha256"] = "e" * 64
+    write_operational_report(origin, tmp_path)
+    prior = report("2026-10-05", healthy=True)
+    prior.update(evidence_complete=False, profile_sha256=origin["profile_sha256"])
+    write_operational_report(prior, tmp_path)
+    current = report(healthy=True)
+    current.update(evidence_complete=False, profile_sha256=origin["profile_sha256"])
+    current["source_incidents"] = assess_source_incidents(current, prior)
+    assert current["source_incidents"]["open_incidents"][0]["observation"] == "unknown"
+    if damage == "current_failure":
+        prior["sources"].update(observations={"fred":"failed"}, unresolved=[{"provider":"fred","reason_code":"timeout"}])
+    elif damage == "false_healthy":
+        prior["evidence_complete"] = True
+    elif damage == "missing_history":
+        prior["source_incidents"]["history_status"] = "missing"
+    if damage:
+        with pytest.raises(ValueError):
+            requests(current, previous_pair=pair(prior))
+    else:
+        assert requests(current, previous_pair=pair(prior)) == {"requests":[], "requires_user":[]}

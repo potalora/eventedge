@@ -64,3 +64,43 @@ generation at its recorded commit; installing that runtime is separate from
 changing generation code. Changes to FINRA acquisition code remain prospective
 unless separately approved under the generation deployment policy. Never rewrite
 accepted sessions or delete repair/notification receipts to make an alert clear.
+
+## Incomplete focused Court acquisition
+
+A completed monitor refresh can observe a source hold. The conditional
+`eventedge-enrichment-monitor-v2` envelope uses `status=held` when the
+accepted focused Court search exhausted its request cap with a failed issuer
+query, matching request receipts and a valid target manifest. The publisher
+checks the frozen profile, report pair, exact completion reasons, source
+coverage, metric health, accepted decision inputs and sixteen book bindings.
+The report still records incomplete source evidence, workflow and continuity.
+The sidecar carries the profile digest and completion reason codes. Its
+healthy scope and failures are empty, and its accepted enrichment digest is null.
+
+If the source incident reducer retained an earlier repair-required incident
+with an unknown current observation, the intervention publisher verifies the
+immediately preceding exchange session's canonical report pair, profile,
+source configuration and current reducer result. It preserves the stable
+incident identity and prior pair digest in the separate `retained_unknown`
+list of an `eventedge-source-intervention-proposal-v2` envelope. Independent
+current failures still receive their usual admission checks. Only a current
+corroborated failure can propose a worker or create a new intervention case.
+Ordinary observations and proposals use their existing v1 wire formats.
+
+`scripts/source_repair.py verify-projections --repo-root PATH` takes the
+shared runtime lease, derives both current projections again and compares their
+exact bytes with the published files. Successful output binds the active
+manifest digest to the report, profile, source configuration, both artifact
+digests and their separate statuses. A verification failure returns a nonzero
+exit status. The publishing `interventions` command also returns a nonzero
+status when either current projection is unavailable.
+
+Before the first publication, an active generation can have a verified frozen
+configuration and worktree, an empty run history and a state directory
+containing only its configuration. If that generation is the newest and sole
+active generation, and both report directories contain no artifact for it,
+ordinary projection returns `awaiting_first_report` for both outputs. It checks
+the bounded directory inventories again under the same runtime lease. This
+status describes publication only. The runtime monitor checks heartbeat and
+first-session deadlines independently. Explicit projection verification still
+requires the two published artifacts.

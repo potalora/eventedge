@@ -132,7 +132,7 @@ def _read_accepted_observation(repo, metadata, report):
     """Reuse canonical read-only proof validators, including all sixteen books."""
     from . import operational_report as reports
     from .generation_config import FROZEN_CONFIG_NAME, read_generation_config
-    from .operating_contract import profile_contract
+    from .operating_contract import profile_contract, source_support
     state = repo / 'data/generations' / report['generation_id']
     config_file = state / FROZEN_CONFIG_NAME
     if (Path(metadata['state_dir']) != state or Path(metadata['config_file']) != config_file
@@ -147,22 +147,77 @@ def _read_accepted_observation(repo, metadata, report):
         diagnostics.append(code)
     sources = reports._sources(state, report['generation_id'], report['session'], report['generation_commit'],
         diagnose, retained_sources=retained, operating_profile=profile, frozen_config=config)
-    from .operating_contract import source_support
-    sources['capability_scope'], _ = source_support(config, retained['_completion_source_envelope']['payload'])
+    source = retained['_completion_source_envelope']
+    sources['capability_scope'], failed = source_support(config, source['payload'])
     if (diagnostics or sources != report['sources']):
         raise ValueError('enrichment monitor source mismatch')
     epoch, health = reports._metrics(state, report['generation_id'], report['session'], report['generation_commit'],
         diagnose, sources.get('declared_exclusions', {}))
     if epoch != report['epoch_id']:
         raise ValueError('enrichment monitor metric epoch mismatch')
-    reports._completion_facts(state, profile, report, health,
-        retained['_completion_source_envelope'], diagnose, enrichment_observation=observation)
+    facts = reports._completion_facts(state, profile, report, health, source, diagnose,
+                                      enrichment_observation=observation)
+    if diagnostics == ['supported_source_scope_invalid'] and observation and failed == {'courtlistener'}:
+        return _qualified_scope_hold(state, profile, report, source, facts, diagnostics)
     if diagnostics or not observation:
         raise ValueError('enrichment monitor accepted proof unavailable')
     return observation
 
 
-def publish_enrichment_monitor(repo_root, report, paths, *, metadata, now=None):
+_HELD_REASONS = ['evidence_incomplete', 'required_source_failed', 'run_incomplete', 'supported_health_invalid']
+
+
+def _qualified_scope_hold(state, profile, report, source, facts, diagnostics):
+    from datetime import date
+    from . import operational_report as reports
+    from .held_court_observation import validate_held_court_observation
+    from .litigation_targets import validate_litigation_targets
+    from .operating_contract import evaluate_completion
+    from .scoped_sources import litigation_settings, source_scope_evidence
+
+    session, epoch, generation = report['session'], report['epoch_id'], report['generation_id']
+    config, payload = profile.config['autoresearch'], source['payload']
+    # The normal complete-scope decoder treats every invalid scope as an
+    # error. Only the independently validated failed acquisition qualifies.
+    errors, _, _ = source_scope_evidence(payload, config, session, now=source['acquired_at'])
+    if errors != {'courtlistener': 'scoped_source_evidence_invalid'}:
+        raise ValueError('unverified incomplete source scope')
+    targets = payload['_courtlistener_targets']
+    target = validate_litigation_targets({key: targets[key] for key in ('manifest', 'scope')},
+        session=date.fromisoformat(session), settings=litigation_settings(config), company_map=targets['company_map'])
+    validate_held_court_observation(payload['courtlistener'], target['scope'], session, source['acquired_at'])
+
+    def diagnose(code, *_):
+        diagnostics.append(code)
+
+    failures = reports._health_coverage(facts['health'], epoch, session, diagnose,
+        report['sources'].get('declared_exclusions', {}), strategies=profile.strategies)
+    for name in profile.roster:
+        book = reports._book(state, name, generation, session, epoch, diagnose)
+        recorded = report['cohorts'][name]
+        if (book['accounting_valid'] is not True or book['staging_complete'] is not True
+                or recorded['staging_valid'] is not True
+                or any(_bytes(recorded.get(key)) != _bytes(value) for key, value in book.items())):
+            raise ValueError('incomplete observation book binding differs')
+    completion = evaluate_completion(profile, facts)
+    if (diagnostics != ['supported_source_scope_invalid']
+            or report['diagnostics'] != [{'code': 'supported_source_scope_invalid'}]
+            or report['outcome'] != 'incomplete' or report['evidence_complete'] is not False
+            or report['input_coverage_valid'] is not False or report['performance_claims_withheld'] is not True
+            or any(report[k] is not True for k in ('accounting_valid', 'staging_complete', 'staging_valid'))
+            or reports._candidate_issues(state, epoch, session, diagnose) or len(diagnostics) != 1
+            or failures != report['source_health_failures'] or len(failures) != len(profile.horizon_policies)
+            or any(f['status'] != 'data_failure' or f['strategy'] != 'litigation'
+                   or f['sources'] != ['courtlistener'] for f in failures)
+            or report['sources']['unresolved'] != [{'provider':'courtlistener','http_status':None,'reason_code':'provider_error'}]
+            or report['sources']['observations'].get('courtlistener') != 'failed'
+            or _bytes(report['completion']) != _bytes(completion) or completion['reason_codes'] != _HELD_REASONS):
+        raise ValueError('incomplete source observation does not match canonical completion')
+    return {'version':'eventedge-enrichment-monitor-v2', 'status':'held', 'profile_sha256':profile.profile_sha256,
+            'completion_reason_codes':completion['reason_codes'], 'diagnostics':['supported_source_scope_invalid']}
+
+
+def publish_enrichment_monitor(repo_root, report, paths, *, metadata, now=None, _verify_capture=None):
     """Write only a separate sidecar, under the caller's canonical runtime lock.
 
     A missing or invalid accepted proof produces unavailable, never recovery.
@@ -173,7 +228,7 @@ def publish_enrichment_monitor(repo_root, report, paths, *, metadata, now=None):
     from datetime import date
     from .operational_report import render_operational_report
     from .source_repair import _Capture, _now, _decode, _COMMIT, _GENERATION
-    from .source_repair_intervention import _publish_sidecar
+    from .source_repair_intervention import _publish_or_verify
     repo = Path(repo_root).absolute()
     generation, commit, session = (report[key] for key in ('generation_id', 'generation_commit', 'session'))
     if (not _GENERATION.fullmatch(generation) or not _COMMIT.fullmatch(commit)
@@ -183,7 +238,7 @@ def publish_enrichment_monitor(repo_root, report, paths, *, metadata, now=None):
     stem = f'{session}-{generation}-operational-report'
     if Path(paths['json']) != folder / (stem + '.json') or Path(paths['markdown']) != folder / (stem + '.md'):
         raise ValueError('enrichment monitor report path mismatch')
-    capture = _Capture(folder)
+    capture = _verify_capture or _Capture(folder)
     raw, markdown = capture.read(stem + '.json', 2 * 1024 * 1024), capture.read(stem + '.md', 2 * 1024 * 1024)
     if _decode(raw, 2 * 1024 * 1024) != report or markdown != render_operational_report(report).encode():
         raise ValueError('enrichment monitor report pair mismatch')
@@ -209,5 +264,5 @@ def publish_enrichment_monitor(repo_root, report, paths, *, metadata, now=None):
     if len(data) > MAX_BYTES:
         raise ValueError('enrichment monitor size bound')
     destination = folder / 'source-repair' / f'{session}-{generation}-enrichment-monitor.json'
-    _publish_sidecar(destination, data)
+    _publish_or_verify(destination, data, _verify_capture)
     return {'path': str(destination), 'status': result['status'], 'diagnostics': result['diagnostics']}
