@@ -113,6 +113,20 @@ def test_profile_factory_and_loader_keep_original_ledger_binding(tmp_path):
     assert current['source_retirement']['previous_config_sha256']!=new_digest
 
 
+def test_public_source_identity_uses_actual_amended_profile_while_ledger_keeps_original(tmp_path):
+    from tradingagents.strategies.orchestration.generation_config import apply_generation_config
+    from tradingagents.strategies.orchestration.operating_contract import profile_contract
+    from tradingagents.strategies.orchestration.source_inputs import public_source_configuration_declaration
+    config=amendment();path=tmp_path/'retired.json';path.write_text(json.dumps(config,indent=2)+'\n')
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    runtime=apply_generation_config({},path,digest)
+    contract=profile_contract(config,profile_sha256=digest)
+    for effective in (runtime,contract.config):
+        declaration=public_source_configuration_declaration(effective)['_source_public_configuration']
+        assert declaration['profile_sha256']==digest
+        assert effective['autoresearch']['paper_ledger']['policy_id'].endswith(config['source_retirement']['previous_config_sha256'])
+
+
 def test_loader_rejects_an_unverified_delta_before_applying_it(tmp_path):
     from tradingagents.strategies.orchestration.generation_config import apply_generation_config,read_generation_config
     config=amendment();config['autoresearch']['paper_ledger']['slippage_bps']='0'
@@ -120,6 +134,14 @@ def test_loader_rejects_an_unverified_delta_before_applying_it(tmp_path):
     digest=hashlib.sha256(path.read_bytes()).hexdigest()
     with pytest.raises(ValueError,match='generation_config'):read_generation_config(path,digest)
     with pytest.raises(ValueError,match='generation_config'):apply_generation_config({},path,digest)
+
+
+def test_actual_profile_digest_is_derived_and_cannot_be_overridden_in_frozen_input(tmp_path):
+    from tradingagents.strategies.orchestration.generation_config import read_generation_config
+    config=amendment();config['_source_retirement_profile_sha256']='f'*64
+    path=tmp_path/'invalid-derived-digest.json';path.write_text(json.dumps(config))
+    with pytest.raises(ValueError,match='generation_config'):
+        read_generation_config(path,hashlib.sha256(path.read_bytes()).hexdigest())
 
 
 def test_retired_declaration_excludes_payload_and_requires_four_zero_signal_health_records():

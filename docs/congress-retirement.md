@@ -13,6 +13,8 @@ at `generation-config.json`; the new profile at
 hash. Validation rejects every other configuration change. Only the ledger's
 policy identity retains the original hash; new execution, acquisition and report
 evidence uses the actual new profile hash and reviewed code commit.
+The verified loader derives the runtime profile digest for public source
+declarations; a frozen profile cannot override it.
 
 The manifest records the effective session and both revisions. Earlier sessions
 continue to use the original profile, commit and archived worktree
@@ -20,6 +22,10 @@ continue to use the original profile, commit and archived worktree
 the amended profile and active worktree. Reports, runtime receipts and monitoring
 must select the recorded revision for their session. A new metrics epoch records
 the change; earlier signals and pending outcomes retain their original epoch.
+Pending orders retain their original staged volatility evidence. Reusing it
+across this boundary requires the exact amendment, original accepted source and
+shared-execution records, original signal policy, and unchanged execution
+settings. The new session's execution record still uses the new revision.
 
 ## Operator transaction
 

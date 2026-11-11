@@ -101,6 +101,8 @@ def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingPr
             raise ValueError()
         config = deepcopy(DEFAULT_CONFIG)
         _merge(config, frozen_config)
+        if binding is not None:
+            config['_source_retirement_profile_sha256'] = profile_sha256
         ar = config['autoresearch']
         exclusions,retired=_profile_source_scope(ar,full_config=frozen_config)
         if (ar.get('disabled_strategies') != exclusions

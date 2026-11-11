@@ -87,6 +87,8 @@ def read_generation_config(path, expected_sha256=None):
         if 'source_retirement' in overlay:
             from .source_retirement_profile import profile_binding
             profile_binding(overlay,digest)
+        if '_source_retirement_profile_sha256' in overlay:
+            _invalid()
         return body, overlay, digest
     except (OSError, ValueError, TypeError, RecursionError):
         _invalid()
@@ -107,6 +109,8 @@ def apply_generation_config(defaults, path, expected_sha256):
     ledger_digest=ledger_profile_sha256(overlay,digest)
     result = copy.deepcopy(defaults)
     _merge(result, overlay)
+    if 'source_retirement' in overlay:
+        result['_source_retirement_profile_sha256'] = digest
     ar = result.setdefault('autoresearch', {})
     ledger = ar.setdefault('paper_ledger', {})
     configured = ledger.get('policy_id')

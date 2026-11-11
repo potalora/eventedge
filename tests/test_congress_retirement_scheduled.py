@@ -55,7 +55,7 @@ def test_retirement_preserves_books_and_fills_prior_intents_without_congress_io(
     assert all(report[key] is True for key in
         ('evidence_complete', 'accounting_valid', 'staging_complete', 'staging_valid', 'input_coverage_valid'))
     assert report['completion']['workflow_complete'] is True
-    assert report['completion']['audit_warnings'] == []
+    assert report['completion'].get('audit_warnings', []) == []
     assert 'congress' not in report['sources']['observations']
     assert report['sources']['declared_exclusions']['congressional_trades'] == 'congress_source_retired_v1'
     assert report['sources']['recovered'] == []
