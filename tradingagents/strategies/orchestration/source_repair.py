@@ -564,7 +564,7 @@ def _git(root, *arguments):
         raise ValueError("generation Git identity unavailable") from error
 
 
-def _metadata(capture, generation):
+def _metadata(capture, generation, *, session=None):
     document = _decode(capture.read("data/generations/manifest.json"), MAX_FILE_BYTES)
     try:
         rows = document["generations"]
@@ -585,13 +585,22 @@ def _metadata(capture, generation):
                 declared = capture.root / declared
             if declared != capture.root / relative:
                 raise ValueError("noncanonical generation path")
-        return row
+        from .source_retirement import validate_generation_retirement, generation_for_session
+        validate_generation_retirement(row, capture.root)
+        return generation_for_session(row, session) if session is not None else row
     except (KeyError, TypeError, AttributeError) as error:
         raise ValueError("invalid generation manifest identity") from error
 
 
-def _head(capture, generation):
+def _head(capture, generation, *, metadata=None):
     path = Path(".worktrees") / generation
+    if metadata is not None:
+        declared = Path(metadata['worktree_path'])
+        allowed = {capture.root / path,
+                   capture.root / '.worktrees' / (generation + '-before-congress-retirement')}
+        if declared not in allowed:
+            raise ValueError('noncanonical selected generation worktree')
+        path = declared.relative_to(capture.root)
     gitfile = capture.read(path / ".git", 4096).decode()
     if not gitfile.startswith("gitdir: ") or not gitfile.endswith("\n"):
         raise ValueError("invalid generation worktree registration")
@@ -661,8 +670,8 @@ def current_repair_requests(repo_root, *, now=None):
         for generation in sorted(generations):
             if type(generation) is not str or not _GENERATION.fullmatch(generation):
                 raise ValueError("invalid active generation")
-            metadata = _metadata(capture, generation)
-            if _head(capture, generation) != metadata["git_commit"]:
+            metadata = _metadata(capture, generation, session=session)
+            if _head(capture, generation, metadata=metadata) != metadata["git_commit"]:
                 raise ValueError("active generation HEAD mismatch")
             raw, markdown = _report_pair(capture, generation, session)
             projected = build_repair_requests(
@@ -710,8 +719,8 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
     stage = None
     with _readonly_runtime_lock(lock):
         try:
-            metadata = _metadata(capture, generation)
-            if metadata["git_commit"] != commit or _head(capture, generation) != commit:
+            metadata = _metadata(capture, generation, session=session)
+            if metadata["git_commit"] != commit or _head(capture, generation, metadata=metadata) != commit:
                 raise ValueError("active generation identity mismatch")
             report_bytes, markdown_bytes = _report_pair(capture, generation, session)
             projected = build_repair_requests(
@@ -748,13 +757,16 @@ def export_repair_evidence(repo_root, request, output_dir, *, now=None):
                 )
                 from .operating_contract import configured, profile_contract
 
-                relative = Path("data/generations") / generation / FROZEN_CONFIG_NAME
+                relative = Path(config_file).relative_to(capture.root) if Path(config_file).is_absolute() else Path(config_file)
                 if type(config_file) is not str:
                     raise ValueError("noncanonical frozen profile path")
                 declared = Path(config_file)
                 if not declared.is_absolute():
                     declared = capture.root / declared
-                if declared != capture.root / relative:
+                if declared != capture.root / relative or relative not in {
+                    Path('data/generations') / generation / FROZEN_CONFIG_NAME,
+                    Path('data/generations') / generation / 'generation-config-congress-retired.json',
+                }:
                     raise ValueError("noncanonical frozen profile path")
                 digest = metadata.get("config_sha256")
                 if (

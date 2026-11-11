@@ -208,7 +208,11 @@ def atomic_json(path: Path, document: dict) -> None:
 def identity_for(repo: Path, generation: dict, session: str) -> dict:
     """Bind identity to actual checkout/profile, never to environment assertions."""
     from .generation_config import read_generation_config
+    from .source_retirement import validate_generation_retirement, generation_for_session, config_path_for_generation
     date.fromisoformat(session)
+    binding = validate_generation_retirement(generation, repo=repo)
+    logical_worktree = generation['worktree_path']
+    generation = generation_for_session(generation, session)
     commit = generation['git_commit']
     if not re.fullmatch('[0-9a-f]{40}', commit) or not re.fullmatch('gen_[0-9]+', generation['gen_id']):
         raise ValueError('identity_mismatch')
@@ -216,13 +220,17 @@ def identity_for(repo: Path, generation: dict, session: str) -> dict:
     worktree = Path(generation['worktree_path'])
     state = Path(generation['state_dir'])
     expected_worktree = repo / '.worktrees' / generation['gen_id']
+    if binding is not None and session < binding['effective_session']:
+        expected_worktree = Path(binding['previous_worktree_path'])
     expected_state = repo / 'data/generations' / generation['gen_id']
     if worktree != expected_worktree or state != expected_state:
         raise ValueError('identity_mismatch')
     for target in (worktree, state):
         if target.resolve() != target or any(parent.is_symlink() for parent in (target, *target.parents)):
             raise ValueError('identity_mismatch')
-    if generation.get('config_file') != str(state / FROZEN_CONFIG_NAME):
+    expected_config = (Path(binding['config_file']) if binding is not None and session >= binding['effective_session']
+                       else state / FROZEN_CONFIG_NAME)
+    if config_path_for_generation(generation) != expected_config:
         raise ValueError('identity_mismatch')
     actual = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=worktree,
                             check=True, capture_output=True, text=True).stdout.strip()
@@ -249,11 +257,23 @@ def identity_for(repo: Path, generation: dict, session: str) -> dict:
     # environment/default configuration needs an explicit operator migration.
     if not config_sha or not config_file:
         raise ValueError('identity_mismatch')
-    read_generation_config(config_file, config_sha)
+    body, config, _ = read_generation_config(config_file, config_sha)
+    if binding is not None and session >= binding['effective_session']:
+        from .source_retirement_profile import profile_binding
+
+        proof = profile_binding(config, config_sha)
+        previous_body, _, _ = read_generation_config(
+            binding['previous_config_file'], binding['previous_config_sha256'])
+        if (proof is None or proof['effective_session'] != binding['effective_session']
+                or proof['previous_config_sha256'] != binding['previous_config_sha256']
+                or proof['previous_config_text'].encode('utf-8') != previous_body):
+            raise ValueError('identity_mismatch')
     return {'generation_id': generation['gen_id'], 'generation_commit': commit,
             'config_sha256': config_sha, 'session': session,
             'state_dir': str(Path(generation['state_dir']).resolve()),
-            'worktree_path': str(worktree)}
+            # Incident keys include this historical logical identity. Moving
+            # the proven old checkout must never create a second incident key.
+            'worktree_path': logical_worktree}
 
 
 def incident_key(identity: dict) -> str:
@@ -548,6 +568,23 @@ def write_recovery_receipt(owner, session: date, *, now=None, configuration_sha2
     return path
 
 
+def _read_recovery_configuration(state, expected_configuration, session):
+    """Resolve only the two immutable names, retaining the original proof join."""
+    from .generation_config import FROZEN_CONFIG_NAME, read_generation_config
+    from .source_retirement import CONFIG_NAME
+    from .source_retirement_profile import profile_binding
+
+    previous_body, _, previous_sha = read_generation_config(state / FROZEN_CONFIG_NAME)
+    if previous_sha == expected_configuration:
+        return
+    _, config, _ = read_generation_config(state / CONFIG_NAME, expected_configuration)
+    proof = profile_binding(config, expected_configuration)
+    if (proof is None or proof['previous_config_sha256'] != previous_sha
+            or proof['previous_config_text'].encode('utf-8') != previous_body
+            or session < proof['effective_session']):
+        raise ValueError('recovery receipt identity invalid')
+
+
 def validate_recovery_receipt(state, generation, session, commit, expected_configuration=None):
     """Validate distinct completion proof against current immutable evidence.
 
@@ -582,8 +619,7 @@ def validate_recovery_receipt(state, generation, session, commit, expected_confi
             or expected_configuration is None or document['configuration_sha256']!=expected_configuration
             or _utc(datetime.fromisoformat(document['completed_at']))>datetime.now(timezone.utc)):
         raise ValueError('recovery receipt identity invalid')
-    from .generation_config import FROZEN_CONFIG_NAME, read_generation_config
-    read_generation_config(state/FROZEN_CONFIG_NAME, document['configuration_sha256'])
+    _read_recovery_configuration(state, document['configuration_sha256'], session)
     proof = session_recovery_proof(state,generation,session,document['epoch_id'])
     if document['proof']!=proof or document['proof_sha256']!=_hash_document(proof):
         raise ValueError('recovery receipt proof conflict')

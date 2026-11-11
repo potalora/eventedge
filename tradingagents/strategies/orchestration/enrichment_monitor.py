@@ -131,10 +131,14 @@ def _bytes(value):
 def _read_accepted_observation(repo, metadata, report):
     """Reuse canonical read-only proof validators, including all sixteen books."""
     from . import operational_report as reports
-    from .generation_config import FROZEN_CONFIG_NAME, read_generation_config
+    from .generation_config import read_generation_config
+    from .source_retirement import config_path_for_generation
     from .operating_contract import profile_contract, source_support
     state = repo / 'data/generations' / report['generation_id']
-    config_file = state / FROZEN_CONFIG_NAME
+    config_file = config_path_for_generation(metadata)
+    if config_file.parent != state or config_file.name not in {
+            'generation-config.json', 'generation-config-congress-retired.json'}:
+        raise ValueError('enrichment monitor configuration path mismatch')
     if (Path(metadata['state_dir']) != state or Path(metadata['config_file']) != config_file
             or config_file.is_symlink() or state.resolve() != state):
         raise ValueError('enrichment monitor configuration path mismatch')
@@ -231,6 +235,8 @@ def publish_enrichment_monitor(repo_root, report, paths, *, metadata, now=None, 
     from .source_repair_intervention import _publish_or_verify
     repo = Path(repo_root).absolute()
     generation, commit, session = (report[key] for key in ('generation_id', 'generation_commit', 'session'))
+    from .source_retirement import generation_for_session
+    metadata = generation_for_session(metadata, session)
     if (not _GENERATION.fullmatch(generation) or not _COMMIT.fullmatch(commit)
             or metadata['gen_id'] != generation or metadata['git_commit'] != commit):
         raise ValueError('enrichment monitor generation mismatch')

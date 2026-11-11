@@ -84,7 +84,8 @@ def test_http_probe_is_separate_from_original_failure():
 
 
 @pytest.mark.parametrize('unavailable', [False, True])
-def test_supplemental_publication_never_rewrites_canonical_reports(tmp_path, monkeypatch, unavailable):
+@pytest.mark.parametrize('amended', [False, True])
+def test_supplemental_publication_never_rewrites_canonical_reports(tmp_path, monkeypatch, unavailable, amended):
     from test_source_repair import report, pair, NOW, COMMIT, GENERATION
     value = report()
     folder = tmp_path / 'docs/reports'
@@ -104,6 +105,9 @@ def test_supplemental_publication_never_rewrites_canonical_reports(tmp_path, mon
             'hold_reasons': [], 'short_interest_acquisition': None}
     monkeypatch.setattr(api(), '_read_accepted_observation', read)
     metadata = {'gen_id': GENERATION, 'git_commit': COMMIT}
+    if amended:
+        from test_congress_retirement_history import amended_row
+        metadata = amended_row(tmp_path)
     result = api().publish_enrichment_monitor(tmp_path, value, paths, metadata=metadata, now=NOW)
     assert result['status'] == ('unavailable' if unavailable else 'degraded')
     sidecar = json.loads(open(result['path']).read())

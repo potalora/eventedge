@@ -713,7 +713,7 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
         from .source_lifecycle_policy import declared_scope, exclusions as retirement_exclusions
         if operating_profile is not None:
             from .operating_contract import configure_strategies
-            strategies = configure_strategies(get_paper_trade_strategies(), operating_profile.config['autoresearch'])
+            strategies = configure_strategies(get_paper_trade_strategies(), operating_profile.config['autoresearch'], full_config=operating_profile.config)
             retirement_scope = declared_scope(envelope['payload'], operating_profile.config['autoresearch'], strategies)
         else:
             retirement_scope = declared_scope(envelope['payload'])
@@ -953,7 +953,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             matches = [row for row in manifest['generations'] if row['gen_id']==generation]
             if len(matches)!=1 or not _safe_id(matches[0]['git_commit']):
                 raise ValueError('generation identity conflict')
-            metadata = matches[0]
+            from .source_retirement import generation_for_session
+            metadata = generation_for_session(matches[0], session)
             commit = metadata['git_commit']
             state = Path(metadata['state_dir'])
             state = state.resolve() if state.is_absolute() else (repo/state).resolve()
@@ -999,7 +1000,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report_strategies = document_strategies(report_strategies, retained_sources.get('_bounded_document_config', {}))
         if operating_profile is not None:
             from .operating_contract import configure_strategies
-            report_strategies = configure_strategies(report_strategies, operating_profile.config['autoresearch'])
+            report_strategies = configure_strategies(report_strategies, operating_profile.config['autoresearch'], full_config=operating_profile.config)
         epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
         from .source_lifecycle_policy import validate_health as validate_retirement_health
         try:
@@ -1283,7 +1284,7 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose,
         # no engine constructor, registry, model or store mutation is involved.
         verifier = MultiStrategyEngine.__new__(MultiStrategyEngine)
         verifier.config, verifier.ar_config = profile.config, profile.config['autoresearch']
-        verifier.paper_trade_strategies = configure_strategies(get_paper_trade_strategies(), verifier.ar_config)
+        verifier.paper_trade_strategies = configure_strategies(get_paper_trade_strategies(), verifier.ar_config, full_config=profile.config)
         strategy_sources = {strategy.name: strategy.data_sources for strategy in verifier.paper_trade_strategies}
         for signals, regime, records in sample.values():
             for record in records:

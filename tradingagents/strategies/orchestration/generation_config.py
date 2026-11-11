@@ -1,7 +1,8 @@
 """Bounded, secret-free configuration frozen with a generation.
 
-The exact profile byte digest is appended to paper_ledger.policy_id. Existing
-epoch semantics therefore distinguish profiles without changing the epoch schema.
+The exact profile byte digest binds paper_ledger.policy_id, except for the
+strictly verified Congress retirement amendment that preserves its original
+ledger identity. Acquisition and report identities retain the actual digest.
 State belongs to GenerationManager; credentials remain environment-owned.
 """
 from __future__ import annotations
@@ -83,6 +84,9 @@ def read_generation_config(path, expected_sha256=None):
         policy_id = ar.get('paper_ledger', {}).get('policy_id')
         if policy_id is not None and (type(policy_id) is not str or not policy_id.strip()):
             _invalid()
+        if 'source_retirement' in overlay:
+            from .source_retirement_profile import profile_binding
+            profile_binding(overlay,digest)
         return body, overlay, digest
     except (OSError, ValueError, TypeError, RecursionError):
         _invalid()
@@ -97,12 +101,14 @@ def _merge(target, overlay):
 
 
 def apply_generation_config(defaults, path, expected_sha256):
-    """Deep-merge a verified profile and bind its exact bytes to epoch policy."""
+    """Deep-merge a verified profile and retain its proven ledger identity."""
     _, overlay, digest = read_generation_config(path, expected_sha256)
+    from .source_retirement_profile import ledger_profile_sha256
+    ledger_digest=ledger_profile_sha256(overlay,digest)
     result = copy.deepcopy(defaults)
     _merge(result, overlay)
     ar = result.setdefault('autoresearch', {})
     ledger = ar.setdefault('paper_ledger', {})
     configured = ledger.get('policy_id')
-    ledger['policy_id'] = ((configured + '-') if configured else '') + 'generation-config-' + digest
+    ledger['policy_id'] = ((configured + '-') if configured else '') + 'generation-config-' + ledger_digest
     return result
