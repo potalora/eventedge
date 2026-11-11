@@ -47,8 +47,8 @@ jobs:
 
   test-openbb:
     runs-on: ubuntu-latest
-    # Preserve the same bounded acceptance in the pinned optional-SDK environment.
-    timeout-minutes: 90
+    # Allow both acceptance and the full regression suite in the pinned SDK environment.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
