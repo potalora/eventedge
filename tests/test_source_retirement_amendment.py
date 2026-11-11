@@ -102,7 +102,7 @@ def test_manager_rejects_amendment_without_frozen_config_identity(tmp_path):
 
 
 @pytest.fixture
-def deployed_amendment(tmp_path):
+def deployed_amendment(tmp_path, request):
     repo = tmp_path / 'repo'
     repo.mkdir()
 
@@ -113,9 +113,15 @@ def deployed_amendment(tmp_path):
     git('init')
     git('config', 'user.email', 'offline@example.invalid')
     git('config', 'user.name', 'Offline test')
-    (repo / '.gitignore').write_text('data/\n.worktrees/\n')
+    options = getattr(request, 'param', {})
+    (repo / '.gitignore').write_text(('data/\n' if options.get('ignore_data', True) else '') + '.worktrees/\n')
     (repo / 'tracked.txt').write_text('original\n')
     git('add', '.gitignore', 'tracked.txt')
+    if options.get('tracked_data'):
+        tracked_data = repo / 'data/tracked-fixture.txt'
+        tracked_data.parent.mkdir()
+        tracked_data.write_text('original tracked data\n')
+        git('add', '-f', 'data/tracked-fixture.txt')
     git('commit', '-m', 'original fixture')
     previous_commit = git('rev-parse', 'HEAD')
     (repo / 'tracked.txt').write_text('Congress retired\n')
@@ -294,6 +300,64 @@ def test_cli_dry_run_apply_and_identical_retry_preserve_populated_books(unapplie
     assert protected_bytes(repo, old) == before
     assert subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=repo, check=True,
                           capture_output=True, text=True).stdout.strip() == args['commit']
+
+
+@pytest.mark.parametrize('deployed_amendment', [{'ignore_data': False}], indirect=True)
+def test_cli_allows_only_authoritative_untracked_host_data_without_ignoring_it(unapplied_retirement):
+    from scripts import retire_congress as cli
+    repo, old, _, args = unapplied_retirement
+    def git(*parts):
+        return subprocess.check_output(['git', '-C', str(repo), *parts], text=True).strip()
+    assert git('status', '--porcelain', '--untracked-files=normal') == '?? data/'
+    before = protected_bytes(repo, old)
+    assert cli.retire_congress(**args)['changed'] is False
+    assert cli.retire_congress(**args, apply=True, scheduler_quiesced=True)['changed'] is True
+    assert cli.retire_congress(**args, apply=True, scheduler_quiesced=True)['already_applied'] is True
+    assert protected_bytes(repo, old) == before
+    assert git('status', '--porcelain', '--untracked-files=normal') == '?? data/'
+
+
+@pytest.mark.parametrize('deployed_amendment', [{'ignore_data': False, 'tracked_data': True}], indirect=True)
+@pytest.mark.parametrize('change', ['untracked_source', 'untracked_prefix', 'tracked_source', 'staged_source',
+    'tracked_data', 'staged_data', 'staged_reverted_source', 'staged_reverted_data'])
+def test_cli_still_rejects_untracked_source_and_all_tracked_changes(unapplied_retirement, change):
+    from scripts import retire_congress as cli
+    repo, old, _, args = unapplied_retirement
+    target = (repo / 'untracked.py' if change == 'untracked_source' else
+              repo / 'database/untracked.py' if change == 'untracked_prefix' else
+              repo / 'data/tracked-fixture.txt' if change.endswith('data') else repo / 'tracked.txt')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('changed source or tracked data\n')
+    if change.startswith('staged_'):
+        subprocess.run(['git', '-C', str(repo), 'add', str(target)], check=True, capture_output=True)
+        if 'reverted' in change:
+            # The index is still dirty even when the working file again matches
+            # HEAD; a combined diff against HEAD alone misses this state.
+            target.write_text('original tracked data\n' if change.endswith('data') else 'original\n')
+    before = protected_bytes(repo, old)
+    manifest = (repo / 'data/generations/manifest.json').read_bytes()
+    with pytest.raises(ValueError, match='host_checkout_changed'):
+        cli.retire_congress(**args, apply=True, scheduler_quiesced=True)
+    assert protected_bytes(repo, old) == before
+    assert (repo / 'data/generations/manifest.json').read_bytes() == manifest
+    assert not (Path(old['state_dir']) / cli.JOURNAL_NAME).exists()
+
+
+@pytest.mark.parametrize('deployed_amendment', [{'ignore_data': False}], indirect=True)
+@pytest.mark.parametrize('location', ['active', 'archive'])
+def test_host_data_exception_never_allows_untracked_worktree_data(unapplied_retirement, location):
+    from scripts import retire_congress as cli
+    repo, old, amended, args = unapplied_retirement
+    if location == 'archive':
+        cli.retire_congress(**args, apply=True, scheduler_quiesced=True)
+    worktree = Path(old['worktree_path'] if location == 'active' else amended['source_retirement']['previous_worktree_path'])
+    unexpected = worktree / 'data/untracked-source.py'
+    unexpected.parent.mkdir()
+    unexpected.write_text('unexpected worktree contents\n')
+    before = protected_bytes(repo, old)
+    with pytest.raises(ValueError, match='worktree_changed'):
+        cli.retire_congress(**args, apply=True, scheduler_quiesced=True)
+    assert protected_bytes(repo, old) == before
 
 
 @pytest.mark.parametrize('stage', ['profile', 'move', 'add', 'checkout', 'manifest'])

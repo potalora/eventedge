@@ -50,6 +50,8 @@ Apply requires the exact returned `new_profile_sha256`, `--apply` and
 `--scheduler-quiesced`. The CLI also acquires the real exclusive runtime lock,
 checks accepted-session and book-completion boundaries, verifies all sixteen
 books, and writes a durable transaction journal before changing code or pins.
+Untracked files under canonical `data/` remain authoritative state. Tracked
+changes anywhere, or untracked source files elsewhere, refuse the transaction.
 An identical retry resumes only its own verified progress. Foreign or ambiguous
 state requires investigation. Keep the recovery copy until the amendment and
 subsequent scheduled behavior have been verified.

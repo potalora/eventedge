@@ -286,7 +286,14 @@ def retire_congress(*, repo, generation, effective_session, old_commit, old_prof
         profile_path = Path(new['config_file'])
         _git(repo, 'cat-file', '-e', commit + '^{commit}')
         _git(repo, 'merge-base', '--is-ancestor', old_commit, commit)
-        if _git(repo, 'status', '--porcelain', '--untracked-files=normal'):
+        # Authoritative state is intentionally untracked beneath root/data.
+        # Every tracked change (including tracked data) and every untracked
+        # path elsewhere remains a source-integrity refusal. NUL delimiters
+        # retain filenames containing only whitespace through _git().strip().
+        if (_git(repo, 'diff', '--name-only', '-z', 'HEAD', '--')
+                or _git(repo, 'diff', '--cached', '--name-only', '-z', 'HEAD', '--')
+                or _git(repo, 'ls-files', '--others', '--exclude-standard', '-z',
+                        '--', '.', ':(top,exclude)data/**')):
             _invalid('host_checkout_changed')
         if _git(repo, 'rev-parse', 'HEAD') not in (old_commit, commit):
             _invalid('host_commit_changed')
