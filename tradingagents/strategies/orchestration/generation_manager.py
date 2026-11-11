@@ -679,6 +679,7 @@ class GenerationInfo:
     run_history: list[dict] = field(default_factory=list)
     config_file: str | None = None
     config_sha256: str | None = None
+    source_retirement: dict | None = None
 
 
 class GenerationManifestError(ValueError):
@@ -820,6 +821,7 @@ class GenerationManager:
         )
 
         record = asdict(info)
+        record.pop('source_retirement')
         if profile is None:
             record.pop('config_file')
             record.pop('config_sha256')
@@ -1183,6 +1185,14 @@ class GenerationManager:
         Daily results include a canonical ``outcome``. Preflight results retain
         their independent outcome-free report contract.
         """
+        if gen_data.get('source_retirement') is not None:
+            from .source_retirement import generation_for_session
+
+            try:
+                session = extra_args[extra_args.index('--date') + 1]
+                gen_data = generation_for_session(gen_data, session)
+            except (ValueError, IndexError) as error:
+                raise GenerationManifestError('source retirement requires an exact session') from error
         started_at = datetime.now(timezone.utc)
         capture: dict = {
             "stdout": "",
@@ -1584,7 +1594,7 @@ class GenerationManager:
         if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
             raise GenerationManifestError("generation manifest requires a generations list")
         optional_config = {'config_file', 'config_sha256'}
-        required = {item.name for item in fields(GenerationInfo)} - optional_config
+        required = {item.name for item in fields(GenerationInfo)} - optional_config - {'source_retirement'}
         seen = set()
         for row in data["generations"]:
             if not isinstance(row, dict) or not required.issubset(row):
@@ -1600,11 +1610,18 @@ class GenerationManager:
                 not isinstance(entry, dict) for entry in row["run_history"]
             ):
                 raise GenerationManifestError("generation manifest has an invalid run history")
-            if optional_config & row.keys():
+            from .source_retirement import validate_generation_retirement, CONFIG_NAME
+
+            try:
+                retirement = validate_generation_retirement(row)
+            except ValueError as error:
+                raise GenerationManifestError('generation manifest has invalid source retirement') from error
+            if optional_config & row.keys() or retirement is not None:
                 from .generation_config import FROZEN_CONFIG_NAME
+                filename = CONFIG_NAME if retirement is not None else FROZEN_CONFIG_NAME
 
                 if (type(row.get('config_file')) is not str
-                        or row['config_file'] != str(Path(row['state_dir']) / FROZEN_CONFIG_NAME)
+                        or row['config_file'] != str(Path(row['state_dir']) / filename)
                         or type(row.get('config_sha256')) is not str
                         or not re.fullmatch(r'[0-9a-f]{64}', row['config_sha256'])):
                     raise GenerationManifestError('generation manifest has invalid configuration identity')

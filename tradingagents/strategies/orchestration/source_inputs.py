@@ -284,8 +284,15 @@ def public_source_configuration_declaration(config: Mapping[str, Any]) -> dict:
     match = re.search(r'(?:^|-)generation-config-([a-f0-9]{64})$', policy) if isinstance(policy, str) else None
     if match is None:
         raise ValueError('invalid_source_public_configuration')
+    profile_sha256 = match[1]
+    if 'source_retirement' in config:
+        from .operating_contract import _profile_source_scope
+        _profile_source_scope(ar, full_config=config)
+        profile_sha256 = config.get('_source_retirement_profile_sha256')
+        if type(profile_sha256) is not str or not re.fullmatch('[a-f0-9]{64}', profile_sha256):
+            raise ValueError('invalid_source_public_configuration')
     return {PUBLIC_CONFIGURATION_KEY: {'version': PUBLIC_CONFIGURATION_VERSION,
-        'profile_sha256': match[1], 'configuration_sha256': public_source_configuration_fingerprint(config)}}
+        'profile_sha256': profile_sha256, 'configuration_sha256': public_source_configuration_fingerprint(config)}}
 
 def registered_source_fingerprint(configuration: str, source: Any) -> str:
     settings = {'configuration': configuration}

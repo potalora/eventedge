@@ -29,6 +29,9 @@ from tradingagents.strategies.orchestration.runtime_recovery import (
 from tradingagents.strategies.orchestration.runtime_lock import (
     RuntimeLockBusy, RuntimeLockInvalid, canonical_runtime_lock_path, runtime_lock,
 )
+from tradingagents.strategies.orchestration.source_retirement import (
+    generation_for_session, validate_generation_retirement,
+)
 from tradingagents.strategies.orchestration.trading_calendar import (
     exchange_date, is_session, session_close,
 )
@@ -68,13 +71,26 @@ def _discover_sessions(row, now):
 
 def launch(repo, row, session, action, *, heartbeat=None, expected_roster=None):
     env = os.environ.copy()
+    binding = validate_generation_retirement(row, repo=repo)
+    if binding is not None:
+        identity_for(repo, row, session)
+        if session < binding['effective_session']:
+            # Retirement requires all older phases complete. Never relaunch
+            # either an old daily sample or historical recovery after cutover.
+            raise ValueError('identity_mismatch')
     if action == 'daily':
         with runtime_lock(canonical_runtime_lock_path(repo), exclusive=True) as lock:
             current = manifest_rows(repo)
+            for item in current:
+                current_binding = validate_generation_retirement(item, repo=repo)
+                if current_binding is not None and session < current_binding['effective_session']:
+                    raise ValueError('identity_mismatch')
             expected = expected_roster or [row]
             if sorted(identity_for(repo,item,session)['generation_id']+incident_key(identity_for(repo,item,session)) for item in current) != sorted(identity_for(repo,item,session)['generation_id']+incident_key(identity_for(repo,item,session)) for item in expected):
                 raise ValueError('identity_mismatch')
             return _daily_process(repo, lock, heartbeat=heartbeat)
+    if binding is not None:
+        row = generation_for_session(row, session)
     env.update(AUTORESEARCH_STATE_DIR=str(Path(row['state_dir']).resolve()),
         EVENTEDGE_GENERATION_ID=row['gen_id'], EVENTEDGE_GENERATION_COMMIT=row['git_commit'],
         EVENTEDGE_RECOVERY_REPO=str(repo), EVENTEDGE_GENERATION_CONFIG_FILE=row['config_file'],
@@ -396,6 +412,10 @@ def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discove
                 if row is None or identity_for(repo, row, identity['session']) != identity:
                     finish_attempt(record, _result('requires_user', 'identity_mismatch'), now)
                     continue
+                binding = validate_generation_retirement(row, repo=repo)
+                if binding is not None and identity['session'] < binding['effective_session']:
+                    finish_attempt(record, _result('requires_user', 'identity_mismatch'), now)
+                    continue
                 if record['running']:
                     # Controller lock is free after the former process/cgroup
                     # exited. An interrupted launch consumes its recorded slot.
@@ -476,10 +496,17 @@ def worker(repo, session):
     from tradingagents.strategies.orchestration.runtime_recovery import RecoveryUnavailable
     with runtime_lock(canonical_runtime_lock_path(repo), exclusive=True):
         matches = [row for row in manifest_rows(repo) if row['gen_id'] == os.environ.get('EVENTEDGE_GENERATION_ID')]
-        if len(matches) != 1 or matches[0]['git_commit'] != os.environ.get('EVENTEDGE_GENERATION_COMMIT'):
+        if len(matches) != 1:
             return _result('requires_user', 'identity_mismatch')
         row = matches[0]
         identity_for(repo, row, session)
+        binding = validate_generation_retirement(row, repo=repo)
+        if binding is not None:
+            if session < binding['effective_session']:
+                return _result('requires_user', 'identity_mismatch')
+            row = generation_for_session(row, session)
+        if row['git_commit'] != os.environ.get('EVENTEDGE_GENERATION_COMMIT'):
+            return _result('requires_user', 'identity_mismatch')
         if Path(__file__).resolve().parents[1] != Path(row['worktree_path']).resolve():
             return _result('requires_user', 'identity_mismatch')
         args = _build_parser().parse_args(['--date', session])

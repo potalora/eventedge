@@ -137,11 +137,13 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
         manifest = report_io._load_json(repo/'data/generations/manifest.json')
         matches=[item for item in manifest['generations'] if item['gen_id']==generation]
         _require(len(matches)==1)
-        metadata=matches[0]
+        from .source_retirement import generation_for_session, config_path_for_generation
+        metadata=generation_for_session(matches[0],session)
         state=Path(metadata['state_dir'])
         state=state if state.is_absolute() else repo/state
         _require(metadata['git_commit']==expected_commit and metadata['config_sha256']==expected_profile
-            and Path(metadata['config_file']).resolve()==(state/'generation-config.json').resolve())
+            and config_path_for_generation(metadata).parent==state
+            and Path(metadata['config_file']).name in {'generation-config.json','generation-config-congress-retired.json'})
         config=apply_generation_config(DEFAULT_CONFIG,metadata['config_file'],expected_profile)
         ar=config['autoresearch']
         _require(ar.get('research_resilience_policy')==POLICY and ar.get('llm_billing_mode')=='chatgpt_plan'

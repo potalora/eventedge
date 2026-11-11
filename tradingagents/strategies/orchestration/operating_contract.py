@@ -62,27 +62,58 @@ def _exclusion_scope(ar, declarations):
     return scope
 
 
+def _profile_source_scope(ar,full_config=None):
+    """Validate runtime source scope against a separately verified raw amendment.
+
+    Runtime capital, risk, state paths and the appended ledger policy are owned by
+    their existing loaders. They are deliberately outside this source-only check.
+    """
+    exclusions=dict(EXCLUSIONS)
+    retired={'regulations':{'reason':EXCLUSIONS['regulatory_pipeline'],'strategies':['regulatory_pipeline']}}
+    proof=full_config.get('source_retirement') if isinstance(full_config,dict) else None
+    if proof is not None or 'congress' in ar.get('retired_sources',{}):
+        from .source_retirement_profile import make_retired_profile,REASON
+        if type(proof) is not dict:raise ValueError('invalid_stabilization_profile')
+        reconstructed=make_retired_profile(proof.get('previous_config_text'),proof.get('effective_session'))
+        if proof!=reconstructed['source_retirement']:raise ValueError('invalid_stabilization_profile')
+        expected=reconstructed['autoresearch']
+        fields=('disabled_strategies','retired_sources','congress_disclosure_policy',
+            'congress_audit_continuity_policy','stabilization_profile_policy','source_lifecycle_policy',
+            'decision_clock_policy','research_resilience_policy','source_capability_policy',
+            'disabled_strategy_capabilities','courtlistener_scope_policy','noaa_delivery_policy','equity_universe_policy')
+        if any(ar.get(key)!=expected.get(key) for key in fields):raise ValueError('invalid_stabilization_profile')
+        exclusions['congressional_trades']=REASON
+        retired['congress']={'reason':REASON,'strategies':['congressional_trades']}
+    elif isinstance(full_config,dict) and 'source_retirement' in full_config:
+        raise ValueError('invalid_stabilization_profile')
+    return exclusions,retired
+
+
 def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingProfile:
     """Validate the finite supported scope and bind its exact frozen byte hash."""
     from tradingagents.default_config import DEFAULT_CONFIG
     from ..modules import get_paper_trade_strategies
     from .generation_config import _merge
+    from .source_retirement_profile import profile_binding,ledger_profile_sha256
     try:
+        binding=profile_binding(frozen_config,profile_sha256)
         if not configured(frozen_config) or not re.fullmatch('[a-f0-9]{64}', profile_sha256):
             raise ValueError()
         config = deepcopy(DEFAULT_CONFIG)
         _merge(config, frozen_config)
+        if binding is not None:
+            config['_source_retirement_profile_sha256'] = profile_sha256
         ar = config['autoresearch']
-        if (ar.get('disabled_strategies') != EXCLUSIONS
-                or ar.get('retired_sources') != {'regulations': {
-                    'reason': EXCLUSIONS['regulatory_pipeline'], 'strategies': ['regulatory_pipeline']}}
+        exclusions,retired=_profile_source_scope(ar,full_config=frozen_config)
+        if (ar.get('disabled_strategies') != exclusions
+                or ar.get('retired_sources') != retired
                 or ar.get('disabled_strategy_capabilities') != CAPABILITY_EXCLUSIONS
                 or ar.get('decision_clock_policy') != 'prospective_next_open_v1'
                 or ar.get('research_resilience_policy') != 'dependency_isolation_v1'
                 or ar.get('source_capability_policy') != 'regime_strategy_capabilities_v1'
                 or ar.get('courtlistener_scope_policy') != 'focused_litigation_v1'
                 or ar.get('noaa_delivery_policy') != 'ghcnd_yearly_v1'
-                or ar.get('congress_disclosure_policy') != 'display_audit_only_v1'
+                or ar.get('congress_disclosure_policy') != (None if binding else 'display_audit_only_v1')
                 or ar.get('equity_universe_policy') != 'us_exchange_listed_sip_v1'
                 or any(ar.get(key) is not None for key in OFF)
                 or ar.get('bounded_document_registry') not in (None, [])
@@ -90,7 +121,7 @@ def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingPr
                 or config.get('execution', {}).get('mode') != 'paper'
                 or config.get('execution', {}).get('execution_enabled') is not False):
             raise ValueError()
-        strategies = configure_strategies(get_paper_trade_strategies(), ar)
+        strategies = configure_strategies(get_paper_trade_strategies(), ar,full_config=frozen_config)
         names = tuple(sorted(strategy.name for strategy in strategies))
         if len(names) != 12 or len(set(names)) != 12 or not set(EXCLUSIONS) <= set(names):
             raise ValueError()
@@ -98,17 +129,17 @@ def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingPr
         if set(scope) != {filing.DECLARATION_KEY, lifecycle.DECLARATION_KEY}:
             raise ValueError()
         base = ar.setdefault('paper_ledger', {}).get('policy_id')
-        policy = ((base + '-') if base else '') + 'generation-config-' + profile_sha256
+        policy = ((base + '-') if base else '') + 'generation-config-' + ledger_profile_sha256(frozen_config,profile_sha256)
         ar['paper_ledger']['policy_id'] = policy
         return OperatingProfile(POLICY, profile_sha256, ROSTER,
             {h: f'{policy}:health:{h}' for h in HORIZONS}, names,
-            tuple(name for name in names if name not in EXCLUSIONS), dict(EXCLUSIONS),
+            tuple(name for name in names if name not in exclusions), exclusions,
             lifecycle._digest(_exclusion_scope(ar, scope)), config, policy)
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ValueError('invalid_stabilization_profile') from None
 
 
-def configure_strategies(strategies, config):
+def configure_strategies(strategies, config,*,full_config=None):
     """Explicitly omit the deferred optional regulatory commodity catalyst.
 
     The native module's CFTC/FRED rule and Finnhub catalyst are retained. The
@@ -117,16 +148,16 @@ def configure_strategies(strategies, config):
     if config.get('stabilization_profile_policy') != POLICY:
         return list(strategies)
     try:
+        exclusions,retired=_profile_source_scope(config,full_config=full_config)
         congress_continuity.configured(config)
         if (enrichment_capabilities.configured(config)
                 and config.get('research_resilience_policy') != 'dependency_isolation_v1'):
             raise ValueError()
-    except ValueError:
+    except (ValueError,TypeError,KeyError,AttributeError):
         raise ValueError('invalid_stabilization_profile') from None
     if (config.get('disabled_strategy_capabilities') != CAPABILITY_EXCLUSIONS
-            or config.get('retired_sources') != {'regulations': {
-                'reason': EXCLUSIONS['regulatory_pipeline'], 'strategies': ['regulatory_pipeline']}}
-            or config.get('disabled_strategies') != EXCLUSIONS
+            or config.get('retired_sources') != retired
+            or config.get('disabled_strategies') != exclusions
             or any(config.get(key) is not None for key in OFF)):
         raise ValueError('invalid_stabilization_profile')
     from copy import copy
@@ -148,7 +179,7 @@ def source_support(config, payload):
     from ..modules import get_paper_trade_strategies
     from .research_resilience import project_sources, strategy_capability_holds
     from .source_inputs import source_codec_limits
-    strategies = configure_strategies(get_paper_trade_strategies(), config['autoresearch'])
+    strategies = configure_strategies(get_paper_trade_strategies(), config['autoresearch'],full_config=config)
     names = set(payload) | {'fred', 'yfinance', 'equity_universe'}
     names.update(source for strategy in strategies for source in strategy.data_sources)
     _, scope = project_sources(payload, names, codec_limits=source_codec_limits(config),
@@ -259,7 +290,7 @@ def evaluate_completion(profile: OperatingProfile, facts: dict) -> dict:
     try:
         filing_scope = filing.declared_scope(payload, config=profile.config['autoresearch'])
         retirement_scope = lifecycle.declared_scope(payload, profile.config['autoresearch'],
-            configure_strategies(get_paper_trade_strategies(), profile.config['autoresearch']))
+            configure_strategies(get_paper_trade_strategies(), profile.config['autoresearch'],full_config=profile.config))
         require(lifecycle._digest(_exclusion_scope(profile.config['autoresearch'], {
             filing.DECLARATION_KEY: filing_scope, lifecycle.DECLARATION_KEY: retirement_scope}))
             == profile.exclusion_scope_sha256, 'exclusion_scope_invalid')
@@ -273,7 +304,7 @@ def evaluate_completion(profile: OperatingProfile, facts: dict) -> dict:
         reasons.add('source_capabilities_invalid')
     health = facts.get('health', [])
     strategy_sources = {strategy.name: strategy.data_sources for strategy in
-        configure_strategies(get_paper_trade_strategies(), profile.config['autoresearch'])}
+        configure_strategies(get_paper_trade_strategies(), profile.config['autoresearch'],full_config=profile.config)}
     expected = {(policy, name) for policy in profile.horizon_policies.values() for name in profile.strategies}
     try:
         observed = [(row['policy_id'], row['strategy']) for row in health]

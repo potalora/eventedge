@@ -347,7 +347,7 @@ class MultiStrategyEngine:
 
         from .operating_contract import configured as stabilization_configured, configure_strategies as stabilization_strategies
         if stabilization_configured(self.config):
-            self.paper_trade_strategies = stabilization_strategies(self.paper_trade_strategies, self.ar_config)
+            self.paper_trade_strategies = stabilization_strategies(self.paper_trade_strategies, self.ar_config, full_config=self.config)
         from .filing_research_policy import declaration as filing_declaration
         filing_declaration(self.ar_config)
         from .source_lifecycle_policy import configured as lifecycle_configured

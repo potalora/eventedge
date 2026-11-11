@@ -680,8 +680,8 @@ def _current_projections(repo_root, *, now, verify):
         for generation in sorted(generations):
             if type(generation) is not str or not _GENERATION.fullmatch(generation):
                 raise ValueError("invalid intervention active generation")
-            metadata = _metadata(capture, generation)
-            if _head(capture, generation) != metadata["git_commit"]:
+            metadata = _metadata(capture, generation, session=session)
+            if _head(capture, generation, metadata=metadata) != metadata["git_commit"]:
                 raise ValueError("intervention active generation HEAD mismatch")
             report, paths = None, None
             try:
