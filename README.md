@@ -4,6 +4,13 @@ An autonomous event-driven trading research system with 11 enabled strategies ac
 
 The current closeout candidate uses the [reduced research profile](docs/research/2026-10-12-bulk-filing-rollback.md): bulk filing/media acquisition is disabled, and EDGAR-dependent research and new entries are explicitly excluded. The capabilities below describe the system; the profile's actual coverage is narrower. This topic-branch candidate is not deployed.
 
+For the deployed generation, current reliability work and deployment gates, start
+with [operating status](docs/reliability-status.md). The strategy catalogue below
+is broader than the deployed profile. [Future-generation work](docs/future-generations.md)
+stays parked until a demonstrated run failure requires a repair, or production
+reliability is established and a specific experiment is approved. An open PR is
+not a deployment queue.
+
 ## What it does
 
 Strategies examine events such as SEC filings, insider trades, and congressional disclosures. An LLM portfolio committee combines their signals and sizes positions for each scenario book.
