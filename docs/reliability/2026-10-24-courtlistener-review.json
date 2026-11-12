@@ -1,0 +1,37 @@
+{
+  "case": {
+    "accepted_observation_id": null,
+    "case_id": "courtlistener_screen_timeout_20261023",
+    "classification": "unresolved",
+    "evidence_kind": "retained_diagnostic",
+    "evidence_sha256": "476e0bcd48ec554fd8d6d1d7def469bef2bfa7b621a3215ad722c76f102b6472",
+    "http_status": null,
+    "lesson_code": "retain_unresolved_transport_evidence",
+    "operation": "unspecified",
+    "provenance": "native_observation",
+    "provider": "courtlistener",
+    "reason_code": "timeout",
+    "source": "courtlistener"
+  },
+  "evidence": {
+    "failed_screen_operations": 1,
+    "operation_count": 1,
+    "operational_report_sha256": "2e0efcf0a1ccec9bc1771a7166afd0b14615b236238488875b93a5cf0e9a5085",
+    "physical_attempts": 3,
+    "preflight_finished_at": "2026-10-23T22:01:25.261804+00:00",
+    "preflight_started_at": "2026-10-23T22:00:06.377685+00:00",
+    "subsequent_accepted_acquired_at": "2026-10-23T22:02:36.390419+00:00",
+    "subsequent_accepted_source_status": "success"
+  },
+  "generation": "gen_025",
+  "generation_commit": "e33cc9eed38aa668dbde5f5e2844b7fbfb9391ac",
+  "limits": [
+    "Exact failed request and exception subtype were not retained; root cause remains unresolved.",
+    "Three physical attempts are one failed screen operation, not three outages.",
+    "The later successful acquisition is a different observation; it cannot identify or overwrite the failed attempt.",
+    "No accepted-source observation identifier is assigned to preflight evidence.",
+    "This proposal does not clear the historical review diagnostic or authorize retries, substitutions, policy changes or deployment."
+  ],
+  "status": "reviewed_proposal_not_deployed",
+  "version": "eventedge_reviewed_reliability_lesson_v1"
+}
