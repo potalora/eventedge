@@ -1260,8 +1260,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
 
 def _completion_facts(state, profile, report, health, source_envelope, diagnose, *, enrichment_observation=None):
     """Read immutable screening and native committee rows without store writes."""
-    from .research_screening import _decode, _digest, VERSION
-    from .source_inputs import source_codec_limits
+    from .research_screening import _decode, _digest, VERSION, screening_codec_limits
     facts = {'report': report, 'health': health, 'source_envelope': source_envelope or {}, 'committees': {}}
     sample = {}
     try:
@@ -1270,7 +1269,7 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose,
             'epoch_id': report['epoch_id'], 'source_digest': source_envelope['digest'],
             'horizon_policies': profile.horizon_policies, 'strategies': list(profile.strategies)}
         store = SourceInputStore(state / 'source_cache', accepted_dir=state / 'source_inputs/screening',
-            **source_codec_limits(profile.config))
+            **screening_codec_limits())
         checkpoint_identity = {**identity, 'purpose': VERSION, 'epoch_id': report['epoch_id'],
             'research_resilience_policy': 'dependency_isolation_v1',
             'screening_binding_sha256': _digest(store, binding)}

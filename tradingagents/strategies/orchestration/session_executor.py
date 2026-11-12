@@ -404,7 +404,7 @@ class SessionExecutor:
         try:
             from tradingagents.default_config import DEFAULT_CONFIG
             from .generation_config import read_generation_config, apply_generation_config, _pairs
-            from .source_retirement import validate_generation_retirement
+            from .source_retirement import validate_generation_retirement, validate_code_revision, generation_for_session
             from .source_retirement_profile import profile_binding
             from . import shared_execution as shared
             from .source_inputs import (
@@ -433,6 +433,7 @@ class SessionExecutor:
                 return False
             row = matches[0]
             amendment = validate_generation_retirement(row, repo=repo)
+            revision = validate_code_revision(row, repo=repo)
             if amendment is None or self.ledger.path != state / self.ledger.cohort_id / 'portfolio.db':
                 return False
             _, frozen, _ = read_generation_config(row['config_file'], row['config_sha256'])
@@ -445,20 +446,49 @@ class SessionExecutor:
                 return False
             previous = self.metric_store.load_epoch(binding['epoch_id'])
             current = self.metric_store.load_epoch(epoch_id)
-            effective = date.fromisoformat(amendment['effective_session'])
+            old_selected = generation_for_session(row, reference_session.isoformat())
+            selected_current = generation_for_session(row, current.start_session.isoformat())
+            edges = {(amendment['previous_commit'], amendment['commit']): amendment['effective_session']}
+            if revision is not None:
+                edges[(revision['previous_commit'], revision['commit'])] = revision['effective_session']
+            pair = (previous.generation_commit, current.generation_commit)
+            effective = date.fromisoformat(edges.get(pair, revision['effective_session'] if revision else amendment['effective_session']))
+            adjacent = previous.end_session == previous_session(current.start_session)
+            if revision is not None and pair == (amendment['previous_commit'], revision['commit']):
+                # A pending original signal may span the intermediate retired
+                # epoch. Prove both recorded adjacent boundaries, never skip an
+                # unknown epoch merely because the final policy looks similar.
+                with self.metric_store._connect() as connection:
+                    epochs = [self.metric_store._epoch(item[0]) for item in connection.execute('SELECT payload_json FROM metric_epochs')]
+                middle = [item for item in epochs if previous.start_session < item.start_session < current.start_session]
+                if len(middle) != 1:
+                    return False
+                bridge = middle[0]
+                adjacent = (bridge.generation_id == row['gen_id'] and bridge.generation_commit == amendment['commit']
+                    and bridge.status == 'closed' and bridge.boundary_reason == 'semantic_hash_changed'
+                    and bridge.start_session >= date.fromisoformat(amendment['effective_session'])
+                    and previous.end_session == previous_session(bridge.start_session)
+                    and bridge.end_session == previous_session(current.start_session)
+                    and bridge.config_hash == current.config_hash
+                    and all(getattr(bridge,key)==getattr(current,key) for key in
+                        ('metric_schema_version','execution_clock_version','pricing_version','cost_model_version')))
+            elif pair not in edges:
+                return False
+            if revision is not None and pair == (revision['previous_commit'], revision['commit']) and previous.config_hash != current.config_hash:
+                return False
             if (previous.generation_id != row['gen_id'] or current.generation_id != row['gen_id']
-                    or previous.generation_commit != amendment['previous_commit']
-                    or current.generation_commit != amendment['commit']
+                    or previous.generation_commit != old_selected['git_commit']
+                    or current.generation_commit != selected_current['git_commit']
                     or previous.status != 'closed' or previous.end_session is None
                     or previous.boundary_reason != 'semantic_hash_changed'
                     or not previous.start_session <= reference_session <= previous.end_session
                     or not reference_session < effective <= current.start_session
-                    or previous.end_session != previous_session(current.start_session)
+                    or not adjacent
                     or current.status not in {'open', 'closed'}
                     or any(getattr(previous, key) != getattr(current, key) for key in
                         ('metric_schema_version', 'execution_clock_version', 'pricing_version', 'cost_model_version'))):
                 return False
-            old_config = apply_generation_config(DEFAULT_CONFIG, amendment['previous_config_file'], amendment['previous_config_sha256'])
+            old_config = apply_generation_config(DEFAULT_CONFIG, old_selected['config_file'], old_selected['config_sha256'])
             old_config['autoresearch']['state_dir'] = str(state)
             owner = SimpleNamespace(_base_config=old_config, _metric_epoch_context=previous)
             # Historical credentials need not remain usable or unchanged. Join
@@ -495,7 +525,7 @@ class SessionExecutor:
             seal = seal_store.load_frozen(seal_identity)
             if (not isinstance(seal, Mapping) or set(seal) != shared.FIELDS
                     or seal['version'] != shared.VERSION or seal['session'] != reference_session
-                    or seal['profile_sha256'] != amendment['previous_config_sha256']
+                    or seal['profile_sha256'] != old_selected['config_sha256']
                     or seal['configuration'] != accepted_identity['configuration']
                     or type(seal['effective_configuration']) is not str
                     or len(seal['effective_configuration']) != 64

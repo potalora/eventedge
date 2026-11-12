@@ -18,9 +18,21 @@ from .research_resilience import POLICY, configured
 from .source_inputs import MAX_DEPTH, SourceInputError, SourceInputStore, daily_source_store
 
 VERSION = 'research-screening-v1'
+MAX_SCREENING_BYTES = 512 * 1024 * 1024
+MAX_SCREENING_NODES = 8_000_000
 _HORIZONS = frozenset(('30d', '3m', '6m', '1y'))
 _HEALTH_FIELDS = frozenset(field.name for field in fields(StrategyHealthRecord))
 Screening = dict[str, tuple[list[dict], dict, list[StrategyHealthRecord]]]
+
+
+def screening_codec_limits() -> dict[str, int]:
+    """Bound the complete all-horizon checkpoint independently of providers.
+
+    Screening retains aggregate model, signal and failure evidence. Its former
+    finite capacity must not disappear when an unrelated source is retired.
+    Provider acquisition and MAIN source stores keep their own codec limits.
+    """
+    return {'max_bytes': MAX_SCREENING_BYTES, 'max_nodes': MAX_SCREENING_NODES}
 
 
 def _require(condition: bool, reason: str) -> None:
@@ -64,7 +76,7 @@ def _context(owner: Any, session: date, source_digest: str, horizons=None):
              and len(set(policies.values())) == len(policies), 'policy scope invalid')
     shared, source_identity = daily_source_store(owner, session.isoformat())
     store = SourceInputStore(shared.cache_dir, accepted_dir=shared.accepted_dir / 'screening',
-        ttl_s=shared.ttl_s, **shared.codec_limits)
+        ttl_s=shared.ttl_s, **screening_codec_limits())
     binding = {'policy': POLICY, 'source_identity': source_identity, 'epoch_id': owner._epoch_id,
         'source_digest': source_digest, 'horizon_policies': policies, 'strategies': strategies}
     identity = {**source_identity, 'purpose': VERSION, 'epoch_id': owner._epoch_id,
