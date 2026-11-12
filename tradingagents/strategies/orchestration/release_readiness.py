@@ -31,7 +31,7 @@ from tradingagents.strategies.orchestration.runtime_lock import (
 )
 from tradingagents.strategies.orchestration.session_executor import PHASES
 from tradingagents.strategies.orchestration.source_retirement import (
-    CONFIG_NAME, generation_for_session, validate_generation_retirement,
+    CONFIG_NAME, execution_boundary, generation_for_session, validate_generation_retirement,
 )
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
@@ -451,7 +451,7 @@ def _verify_worktree(
     if binding is not None:
         from .runtime_recovery import identity_for
 
-        identity = identity_for(repo, generation, binding['effective_session'])
+        identity = identity_for(repo, generation, execution_boundary(generation))
         if identity['generation_commit'] != commit:
             raise ValueError('candidate worktree commit differs from expected commit')
         return

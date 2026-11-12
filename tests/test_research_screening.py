@@ -255,11 +255,14 @@ def test_interruption_at_publication_restores_the_complete_first_sample(owner, m
     assert accepted_file(owner).read_bytes() == before
 
 
-def test_checkpoint_inherits_codec_limit_without_publishing_oversize_sample(owner, monkeypatch):
+@pytest.mark.parametrize('limit,value,error', [
+    ('MAX_SCREENING_BYTES', 2048, 'byte limit'),
+    ('MAX_SCREENING_NODES', 128, 'structural bounds'),
+])
+def test_checkpoint_capacity_is_finite_without_publishing_oversize_sample(owner, monkeypatch, limit, value, error):
     module = api()
-    from tradingagents.strategies.orchestration import source_inputs
-    monkeypatch.setattr(source_inputs, 'MAX_BYTES', 2048)
-    with pytest.raises(SourceInputError, match='byte limit'):
+    monkeypatch.setattr(module, limit, value)
+    with pytest.raises(SourceInputError, match=error):
         module.freeze_screening(owner, SESSION, SOURCE, screening(owner), {'complete': True})
     assert not list((Path(owner._base_config['autoresearch']['state_dir']) / 'source_inputs' / 'screening').glob('*.json'))
 

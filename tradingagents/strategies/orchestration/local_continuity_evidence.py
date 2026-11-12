@@ -24,7 +24,7 @@ from . import operational_report as report_io
 from .generation_config import apply_generation_config
 from .local_continuity import REQUIRED_CHECKS, classify_session
 from .release_readiness import _accounting_and_staging, _session_epoch
-from .research_screening import VERSION, _decode, _digest
+from .research_screening import VERSION, _decode, _digest, screening_codec_limits
 from .research_resilience import POLICY
 from .source_inputs import CONTRACT_VERSION, SourceInputStore, configuration_fingerprint, source_codec_limits
 from .trading_calendar import session_close, session_open, next_session
@@ -95,7 +95,7 @@ def _native(provenance, request=None, *, role=None):
 def _screening(state, source, epoch, config, strategies, wire, session, start, finish):
     slot = configuration_fingerprint({'generation':source['identity']['generation'], 'session':session})
     path = state / 'source_inputs/screening' / (slot+'.json')
-    limits = source_codec_limits(config)
+    limits = screening_codec_limits()
     store = SourceInputStore(state/'unused-read-only-cache', **limits)
     _require(not path.is_symlink() and path.stat().st_size <= limits.get('max_bytes', report_io.MAX_BYTES))
     envelope = SourceInputStore.decode(path.read_text(), **limits)

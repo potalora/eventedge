@@ -208,9 +208,10 @@ def atomic_json(path: Path, document: dict) -> None:
 def identity_for(repo: Path, generation: dict, session: str) -> dict:
     """Bind identity to actual checkout/profile, never to environment assertions."""
     from .generation_config import read_generation_config
-    from .source_retirement import validate_generation_retirement, generation_for_session, config_path_for_generation
+    from .source_retirement import validate_generation_retirement, generation_for_session, config_path_for_generation, validate_code_revision
     date.fromisoformat(session)
     binding = validate_generation_retirement(generation, repo=repo)
+    revision = validate_code_revision(generation, repo=repo)
     logical_worktree = generation['worktree_path']
     generation = generation_for_session(generation, session)
     commit = generation['git_commit']
@@ -222,6 +223,8 @@ def identity_for(repo: Path, generation: dict, session: str) -> dict:
     expected_worktree = repo / '.worktrees' / generation['gen_id']
     if binding is not None and session < binding['effective_session']:
         expected_worktree = Path(binding['previous_worktree_path'])
+    elif revision is not None and session < revision['effective_session']:
+        expected_worktree = Path(revision['previous_worktree_path'])
     expected_state = repo / 'data/generations' / generation['gen_id']
     if worktree != expected_worktree or state != expected_state:
         raise ValueError('identity_mismatch')
@@ -305,6 +308,9 @@ def load_journal(path: Path) -> dict:
             raise ValueError('state_corrupt')
         if 'launch_mode' in row or 'launch_intent' in row:
             validate_prospective_intent(row)
+        if 'operator_assessment_sha256' in row:
+            from .operator_assessment import validate_operator_assessment
+            validate_operator_assessment(path.parents[2], row, row['operator_assessment_sha256'])
     return document
 
 

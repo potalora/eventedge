@@ -10,8 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Include both retained and fresh-profile acceptance with a finite margin.
-    timeout-minutes: 90
+    # Include the complete workflow and recovery regressions with a finite margin.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

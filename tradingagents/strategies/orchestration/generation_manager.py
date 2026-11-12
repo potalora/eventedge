@@ -680,6 +680,7 @@ class GenerationInfo:
     config_file: str | None = None
     config_sha256: str | None = None
     source_retirement: dict | None = None
+    code_revision: dict | None = None
 
 
 class GenerationManifestError(ValueError):
@@ -822,6 +823,7 @@ class GenerationManager:
 
         record = asdict(info)
         record.pop('source_retirement')
+        record.pop('code_revision')
         if profile is None:
             record.pop('config_file')
             record.pop('config_sha256')
@@ -1186,10 +1188,12 @@ class GenerationManager:
         their independent outcome-free report contract.
         """
         if gen_data.get('source_retirement') is not None:
-            from .source_retirement import generation_for_session
+            from .source_retirement import generation_for_session, execution_boundary
 
             try:
                 session = extra_args[extra_args.index('--date') + 1]
+                if session < execution_boundary(gen_data):
+                    raise GenerationManifestError('historical generation revisions are read-only')
                 gen_data = generation_for_session(gen_data, session)
             except (ValueError, IndexError) as error:
                 raise GenerationManifestError('source retirement requires an exact session') from error
@@ -1594,7 +1598,7 @@ class GenerationManager:
         if not isinstance(data, dict) or not isinstance(data.get("generations"), list):
             raise GenerationManifestError("generation manifest requires a generations list")
         optional_config = {'config_file', 'config_sha256'}
-        required = {item.name for item in fields(GenerationInfo)} - optional_config - {'source_retirement'}
+        required = {item.name for item in fields(GenerationInfo)} - optional_config - {'source_retirement', 'code_revision'}
         seen = set()
         for row in data["generations"]:
             if not isinstance(row, dict) or not required.issubset(row):

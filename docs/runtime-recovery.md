@@ -144,6 +144,13 @@ incident, inspect its exact generation/session report and the underlying accepte
 proof. Do not delete the journal, refresh frozen inputs, change a profile, or
 replay a past session merely to clear an alert.
 
+The separately authorized [screening capacity repair](research-screening-capacity.md)
+adds a proof-bound operator assessment for its specific failed checkpoint. It
+records completed accounting with missed prospective staging while retaining the
+original failure. Its commit-only revision preserves each historical session's
+code identity and the existing frozen profile. It does not enable automatic
+operator dismissal, historical inference or a generic in-place amendment.
+
 ## Verification scope
 
 The focused runtime tests use real sixteen-book accounting/staging methods,
