@@ -1,0 +1,346 @@
+{
+  "cases": [
+    {
+      "alternative": {
+        "median_ms": 0.490834,
+        "p95_ms": 0.64392
+      },
+      "budget": 4,
+      "horizon": "1y",
+      "legacy": {
+        "median_ms": 0.411793,
+        "p95_ms": 0.558754
+      },
+      "session": "2026-10-22",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.863344,
+        "p95_ms": 2.07921
+      },
+      "budget": 3,
+      "horizon": "1y",
+      "legacy": {
+        "median_ms": 1.740677,
+        "p95_ms": 2.017729
+      },
+      "session": "2026-10-22",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.249988,
+        "p95_ms": 2.392909
+      },
+      "budget": 4,
+      "horizon": "1y",
+      "legacy": {
+        "median_ms": 1.32004,
+        "p95_ms": 1.446616
+      },
+      "session": "2026-10-22",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.491914,
+        "p95_ms": 0.969561
+      },
+      "budget": 4,
+      "horizon": "30d",
+      "legacy": {
+        "median_ms": 0.410934,
+        "p95_ms": 0.797708
+      },
+      "session": "2026-10-22",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.900409,
+        "p95_ms": 2.828855
+      },
+      "budget": 3,
+      "horizon": "30d",
+      "legacy": {
+        "median_ms": 1.764588,
+        "p95_ms": 2.269911
+      },
+      "session": "2026-10-22",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.253578,
+        "p95_ms": 2.390478
+      },
+      "budget": 4,
+      "horizon": "30d",
+      "legacy": {
+        "median_ms": 1.324758,
+        "p95_ms": 1.378852
+      },
+      "session": "2026-10-22",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.489776,
+        "p95_ms": 0.50817
+      },
+      "budget": 4,
+      "horizon": "3m",
+      "legacy": {
+        "median_ms": 0.406249,
+        "p95_ms": 0.435712
+      },
+      "session": "2026-10-22",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.871918,
+        "p95_ms": 2.076109
+      },
+      "budget": 3,
+      "horizon": "3m",
+      "legacy": {
+        "median_ms": 1.747159,
+        "p95_ms": 1.92739
+      },
+      "session": "2026-10-22",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.27638,
+        "p95_ms": 2.621729
+      },
+      "budget": 4,
+      "horizon": "3m",
+      "legacy": {
+        "median_ms": 1.333468,
+        "p95_ms": 1.519168
+      },
+      "session": "2026-10-22",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.485393,
+        "p95_ms": 0.50596
+      },
+      "budget": 4,
+      "horizon": "6m",
+      "legacy": {
+        "median_ms": 0.404935,
+        "p95_ms": 0.422888
+      },
+      "session": "2026-10-22",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.865108,
+        "p95_ms": 1.985139
+      },
+      "budget": 3,
+      "horizon": "6m",
+      "legacy": {
+        "median_ms": 1.743503,
+        "p95_ms": 1.865743
+      },
+      "session": "2026-10-22",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.269725,
+        "p95_ms": 2.586204
+      },
+      "budget": 4,
+      "horizon": "6m",
+      "legacy": {
+        "median_ms": 1.326746,
+        "p95_ms": 1.647342
+      },
+      "session": "2026-10-22",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.49312,
+        "p95_ms": 0.551556
+      },
+      "budget": 4,
+      "horizon": "1y",
+      "legacy": {
+        "median_ms": 0.410286,
+        "p95_ms": 0.456351
+      },
+      "session": "2026-10-23",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.730831,
+        "p95_ms": 1.80748
+      },
+      "budget": 3,
+      "horizon": "1y",
+      "legacy": {
+        "median_ms": 1.633943,
+        "p95_ms": 1.721507
+      },
+      "session": "2026-10-23",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.339098,
+        "p95_ms": 2.900661
+      },
+      "budget": 4,
+      "horizon": "1y",
+      "legacy": {
+        "median_ms": 1.368454,
+        "p95_ms": 1.691356
+      },
+      "session": "2026-10-23",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.48904,
+        "p95_ms": 0.512019
+      },
+      "budget": 4,
+      "horizon": "30d",
+      "legacy": {
+        "median_ms": 0.408637,
+        "p95_ms": 0.440987
+      },
+      "session": "2026-10-23",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.731388,
+        "p95_ms": 2.06004
+      },
+      "budget": 3,
+      "horizon": "30d",
+      "legacy": {
+        "median_ms": 1.63393,
+        "p95_ms": 1.797136
+      },
+      "session": "2026-10-23",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.328397,
+        "p95_ms": 2.447788
+      },
+      "budget": 4,
+      "horizon": "30d",
+      "legacy": {
+        "median_ms": 1.358441,
+        "p95_ms": 1.442032
+      },
+      "session": "2026-10-23",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.487998,
+        "p95_ms": 0.500826
+      },
+      "budget": 4,
+      "horizon": "3m",
+      "legacy": {
+        "median_ms": 0.406355,
+        "p95_ms": 0.42671
+      },
+      "session": "2026-10-23",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.725904,
+        "p95_ms": 1.815332
+      },
+      "budget": 3,
+      "horizon": "3m",
+      "legacy": {
+        "median_ms": 1.633079,
+        "p95_ms": 1.759037
+      },
+      "session": "2026-10-23",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.334005,
+        "p95_ms": 2.4185
+      },
+      "budget": 4,
+      "horizon": "3m",
+      "legacy": {
+        "median_ms": 1.357657,
+        "p95_ms": 1.412973
+      },
+      "session": "2026-10-23",
+      "strategy": "supply_chain"
+    },
+    {
+      "alternative": {
+        "median_ms": 0.488507,
+        "p95_ms": 0.523709
+      },
+      "budget": 4,
+      "horizon": "6m",
+      "legacy": {
+        "median_ms": 0.40642,
+        "p95_ms": 0.449891
+      },
+      "session": "2026-10-23",
+      "strategy": "earnings_call"
+    },
+    {
+      "alternative": {
+        "median_ms": 1.742237,
+        "p95_ms": 2.246737
+      },
+      "budget": 3,
+      "horizon": "6m",
+      "legacy": {
+        "median_ms": 1.645771,
+        "p95_ms": 2.904447
+      },
+      "session": "2026-10-23",
+      "strategy": "govt_contracts"
+    },
+    {
+      "alternative": {
+        "median_ms": 2.324608,
+        "p95_ms": 4.16744
+      },
+      "budget": 4,
+      "horizon": "6m",
+      "legacy": {
+        "median_ms": 1.351573,
+        "p95_ms": 2.063915
+      },
+      "session": "2026-10-23",
+      "strategy": "supply_chain"
+    }
+  ],
+  "fixture_path": "docs/experiments/2026-10-24-selection/selection-fixture.json",
+  "fixture_sha256": "f0cc7c28194deddcd2ae51dc18e649802cf396da761a567893401dbb72fa4636",
+  "platform": "Linux x86_64",
+  "python": "3.12.3",
+  "repetitions_per_case_policy": 100,
+  "scope": "Local selector including validation/copy; excludes source, model and trading work."
+}
