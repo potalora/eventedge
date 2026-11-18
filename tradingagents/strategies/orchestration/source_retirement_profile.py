@@ -37,6 +37,7 @@ def _previous(proof):
     _validate(previous)
     ar=previous.get('autoresearch',{})
     if (type(ar) is not dict or 'state_dir' in ar or type(ar.get('paper_ledger',{})) is not dict
+            or 'congress' in ar.get('retired_sources',{})
             or ar.get('paper_ledger',{}).get('policy_id') is not None and
             (type(ar['paper_ledger']['policy_id']) is not str or not ar['paper_ledger']['policy_id'].strip())):
         _invalid()

@@ -63,7 +63,7 @@ def _exclusion_scope(ar, declarations):
 
 
 def _profile_source_scope(ar,full_config=None):
-    """Validate runtime source scope against a separately verified raw amendment.
+    """Validate fresh source scope or a separately verified raw amendment.
 
     Runtime capital, risk, state paths and the appended ledger policy are owned by
     their existing loaders. They are deliberately outside this source-only check.
@@ -71,7 +71,7 @@ def _profile_source_scope(ar,full_config=None):
     exclusions=dict(EXCLUSIONS)
     retired={'regulations':{'reason':EXCLUSIONS['regulatory_pipeline'],'strategies':['regulatory_pipeline']}}
     proof=full_config.get('source_retirement') if isinstance(full_config,dict) else None
-    if proof is not None or 'congress' in ar.get('retired_sources',{}):
+    if isinstance(full_config,dict) and 'source_retirement' in full_config:
         from .source_retirement_profile import make_retired_profile,REASON
         if type(proof) is not dict:raise ValueError('invalid_stabilization_profile')
         reconstructed=make_retired_profile(proof.get('previous_config_text'),proof.get('effective_session'))
@@ -84,8 +84,18 @@ def _profile_source_scope(ar,full_config=None):
         if any(ar.get(key)!=expected.get(key) for key in fields):raise ValueError('invalid_stabilization_profile')
         exclusions['congressional_trades']=REASON
         retired['congress']={'reason':REASON,'strategies':['congressional_trades']}
-    elif isinstance(full_config,dict) and 'source_retirement' in full_config:
-        raise ValueError('invalid_stabilization_profile')
+    elif 'congress' in ar.get('retired_sources',{}):
+        from .source_retirement_profile import REASON
+        # Fresh retirement has no historical proof or derived amendment marker.
+        if (not isinstance(full_config,dict)
+                or '_source_retirement_profile_sha256' in full_config
+                or any(key not in ar or ar[key] is not None for key in
+                    ('congress_disclosure_policy','congress_audit_continuity_policy'))):
+            raise ValueError('invalid_stabilization_profile')
+        exclusions['congressional_trades']=REASON
+        retired['congress']={'reason':REASON,'strategies':['congressional_trades']}
+        if ar.get('disabled_strategies')!=exclusions or ar.get('retired_sources')!=retired:
+            raise ValueError('invalid_stabilization_profile')
     return exclusions,retired
 
 
@@ -113,7 +123,7 @@ def profile_contract(frozen_config: dict, *, profile_sha256: str) -> OperatingPr
                 or ar.get('source_capability_policy') != 'regime_strategy_capabilities_v1'
                 or ar.get('courtlistener_scope_policy') != 'focused_litigation_v1'
                 or ar.get('noaa_delivery_policy') != 'ghcnd_yearly_v1'
-                or ar.get('congress_disclosure_policy') != (None if binding else 'display_audit_only_v1')
+                or ar.get('congress_disclosure_policy') != (None if 'congress' in retired else 'display_audit_only_v1')
                 or ar.get('equity_universe_policy') != 'us_exchange_listed_sip_v1'
                 or any(ar.get(key) is not None for key in OFF)
                 or ar.get('bounded_document_registry') not in (None, [])
