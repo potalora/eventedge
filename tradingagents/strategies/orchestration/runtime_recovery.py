@@ -6,7 +6,7 @@ cycle remains the sole path that may initiate a new sample.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 import hashlib
@@ -481,7 +481,7 @@ def session_recovery_proof(state, generation, session, epoch_id):
         path = state/name/'portfolio.db'
         if path.is_symlink() or not path.is_file():
             raise ValueError('recovery book missing')
-        with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as connection:
+        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as connection, connection:
             connection.row_factory = sqlite3.Row
             connection.execute('PRAGMA query_only=ON')
             context = connection.execute('SELECT * FROM session_execution_contexts WHERE session=?', (session,)).fetchall()
@@ -525,7 +525,7 @@ def session_recovery_proof(state, generation, session, epoch_id):
                 'staging_run_id':staging['staging_run_id'], 'staging_post_state_digest':staging['post_state_digest'],
                 'staging_digest':_hash_document(staging), 'snapshot_digest':_hash_document(snapshot),
                 'committee_digest':_hash_document(committee)}
-    with sqlite3.connect(f'file:{state / "metrics_v2.sqlite3"}?mode=ro',uri=True) as connection:
+    with closing(sqlite3.connect(f'file:{state / "metrics_v2.sqlite3"}?mode=ro',uri=True)) as connection, connection:
         connection.row_factory = sqlite3.Row
         connection.execute('PRAGMA query_only=ON')
         for table in ('strategy_health','candidate_bar_recoveries','governed_bar_recoveries',

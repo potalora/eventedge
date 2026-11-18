@@ -8,6 +8,7 @@ mode; it never calls providers or models.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 import fcntl
 import json
@@ -61,7 +62,7 @@ def _discover_sessions(row, now):
     state = Path(row['state_dir']).resolve()
     oldest = (exchange_date(now) - timedelta(days=10)).isoformat()
     for path in sorted(state.glob('horizon_*/portfolio.db'))[:16]:
-        with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as connection:
+        with closing(sqlite3.connect(f'file:{path}?mode=ro', uri=True)) as connection, connection:
             values = connection.execute('SELECT DISTINCT c.session FROM session_execution_contexts c '
                 'LEFT JOIN staging_runs s ON s.session=c.session AND s.cohort_id=c.cohort_id '
                 'WHERE c.session>=? AND s.session IS NULL LIMIT 10', (oldest,)).fetchall()
