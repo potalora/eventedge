@@ -747,17 +747,18 @@ def _run_screen_preflight(
                 report['failures'].append({'horizon': 'shared', 'strategy': 'source_health',
                     'ticker': None, 'error': f'{source}: required capability unavailable'})
         for source in sorted(source_errors):
+            # Enrichment is outside the strict required-source diagnostic wire.
+            if source in OPTIONAL_ENRICHMENT_SOURCES:
+                report["source_warnings"].append(
+                    {"source": source, "error": "optional enrichment unavailable"}
+                )
+                continue
             if bulk_scope is not None:
                 from .operating_contract import optional_source_failure
                 failure = _screen_source_failure(source, shared_data.get(source))
                 if optional_source_failure(failure, shared_data, failed_required):
                     report['source_warnings'].append({'source': source, 'error': 'optional capability unavailable'})
                     continue
-            if source in OPTIONAL_ENRICHMENT_SOURCES:
-                report["source_warnings"].append(
-                    {"source": source, "error": "optional enrichment unavailable"}
-                )
-                continue
             report["screen_source_failures"].append(
                 _screen_source_failure(source, shared_data.get(source))
             )

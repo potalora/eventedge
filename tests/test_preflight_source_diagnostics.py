@@ -43,6 +43,79 @@ def _failed_payload():
     }
 
 
+def _bulk_screen_fixture(tmp_path):
+    from test_stabilization_contract import profile
+    from test_source_capabilities import fred_payload, yahoo_engine
+    from tradingagents.strategies.orchestration import filing_research_policy as filing
+    from tradingagents.strategies.orchestration import source_lifecycle_policy as lifecycle
+    from tradingagents.strategies.orchestration.congress_policy import declaration as congress
+
+    from tradingagents.strategies.modules import get_paper_trade_strategies
+    from tradingagents.strategies.orchestration.operating_contract import configure_strategies
+
+    config = profile().config
+    ar = config["autoresearch"]
+    strategies = configure_strategies(get_paper_trade_strategies(), ar)
+    for strategy in strategies:
+        strategy.screen = lambda data, trading_date, params: []
+    data = {source: {} for strategy in strategies for source in strategy.data_sources}
+    data.pop("regulations", None)
+    data["equity_universe"] = {}
+    data.update(filing.declaration(ar))
+    data.update(lifecycle.declaration(ar, strategies))
+    data.update(congress(ar))
+    data["edgar"] = filing.sentinel()
+    data["fred"] = fred_payload(tmp_path / "fred")
+    data["yfinance"] = yahoo_engine(tmp_path / "yahoo")._fetch_yfinance_data(
+        "2026-09-01", "2026-10-06"
+    )
+    engine = _Engine(data)
+    engine.paper_trade_strategies = strategies
+    return config, engine
+
+
+@pytest.mark.parametrize("required_failed", [False, True])
+def test_bulk_optional_openbb_warning_preserves_required_failure(tmp_path, required_failed):
+    from tradingagents.strategies.orchestration.preflight import _run_screen_preflight
+
+    config, engine = _bulk_screen_fixture(tmp_path)
+    data = engine.data
+    # Synthetic unavailable enrichment, including opaque text that must not escape.
+    data["openbb"] = {"error": "API_SECRET https://provider.invalid/private",
+        "_coverage": {"status": "unavailable", "reason_code": "provider_error"}}
+    if required_failed:
+        data["noaa"] = _failed_payload()
+    report = _run_screen_preflight(config, "2026-10-06", engine=engine)
+    assert report["ok"] is (not required_failed), report
+    assert report["source_warnings"] == [
+        {"source": "openbb", "error": "optional enrichment unavailable"}]
+    assert report["screen_source_failures"] == ([_failure()] if required_failed else [])
+    assert report["failures"] == ([{"horizon": "shared", "strategy": "source_health",
+        "ticker": None, "error": "noaa: provider fetch failed"}] if required_failed else [])
+    assert len(report["horizons"]) == 4
+    assert report["coverage_excluded"] is True
+    assert report["research_coverage_complete"] is False
+    assert "API_SECRET" not in json.dumps(report)
+    assert "provider.invalid" not in json.dumps(report)
+
+
+def test_bulk_unknown_source_still_fails_closed(tmp_path):
+    from tradingagents.strategies.orchestration.preflight import _run_screen_preflight
+
+    config, engine = _bulk_screen_fixture(tmp_path)
+    strategy = _EmptyStrategy()
+    strategy.data_sources = (*strategy.data_sources, "unknown_source")
+    engine.paper_trade_strategies.append(strategy)
+    engine.data["unknown_source"] = {"error": "API_SECRET"}
+    report = _run_screen_preflight(config, "2026-10-06", engine=engine)
+    assert report["ok"] is False
+    assert report["screen_runtime_failures"] == [
+        {"phase": "screen", "reason_code": "screen_runtime_error"}]
+    assert report["source_warnings"] == []
+    assert report["horizons"] == {}
+    assert "API_SECRET" not in json.dumps(report)
+
+
 def _failure():
     return {"source": "noaa", "reason_code": "invalid_response", "http_status": None,
             "attempts": 1, "operation_count": 1}
