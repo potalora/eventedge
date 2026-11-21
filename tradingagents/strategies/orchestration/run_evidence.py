@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .run_outcome import DAILY_RESULT_PREFIX
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,6 +94,8 @@ _SCHEME_VALUE_RE = re.compile(
 _URL_USERINFO_RE = re.compile(
     r"(?P<prefix>\b[a-z][a-z0-9+.-]*://)[^/@\s]+@", re.IGNORECASE
 )
+_JSON_LITERAL_WORDS = frozenset({"true", "false", "null"})
+_JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
 def _text(value: str | bytes | None) -> str:
@@ -166,6 +170,41 @@ def _sanitize(value: Any, credential_values: tuple[str, ...]) -> Any:
     return value
 
 
+def _sanitize_daily_stdout(value: Any, credential_values: tuple[str, ...]) -> Any:
+    # An environment value can equal JSON syntax. Exempt it only outside
+    # strings in the single, final, parseable daily result. Never repair
+    # suspect output or exempt matching words in ordinary logs.
+    literals = _JSON_LITERAL_WORDS.intersection(credential_values)
+    if not literals or not isinstance(value, str):
+        return _sanitize(value, credential_values)
+
+    lines = value.splitlines(keepends=True)
+    marked = [i for i, line in enumerate(lines) if line.startswith(DAILY_RESULT_PREFIX)]
+    if len(marked) != 1 or any(line.strip() for line in lines[marked[0] + 1:]):
+        return _sanitize_text(value, credential_values)
+    i = marked[0]
+    wire = lines[i].removeprefix(DAILY_RESULT_PREFIX)
+    ordinary_values = tuple(word for word in credential_values if word not in literals)
+    try:
+        json.loads(wire)
+        # Keep full-value redaction ahead of literal matching (e.g. when a
+        # longer credential contains one of the literal words).
+        wire = _sanitize_text(wire, ordinary_values)
+        json.loads(wire)
+    except (ValueError, RecursionError):
+        return _sanitize_text(value, credential_values)
+
+    def redact_literals(match: re.Match[str]) -> str:
+        text = match.group()
+        for literal in literals:
+            text = text.replace(literal, "<redacted>")
+        return text
+
+    return (_sanitize_text("".join(lines[:i]), credential_values) + DAILY_RESULT_PREFIX
+            + _JSON_STRING_RE.sub(redact_literals, wire)
+            + _sanitize_text("".join(lines[i + 1:]), credential_values))
+
+
 def persist_run_evidence(repo_root: str | Path, evidence: dict) -> Path:
     """Persist one immutable attempt artifact."""
     attempts_dir = Path(repo_root) / "data" / "logs" / "run_attempts"
@@ -173,7 +212,9 @@ def persist_run_evidence(repo_root: str | Path, evidence: dict) -> Path:
 
     credential_values = _credential_values()
     payload = {
-        field: _sanitize(evidence[field], credential_values)
+        field: (_sanitize_daily_stdout(evidence[field], credential_values)
+                if field == "stdout" and evidence["action"] == "daily"
+                else _sanitize(evidence[field], credential_values))
         for field in _EVIDENCE_FIELDS
     }
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
