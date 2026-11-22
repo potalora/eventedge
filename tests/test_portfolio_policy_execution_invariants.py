@@ -331,7 +331,7 @@ def _seed_post_exit_volatility_case(
         executor,
         "HIGH",
         MONDAY,
-        1,
+        2,
         suffix="high",
         staging_context=context,
     )

@@ -8,8 +8,11 @@ the analyzer selects its prompt from the explicit text_source identity.
 
 from __future__ import annotations
 
+from datetime import date as calendar_date
+import hashlib
 import logging
-from typing import Any
+import math
+from typing import Any, Iterable, Mapping
 
 from .base import Candidate
 from .admission import admit_candidates
@@ -17,12 +20,101 @@ from .admission import admit_candidates
 logger = logging.getLogger(__name__)
 
 
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _eps_surprise_magnitude(item: Mapping[str, Any]) -> float | None:
+    """Return fractional absolute EPS surprise magnitude, or None if unavailable."""
+    pct = _finite_float(item.get("eps_surprise_pct"))
+    if pct is not None:
+        return abs(pct) / 100.0
+    eps_actual = _finite_float(item.get("eps_actual"))
+    eps_estimate = _finite_float(item.get("eps_estimate"))
+    if eps_actual is not None and eps_estimate is not None and eps_estimate != 0.0:
+        return abs((eps_actual - eps_estimate) / abs(eps_estimate))
+    meta = item.get("metadata")
+    if isinstance(meta, Mapping):
+        return _eps_surprise_magnitude(meta)
+    return None
+
+
+def _liquidity_metric(item: Mapping[str, Any]) -> float:
+    """Extract market cap / dollar volume liquidity signal (0.0 if absent)."""
+    for key in ("market_cap", "avg_dollar_volume", "dollar_volume", "liquidity", "volume"):
+        val = _finite_float(item.get(key))
+        if val is not None and val > 0:
+            return val
+    meta = item.get("metadata")
+    if isinstance(meta, Mapping):
+        for key in ("market_cap", "avg_dollar_volume", "dollar_volume", "liquidity", "volume"):
+            val = _finite_float(meta.get(key))
+            if val is not None and val > 0:
+                return val
+    return 0.0
+
+
+def _recency_ordinal(item: Mapping[str, Any]) -> int:
+    for key in ("report_date", "date", "published_at"):
+        raw = item.get(key)
+        if isinstance(raw, str) and len(raw) >= 10:
+            try:
+                return calendar_date.fromisoformat(raw[:10]).toordinal()
+            except ValueError:
+                continue
+    return 0
+
+
+def _deterministic_symbol_hash(symbol: str) -> str:
+    """Stable non-alphabetical tie-breaker so A-tickers never beat Z-tickers."""
+    canonical = str(symbol or "").strip().upper()
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def earnings_priority_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Deterministic economic rank key: EPS surprise -> liquidity -> recency -> hash.
+
+    Never sorts alphabetically by symbol.
+    """
+    surprise = _eps_surprise_magnitude(item)
+    has_surprise = 0 if surprise is not None else 1
+    surprise_mag = -(surprise if surprise is not None else 0.0)
+    liquidity = -_liquidity_metric(item)
+    recency = -_recency_ordinal(item)
+    symbol = str(item.get("symbol") or item.get("ticker") or "").strip().upper()
+    return (has_surprise, surprise_mag, liquidity, recency, _deterministic_symbol_hash(symbol))
+
+
+def prioritize_earnings_candidates(
+    items: Iterable[Mapping[str, Any]],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Rank earnings events by EPS surprise magnitude, liquidity/market cap, and recency.
+
+    Never sorts alphabetically and never drops valid numeric EPS surprises when
+    news count is zero.
+    """
+    ranked = sorted((dict(item) for item in items), key=earnings_priority_key)
+    if limit is not None:
+        if type(limit) is not int or limit < 0:
+            raise ValueError("limit must be a nonnegative integer or None")
+        return ranked[:limit]
+    return ranked
+
+
 class EarningsCallStrategy:
     """Paper-trade earnings research with explicitly identified text evidence."""
 
     name = "earnings_call"
     track = "paper_trade"
-    data_sources = ["finnhub", "yfinance", "openbb"]
+    data_sources = ["finnhub", "yfinance"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -50,46 +142,95 @@ class EarningsCallStrategy:
         """Screen for recent earnings events and generate candidates.
 
         Combines numerical EPS surprise and available text into one candidate
-        per fiscal event. News remains identified as earnings_news.
-
-        Expects data["finnhub"]["transcripts"] = list of dicts with
-        {symbol, year, quarter, transcript_text, text_source,
-         eps_actual, eps_estimate}.
+        per fiscal event. Valid numeric EPS surprises are retained even when
+        Finnhub news count is 0 (with explicit numeric-only metadata), while
+        still enriching with news text whenever present.
         """
         finnhub_data = data.get("finnhub", {})
-        transcripts = finnhub_data.get("transcripts", [])
+        transcripts = list(finnhub_data.get("transcripts", []) or [])
 
-        if not transcripts:
+        # Also accept numeric-surprise-only rows supplied via earnings_calendar / earnings
+        # if not already represented in transcripts.
+        seen_fiscal_events: set[tuple[str, Any, Any]] = set()
+        raw_events: list[dict[str, Any]] = []
+        for entry in transcripts:
+            if not isinstance(entry, Mapping):
+                continue
+            sym = str(entry.get("symbol") or "").strip().upper()
+            yr = entry.get("year")
+            qtr = entry.get("quarter")
+            if not sym or yr is None or qtr is None:
+                continue
+            key = (sym, yr, qtr)
+            if key in seen_fiscal_events:
+                continue
+            seen_fiscal_events.add(key)
+            raw_events.append(dict(entry, symbol=sym))
+
+        for fallback_key in ("earnings_calendar", "earnings"):
+            for entry in finnhub_data.get(fallback_key, []) or []:
+                if not isinstance(entry, Mapping):
+                    continue
+                sym = str(entry.get("symbol") or "").strip().upper()
+                yr = entry.get("year")
+                qtr = entry.get("quarter")
+                if not sym or yr is None or qtr is None:
+                    continue
+                key = (sym, yr, qtr)
+                if key in seen_fiscal_events:
+                    continue
+                eps_a = _finite_float(entry.get("eps_actual"))
+                eps_e = _finite_float(entry.get("eps_estimate"))
+                if eps_a is None or eps_e is None or eps_e == 0.0:
+                    continue
+                seen_fiscal_events.add(key)
+                raw_events.append(dict(entry, symbol=sym))
+
+        if not raw_events:
             return []
 
-        candidates = []
-        for t in transcripts:
-            symbol = t.get("symbol", "")
-            year = t.get("year")
-            quarter = t.get("quarter")
-            if not symbol or year is None or quarter is None:
-                continue
+        prioritized = prioritize_earnings_candidates(raw_events)
+        candidates: list[Candidate] = []
+        for t in prioritized:
+            symbol = t["symbol"]
+            year = t["year"]
+            quarter = t["quarter"]
 
             # One fiscal period is one source event. Quantitative and text
             # evidence enrich the same candidate instead of creating colliding
             # ledger identities with different payloads.
-            eps_actual = t.get("eps_actual")
-            eps_estimate = t.get("eps_estimate")
-            text = t.get("transcript_text", "")
-            metadata = {
+            eps_actual = _finite_float(t.get("eps_actual"))
+            eps_estimate = _finite_float(t.get("eps_estimate"))
+            has_numeric_surprise = (
+                eps_actual is not None
+                and eps_estimate is not None
+                and eps_estimate != 0.0
+            )
+            text = str(t.get("transcript_text") or "").strip()
+            raw_news_count = t.get("news_count")
+            news_count = (
+                int(raw_news_count)
+                if isinstance(raw_news_count, int) and not isinstance(raw_news_count, bool) and raw_news_count >= 0
+                else (1 if text else 0)
+            )
+            metadata: dict[str, Any] = {
                 "year": year,
                 "quarter": quarter,
                 "analysis_type": "earnings_call",
+                "news_count": news_count,
+                "has_news_text": bool(text),
             }
             if t.get("published_at"):
                 metadata["published_at"] = t["published_at"]
+            for liq_key in ("market_cap", "avg_dollar_volume", "dollar_volume", "liquidity", "volume"):
+                val = _finite_float(t.get(liq_key))
+                if val is not None and val > 0:
+                    metadata[liq_key] = val
+
             direction = "long"
             score = 0.5
-            if (
-                eps_actual is not None
-                and eps_estimate is not None
-                and eps_estimate != 0
-            ):
+            if has_numeric_surprise:
+                assert eps_actual is not None and eps_estimate is not None
                 surprise = (eps_actual - eps_estimate) / abs(eps_estimate)
                 score = round(min(abs(surprise) * 7.0, 1.0), 3)
                 direction = "long" if surprise > 0 else "short"
@@ -107,38 +248,55 @@ class EarningsCallStrategy:
                         "analysis_text": text[:5000],
                         "text_source": t.get("text_source", "earnings_news"),
                         "needs_llm_analysis": True,
+                        "evidence_mode": (
+                            "numeric_and_news" if has_numeric_surprise else "news_only"
+                        ),
                     }
                 )
                 metadata.setdefault("signal_tier", "paper_only")
-            if text or (eps_actual is not None and eps_estimate not in (None, 0)):
+            elif has_numeric_surprise:
+                metadata.update(
+                    {
+                        "needs_llm_analysis": False,
+                        "evidence_mode": "numeric_surprise_only",
+                    }
+                )
+
+            if text or has_numeric_surprise:
                 candidates.append(
                     Candidate(
                         ticker=symbol,
                         date=date,
                         direction=direction,
                         score=score,
+                        raw_signal_score=score,
                         metadata=metadata,
                     )
                 )
 
-        # Enrich with analyst consensus if available
-        openbb_data = data.get("openbb", {})
-        estimates = openbb_data.get("estimates", {})
-        if isinstance(estimates, dict):
-            for candidate in candidates:
-                est = estimates.get(candidate.ticker, {})
-                if not est:
-                    continue
-                consensus_eps = est.get("consensus_eps")
-                num_analysts = est.get("num_analysts", 0)
-                if consensus_eps is not None:
-                    candidate.metadata["consensus_eps"] = consensus_eps
-                    candidate.metadata["num_analysts"] = num_analysts
-                    # Boost score if many analysts cover (higher conviction)
-                    if num_analysts >= 10:
-                        candidate.score = min(candidate.score * 1.15, 1.0)
+        def _candidate_rank_key(candidate: Candidate) -> tuple[Any, ...]:
+            meta = candidate.metadata
+            surprise_pct = _finite_float(meta.get("eps_surprise_pct"))
+            has_surprise = 0 if surprise_pct is not None else 1
+            mag = -(
+                abs(surprise_pct) / 100.0
+                if surprise_pct is not None
+                else float(
+                    candidate.raw_signal_score
+                    if candidate.raw_signal_score is not None
+                    else candidate.score
+                )
+            )
+            liq = -_liquidity_metric(meta)
+            return (has_surprise, mag, liq, _deterministic_symbol_hash(candidate.ticker))
 
-        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
+        return admit_candidates(
+            self.name,
+            candidates,
+            params.get("analysis_budget", params.get("max_positions", 4)),
+            rank_key=_candidate_rank_key,
+            policy="eps_surprise_liquidity_hash_v1",
+        )
 
     def check_exit(
         self,

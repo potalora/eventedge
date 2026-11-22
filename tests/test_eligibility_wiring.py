@@ -40,12 +40,11 @@ class TestCohortEligibilityWiring:
         assert ss["borrow_cost_reject_above"] == 0.05
         assert ss["hard_to_borrow_si_pct"] == 30
 
-    def test_config_has_covered_call_options(self):
+    def test_config_disables_covered_call_options_overlays(self):
         from tradingagents.default_config import DEFAULT_CONFIG
-        opts = DEFAULT_CONFIG["options"]
-        assert opts["covered_call_min_hold_days"] == 14
-        assert opts["covered_call_default_dte"] == 30
-        assert opts["covered_call_strike_offset"] == 0.05
+        policy = DEFAULT_CONFIG["autoresearch"]["portfolio_policy"]
+        assert policy["options_overlays_enabled"] is False
+        assert "options" not in DEFAULT_CONFIG
 
     def test_autoresearch_model_is_luna_high_effort(self):
         from tradingagents.default_config import DEFAULT_CONFIG

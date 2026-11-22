@@ -3,7 +3,7 @@
 Signal logic:
 1. CFTC COT gate: extreme speculative positioning (contrarian).
 2. Macro confirmation: FRED data veto for contradicting macro regimes.
-3. Catalyst scan: regulatory/supply chain news for optional boost.
+3. Catalyst scan: supply chain / market news for optional boost.
 4. Emit ETF candidates via FUTURES_TO_ETF_MAP.
 """
 
@@ -82,7 +82,7 @@ class CommodityMacroStrategy:
 
     name = "commodity_macro"
     track = "paper_trade"
-    data_sources = ["yfinance", "cftc", "fred", "regulations", "finnhub"]
+    data_sources = ["yfinance", "cftc", "fred", "finnhub"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -183,6 +183,7 @@ class CommodityMacroStrategy:
                     date=date,
                     direction=direction,
                     score=base_score,
+                    raw_signal_score=base_score,
                     metadata={
                         "commodity": commodity,
                         "cot_percentile": percentile,
@@ -316,18 +317,9 @@ Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
             "nat_gas": ("natural gas", "lng", "gas pipeline"),
         }.get(commodity, (commodity,))
 
-        regs = data.get("regulations", {})
-        if isinstance(regs, dict):
-            results = regs.get("proposed_rules", regs.get("results", []))
-            if isinstance(results, list):
-                for reg in results:
-                    title = str(reg.get("title", "")).lower()
-                    if any(kw in title for kw in relevant_keywords):
-                        return True
-
         finnhub = data.get("finnhub", {})
         if isinstance(finnhub, dict):
-            news = [*finnhub.get("news", []), *finnhub.get("disruption_news", []), *finnhub.get("pqc_news", [])]
+            news = [*finnhub.get("news", []), *finnhub.get("disruption_news", [])]
             if isinstance(news, list):
                 for item in news:
                     headline = str(item.get("headline", "")).lower()

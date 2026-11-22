@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields as dataclass_fields, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from tradingagents.strategies.execution import (
     AccountState,
+    Fill,
     FillResult,
     MarketBar,
     OrderIntent,
@@ -26,6 +28,10 @@ from tradingagents.strategies.orchestration.trading_calendar import (
 )
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 from tradingagents.strategies.trading.portfolio_committee import TradeRecommendation
+from tradingagents.strategies.trading.portfolio_policy import (
+    PortfolioPolicy,
+    PortfolioRiskContext,
+)
 from tradingagents.strategies.trading.risk_gate import (
     PendingRiskEntry,
     RiskGate,
@@ -38,6 +44,90 @@ logger = logging.getLogger(__name__)
 DIRECT_SUBMISSION_DISABLED = (
     "Direct price submission is disabled; stage and execute a ledger intent"
 )
+
+_FILL_RESULT_FIELDS = frozenset(f.name for f in dataclass_fields(FillResult))
+
+_TRIMMABLE_RISK_PREFIXES = (
+    "max_position_pct:",
+    "buying_power:",
+    "cash_reserve:",
+    "margin_utilization:",
+)
+_TRIMMABLE_POLICY_REASONS = frozenset(
+    {
+        "max_position",
+        "max_sector_exposure",
+        "cash_reserve",
+        "max_single_short",
+        "max_short_exposure",
+        "margin_cash_buffer",
+        "max_risk_contribution",
+    }
+)
+
+
+def _is_trimmable_rejection(reason: str) -> bool:
+    """Return True only when a rejection is a size/exposure cap, never a hard risk gate."""
+    if reason.startswith(_TRIMMABLE_RISK_PREFIXES):
+        return True
+    if reason.startswith("portfolio_policy:"):
+        policy_reason = reason[len("portfolio_policy:") :]
+        if PortfolioPolicy.is_hard_rejection(policy_reason):
+            return False
+        if policy_reason in _TRIMMABLE_POLICY_REASONS:
+            return True
+        if policy_reason.startswith(("strategy:", "risk_tag:")):
+            return True
+    return False
+
+
+def _make_fill_result(
+    status: str,
+    fill: Fill | None,
+    reason: str,
+    *,
+    trimmed_at_open: bool = False,
+    requested_qty: int | None = None,
+) -> FillResult:
+    """Construct FillResult, populating trim metadata when supported by FillResult."""
+    if "trimmed_at_open" in _FILL_RESULT_FIELDS and "requested_qty" in _FILL_RESULT_FIELDS:
+        return FillResult(
+            status,
+            fill,
+            reason,
+            trimmed_at_open=trimmed_at_open,
+            requested_qty=requested_qty,
+        )
+    return FillResult(status, fill, reason)
+
+
+def _build_costed_fill(
+    cost_model: PaperCostModel,
+    intent: OrderIntent,
+    reference_price: Decimal,
+    effective_at: datetime,
+    processing_at: datetime,
+    *,
+    quantity: int | None = None,
+) -> Fill:
+    """Build a Fill via PaperCostModel, supporting trimmed quantities cleanly."""
+    if quantity is None or quantity == intent.requested_qty:
+        return cost_model.fill(intent, reference_price, effective_at, processing_at)
+    sig = inspect.signature(cost_model.fill)
+    if "quantity" in sig.parameters:
+        return cost_model.fill(
+            intent,
+            reference_price,
+            effective_at,
+            processing_at,
+            quantity=quantity,
+        )
+    return cost_model.fill(
+        replace(intent, requested_qty=quantity),
+        reference_price,
+        effective_at,
+        processing_at,
+    )
 
 
 @dataclass
@@ -56,27 +146,6 @@ class AccountInfo:
     buying_power: float
 
 
-class _LedgerBrokerAdapter:
-    """Read-only view of PortfolioLedger for RiskGate account/position queries."""
-
-    def __init__(self, ledger: PortfolioLedger) -> None:
-        self.ledger = ledger
-
-    def get_positions(self) -> list[dict[str, Any]]:
-        return [
-            {**position, "avg_price": float(position["avg_price"])}
-            for position in self.ledger.open_positions()
-        ]
-
-    def get_account(self) -> AccountInfo:
-        state = self.ledger.account_state()
-        return AccountInfo(
-            cash=float(state.cash),
-            portfolio_value=float(state.net_equity),
-            buying_power=float(state.buying_power),
-        )
-
-
 class ZeroShareIntentError(ValueError):
     """A valid approved allocation cannot fund one whole reference-price share."""
 
@@ -89,8 +158,8 @@ class ExecutionBridge:
         if config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("EventEdge cohort execution must remain paper-only")
         self.ledger = ledger
-        self.broker = _LedgerBrokerAdapter(ledger)
-        self.risk_gate = RiskGate(RiskGateConfig.from_dict(config), self.broker)
+        self.risk_gate = RiskGate(RiskGateConfig.from_dict(config), ledger=ledger)
+        self.last_open_trim: dict[str, Any] | None = None
         short_config = config.get("autoresearch", {}).get("short_selling", {})
         try:
             self._borrow_reject_above = Decimal(
@@ -288,7 +357,11 @@ class ExecutionBridge:
 
         if risk_context.get("intraday"):
             effective_at = session_close(opening_bar.session)
-        fill = cost_model.fill(intent, reference_price, effective_at, processing_at)
+        self.last_open_trim = None
+        fill = _build_costed_fill(
+            cost_model, intent, reference_price, effective_at, processing_at
+        )
+        trimmed_at_open = False
         direction = "short" if intent.side == "short" else "long"
         if intent.side in {"buy", "short"}:
             borrow_rate = risk_context.get("borrow_rate")
@@ -332,56 +405,265 @@ class ExecutionBridge:
                         else 0.0,
                     )
                 )
-            costs = fill.slippage + fill.commission + fill.other_fees
-            # Exposure is marked at the causal open; costs reduce equity and cash.
-            position_value = reference_price * intent.requested_qty
-            risk_account = replace(
-                marked_account,
-                cash=marked_account.cash - costs,
-                buying_power=marked_account.buying_power - costs,
-                net_equity=marked_account.net_equity - costs,
-            )
-            if risk_account.buying_power < 0 or risk_account.net_equity <= 0:
-                return self._reject(intent, processing_at, "collateral_deficiency: insufficient costed buying power")
+
             opening_equity = self.ledger.opening_equity(opening_bar.session, opening_prices)
-            cooldown = int(self.config.get("autoresearch", {}).get("risk_discipline", {}).get("reentry_cooldown_days", 0))
-            self.risk_gate.set_cooling_tickers(self.ledger.cooling_tickers(opening_bar.session, cooldown))
-            policy_context = risk_context.get("portfolio_context")
-            recommendation = risk_context.get("recommendation")
-            if policy_context is not None:
-                # Existing exposure and reservations remain exact notionals when
-                # the proposed fill's costs lower the equity denominator.
-                equity_scale = policy_context.portfolio_value / float(risk_account.net_equity)
-                policy_context = replace(
-                    policy_context,
-                    cash=float(risk_account.cash),
-                    portfolio_value=float(risk_account.net_equity),
-                    positions=tuple(replace(position, weight=position.weight * equity_scale) for position in policy_context.positions),
-                    pending_positions=tuple(replace(position, weight=position.weight * equity_scale) for position in policy_context.pending_positions),
-                )
-                if recommendation is not None:
-                    recommendation = replace(recommendation, position_size_pct=float(position_value / risk_account.net_equity))
-            passed, reason = self.risk_gate.check(
-                opening_bar.ticker,
-                direction,
-                float(position_value),
-                tuple(sorted({signal.strategy for signal in signals})),
-                risk_context.get("open_trades"),
-                risk_context.get("earnings_dates"),
-                risk_context.get("short_interest"),
-                authoritative_account=risk_account,
-                daily_loss_equity=float(opening_equity),
-                session_realized_net=float(self.ledger.session_realized_net(opening_bar.session)),
-                pending_entries=tuple(pending_risk_entries),
-                proposed_margin=(
-                    float(position_value * cost_model.margin_requirement)
-                    if intent.side == "short"
-                    else 0.0
-                ),
-                policy_enabled=bool(risk_context.get("policy_enabled", False)),
-                recommendation=recommendation,
-                portfolio_context=policy_context,
+            cooldown = int(
+                self.config.get("autoresearch", {})
+                .get("risk_discipline", {})
+                .get("reentry_cooldown_days", 0)
             )
+            self.risk_gate.set_cooling_tickers(
+                self.ledger.cooling_tickers(opening_bar.session, cooldown)
+            )
+            base_policy_context: PortfolioRiskContext | None = risk_context.get(
+                "portfolio_context"
+            )
+            base_recommendation: TradeRecommendation | None = risk_context.get(
+                "recommendation"
+            )
+            policy_enabled = bool(risk_context.get("policy_enabled", False))
+            strategies_tuple = tuple(sorted({signal.strategy for signal in signals}))
+            session_realized = float(
+                self.ledger.session_realized_net(opening_bar.session)
+            )
+            pending_entries_tuple = tuple(pending_risk_entries)
+            pending_pos_value = sum(
+                Decimal(str(entry.position_value)) for entry in pending_entries_tuple
+            )
+            pending_margin_total = sum(
+                Decimal(str(entry.margin_required)) for entry in pending_entries_tuple
+            )
+
+            # Determine max_open_chase_pct and overnight gap vs staged reference_close
+            if base_policy_context is not None:
+                max_open_chase_pct = float(base_policy_context.config.max_open_chase_pct)
+            else:
+                max_open_chase_pct = float(
+                    self.config.get("autoresearch", {})
+                    .get("portfolio_policy", {})
+                    .get("max_open_chase_pct", 0.05)
+                )
+            signal_ref_close = signals[0].reference_close
+            if signal_ref_close > 0:
+                if intent.side == "buy":
+                    adverse_chase_pct = float(
+                        (reference_price - signal_ref_close) / signal_ref_close
+                    )
+                else:
+                    adverse_chase_pct = float(
+                        (signal_ref_close - reference_price) / signal_ref_close
+                    )
+                abs_gap_pct = float(
+                    abs(reference_price - signal_ref_close) / signal_ref_close
+                )
+            else:
+                adverse_chase_pct = 0.0
+                abs_gap_pct = 0.0
+
+            if (
+                intent.price_rule == "next_session_open"
+                and adverse_chase_pct > max_open_chase_pct + 1e-9
+            ):
+                return self._reject(
+                    intent,
+                    processing_at,
+                    f"max_open_chase_pct: overnight gap {adverse_chase_pct:.2%} > {max_open_chase_pct:.2%}",
+                )
+
+            def _evaluate_qty(
+                candidate_fill: Fill,
+            ) -> tuple[bool, str, AccountState, PortfolioRiskContext | None, TradeRecommendation | None]:
+                costs = (
+                    candidate_fill.slippage
+                    + candidate_fill.commission
+                    + candidate_fill.other_fees
+                )
+                # Exposure is marked at the causal open; costs reduce equity and cash.
+                pos_value = reference_price * candidate_fill.quantity
+                acct = replace(
+                    marked_account,
+                    cash=marked_account.cash - costs,
+                    buying_power=marked_account.buying_power - costs,
+                    net_equity=marked_account.net_equity - costs,
+                )
+                if acct.buying_power < 0 or acct.net_equity <= 0:
+                    return (
+                        False,
+                        "collateral_deficiency: insufficient costed buying power",
+                        acct,
+                        base_policy_context,
+                        base_recommendation,
+                    )
+                scaled_ctx = base_policy_context
+                scaled_rec = base_recommendation
+                if scaled_ctx is not None:
+                    equity_scale = scaled_ctx.portfolio_value / float(acct.net_equity)
+                    scaled_ctx = replace(
+                        scaled_ctx,
+                        cash=float(acct.cash),
+                        portfolio_value=float(acct.net_equity),
+                        positions=tuple(
+                            replace(position, weight=position.weight * equity_scale)
+                            for position in scaled_ctx.positions
+                        ),
+                        pending_positions=tuple(
+                            replace(position, weight=position.weight * equity_scale)
+                            for position in scaled_ctx.pending_positions
+                        ),
+                    )
+                    if scaled_rec is not None:
+                        scaled_rec = replace(
+                            scaled_rec,
+                            position_size_pct=float(pos_value / acct.net_equity),
+                        )
+                ok, fail_reason = self.risk_gate.check(
+                    opening_bar.ticker,
+                    direction,
+                    float(pos_value),
+                    strategies_tuple,
+                    risk_context.get("open_trades"),
+                    risk_context.get("earnings_dates"),
+                    risk_context.get("short_interest"),
+                    authoritative_account=acct,
+                    daily_loss_equity=float(opening_equity),
+                    session_realized_net=session_realized,
+                    pending_entries=pending_entries_tuple,
+                    proposed_margin=(
+                        float(pos_value * cost_model.margin_requirement)
+                        if intent.side == "short"
+                        else 0.0
+                    ),
+                    policy_enabled=policy_enabled,
+                    recommendation=scaled_rec,
+                    portfolio_context=scaled_ctx,
+                )
+                return ok, fail_reason, acct, scaled_ctx, scaled_rec
+
+            def _max_allowed_notional(
+                acct: AccountState,
+                pol_ctx: PortfolioRiskContext | None,
+                pol_rec: TradeRecommendation | None,
+            ) -> Decimal:
+                bounds: list[Decimal] = [acct.buying_power - pending_pos_value]
+                if policy_enabled and pol_ctx is not None and pol_rec is not None:
+                    allowed_w, _ = PortfolioPolicy().max_allowed_weight(pol_rec, pol_ctx)
+                    bounds.append(Decimal(str(allowed_w)) * acct.net_equity)
+                else:
+                    bounds.append(
+                        acct.net_equity
+                        * Decimal(str(self.risk_gate.config.max_position_pct))
+                    )
+                    if self.risk_gate.config.cash_reserve_pct > 0:
+                        min_cash = acct.net_equity * Decimal(
+                            str(self.risk_gate.config.cash_reserve_pct)
+                        )
+                        bounds.append(acct.buying_power - pending_pos_value - min_cash)
+                if (
+                    intent.side == "short"
+                    and self.risk_gate.config.max_margin_utilization_pct > 0
+                    and cost_model.margin_requirement > 0
+                ):
+                    margin_limit = Decimal(
+                        str(self.risk_gate.config.total_capital)
+                    ) * Decimal(str(self.risk_gate.config.max_margin_utilization_pct))
+                    margin_headroom = (
+                        margin_limit - acct.margin_used - pending_margin_total
+                    )
+                    bounds.append(margin_headroom / cost_model.margin_requirement)
+                return max(Decimal("0"), min(bounds))
+
+            passed, reason, risk_account, policy_context, recommendation = _evaluate_qty(
+                fill
+            )
+
+            # Check if T+1 open fill price (including +10 bps slippage) pushed a
+            # staged-valid order above max_allowed_notional.
+            unit_exec_price = (
+                fill.fill_price
+                if intent.side == "buy"
+                else reference_price + abs(fill.fill_price - reference_price)
+            )
+            max_notional_risk = _max_allowed_notional(
+                risk_account, policy_context, recommendation
+            )
+            max_notional_at_marked = _max_allowed_notional(
+                marked_account, base_policy_context, base_recommendation
+            )
+            buy_costed_breach = (
+                passed
+                and intent.side == "buy"
+                and intent.price_rule == "next_session_open"
+                and fill.fill_price * intent.requested_qty > max_notional_risk
+            )
+
+            if (not passed and _is_trimmable_rejection(reason)) or buy_costed_breach:
+                staged_notional = signal_ref_close * intent.requested_qty
+                pushed_over_at_open = (
+                    intent.price_rule == "next_session_open"
+                    and signal_ref_close > 0
+                    and staged_notional <= max_notional_at_marked + Decimal("1e-6")
+                    and unit_exec_price * intent.requested_qty > max_notional_risk - Decimal("1e-6")
+                )
+                if pushed_over_at_open:
+                    if abs_gap_pct > max_open_chase_pct + 1e-9:
+                        return self._reject(
+                            intent,
+                            processing_at,
+                            f"max_open_chase_pct: overnight gap {abs_gap_pct:.2%} > {max_open_chase_pct:.2%}",
+                        )
+                    fill_qty = min(
+                        intent.requested_qty - 1,
+                        int(max_notional_risk // unit_exec_price),
+                    )
+                    if fill_qty < 1:
+                        return self._reject(
+                            intent,
+                            processing_at,
+                            reason if not passed else "max_position_pct: trimmed below 1 share",
+                        )
+                    trimmed_fill = _build_costed_fill(
+                        cost_model,
+                        intent,
+                        reference_price,
+                        effective_at,
+                        processing_at,
+                        quantity=fill_qty,
+                    )
+                    trim_ok, trim_reason, _, _, _ = _evaluate_qty(trimmed_fill)
+                    if not trim_ok and _is_trimmable_rejection(trim_reason) and fill_qty > 1:
+                        fill_qty -= 1
+                        trimmed_fill = _build_costed_fill(
+                            cost_model,
+                            intent,
+                            reference_price,
+                            effective_at,
+                            processing_at,
+                            quantity=fill_qty,
+                        )
+                        trim_ok, trim_reason, _, _, _ = _evaluate_qty(trimmed_fill)
+                    if not trim_ok:
+                        return self._reject(intent, processing_at, trim_reason)
+                    fill = trimmed_fill
+                    passed = True
+                    trimmed_at_open = True
+                    self.last_open_trim = {
+                        "intent_id": intent.intent_id,
+                        "ticker": opening_bar.ticker,
+                        "requested_qty": intent.requested_qty,
+                        "filled_qty": fill.quantity,
+                        "trimmed_at_open": True,
+                        "overnight_gap_pct": abs_gap_pct,
+                        "original_reason": reason or "costed_notional_cap",
+                    }
+                    logger.info(
+                        "Trimmed T+1 open entry %s %s: requested=%d filled=%d gap=%.2f%%",
+                        opening_bar.ticker,
+                        intent.side,
+                        intent.requested_qty,
+                        fill.quantity,
+                        abs_gap_pct * 100.0,
+                    )
+
             if not passed:
                 return self._reject(intent, processing_at, reason)
             if intent.side == "short":
@@ -402,13 +684,21 @@ class ExecutionBridge:
         ]
         if persisted != [fill]:
             raise RuntimeError("authoritative fill persistence failed")
-        return FillResult("filled", fill, "")
+        if trimmed_at_open:
+            return _make_fill_result(
+                "filled",
+                fill,
+                f"trimmed_at_open:requested={intent.requested_qty},filled={fill.quantity}",
+                trimmed_at_open=True,
+                requested_qty=intent.requested_qty,
+            )
+        return _make_fill_result("filled", fill, "")
 
     def _reject(
         self, intent: OrderIntent, occurred_at: datetime, reason: str
     ) -> FillResult:
         self.ledger.reject_intent(intent.intent_id, occurred_at, reason)
-        return FillResult("rejected", None, reason)
+        return _make_fill_result("rejected", None, reason)
 
     def execute_recommendation(self, *args: object, **kwargs: object) -> OrderResult:
         del args, kwargs
@@ -419,10 +709,18 @@ class ExecutionBridge:
         raise RuntimeError(DIRECT_SUBMISSION_DISABLED)
 
     def get_account(self) -> AccountInfo:
-        return self.broker.get_account()
+        state = self.ledger.account_state()
+        return AccountInfo(
+            cash=float(state.cash),
+            portfolio_value=float(state.net_equity),
+            buying_power=float(state.buying_power),
+        )
 
     def get_positions(self) -> list[dict]:
-        return self.broker.get_positions()
+        return [
+            {**position, "avg_price": float(position["avg_price"])}
+            for position in self.ledger.open_positions()
+        ]
 
     @property
     def is_live(self) -> bool:
