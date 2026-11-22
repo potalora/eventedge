@@ -94,41 +94,13 @@ def _execute_plan(payload):
     from tradingagents.strategies.chatgpt_plan_transport import (
         ChatGPTPlanTransportError, stream_plan_response,
     )
-    document_options = {}
     request = payload["request"]
-    graphics_route = 'regulation_graphics_model_policy' in request
-    if graphics_route or 'max_call_seconds' in request:
-        timeout = payload.get('timeout')
-        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 240:
-            return {"error": "provider_error", "status_code": None,
-                    "error_metadata": {"error_code": "invalid_request"}}
+    if ("regulation_graphics_model_policy" in request
+            or "max_call_seconds" in request
+            or "document_inputs" in request):
+        return {"error": "provider_error", "status_code": None,
+                "error_metadata": {"error_code": "invalid_request"}}
     deadline = time.monotonic() + payload["timeout"]
-    if graphics_route or 'max_call_seconds' in request:
-        from tradingagents.strategies.regulation_graphics_route import validate_regulation_graphics_route
-        try:
-            validate_regulation_graphics_route(model_policy=request.get('regulation_graphics_model_policy'),
-                model=request.get('model'), effort=request.get('effort'),
-                document_inputs=request.get('document_inputs'), max_tokens=request.get('max_tokens'),
-                temperature=request.get('temperature'), max_call_seconds=request.get('max_call_seconds'))
-            if (payload.get('provider') != 'chatgpt_plan'
-                    or type(request.get('system')) is not str or type(request.get('prompt')) is not str):
-                raise ValueError
-        except ValueError:
-            return {"error": "provider_error", "status_code": None,
-                    "error_metadata": {"error_code": "invalid_request"}}
-        document_options.update(regulation_graphics_model_policy=request['regulation_graphics_model_policy'],
-            max_tokens=request['max_tokens'], temperature=request['temperature'],
-            max_call_seconds=request['max_call_seconds'])
-    if "document_inputs" in request:
-        from tradingagents.strategies.plan_document_inputs import document_input_content
-        try:
-            if not graphics_route and request.get("model") != "gpt-6-luna":
-                raise ValueError
-            document_input_content(request["document_inputs"])
-        except ValueError:
-            return {"error": "provider_error", "status_code": None,
-                    "error_metadata": {"error_code": "invalid_request"}}
-        document_options["document_inputs"] = request["document_inputs"]
     try:
         from tradingagents.strategies.plan_auth import get_plan_credentials
         settings = payload["client"]
@@ -143,7 +115,7 @@ def _execute_plan(payload):
         return {"error": "timeout" if isinstance(exc, TimeoutError) else "provider_error",
                 "status_code": None, "error_metadata": {"error_code": "auth_denied"}}
     try:
-        # This disposable process must not inherit a paid tenant, endpoint,
+        # This worker must not inherit a paid tenant, endpoint,
         # SDK logging setting, or any other OpenAI credential configuration.
         for name in tuple(os.environ):
             if name.startswith("OPENAI_"):
@@ -157,10 +129,9 @@ def _execute_plan(payload):
                     http_client=DefaultHttpxClient(timeout=remaining, follow_redirects=False,
                                                   trust_env=False)) as client:
             provenance = {}
-            request = payload["request"]
             text = stream_plan_response(client, model=request["model"], system=request["system"],
                                         prompt=request["prompt"], effort=request["effort"],
-                                        provenance=provenance, **document_options)
+                                        provenance=provenance)
             if time.monotonic() >= deadline:
                 raise TimeoutError
             provenance.update(billing_mode="chatgpt_plan", effective_output_limit=None)
@@ -240,9 +211,26 @@ def execute(payload):
     raise ValueError("unknown transport")
 
 
+def _serve():
+    """Serve bounded NDJSON requests over stdin/stdout for a pooled phase worker."""
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        try:
+            result = execute(json.loads(line))
+        except Exception:
+            result = {"error": "worker_failure"}
+        sys.stdout.write(json.dumps(result) + "\n")
+        sys.stdout.flush()
+
+
 if __name__ == "__main__":
-    try:
-        result = execute(json.load(sys.stdin))
-    except Exception:
-        result = {"error": "worker_failure"}
-    sys.stdout.write(json.dumps(result))
+    if "--serve" in sys.argv[1:]:
+        _serve()
+    else:
+        try:
+            result = execute(json.load(sys.stdin))
+        except Exception:
+            result = {"error": "worker_failure"}
+        sys.stdout.write(json.dumps(result))

@@ -146,13 +146,12 @@ def test_each_candidate_gets_fresh_diagnostic_state_within_worker():
     assert [row.failure for row in outcomes] == [""] * 9
 
 
-def test_analyzer_fork_copies_overrides_and_isolates_diagnostics_and_config():
+def test_analyzer_fork_isolates_diagnostics_and_config():
     from openai import OpenAI
     from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
     parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna",
-                         "thesis_model": "gpt-6-astra", "llm_effort": "high",
+                         "thesis_model": "gpt-6.2-sol", "llm_effort": "high",
                          "thesis_effort": "xhigh", "llm_temperature": .25}})
-    parent.set_prompt_override("filing_analysis", "explicit system prompt")
     parent.last_call_provenance = {"response_id": "parent"}
     parent.last_call_failure = "parent_failure"
     client = OpenAI(api_key="offline-private", base_url="https://offline.invalid/v1",
@@ -163,16 +162,14 @@ def test_analyzer_fork_copies_overrides_and_isolates_diagnostics_and_config():
     try:
         fork = parent.fork_for_parallel()
         assert fork._client is client and fork._provider_clients["openai"] is client
-        assert fork._model_name == "gpt-6-luna" and fork._thesis_model == "gpt-6-astra"
+        assert fork._model_name == "gpt-6-luna" and fork._thesis_model == "gpt-6.2-sol"
         assert fork._effort == "high" and fork._thesis_effort == "xhigh"
         assert fork._temperature == .25
-        assert fork.get_prompt("filing_analysis") == "explicit system prompt"
+        assert fork.get_prompt("supply_chain") == parent.get_prompt("supply_chain")
         assert fork.last_call_provenance == {} and fork.last_call_failure == ""
-        fork.set_prompt_override("filing_analysis", "worker prompt")
         fork.config["autoresearch"]["llm_effort"] = "low"
         fork._provider_clients.clear()
         fork.last_call_provenance["response_id"] = "worker"
-        assert parent.get_prompt("filing_analysis") == "explicit system prompt"
         assert parent.config["autoresearch"]["llm_effort"] == "high"
         assert parent._provider_clients["openai"] is client
         assert parent.last_call_provenance == {"response_id": "parent"}
@@ -183,7 +180,7 @@ def test_analyzer_fork_copies_overrides_and_isolates_diagnostics_and_config():
 def test_parallel_native_transport_keeps_exact_client_settings_and_provenance(monkeypatch):
     from openai import OpenAI
     from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-    parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "thesis_model": "gpt-6-astra"}})
+    parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "thesis_model": "gpt-6.2-sol"}})
     client = OpenAI(api_key="offline-private", base_url="https://offline.invalid/custom/v1",
                     organization="offline-org", project="offline-project",
                     default_headers={"X-Private-Setting": "retained"})
@@ -237,7 +234,7 @@ def test_explicit_injected_client_fork_is_respected():
 
 def test_lazy_client_remains_worker_local_without_eager_unused_provider_init():
     from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-    parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "thesis_model": "claude-sonnet-5"}})
+    parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "thesis_model": "claude-haiku-4-5-20251001"}})
     fork = parent.fork_for_parallel()
     assert fork._client is None and parent._client is None
     fork._provider_clients["anthropic"] = object()
@@ -290,7 +287,7 @@ def test_collection_after_deadline_cannot_return_previously_completed_success(mo
 def test_anthropic_existing_auth_and_mixed_provider_map_remain_exact():
     from anthropic import Anthropic
     from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-    parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "thesis_model": "claude-sonnet-5"}})
+    parent = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "thesis_model": "claude-haiku-4-5-20251001"}})
     client = Anthropic(api_key="offline-key", auth_token="offline-auth", base_url="https://offline.invalid/custom",
                        default_headers={"X-Private-Setting": "retained"})
     parent._provider_clients["anthropic"] = client

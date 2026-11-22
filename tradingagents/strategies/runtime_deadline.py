@@ -5,56 +5,33 @@ DNS, streamed trickle responses and SDK work against elapsed wall time.
 """
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import json
 import math
+import os
 from pathlib import Path
+import select
 import subprocess
 import sys
+import threading
 import time
 
 _CURRENT_MODEL_DEADLINE: ContextVar[float | None] = ContextVar("model_deadline", default=None)
+_CURRENT_WORKER_POOL: ContextVar["TransportWorkerPool | None"] = ContextVar("transport_worker_pool", default=None)
 DEFAULT_MODEL_BUDGET_S = 2400.0
 MODEL_CALL_CAP_S = 120.0
-
-
-FULL_REGULATION_GRAPHICS_POLICY = "full_regulation_graphics_v1"
-
-
-def _full_graphics_policy(config: dict) -> bool:
-    """One frozen prospective timing contract; absent policy retains history."""
-    if not isinstance(config, dict):
-        raise ValueError("invalid_model_runtime_policy")
-    ar = config.get("autoresearch", {})
-    if not isinstance(ar, dict):
-        raise ValueError("invalid_model_runtime_policy")
-    if "model_runtime_policy" not in ar:
-        return False
-    execution = config.get("execution", {})
-    temperature = ar.get("llm_temperature", 0.0)
-    if (ar.get("model_runtime_policy") != FULL_REGULATION_GRAPHICS_POLICY
-            or ar.get("regulation_retrieval_policy") != "verified_government_copy_v3"
-            or ar.get("llm_billing_mode") != "chatgpt_plan"
-            or ar.get("autoresearch_model") != "gpt-6-luna"
-            or ar.get("llm_effort") != "high"
-            or ar.get("thesis_model") != "gpt-6.1-sol"
-            or ar.get("thesis_effort") != "high"
-            or type(temperature) is not float
-            or temperature != 0.0
-            or not isinstance(execution, dict) or execution.get("mode") != "paper"
-            or execution.get("execution_enabled") is not False):
-        raise ValueError("invalid_model_runtime_policy")
-    return True
+DEFAULT_WORKER_POOL_SIZE = 32
 
 
 def model_phase_budget_seconds(config: dict) -> float:
-    return 9000.0 if _full_graphics_policy(config) else DEFAULT_MODEL_BUDGET_S
+    return DEFAULT_MODEL_BUDGET_S
 
 
 def graphics_call_seconds(config: dict) -> float:
-    return 240.0 if _full_graphics_policy(config) else MODEL_CALL_CAP_S
+    return MODEL_CALL_CAP_S
 
 
 class ModelDeadlineExceeded(TimeoutError):
@@ -69,15 +46,185 @@ class ModelTransportError(RuntimeError):
         super().__init__(f"Model transport failed ({reason}, status={status_code})")
 
 
+class _PooledWorker:
+    """One persistent transport worker process communicating via NDJSON lines."""
+
+    def __init__(self, worker_path: Path) -> None:
+        self.process = subprocess.Popen(
+            [sys.executable, str(worker_path), "--serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+        self._buffer = bytearray()
+        assert self.process.stdin is not None and self.process.stdout is not None
+        os.set_blocking(self.process.stdin.fileno(), False)
+        os.set_blocking(self.process.stdout.fileno(), False)
+
+    def alive(self) -> bool:
+        return self.process.poll() is None
+
+    def kill(self) -> None:
+        try:
+            if self.process.poll() is None:
+                self.process.kill()
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=2)
+        except Exception:
+            pass
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def roundtrip(self, payload: dict, deadline: float) -> dict:
+        assert self.process.stdin is not None and self.process.stdout is not None
+        stdin_fd = self.process.stdin.fileno()
+        stdout_fd = self.process.stdout.fileno()
+        encoded = (json.dumps(payload) + "\n").encode("utf-8")
+        written = 0
+        while written < len(encoded):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("transport_deadline_exhausted")
+            _, writable, _ = select.select([], [stdin_fd], [], remaining)
+            if not writable:
+                raise TimeoutError("transport_deadline_exhausted")
+            try:
+                written += os.write(stdin_fd, encoded[written:])
+            except BlockingIOError:
+                continue
+            except OSError:
+                raise RuntimeError("transport_worker_failed") from None
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                line = bytes(self._buffer[:newline])
+                del self._buffer[:newline + 1]
+                try:
+                    return json.loads(line)
+                except ValueError:
+                    raise RuntimeError("transport_worker_failed") from None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("transport_deadline_exhausted")
+            readable, _, _ = select.select([stdout_fd], [], [], remaining)
+            if not readable:
+                raise TimeoutError("transport_deadline_exhausted")
+            try:
+                chunk = os.read(stdout_fd, 65536)
+            except BlockingIOError:
+                continue
+            except OSError:
+                raise RuntimeError("transport_worker_failed") from None
+            if not chunk:
+                raise RuntimeError("transport_worker_failed")
+            self._buffer.extend(chunk)
+
+
+class TransportWorkerPool:
+    """Bounded reusable worker process pool per phase with SIGKILL timeout enforcement."""
+
+    def __init__(self, max_workers: int = DEFAULT_WORKER_POOL_SIZE) -> None:
+        self._max_workers = max_workers
+        self._worker_path = Path(__file__).with_name("transport_worker.py")
+        self._lock = threading.Lock()
+        self._semaphore = threading.BoundedSemaphore(max_workers)
+        self._idle: deque[_PooledWorker] = deque()
+        self._active: set[_PooledWorker] = set()
+        self._closed = False
+        self.spawn_count = 0
+
+    def _checkout(self) -> _PooledWorker:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("transport_pool_closed")
+            while self._idle:
+                candidate = self._idle.popleft()
+                if candidate.alive():
+                    self._active.add(candidate)
+                    return candidate
+                candidate.kill()
+        worker = _PooledWorker(self._worker_path)
+        with self._lock:
+            if self._closed:
+                worker.kill()
+                raise RuntimeError("transport_pool_closed")
+            self._active.add(worker)
+            self.spawn_count += 1
+        return worker
+
+    def _checkin(self, worker: _PooledWorker) -> None:
+        should_kill = False
+        with self._lock:
+            self._active.discard(worker)
+            if self._closed or not worker.alive() or len(self._idle) >= self._max_workers:
+                should_kill = True
+            else:
+                self._idle.append(worker)
+        if should_kill:
+            worker.kill()
+
+    def _discard(self, worker: _PooledWorker) -> None:
+        with self._lock:
+            self._active.discard(worker)
+        worker.kill()
+
+    def execute(self, payload: dict, timeout: float) -> dict:
+        deadline = time.monotonic() + timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._semaphore.acquire(timeout=remaining):
+            raise TimeoutError("transport_deadline_exhausted")
+        worker: _PooledWorker | None = None
+        try:
+            worker = self._checkout()
+            result = worker.roundtrip(payload, deadline)
+            self._checkin(worker)
+            worker = None
+            return result
+        except TimeoutError:
+            if worker is not None:
+                self._discard(worker)
+                worker = None
+            raise TimeoutError("transport_deadline_exhausted") from None
+        except Exception:
+            if worker is not None:
+                self._discard(worker)
+                worker = None
+            raise RuntimeError("transport_worker_failed") from None
+        finally:
+            self._semaphore.release()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            idle = list(self._idle)
+            self._idle.clear()
+        for worker in idle:
+            worker.kill()
+
+
 @contextmanager
 def model_budget(deadline: float):
     if not math.isfinite(deadline):
         raise ValueError("invalid model deadline")
     outer = _CURRENT_MODEL_DEADLINE.get()
     token = _CURRENT_MODEL_DEADLINE.set(min(outer, deadline) if outer is not None else deadline)
+    own_pool = _CURRENT_WORKER_POOL.get() is None
+    pool = TransportWorkerPool() if own_pool else None
+    pool_token = _CURRENT_WORKER_POOL.set(pool) if own_pool else None
     try:
         yield
     finally:
+        if pool_token is not None:
+            _CURRENT_WORKER_POOL.reset(pool_token)
+        if pool is not None:
+            pool.close()
         _CURRENT_MODEL_DEADLINE.reset(token)
 
 
@@ -103,11 +250,14 @@ def model_backoff(delay: float) -> None:
 def bounded_transport(payload: dict, timeout: float) -> dict:
     """Send credentials/evidence only through private pipes; reap on every exit.
 
-    The worker has no persistent state, retries or descendants. Never forward
-    its stderr or raw provider errors: these can include request credentials.
+    Model calls inside a `model_budget` reuse a bounded per-phase worker pool
+    (enforcing hard wall-clock SIGKILL + clean worker respawn on timeout).
     """
     if not math.isfinite(timeout) or timeout <= 0:
         raise TimeoutError("transport_deadline_exhausted")
+    pool = _CURRENT_WORKER_POOL.get()
+    if pool is not None and payload.get("kind") == "model":
+        return pool.execute(payload, timeout)
     deadline = time.monotonic() + timeout
     worker = Path(__file__).with_name("transport_worker.py")
     process = subprocess.Popen([sys.executable, str(worker)], stdin=subprocess.PIPE,

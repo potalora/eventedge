@@ -103,40 +103,24 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
     from tradingagents.strategies.data_sources.fred_source import FREDSource
     from tradingagents.strategies.data_sources.finnhub_source import FinnhubSource
     from tradingagents.strategies.data_sources.noaa_yearly_source import NOAAYearlySource
+    from tradingagents.strategies.data_sources.usda_source import USDASource
+    from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
+    from tradingagents.strategies.data_sources.cftc_source import CFTCSource
+    from tradingagents.strategies.data_sources.enrichment_source import EnrichmentSource
 
     registry = DataSourceRegistry()
 
     registry.register(YFinanceSource())
-    registry.register(USASpendingSource())
-
-    # API-key sources (free keys)
-    registry.register(FREDSource(api_key=config.get("fred_api_key")))
     registry.register(FinnhubSource(
         api_key=config.get("finnhub_api_key"),
         reliability_config=config.get("finnhub_reliability"),
     ))
+    registry.register(USASpendingSource())
     registry.register(NOAAYearlySource())
-
-    from tradingagents.strategies.data_sources.usda_source import USDASource
     registry.register(USDASource(api_key=config.get("usda_nass_api_key")))
-
-    from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
     registry.register(DroughtMonitorSource())
-
-    # OpenBB Platform (optional — graceful skip if not installed)
-    try:
-        from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
-
-        registry.register(OpenBBSource(fmp_api_key=config.get("fmp_api_key")))
-    except ImportError:
-        logger.info("openbb not installed — OpenBBSource skipped")
-
-    # CFTC COT data (optional — graceful skip if cot_reports not installed)
-    try:
-        from tradingagents.strategies.data_sources.cftc_source import CFTCSource
-
-        registry.register(CFTCSource())
-    except ImportError:
-        logger.info("cot_reports not installed — CFTCSource skipped")
+    registry.register(CFTCSource())
+    registry.register(FREDSource(api_key=config.get("fred_api_key")))
+    registry.register(EnrichmentSource())
 
     return registry

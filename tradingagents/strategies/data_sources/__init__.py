@@ -10,7 +10,7 @@ from tradingagents.strategies.data_sources.usaspending_source import USASpending
 from tradingagents.strategies.data_sources.fred_source import FREDSource
 from tradingagents.strategies.data_sources.finnhub_source import FinnhubSource
 from tradingagents.strategies.data_sources.noaa_yearly_source import NOAAYearlySource
-from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
+from tradingagents.strategies.data_sources.enrichment_source import EnrichmentSource
 from tradingagents.strategies.data_sources.usda_source import USDASource
 from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
 from tradingagents.strategies.data_sources.cftc_source import CFTCSource
@@ -24,7 +24,7 @@ __all__ = [
     "FREDSource",
     "FinnhubSource",
     "NOAAYearlySource",
-    "OpenBBSource",
+    "EnrichmentSource",
     "USDASource",
     "DroughtMonitorSource",
     "CFTCSource",

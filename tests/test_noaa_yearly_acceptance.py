@@ -1,62 +1,42 @@
-"""Exercise the reproducible raw-file gate through its command-line interface."""
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
-import sys
+"""Acceptance tests for lightweight Corn Belt NOAA station acquisition."""
+from __future__ import annotations
 
-ROOT = Path(__file__).resolve().parents[1]
+import pytest
+
+from tradingagents.strategies.data_sources import noaa_yearly_source as module
+from tradingagents.strategies.data_sources.registry import build_default_registry
 
 
-def run_gate(tmp_path, *args):
-    report = tmp_path / 'report.json'
-    process = subprocess.run([sys.executable, str(ROOT / 'scripts/verify_noaa_yearly_source.py'),
-        '--report', str(report), *map(str, args)], cwd=ROOT, capture_output=True, timeout=30)
-    assert report.is_file(), process.stderr.decode()
-    return process, json.loads(report.read_text())
+def test_registered_noaa_source_handles_growing_and_off_season(monkeypatch, tmp_path):
+    source = build_default_registry({}).get("noaa")
+    assert isinstance(source, module.NOAAYearlySource)
 
+    # Off-season (Nov): clean skip without network
+    monkeypatch.setattr(module, "current_vintage_date", lambda: "2026-11-21")
+    off_season = source.fetch({"date": "2026-11-21"})
+    assert off_season["off_season_skipped"] is True
+    assert off_season["_coverage"] == {"status": "ok", "reason": "outside_growing_season"}
 
-def test_public_raw_file_gate_uses_registered_adapter_and_no_external_io(tmp_path):
-    process, report = run_gate(tmp_path)
-    assert process.returncode == 0
-    assert report['passed'] is True
-    assert report['scope'] == 'public_subset_raw_file_replay'
-    assert report['io_counters'] == {'network_attempts': 0, 'subprocess_attempts': 0}
-    assert report['summary']['coverage']['complete'] is True
-    assert report['summary']['observations'] == 900
-    assert report['transport']['requests'] == 3
-    assert report['transport']['all_closed'] is True
-    assert report['transport']['all_bodies_consumed'] is True
-    assert report['adapter'].endswith('.NOAAYearlySource')
+    # Growing season (Jun): kilobyte-sized station CSV
+    monkeypatch.setattr(module, "current_vintage_date", lambda: "2026-06-30")
+    lines = ['"STATION","DATE","PRCP","PRCP_ATTRIBUTES","TMAX","TMAX_ATTRIBUTES","TMIN","TMIN_ATTRIBUTES"']
+    from datetime import date, timedelta
+    start = date(2026, 5, 25)
+    for station in sorted(module.CORN_BELT_STATIONS):
+        for offset in range(37):
+            day = (start + timedelta(days=offset)).isoformat()
+            lines.append(f'"{station}","{day}","20",",,1,2400","290",",,1","150",",,1"')
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
 
+    class Resp:
+        status_code = 200
+        headers = {"Content-Length": str(len(payload))}
+        def iter_content(self, chunk_size): yield payload
+        def close(self): pass
 
-def test_missing_full_originals_fail_instead_of_substituting_public_subset(tmp_path):
-    process, report = run_gate(tmp_path, '--full-corpus', tmp_path / 'absent')
-    assert process.returncode == 1
-    assert report['passed'] is False
-    assert report['reason'] == 'required_original_missing'
-    assert report['transport']['requests'] == 0
-    assert str(tmp_path) not in json.dumps(report)
-
-
-def test_changed_recorded_file_fails_hash_before_adapter_acquisition(tmp_path):
-    directory = tmp_path / 'fixtures'
-    shutil.copytree(ROOT / 'tests/fixtures/noaa_ghcnd_yearly', directory)
-    with (directory / '2026-ten-state-37day-original.csv.gz').open('ab') as target:
-        target.write(b'controlled changed fixture')
-    process, report = run_gate(tmp_path, '--fixtures', directory)
-    assert process.returncode == 1
-    assert report['passed'] is False
-    assert report['reason'] == 'recorded_file_identity_mismatch'
-    assert report['transport']['requests'] == 0
-
-
-def test_metadata_fifo_is_rejected_without_blocking_or_network(tmp_path):
-    directory = tmp_path / 'fixtures'
-    directory.mkdir()
-    os.mkfifo(directory / 'manifest.json')
-    process, report = run_gate(tmp_path, '--fixtures', directory)
-    assert process.returncode == 1
-    assert report['reason'] == 'fixture_metadata_type_or_size_invalid'
-    assert report['transport']['requests'] == 0
+    monkeypatch.setattr(module, "_yearly_http_get", lambda *a, **kw: Resp())
+    summary = source.fetch({"date": "2026-06-30"})
+    assert summary["coverage"]["complete"] is True
+    assert summary["states_reporting"] == 10
+    assert summary["in_growing_season"] is True
+    assert summary["coverage"]["files"][0]["bytes"] < 100_000

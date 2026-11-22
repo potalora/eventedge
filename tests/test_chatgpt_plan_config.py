@@ -22,7 +22,7 @@ def plan_boundary(monkeypatch):
         ar = config.get('autoresearch', {})
         mode = ar.get('llm_billing_mode', 'api')
         if mode == 'api': return None
-        if mode != 'chatgpt_plan' or model not in {'gpt-6-luna', 'gpt-6-astra', 'gpt-6.1-sol'}:
+        if mode != 'chatgpt_plan' or model not in {'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.2-sol'}:
             raise ValueError('invalid_plan_configuration')
         return ChatGPTPlanClient(ar.get('chatgpt_plan_auth_path', '/private/profile.json'), current['identity'])
     def require(client, config, model):
@@ -47,7 +47,7 @@ def plan_boundary(monkeypatch):
 
 def plan_config(**changes):
     return {'autoresearch': {'llm_billing_mode': 'chatgpt_plan', 'autoresearch_model': 'gpt-6-luna',
-        'thesis_model': 'gpt-6-astra', 'llm_effort': 'high', 'thesis_effort': 'high', **changes}}
+        'thesis_model': 'gpt-6.2-sol', 'llm_effort': 'high', 'thesis_effort': 'high', **changes}}
 
 
 @pytest.mark.parametrize('kind', ['analyzer', 'committee'])
@@ -85,14 +85,14 @@ def test_plan_descriptor_is_safe_to_share_in_parallel_fork(plan_boundary):
     assert fork.last_call_provenance is not obj.last_call_provenance
 
 
-def test_default_billing_mode_is_api():
+def test_default_billing_mode_is_chatgpt_plan():
     from tradingagents.default_config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG['autoresearch']['llm_billing_mode'] == 'api'
+    assert DEFAULT_CONFIG['autoresearch']['llm_billing_mode'] == 'chatgpt_plan'
 
 
 @pytest.mark.parametrize('base,thesis,supported', [
-    ('gpt-6-luna', 'claude-sonnet-5', False),
-    ('claude-sonnet-5', 'gpt-6-astra', True),
+    ('gpt-6-luna', 'claude-haiku-4-5-20251001', False),
+    ('claude-haiku-4-5-20251001', 'gpt-6.2-sol', True),
 ])
 def test_mixed_provider_role_never_falls_back_to_paid_sdk(plan_boundary, monkeypatch, base, thesis, supported):
     from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
