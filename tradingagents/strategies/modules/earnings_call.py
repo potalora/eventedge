@@ -241,6 +241,22 @@ class EarningsCallStrategy:
             }
             if t.get("published_at"):
                 metadata["published_at"] = t["published_at"]
+            report_date = t.get("report_date") or t.get("date")
+            if report_date:
+                metadata["report_date"] = str(report_date)
+            hour = str(t.get("hour") or "").strip().lower()
+            if hour:
+                metadata["hour"] = hour
+            if t.get("observed_at"):
+                metadata["observed_at"] = t["observed_at"]
+            elif not metadata.get("published_at") and report_date:
+                from tradingagents.strategies.orchestration.event_identity import (
+                    earnings_calendar_observed_at,
+                )
+
+                metadata["observed_at"] = earnings_calendar_observed_at(
+                    report_date, hour
+                ).isoformat()
             for liq_key in ("market_cap", "avg_dollar_volume", "dollar_volume", "liquidity", "volume"):
                 val = _finite_float(t.get(liq_key))
                 if val is not None and val > 0:

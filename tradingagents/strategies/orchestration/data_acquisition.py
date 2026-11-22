@@ -747,10 +747,16 @@ class DataAcquisitionService:
         ranked_earnings = sorted(valid_earnings, key=earnings_priority_key)
         news_candidates = ranked_earnings[:earnings_news_budget]
 
+        from tradingagents.strategies.orchestration.event_identity import (
+            earnings_calendar_observed_at,
+        )
+
         transcripts: list[dict[str, Any]] = []
         for idx, rec in enumerate(ranked_earnings):
             symbol = rec["symbol"]
             edate = rec["date"]
+            hour = str(rec.get("hour") or "").strip().lower()
+            cal_observed = earnings_calendar_observed_at(edate, hour).isoformat()
             selected_articles: list[dict[str, Any]] = []
             if idx < len(news_candidates):
                 news = _acquire(
@@ -779,6 +785,8 @@ class DataAcquisitionService:
                     {
                         "symbol": symbol,
                         "date": edate,
+                        "report_date": edate,
+                        **({"hour": hour} if hour else {}),
                         "year": rec.get("year"),
                         "quarter": rec.get("quarter"),
                         "transcript_text": news_text,
@@ -790,7 +798,7 @@ class DataAcquisitionService:
                         "eps_surprise_pct": round(_eps_surprise_magnitude(rec), 6)
                         if _has_valid_numeric_eps_surprise(rec)
                         else None,
-                        **({"published_at": max(pub_times)} if pub_times else {}),
+                        **({"published_at": max(pub_times)} if pub_times else {"observed_at": cal_observed}),
                     }
                 )
             elif _has_valid_numeric_eps_surprise(rec):
@@ -799,6 +807,8 @@ class DataAcquisitionService:
                     {
                         "symbol": symbol,
                         "date": edate,
+                        "report_date": edate,
+                        **({"hour": hour} if hour else {}),
                         "year": rec.get("year"),
                         "quarter": rec.get("quarter"),
                         "transcript_text": "",
@@ -808,6 +818,7 @@ class DataAcquisitionService:
                         "revenue_actual": rec.get("revenueActual"),
                         "revenue_estimate": rec.get("revenueEstimate"),
                         "eps_surprise_pct": round(_eps_surprise_magnitude(rec), 6),
+                        "observed_at": cal_observed,
                     }
                 )
 

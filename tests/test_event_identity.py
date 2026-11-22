@@ -226,3 +226,30 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                 date(2026, 7, 1),
             )
             assert canonical_observation_time(name, candidate.metadata)
+
+
+def test_earnings_calendar_observed_at_uses_causal_xnys_boundaries():
+    from tradingagents.strategies.orchestration.event_identity import (
+        canonical_observation_time,
+        earnings_calendar_observed_at,
+    )
+    from tradingagents.strategies.orchestration.trading_calendar import (
+        session_close,
+        session_open,
+    )
+
+    session = date(2026, 11, 20)
+    assert earnings_calendar_observed_at("2026-11-20", "bmo") == session_open(session)
+    assert earnings_calendar_observed_at("2026-11-20", "amc") == session_close(session)
+    assert earnings_calendar_observed_at("2026-11-20", "dmh") == session_close(session)
+    assert earnings_calendar_observed_at("2026-11-20", "") == session_close(session)
+    # Non-trading day stays causally on report_date rather than backdating.
+    weekend = earnings_calendar_observed_at("2026-11-21", "amc")
+    assert weekend == datetime(2026, 11, 21, 21, 0, tzinfo=timezone.utc)
+    # Direct metadata fallback on report_date + hour works in canonical_observation_time.
+    assert (
+        canonical_observation_time(
+            "earnings_call", {"report_date": "2026-11-20", "hour": "bmo"}
+        )
+        == session_open(session)
+    )

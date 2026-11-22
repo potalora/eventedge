@@ -76,6 +76,39 @@ def _availability_timestamp(value: object, *, date_only: bool, field: str) -> da
     return parsed.astimezone(timezone.utc)
 
 
+def earnings_calendar_observed_at(report_date: object, hour: object = None) -> datetime:
+    """Resolve a causal UTC observation timestamp for an earnings calendar release.
+
+    - ``"bmo"``: XNYS session open on ``report_date`` (or 09:30 ET on non-sessions).
+    - ``"amc"`` / ``"dmh"`` / unknown: conservative XNYS session close on
+      ``report_date`` (or 16:00 ET on non-sessions), never backdating release.
+    """
+    from tradingagents.strategies.orchestration.trading_calendar import (
+        _ET,
+        is_session,
+        session_close,
+        session_open,
+    )
+
+    if isinstance(report_date, date) and not isinstance(report_date, datetime):
+        day = report_date
+    elif isinstance(report_date, str):
+        stripped = report_date.strip()
+        day = date.fromisoformat(stripped)
+        if stripped != day.isoformat():
+            raise ValueError("invalid earnings report_date")
+    else:
+        raise ValueError("invalid earnings report_date")
+
+    code = str(hour or "").strip().lower()
+    if is_session(day):
+        if code == "bmo":
+            return session_open(day).astimezone(timezone.utc)
+        return session_close(day).astimezone(timezone.utc)
+    local_time = time(9, 30) if code == "bmo" else time(16, 0)
+    return datetime.combine(day, local_time, tzinfo=_ET).astimezone(timezone.utc)
+
+
 def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
     """Resolve when source evidence became available without using economic dates."""
     if strategy == 'regulatory_pipeline' and metadata.get('regulation_publication_policy') == 'linked_publications_v1':
@@ -96,6 +129,10 @@ def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datet
                     metadata[field], date_only=date_only, field=field
                 )
             )
+    if strategy == "earnings_call" and metadata.get("report_date") not in (None, ""):
+        values.append(
+            earnings_calendar_observed_at(metadata["report_date"], metadata.get("hour"))
+        )
     if not values:
         raise ValueError(f"{strategy} candidate lacks recognized observation time")
     return max(values)
