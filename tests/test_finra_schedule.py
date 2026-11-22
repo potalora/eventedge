@@ -86,17 +86,37 @@ def test_unreviewed_or_invalid_settlement_cannot_be_current(settlement):
         validate_current_settlement(settlement, acquired_at=at())
 
 
-@pytest.mark.parametrize('acquired', [datetime(2026, 10, 22), at('2027-02-01T12:00:00+00:00')])
-def test_naive_clock_or_expired_reviewed_calendar_cannot_certify_freshness(acquired):
+def test_naive_clock_cannot_certify_freshness():
     from tradingagents.strategies.data_sources.finra_schedule import validate_current_settlement
     from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
     with pytest.raises(SourceFetchError):
-        validate_current_settlement('2026-09-30', acquired_at=acquired)
+        validate_current_settlement('2026-09-30', acquired_at=datetime(2026, 10, 22))
 
 
-def test_old_reference_date_cannot_reactivate_expired_calendar_for_new_acquisition():
+def test_2027_and_beyond_derive_dynamic_semi_monthly_freshness():
+    from tradingagents.strategies.data_sources.finra_schedule import (
+        DYNAMIC_PUBLICATION_POLICY,
+        validate_current_settlement,
+    )
+    # Jan 2, 2027 run: 2026-12-15 is 18 days old (current); 2026-11-30 is 33 days old (stale).
+    jan2 = at('2027-01-02T12:00:00+00:00')
+    current_dec = validate_current_settlement('2026-12-15', acquired_at=jan2)
+    assert current_dec['status'] == 'current'
+    assert current_dec['publication_policy'] == DYNAMIC_PUBLICATION_POLICY
+    assert validate_current_settlement('2026-11-30', acquired_at=jan2)['status'] == 'stale'
+    # Feb 1, 2027 run: 2027-01-15 is 17 days old (current), 2026-12-15 is 48 days old (stale).
+    feb1 = at('2027-02-01T12:00:00+00:00')
+    assert validate_current_settlement('2027-01-15', acquired_at=feb1)['status'] == 'current'
+    assert validate_current_settlement('2026-12-15', acquired_at=feb1)['status'] == 'stale'
+    assert validate_current_settlement('2027-02-15', acquired_at=feb1)['status'] == 'not_yet_available'
+    # 2028 leap-year check: 2028-02-15 on 2028-03-01 is 15 days old (current).
+    mar1_2028 = at('2028-03-01T12:00:00+00:00')
+    assert validate_current_settlement('2028-02-15', acquired_at=mar1_2028)['status'] == 'current'
+
+
+def test_old_reference_date_in_2026_remains_valid_for_2027_clock():
     from tradingagents.strategies.data_sources.finra_schedule import validate_current_settlement
-    from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
-    with pytest.raises(SourceFetchError):
-        validate_current_settlement('2026-12-15', acquired_at=at('2027-01-02T12:00:00+00:00'),
-                                    as_of=date(2026, 12, 31))
+    res = validate_current_settlement('2026-12-15', acquired_at=at('2027-01-02T12:00:00+00:00'),
+                                      as_of=date(2026, 12, 31))
+    assert res['status'] == 'current'
+    assert res['required_settlement_date'] == '2026-12-15'

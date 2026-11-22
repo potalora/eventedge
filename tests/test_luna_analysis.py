@@ -57,7 +57,7 @@ def test_incomplete_or_empty_luna_analysis_is_not_parsed(luna_config, status, te
     client.responses.create.return_value = response(text, status)
     analyzer = LLMAnalyzer(luna_config)
     analyzer._client = client
-    assert analyzer.analyze_filing_change("current", "prior", "IBM") == {}
+    assert analyzer.analyze_supply_chain("Supplier outage", "Details", "AAPL", ["TSM"]) == {}
     committee = PortfolioCommittee(luna_config)
     committee._client = client
     with pytest.raises(RuntimeError):
@@ -67,7 +67,7 @@ def test_incomplete_or_empty_luna_analysis_is_not_parsed(luna_config, status, te
 def test_committee_model_override_keeps_claude_route(luna_config):
     config = deepcopy(luna_config)
     config["autoresearch"]["paper_trade"] = {
-        "portfolio_committee_model": "claude-sonnet-5"
+        "portfolio_committee_model": "claude-haiku-4-5-20251001"
     }
     committee = PortfolioCommittee(config)
     client = MagicMock()
@@ -77,22 +77,24 @@ def test_committee_model_override_keeps_claude_route(luna_config):
     committee._client = client
     assert committee._call_llm(system="system", prompt="event") == "[]"
     client.responses.create.assert_not_called()
-    assert client.messages.create.call_args.kwargs["model"] == "claude-sonnet-5"
+    assert client.messages.create.call_args.kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
 def test_defaults_separate_bounded_luna_from_frontier_thesis_and_committee():
     assert DEFAULT_CONFIG["autoresearch"]["autoresearch_model"] == "gpt-6-luna"
     assert DEFAULT_CONFIG["autoresearch"]["llm_effort"] == "high"
     assert LLMAnalyzer(DEFAULT_CONFIG)._model_name == "gpt-6-luna"
-    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gpt-6.1-sol"
+    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gpt-6.2-sol"
     assert DEFAULT_CONFIG["autoresearch"]["thesis_effort"] == "high"
-    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6.1-sol"
+    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6.2-sol"
     assert PortfolioCommittee(DEFAULT_CONFIG)._effort == "high"
 
 
-@pytest.mark.parametrize("role,expected_model", [("bounded", "gpt-6-luna"), ("thesis", "gpt-6.1-sol"), ("committee", "gpt-6.1-sol")])
+@pytest.mark.parametrize("role,expected_model", [("bounded", "gpt-6-luna"), ("thesis", "gpt-6.2-sol"), ("committee", "gpt-6.2-sol")])
 def test_next_candidate_role_requests_retain_configured_and_returned_model_provenance(role, expected_model):
-    obj = PortfolioCommittee(DEFAULT_CONFIG) if role == "committee" else LLMAnalyzer(DEFAULT_CONFIG)
+    api_config = deepcopy(DEFAULT_CONFIG)
+    api_config["autoresearch"]["llm_billing_mode"] = "api"
+    obj = PortfolioCommittee(api_config) if role == "committee" else LLMAnalyzer(api_config)
     client = MagicMock()
     def create(**request):
         return SimpleNamespace(status="completed", output_text="{}", output=[], model=request["model"],
@@ -112,12 +114,12 @@ def test_next_candidate_role_requests_retain_configured_and_returned_model_prove
 
 def test_explicit_role_overrides_and_omitted_role_fallbacks_remain_supported():
     config = deepcopy(DEFAULT_CONFIG)
-    config["autoresearch"]["thesis_model"] = "gpt-6-astra"
+    config["autoresearch"]["thesis_model"] = "gpt-6.1-sol"
     config["autoresearch"]["thesis_effort"] = "medium"
-    config["autoresearch"]["paper_trade"]["portfolio_committee_model"] = "gpt-6-astra"
+    config["autoresearch"]["paper_trade"]["portfolio_committee_model"] = "gpt-6.1-sol"
     config["autoresearch"]["paper_trade"]["portfolio_committee_effort"] = "medium"
-    assert (LLMAnalyzer(config)._thesis_model, LLMAnalyzer(config)._thesis_effort) == ("gpt-6-astra", "medium")
-    assert (PortfolioCommittee(config)._model_name, PortfolioCommittee(config)._effort) == ("gpt-6-astra", "medium")
+    assert (LLMAnalyzer(config)._thesis_model, LLMAnalyzer(config)._thesis_effort) == ("gpt-6.1-sol", "medium")
+    assert (PortfolioCommittee(config)._model_name, PortfolioCommittee(config)._effort) == ("gpt-6.1-sol", "medium")
     legacy = {"autoresearch": {"autoresearch_model": "gpt-6-luna", "llm_effort": "low"}}
     assert (LLMAnalyzer(legacy)._thesis_model, LLMAnalyzer(legacy)._thesis_effort) == ("gpt-6-luna", "low")
     assert (PortfolioCommittee(legacy)._model_name, PortfolioCommittee(legacy)._effort) == ("gpt-6-luna", "low")

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
+import tempfile
 import time
 from datetime import datetime
 from typing import Any
@@ -11,6 +14,17 @@ from .request_policy import provider_call, provider_timeout
 from .fetch_errors import SourceFetchError, source_fetch_error, source_number
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_yfinance_tz_cache() -> Path:
+    """Configure yfinance's tz cache to a process-safe writable subdir."""
+    import yfinance as yf
+
+    base = Path(os.environ.get("EVENTEDGE_YFINANCE_CACHE_DIR") or tempfile.gettempdir())
+    cache_dir = base / f"eventedge-py-yfinance-{os.getpid()}"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(cache_dir))
+    return cache_dir
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -101,6 +115,7 @@ class YFinanceSource:
             return self._cache[cache_key]
 
         import yfinance as yf
+        ensure_yfinance_tz_cache()
 
         try:
             yf_tickers = normalize_tickers(tickers)
@@ -198,6 +213,7 @@ class YFinanceSource:
             return self._cache[cache_key]
 
         import yfinance as yf
+        ensure_yfinance_tz_cache()
 
         try:
             df = provider_call("yfinance", "history", lambda: yf.download(
@@ -241,6 +257,7 @@ class YFinanceSource:
             return self._cache[cache_key]
 
         import yfinance as yf
+        ensure_yfinance_tz_cache()
 
         results: dict[str, list[dict[str, Any]]] = {}
         failures, statuses = {}, {}
