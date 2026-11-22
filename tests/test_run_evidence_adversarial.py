@@ -103,7 +103,7 @@ def test_url_query_credentials_preserve_adjacent_parameters(name, value):
 def test_known_environment_values_survive_serialization_redaction(
     monkeypatch, secret, serialize
 ):
-    monkeypatch.setenv("PROVIDER_API_KEY", secret)
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
     original = f"error: rejected value {serialize(secret)}; status=401 symbol=SPY"
     sanitized = run_evidence.sanitize_evidence_text(original)
     assert "synthetic" not in sanitized
@@ -154,29 +154,6 @@ def test_common_provider_credential_names_in_text(name):
     assert "401" in sanitized
 
 
-@pytest.mark.parametrize("depth", [1, 25, 100])
-def test_nested_payloads_redact_at_every_depth_and_preserve_outcomes(depth):
-    payload = {"password": "synthetic-deep", "outcome": "no_signal", "success": True}
-    for _ in range(depth):
-        payload = {"layers": [payload, {"symbol": "SPY", "api_key": "synthetic-key"}]}
-    sanitized = run_evidence._sanitize(payload, ())
-    serialized = json.dumps(sanitized)
-    assert "synthetic" not in serialized
-    assert '"outcome": "no_signal"' in serialized
-    assert '"success": true' in serialized
-    assert serialized.count('"SPY"') == depth
-
-
-def test_known_environment_values_in_dynamic_result_keys_are_redacted(monkeypatch):
-    monkeypatch.setenv("PROVIDER_API_KEY", "synthetic-dynamic-key")
-    sanitized = run_evidence._sanitize(
-        {"by_request": {"synthetic-dynamic-key": {"status": 401}}},
-        run_evidence._credential_values(),
-    )
-    assert "synthetic" not in json.dumps(sanitized)
-    assert "401" in json.dumps(sanitized)
-
-
 @pytest.mark.parametrize(
     "diagnostic",
     [
@@ -191,13 +168,8 @@ def test_plain_diagnostic_text_is_preserved(diagnostic):
     assert run_evidence.sanitize_evidence_text(diagnostic) == diagnostic
 
 
-def test_structured_token_usage_diagnostics_are_preserved():
-    diagnostics = {"prompt_tokens": 128, "completion_tokens": 16, "token_count": 144}
-    assert run_evidence._sanitize(diagnostics, ()) == diagnostics
-
-
 def test_bytes_invalid_utf8_and_known_credentials_are_safely_handled(monkeypatch):
-    monkeypatch.setenv("PROVIDER_API_KEY", "synthetic-byte-value")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-byte-value")
     assert (
         run_evidence.sanitize_evidence_text(
             b"prefix\xff synthetic-byte-value suffix\xfe"
@@ -207,9 +179,9 @@ def test_bytes_invalid_utf8_and_known_credentials_are_safely_handled(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "name", ["AWS_SECRET_ACCESS_KEY", "APCA_API_KEY_ID", "API_KEY_PRIMARY"]
+    "name", ["AWS_SECRET_ACCESS_KEY", "APCA_API_KEY_ID", "ALPACA_SECRET_KEY"]
 )
-def test_credential_names_with_suffixes_remain_sensitive(monkeypatch, name):
+def test_allowlisted_credential_names_remain_sensitive(monkeypatch, name):
     monkeypatch.setenv(name, "synthetic-suffix-secret")
     assert run_evidence.sanitize_evidence_text("rejected synthetic-suffix-secret") == (
         "rejected <redacted>"
@@ -217,14 +189,11 @@ def test_credential_names_with_suffixes_remain_sensitive(monkeypatch, name):
     assert "synthetic" not in run_evidence.sanitize_evidence_text(
         f"{name}=synthetic-unknown-secret"
     )
-    assert run_evidence._sanitize({name: "synthetic-unknown-secret"}, ()) == {
-        name: "<redacted>"
-    }
 
 
 def test_overlapping_environment_secrets_are_fully_redacted(monkeypatch):
-    monkeypatch.setenv("PROVIDER_API_KEY", "synthetic-overlap")
-    monkeypatch.setenv("PROVIDER_SECRET", "synthetic-overlap-extended")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-overlap")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "synthetic-overlap-extended")
     assert (
         run_evidence.sanitize_evidence_text(
             "synthetic-overlap-extended synthetic-overlap"

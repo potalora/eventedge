@@ -49,20 +49,26 @@ def validate_generation_retirement(row, *, repo=None):
 def execution_boundary(row):
     return ""
 
-COHORTS = tuple(
-    f"horizon_{horizon}_size_{size}"
-    for horizon in ("30d", "3m", "6m", "1y")
-    for size in ("5k", "10k", "50k", "100k")
+from tradingagents.strategies.orchestration._io import (
+    CANONICAL_COHORTS,
+    open_sqlite,
 )
+from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+
+COHORTS = CANONICAL_COHORTS
 HEALTHY_STRATEGY_STATUSES = frozenset({"signals", "legitimate_no_event"})
 
 
-def _read_only_db(path: Path) -> sqlite3.Connection:
-    if not path.is_file():
-        raise ValueError(f"missing database: {path}")
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+def _metrics_db(state_dir: Path) -> Path:
+    unified = state_dir / GENERATION_DB_FILENAME
+    return unified if unified.is_file() else (state_dir / "metrics_v2.sqlite3")
+
+
+def _cohort_db(state_dir: Path, cohort: str) -> tuple[Path, bool]:
+    unified = state_dir / GENERATION_DB_FILENAME
+    if unified.is_file():
+        return unified, True
+    return state_dir / cohort / "portfolio.db", False
 
 
 def _one_valid_row(connection: sqlite3.Connection, table: str, session: str) -> bool:
@@ -89,9 +95,8 @@ def _accounting_and_staging(
     staging_complete = True
     for cohort in COHORTS:
         try:
-            with closing(
-                _read_only_db(state_dir / cohort / "portfolio.db")
-            ) as connection:
+            db_path, unified = _cohort_db(state_dir, cohort)
+            with open_sqlite(db_path, readonly=True) as connection:
                 ledger_epoch = connection.execute(
                     "SELECT generation_id, status, start_session, end_session FROM metric_epochs WHERE epoch_id = ?",
                     (epoch_id,),
@@ -211,7 +216,7 @@ def _candidate_and_health(
     state_dir: Path, session: str, epoch_id: str, policy_id: str | None
 ) -> tuple[bool, bool]:
     try:
-        with closing(_read_only_db(state_dir / "metrics_v2.sqlite3")) as connection:
+        with open_sqlite(_metrics_db(state_dir), readonly=True) as connection:
             for table in (
                 "strategy_health",
                 "candidate_input_issues",
@@ -284,7 +289,7 @@ def _candidate_and_health(
     quarantined = any(row.get("outcome") == "quarantined" for row in recovery_rows)
     identities = {(row.get("policy_id"), row.get("strategy")) for row in health}
     health_complete = (
-        len(health) == 48
+        len(health) == len(expected)
         and identities == expected
         and all(classified(row) for row in health)
     )
@@ -433,7 +438,7 @@ def _session_epoch(
     state_dir: Path, session: str, generation_id: str, commit: str
 ) -> str | None:
     try:
-        with closing(_read_only_db(state_dir / "metrics_v2.sqlite3")) as connection:
+        with open_sqlite(_metrics_db(state_dir), readonly=True) as connection:
             matches = []
             for identity, payload in connection.execute(
                 "SELECT epoch_id, payload_json FROM metric_epochs"
@@ -540,10 +545,15 @@ def assess_generation(
     if state.resolve() != state:
         raise ValueError("state path must not contain symlinks")
     manifest = state.parent / "manifest.json"
-    databases = [
-        state / "metrics_v2.sqlite3",
-        *(state / cohort / "portfolio.db" for cohort in COHORTS),
-    ]
+    unified_db = state / GENERATION_DB_FILENAME
+    databases = (
+        [unified_db]
+        if unified_db.is_file()
+        else [
+            state / "metrics_v2.sqlite3",
+            *(state / cohort / "portfolio.db" for cohort in COHORTS),
+        ]
+    )
     paths = [
         manifest,
         state / FROZEN_CONFIG_NAME,

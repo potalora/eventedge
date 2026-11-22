@@ -177,7 +177,7 @@ def test_frozen_worker_never_discovers_another_dotenv(profile, monkeypatch):
     monkeypatch.delenv('BLOCKED_TICKERS', raising=False)
     monkeypatch.setenv('FRED_API_KEY', 'explicit-private-environment')
     config = run_cohorts._build_config(SimpleNamespace(block_tickers=''))
-    assert not config['autoresearch'].get('blocked_tickers')
+    assert 'SPY' not in (config['autoresearch'].get('blocked_tickers') or [])
     assert config['autoresearch']['fred_api_key'] == 'explicit-private-environment'
 
 

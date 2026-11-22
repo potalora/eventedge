@@ -360,12 +360,12 @@ def signal_document(signal: dict) -> dict:
 
 def project_enrichment(original: dict, *, codec_limits=None, capability_config=None) -> tuple[dict, dict]:
     """Select healthy optional facts, retaining every original failure by hash."""
+    _ = capability_config
     from .source_inputs import successful_source
-    operations = ('profiles', 'short_interest', 'factors', 'commodity_futures_curves')
+    operations = ('profiles', 'short_interest', 'factors')
     if not isinstance(original, dict) or not isinstance(original.get('errors', {}), dict):
         raise ValueError('invalid_research_enrichment')
-    from .enrichment_capabilities import declared_scope
-    retirement = declared_scope(original, {} if capability_config is None else capability_config)
+    retirement = None
     errors = original.get('errors', {})
     holds = original.get('research_hold_reasons', [])
     if (not isinstance(holds, list) or any(reason not in
@@ -458,8 +458,6 @@ def validate_signal(signal, regime, strategy_sources, *, codec_limits=None):
 def validate_projection(engine, data, regime):
     """Reconstruct the source selection before committee or exit evaluation."""
     from .source_inputs import source_codec_limits
-    from .congress_policy import configured as congress_configured, DECLARATION_KEY
-    from tradingagents.strategies.data_sources.filing_material_policy import configured as material_configured
     original = {key: value for key, value in data.items()
                 if key not in ('_execution_reference_bars', '_decision_context')}
     names = set(original) | {'fred', 'yfinance'}
@@ -468,28 +466,7 @@ def validate_projection(engine, data, regime):
     names.update(source for strategy in engine.paper_trade_strategies for source in strategy.data_sources)
     limits = source_codec_limits(engine.config)
     projected, scope = project_sources(original, names, codec_limits=limits, capability_policy=engine.ar_config.get('source_capability_policy'))
-    if congress_configured(engine.ar_config):
-        projected = {key: value for key, value in projected.items() if key not in ('congress', DECLARATION_KEY)}
-    from .source_lifecycle_policy import declared_scope, DECLARATION_KEY as LIFECYCLE_KEY
-    if declared_scope(original, engine.ar_config, engine.paper_trade_strategies) is not None:
-        projected.pop(LIFECYCLE_KEY, None)
-    from .filing_research_policy import declared_scope as bulk_scope, DECLARATION_KEY as FILING_KEY
-    if bulk_scope(original, config=engine.ar_config) is not None:
-        projected.pop(FILING_KEY, None)
-    filing_scope = None
-    if material_configured(engine.ar_config):
-        from .filing_research_isolation import isolate_filing_research
-        from .filing_material_validation import validate_filing_material_policy
-        from .filing_acquisition_validation import validate_filing_acquisition_policy
-        edgar, filing_scope = isolate_filing_research(original.get('edgar', {}), engine.ar_config,
-            strict_material_scope=validate_filing_material_policy(original, engine.ar_config),
-            acquisition_scope=validate_filing_acquisition_policy(original, engine.ar_config))
-        if filing_scope['discovery_scope']['outcome'] == 'complete':
-            projected['edgar'] = edgar
-        else:
-            projected.pop('edgar', None)
     if (digest(scope, codec_limits=limits) != digest(regime.get('research_source_scope'), codec_limits=limits)
-            or digest(filing_scope, codec_limits=limits) != digest(regime.get('filing_research_isolation'), codec_limits=limits)
             or digest(projected, codec_limits=limits) != regime.get('research_projection_sha256')):
         raise ValueError('invalid_research_source_projection')
     macro = engine._build_regime_model(projected)
@@ -519,7 +496,6 @@ def validate_book_source_scope(status, regime, *, codec_limits=None):
     expected = {'version': 'research-book-authority-v1', 'policy': POLICY,
         'source_bundle_sha256': regime['research_source_scope']['source_bundle_sha256'],
         'source_scope_sha256': digest(regime['research_source_scope'], codec_limits=codec_limits),
-        'filing_isolation_sha256': digest(regime.get('filing_research_isolation'), codec_limits=codec_limits),
         'projection_sha256': regime['research_projection_sha256'],
         'shared_context_sha256': digest(regime, codec_limits=codec_limits)}
     if not isinstance(authority, dict) or any(authority.get(key) != value for key, value in expected.items()):

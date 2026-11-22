@@ -23,11 +23,16 @@ def test_same_strategy_ticker_mixed_directions_not_cancelled():
         _sig("supply_chain", "AAPL", "long", 0.62),
     ]
     out = MultiStrategyEngine._resolve_signals(signals)
-    # Exactly one AAPL signal survives — the highest-conviction one (the short).
+    # Exactly one AAPL aggregate survives, preserving bull/bear disagreement & net conviction.
     assert len(out) == 1
     assert out[0]["ticker"] == "AAPL"
-    assert out[0]["direction"] == "short"
-    assert out[0]["score"] == 0.65
+    assert out[0]["direction"] == "long"
+    assert out[0]["long_count"] == 3
+    assert out[0]["short_count"] == 1
+    assert out[0]["disagreement"] is True
+    assert round(out[0]["net_conviction"], 4) == round((0.60 + 0.62 + 0.62 - 0.65) / 4, 4)
+    assert len(out[0]["bull_evidence"]) == 3
+    assert len(out[0]["bear_evidence"]) == 1
 
 
 def test_cross_strategy_conflict_preserved():

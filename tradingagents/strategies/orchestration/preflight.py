@@ -705,31 +705,12 @@ def _run_screen_preflight(
             _provider_errors,
         )
 
-        from .operating_contract import configured as stabilization_configured, EXCLUSIONS, CAPABILITY_EXCLUSIONS
-        from .filing_research_policy import declared_scope as filing_scope
-        from .source_lifecycle_policy import declared_scope as retirement_scope
-        disabled = {}
-        bulk_scope = None
+        from .operating_contract import configured as profile_configured
+        disabled: dict[str, Any] = dict(isolated_ar.get("disabled_strategies") or {})
         projected_data = shared_data
-        failed_required = set()
-        if stabilization_configured(config):
-            # Validate the same immutable declarations used by daily screening.
-            # The exact bulk sentinel does not waive focused SEC issuer checks.
-            bulk_scope = filing_scope(shared_data, config=isolated_ar)
-            retirement_scope(shared_data, isolated_ar, engine.paper_trade_strategies)
-            from .congress_policy import declared_exclusions
-            declared_exclusions(shared_data, isolated_ar)
-            disabled = dict(EXCLUSIONS)
-            from .operating_contract import source_support
-            from .research_resilience import project_sources
-            from .source_inputs import source_codec_limits
-            capability_scope, failed_required = source_support(config, shared_data)
-            projected_data, _ = project_sources(shared_data, capability_scope['sources'],
-                codec_limits=source_codec_limits(config), capability_policy=isolated_ar['source_capability_policy'])
-            report['capability_scope'] = capability_scope
-            report.update(declared_exclusions=disabled, coverage_excluded=True,
-                research_coverage_complete=False,
-                disabled_strategy_capabilities=deepcopy(CAPABILITY_EXCLUSIONS))
+        failed_required: set[str] = set()
+        if profile_configured(config):
+            report["profile_validated"] = True
         dependencies = {
             source
             for strategy in engine.paper_trade_strategies
@@ -741,18 +722,10 @@ def _run_screen_preflight(
             dependencies.intersection(report["fetched_sources"]),
             include_optional=True,
         )
-        if bulk_scope is not None:
-            source_errors.pop('edgar', None)
-            for source in sorted(failed_required - source_errors.keys()):
-                report['failures'].append({'horizon': 'shared', 'strategy': 'source_health',
-                    'ticker': None, 'error': f'{source}: required capability unavailable'})
         for source in sorted(source_errors):
-            if bulk_scope is not None:
-                from .operating_contract import optional_source_failure
-                failure = _screen_source_failure(source, shared_data.get(source))
-                if optional_source_failure(failure, shared_data, failed_required):
-                    report['source_warnings'].append({'source': source, 'error': 'optional capability unavailable'})
-                    continue
+            if source in OPTIONAL_ENRICHMENT_SOURCES:
+                report["source_warnings"].append({"source": source, "error": "optional capability unavailable"})
+                continue
             if source in OPTIONAL_ENRICHMENT_SOURCES:
                 report["source_warnings"].append(
                     {"source": source, "error": "optional enrichment unavailable"}

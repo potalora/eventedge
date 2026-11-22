@@ -3,9 +3,7 @@
 
 Usage:
     python scripts/run_cohorts.py --date 2026-04-05    # daily trading (LLM on by default)
-    python scripts/run_cohorts.py --learning            # refused: production learning is disabled
     python scripts/run_cohorts.py --compare             # print comparison report
-    python scripts/run_cohorts.py --reset               # refused: start a fresh generation
     python scripts/run_cohorts.py --date 2026-04-05 --no-llm  # without LLM enrichment
     python scripts/run_cohorts.py --date 2026-04-05 --preflight  # no-write integrity check
 """
@@ -202,17 +200,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--date", default=None, help="Trading date (YYYY-MM-DD). Defaults to today."
     )
     parser.add_argument(
-        "--learning",
-        action="store_true",
-        help="Refuse retired production learning (exit 2).",
-    )
-    parser.add_argument(
         "--compare", action="store_true", help="Print cohort comparison report."
-    )
-    parser.add_argument(
-        "--reset",
-        action="store_true",
-        help="Refuse destructive reset; start a fresh generation instead.",
     )
     parser.add_argument(
         "--no-llm", action="store_true", help="Disable LLM enrichment (on by default)."
@@ -233,20 +221,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma-separated tickers to exclude (compliance). Also reads BLOCKED_TICKERS env var.",
     )
+    parser.add_argument(
+        "--result-file",
+        default=None,
+        help="Write structured JSON worker result atomically to this path (decoupled from stdout/stderr).",
+    )
     return parser
 
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str:
-    if args.learning:
-        print(
-            "Production learning is disabled; no generation state was changed.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    if args.reset:
-        parser.error(
-            "reset is disabled for ledger-backed generation state; start a fresh generation instead"
-        )
     if args.preflight and args.compare:
         parser.error("--preflight cannot be combined with --compare")
     if not args.preflight and args.preflight_mode is not None:
@@ -367,7 +350,18 @@ def _build_orchestrator(args, config: dict, generation_id: str, generation_commi
     )
 
 
-def _run_preflight(config: dict, trading_date: str, mode: str) -> None:
+def _write_result_file(result_file: str | None, payload: object) -> None:
+    if not result_file:
+        return
+    from tradingagents.strategies.orchestration._io import atomic_write_json
+
+    normalized = json.loads(json.dumps(payload, default=str))
+    atomic_write_json(result_file, normalized)
+
+
+def _run_preflight(
+    config: dict, trading_date: str, mode: str, *, result_file: str | None = None
+) -> None:
     from tradingagents.strategies.orchestration.preflight import run_preflight
     from tradingagents.strategies.orchestration.generation_manager import (
         normalize_preflight_report,
@@ -382,19 +376,17 @@ def _run_preflight(config: dict, trading_date: str, mode: str) -> None:
     normalized = normalize_preflight_report(
         report, mode=mode, trading_date=trading_date
     )
-    print(
-        json.dumps(
-            normalized
-            if normalized is not None
-            else {
-                "ok": False,
-                "preflight_mode": mode,
-                "error": "malformed preflight report",
-            },
-            indent=2,
-            default=str,
-        )
+    payload = (
+        normalized
+        if normalized is not None
+        else {
+            "ok": False,
+            "preflight_mode": mode,
+            "error": "malformed preflight report",
+        }
     )
+    _write_result_file(result_file, payload)
+    print(json.dumps(payload, indent=2, default=str))
     exit_code, message = _preflight_exit_status(report, mode, trading_date)
     rendered = f"{message} ({trading_date}, {elapsed:.1f}s)"
     if exit_code == 0:
@@ -422,40 +414,50 @@ def _run_compare(
     args, config: dict, generation_id: str, generation_commit: str
 ) -> None:
     from tradingagents.strategies.metrics.service import MetricsService
+    from tradingagents.strategies.orchestration._io import snapshot_sqlite
     from tradingagents.strategies.orchestration.cohort_comparison import (
         CohortComparison,
     )
 
     from pathlib import Path
-    import shutil
     import tempfile
     from tradingagents.strategies.orchestration.cohort_orchestrator import build_default_cohorts
+    from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME, GenerationDB
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
     def operation():
         root = Path(config["autoresearch"]["state_dir"])
         cohorts = build_default_cohorts(config)
-        # SQLite mode=ro may still create WAL/SHM sidecars. Copy DB plus committed
-        # WAL under the shared runtime lock, then let SQLite read the disposable
-        # snapshot. Never use immutable=1 on a live DB: it ignores committed WAL.
         with tempfile.TemporaryDirectory(prefix="eventedge-compare-") as temporary:
             snapshot = Path(temporary)
-            paths = {"metrics_v2.sqlite3": root / "metrics_v2.sqlite3"}
-            paths.update({f"{c.name}/portfolio.db": Path(c.state_dir) / "portfolio.db" for c in cohorts})
-            for relative, source in paths.items():
-                if not source.is_file():
-                    raise FileNotFoundError(source)
-                target = snapshot / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, target)
-                wal = Path(str(source) + "-wal")
-                if wal.is_file():
-                    shutil.copyfile(wal, Path(str(target) + "-wal"))
+            unified = root / GENERATION_DB_FILENAME
             ledgers = {}
             try:
-                for cohort in cohorts:
-                    ledgers[cohort.name] = PortfolioLedger.open_existing(snapshot / cohort.name / "portfolio.db")
-                service = MetricsService(snapshot, ledgers, read_only=True)
+                if unified.is_file():
+                    snap_db_path = snapshot_sqlite(unified, snapshot / GENERATION_DB_FILENAME)
+                    snap_db = GenerationDB.open_readonly(snap_db_path)
+                    for cohort in cohorts:
+                        ledgers[cohort.name] = PortfolioLedger.open_existing(
+                            snap_db, cohort_id=cohort.name
+                        )
+                    service = MetricsService(snap_db, ledgers, read_only=True)
+                else:
+                    import shutil
+                    paths = {"metrics_v2.sqlite3": root / "metrics_v2.sqlite3"}
+                    paths.update({f"{c.name}/portfolio.db": Path(c.state_dir) / "portfolio.db" for c in cohorts})
+                    for relative, source in paths.items():
+                        if not source.is_file():
+                            raise FileNotFoundError(source)
+                        wal = Path(str(source) + "-wal")
+                        if wal.is_file() and wal.stat().st_size > 0:
+                            snapshot_sqlite(source, snapshot / relative)
+                        else:
+                            target = snapshot / relative
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(source, target)
+                    for cohort in cohorts:
+                        ledgers[cohort.name] = PortfolioLedger.open_existing(snapshot / cohort.name / "portfolio.db")
+                    service = MetricsService(snapshot, ledgers, read_only=True)
                 epoch = service.store.current_epoch()
                 if epoch is not None and (
                     epoch.generation_id != generation_id
@@ -471,7 +473,13 @@ def _run_compare(
 
 
 def _run_daily(
-    args, config: dict, trading_date: str, generation_id: str, generation_commit: str
+    args,
+    config: dict,
+    trading_date: str,
+    generation_id: str,
+    generation_commit: str,
+    *,
+    result_file: str | None = None,
 ) -> None:
     from tradingagents.strategies.orchestration.run_outcome import (
         DAILY_RESULT_PREFIX,
@@ -491,14 +499,13 @@ def _run_daily(
     except Exception:
         print("ERROR: invalid cohort reporting payload", file=sys.stderr)
         raise SystemExit(1)
+    wire_payload = {
+        "wire_version": DAILY_RESULT_WIRE_VERSION,
+        "cohort_results": result,
+    }
+    _write_result_file(result_file, wire_payload)
     print(f"\nDaily trading completed for {trading_date} in {elapsed:.1f}s")
-    print(
-        DAILY_RESULT_PREFIX
-        + json.dumps(
-            {"wire_version": DAILY_RESULT_WIRE_VERSION, "cohort_results": result},
-            default=str,
-        )
-    )
+    print(DAILY_RESULT_PREFIX + json.dumps(wire_payload, default=str))
     if message:
         print(message, file=sys.stderr)
     if exit_code:
@@ -506,7 +513,8 @@ def _run_daily(
 
 
 def _record_runtime_identity(config: dict, generation_id: str, generation_commit: str) -> None:
-    if config.get("autoresearch", {}).get("stabilization_profile_policy") != "supported_sixteen_books_v1":
+    from tradingagents.strategies.orchestration.operating_contract import configured
+    if not configured(config):
         return
     from pathlib import Path
     from tradingagents.strategies.orchestration.run_evidence import worker_runtime_identity
@@ -529,12 +537,19 @@ def main():
     _record_runtime_identity(config, generation_id, generation_commit)
     preflight_mode = args.preflight_mode or "all"
     if args.preflight:
-        _run_preflight(config, exact_trading_date, preflight_mode)
+        _run_preflight(config, exact_trading_date, preflight_mode, result_file=args.result_file)
         return
     if args.compare:
         _run_compare(args, config, generation_id, generation_commit)
         return
-    _run_daily(args, config, exact_trading_date, generation_id, generation_commit)
+    _run_daily(
+        args,
+        config,
+        exact_trading_date,
+        generation_id,
+        generation_commit,
+        result_file=args.result_file,
+    )
 
 
 if __name__ == "__main__":

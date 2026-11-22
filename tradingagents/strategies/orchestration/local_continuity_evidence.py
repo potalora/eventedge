@@ -136,13 +136,12 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
         manifest = report_io._load_json(repo/'data/generations/manifest.json')
         matches=[item for item in manifest['generations'] if item['gen_id']==generation]
         _require(len(matches)==1)
-        from .source_retirement import generation_for_session, config_path_for_generation
-        metadata=generation_for_session(matches[0],session)
+        metadata=matches[0]
         state=Path(metadata['state_dir'])
         state=state if state.is_absolute() else repo/state
         _require(metadata['git_commit']==expected_commit and metadata['config_sha256']==expected_profile
-            and config_path_for_generation(metadata).parent==state
-            and Path(metadata['config_file']).name in {'generation-config.json','generation-config-congress-retired.json'})
+            and Path(metadata['config_file']).parent==state
+            and Path(metadata['config_file']).name == 'generation-config.json')
         config=apply_generation_config(DEFAULT_CONFIG,metadata['config_file'],expected_profile)
         ar=config['autoresearch']
         _require(ar.get('research_resilience_policy')==POLICY and ar.get('llm_billing_mode')=='chatgpt_plan'
@@ -177,19 +176,11 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
         slot=configuration_fingerprint({'generation':generation,'session':session})
         source=report_io._accepted_envelope(state/'source_inputs'/(slot+'.json'),generation,session,expected_commit)
         strategies={strategy.name:strategy for strategy in get_paper_trade_strategies()}
-        from .filing_research_policy import configured as filing_disabled
-        excluded=filing_disabled(ar)
-        edgar=source['payload'].get('edgar',{})
-        excluded=excluded and edgar.get('error')=='filing_research_disabled' and edgar.get('coverage')=={
-            'complete':False,'reason':'filing_research_disabled','filing_research_policy':'disabled_v1'}
-        if excluded:
-            row['approved_exclusions'].append({'provider':'edgar','reason':'filing_research_disabled','policy':'disabled_v1'})
         observations=report['sources'].get('observations',{})
         row['source_observations']=observations
-        required={provider for strategy in strategies.values() for provider in strategy.data_sources if provider!='openbb'}
-        failures=[provider for provider in required if observations.get(provider) not in ('success','success_empty','complete')
-                  and not (excluded and provider=='edgar')]
-        failures += [item['provider'] for item in report['sources']['unresolved'] if not(excluded and item['provider']=='edgar')]
+        required={provider for strategy in strategies.values() for provider in strategy.data_sources if provider not in {'openbb', 'enrichment'}}
+        failures=[provider for provider in required if observations.get(provider) not in ('ok','success','success_empty','complete')]
+        failures += [item['provider'] for item in report['sources']['unresolved']]
         row['unexpected_failures']=sorted(set(failures))
         checks['sources']=not failures
         sample=_screening(state,source,epoch,config,strategies,wire,session,start,finish)

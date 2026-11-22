@@ -245,7 +245,9 @@ print(json.dumps(result))
     harness.write_text(harness.read_text().replace("generation_id='gen_099', generation_commit='a'*40",
         'generation_id='+repr(epoch.generation_id)+', generation_commit='+repr(epoch.generation_commit)))
     import os
-    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    repo_root = str(Path(__file__).resolve().parents[1])
+    existing_pp = os.environ.get("PYTHONPATH", "")
+    env = dict(os.environ, PYTHONPATH=f"{repo_root}{os.pathsep}{existing_pp}" if existing_pp else repo_root)
     def child(mode):
         process = subprocess.Popen([sys.executable, str(harness), str(profile), mode],
             env=env, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

@@ -38,64 +38,12 @@ def source_scope_evidence(data: dict, config: dict, session: str, *,
             limits['usaspending']['coverage_basis'] = 'verified_listed_targets'
         except (ValueError, TypeError, KeyError, SourceFetchError):
             errors['usaspending'] = 'scoped_source_evidence_invalid'
-    payload = data.get('courtlistener', {})
-    configured = config.get('courtlistener_scope_policy')
-    declared = payload.get('courtlistener_scope_policy') if isinstance(payload, dict) else None
-    if configured is not None or declared is not None:
-        try:
-            from .litigation_targets import validate_litigation_targets
-            from ..data_sources.courtlistener_scope import validate_focused_litigation
-            if configured != COURT_POLICY or declared != configured:
-                raise ValueError('Court scope policy mismatch')
-            targets = data['_courtlistener_targets']
-            evidence = validate_litigation_targets(
-                {key: targets[key] for key in ('scope', 'manifest')},
-                session=date.fromisoformat(session), settings=litigation_settings(config),
-                company_map=targets['company_map'])
-            validate_focused_litigation(payload, expected_scope=evidence['scope'],
-                date_filed_after=(date.fromisoformat(session) - timedelta(days=14)).isoformat(),
-                date_filed_before=session, now=now or datetime.now(timezone.utc),
-                max_evidence_age_seconds=None)
-            scope, manifest = evidence['scope'], evidence['manifest']
-            proofs['courtlistener'] = evidence
-            limits['courtlistener'] = {
-                'policy': COURT_POLICY, 'scope_sha256': manifest['scope_sha256'],
-                'target_manifest_sha256': manifest['manifest_sha256'],
-                'coverage_basis': 'declared_issuer_and_case_queries',
-                'content_kind': 'docket_metadata_only', 'issuer_count': len(scope['issuers']),
-                'case_count': len(scope['case_ids']), 'docket_count': len(payload['dockets']),
-                'omitted_issuer_count': len(manifest['omitted_issuers']) + len(manifest['omitted_shortlist']),
-                'target_search_complete': manifest['target_search_complete'], 'marketwide_coverage': False}
-        except (ValueError, TypeError, KeyError, SourceFetchError):
-            errors['courtlistener'] = 'scoped_source_evidence_invalid'
     return errors, limits, proofs
 
 
 def validate_portfolio_targets(data: dict, owner, session: str) -> None:
-    """Bind the original target seed to this run, never to its later positions."""
-    config = owner._base_config.get('autoresearch', {})
-    if config.get('courtlistener_scope_policy') is None:
-        return
-    from .litigation_targets import validate_litigation_targets
-    targets = data.get('_courtlistener_targets')
-    if isinstance(targets, dict) and targets.get('error'):
-        # A failed acquisition is retained for failed strategy-health evidence.
-        if data.get('courtlistener', {}).get('error'):
-            return
-        raise ValueError('Court target failure lacks source failure')
-    evidence = validate_litigation_targets(
-        {key: targets[key] for key in ('scope', 'manifest')},
-        session=date.fromisoformat(session), settings=litigation_settings(config),
-        company_map=targets['company_map'], require_portfolio_scope=True)
-    manifest = evidence['manifest']
-    roster = sorted(({'name': row['config'].name,
-                      'policy_id': owner._policy_id_for_horizon(row['config'].horizon)}
-                     for row in owner.cohorts), key=lambda row: row['name'])
-    if manifest['cohorts'] != roster or manifest['epoch_id'] != owner._epoch_id:
-        raise ValueError('Court target portfolio scope mismatch')
-    acquisition = data.get('_decision_acquisition')
-    if acquisition is not None and manifest['cutoff'] != acquisition.get('started_at'):
-        raise ValueError('Court target acquisition cutoff mismatch')
+    """Retained no-op after retirement of focused litigation targets."""
+    _ = (data, owner, session)
 
 
 def litigation_context(data: dict, proof: dict) -> dict:

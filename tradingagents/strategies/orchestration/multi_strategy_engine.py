@@ -72,6 +72,9 @@ def _enrichment_failures(enrichment: Mapping[str, Any]) -> list[dict]:
     return sorted(failures, key=lambda item: (item["operation"], item["symbol"] or "", item["reason_code"]))
 
 
+_RETIRED_GEN003_SOURCES = frozenset({"edgar", "congress", "regulations", "courtlistener"})
+
+
 def _provider_errors(
     data: Mapping[str, Any], sources: Iterable[str], *, include_optional: bool = False
 ) -> dict[str, str]:
@@ -81,6 +84,8 @@ def _provider_errors(
         if source in OPTIONAL_ENRICHMENT_SOURCES and not include_optional:
             continue
         if source not in data:
+            if source in _RETIRED_GEN003_SOURCES:
+                continue
             errors[str(source)] = "missing from shared data"
             continue
         payload = data[source]
@@ -305,32 +310,33 @@ class MultiStrategyEngine:
         state_manager: StateManager | None = None,
         on_event: Callable | None = None,
         use_llm: bool = False,
-        adaptive_confidence: bool = False,
         ledger: PortfolioLedger | None = None,
-        outcome_reader: Callable[[str], Iterable[OutcomeRecord]] | None = None,
+        data_acquisition: Any | None = None,
     ):
-        if adaptive_confidence:
-            raise ValueError(
-                "production learning is disabled; adaptive_confidence=True is rejected"
-            )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
+        from .data_acquisition import DataAcquisitionService
         from .research_resilience import configured as research_resilience_configured
         research_resilience_configured(self.ar_config)
         from .research_resilience import capability_configured
         capability_configured(self.ar_config)
 
-        # Load strategies (paper-trade only)
+        # Load strategies (active paper-trade strategies only)
         self.paper_trade_strategies = list(strategies or get_paper_trade_strategies())
 
-        from .operating_contract import configured as stabilization_configured, configure_strategies as stabilization_strategies
-        if stabilization_configured(self.config):
-            self.paper_trade_strategies = stabilization_strategies(self.paper_trade_strategies, self.ar_config, full_config=self.config)
-        from .source_lifecycle_policy import configured as lifecycle_configured
-        lifecycle_configured(self.ar_config, self.paper_trade_strategies)
+        from .operating_contract import configured as profile_configured, configure_strategies
+        if profile_configured(self.config) or self.ar_config.get("enabled_strategies") or self.ar_config.get("disabled_strategies"):
+            self.paper_trade_strategies = configure_strategies(
+                self.paper_trade_strategies, self.ar_config, full_config=self.config
+            )
 
-        # Data source registry
-        self.registry = registry or build_default_registry(self.ar_config)
+        # Shared single-instance Tier-2 DataAcquisitionService
+        if data_acquisition is not None:
+            self.data_acquisition = data_acquisition
+            self._registry = registry or data_acquisition.registry
+        else:
+            self._registry = registry or build_default_registry(self.ar_config)
+            self.data_acquisition = DataAcquisitionService(self.config, registry=self._registry)
 
         # State
         self.state = state_manager or StateManager(
@@ -347,13 +353,9 @@ class MultiStrategyEngine:
 
             self._analyzer = LLMAnalyzer(self.config)
 
-        # Price cache: ticker -> DataFrame
-        self._price_cache: dict[str, pd.DataFrame] = {}
-
-        # Adaptive confidence: journal-derived (True) or fixed 0.5 (False)
-        self._adaptive_confidence = adaptive_confidence
+        # Shared price cache owned by DataAcquisitionService
+        self._price_cache: dict[str, pd.DataFrame] = self.data_acquisition.price_cache
         self.ledger = ledger
-        self._outcome_reader = outcome_reader or (lambda _strategy: ())
 
         # Signal journal (shared across methods)
         from tradingagents.strategies.learning.signal_journal import SignalJournal
@@ -362,24 +364,14 @@ class MultiStrategyEngine:
             self.ar_config.get("state_dir", "data/state"), ledger=self.ledger
         )
 
-        # OpenBB availability flag — checked once at startup
-        self._openbb_source = self.registry.get("openbb")
+        # Optional enrichment availability flag — checked once at startup
+        self._openbb_source = self.registry.get("enrichment") or self.registry.get("openbb")
         self._openbb_available = (
             self._openbb_source.is_available() if self._openbb_source else False
         )
 
-        # Cycle tracking (observation-only)
-        self._cycle_tracker = None  # Initialized when gen_start_date is known
-
     def _emit(self, kind: str, **data: Any) -> None:
         self._on_event(kind, **data)
-
-    def set_cycle_tracker(self, gen_start_date: str) -> None:
-        """Initialize cycle tracking for this engine's state directory."""
-        from tradingagents.strategies.state.cycle_tracker import CycleTracker
-
-        state_dir = self.ar_config.get("state_dir", "data/state")
-        self._cycle_tracker = CycleTracker(gen_start_date, state_dir)
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -387,22 +379,86 @@ class MultiStrategyEngine:
 
     @staticmethod
     def _resolve_signals(all_signals: list[dict]) -> list[dict]:
-        """Keep the single highest-conviction candidate per (strategy, ticker).
+        """Aggregate signals per (strategy, ticker) while preserving disagreement.
 
-        supply_chain emits one candidate per news article, and LLM enrichment can
-        tag the same ticker with opposing directions (e.g. 1 short + 3 long for
-        AAPL). The previous logic cancelled opposing same-ticker directions, which
-        removed BOTH and silenced the strategy entirely. Collapsing to the
-        highest-conviction signal per (strategy, ticker) gives one coherent view
-        and prevents self-cancellation. Cross-strategy disagreements are left
-        intact (they were never resolved by the old key, which included strategy).
+        Preserves ``long_count``, ``short_count``, ``net_conviction``,
+        ``disagreement``, and top ``bull_evidence`` / ``bear_evidence`` instead
+        of collapsing to winner-take-all ``max(score)``.
         """
-        best: dict[tuple[str, str], dict] = {}
+        grouped: dict[tuple[str, str], list[dict]] = {}
         for signal in all_signals:
-            st = (signal["strategy"], signal["ticker"])
-            if st not in best or signal["score"] > best[st]["score"]:
-                best[st] = signal
-        return [s for s in best.values() if s.get("ticker", "").strip()]
+            ticker = str(signal.get("ticker", "")).strip()
+            if not ticker:
+                continue
+            key = (str(signal["strategy"]), ticker)
+            grouped.setdefault(key, []).append(signal)
+
+        def _evidence_snippet(sig: dict) -> str:
+            meta = sig.get("metadata") if isinstance(sig.get("metadata"), Mapping) else {}
+            llm = meta.get("llm_analysis") if isinstance(meta.get("llm_analysis"), Mapping) else {}
+            for candidate in (
+                llm.get("thesis"),
+                llm.get("rationale"),
+                llm.get("summary"),
+                meta.get("thesis"),
+                meta.get("catalyst"),
+                meta.get("headline"),
+                meta.get("summary"),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()[:240]
+            return f"{sig.get('strategy')}:{sig.get('direction')}@{float(sig.get('score', 0.0)):.2f}"
+
+        resolved: list[dict] = []
+        for (_strategy, _ticker), items in grouped.items():
+            longs = [s for s in items if s.get("direction") == "long"]
+            shorts = [s for s in items if s.get("direction") == "short"]
+            neutrals = [s for s in items if s.get("direction") not in {"long", "short"}]
+            long_count = len(longs)
+            short_count = len(shorts)
+
+            long_sum = sum(float(s.get("score", 0.0) or 0.0) for s in longs)
+            short_sum = sum(float(s.get("score", 0.0) or 0.0) for s in shorts)
+            directional_count = long_count + short_count
+            net_conviction = (
+                round((long_sum - short_sum) / directional_count, 6)
+                if directional_count > 0
+                else 0.0
+            )
+
+            if directional_count == 0:
+                direction = "neutral"
+                pool = neutrals
+            elif net_conviction >= 0:
+                direction = "long"
+                pool = longs or items
+            else:
+                direction = "short"
+                pool = shorts or items
+
+            lead = max(pool, key=lambda s: float(s.get("score", 0.0) or 0.0))
+            bull_evidence = [
+                _evidence_snippet(s)
+                for s in sorted(longs, key=lambda s: float(s.get("score", 0.0) or 0.0), reverse=True)[:3]
+            ]
+            bear_evidence = [
+                _evidence_snippet(s)
+                for s in sorted(shorts, key=lambda s: float(s.get("score", 0.0) or 0.0), reverse=True)[:3]
+            ]
+            merged = dict(lead)
+            merged["direction"] = direction
+            merged["score"] = round(abs(net_conviction), 6) if directional_count > 0 else float(lead.get("score", 0.0) or 0.0)
+            merged["long_count"] = long_count
+            merged["short_count"] = short_count
+            merged["net_conviction"] = net_conviction
+            merged["disagreement"] = long_count > 0 and short_count > 0
+            merged["bull_evidence"] = bull_evidence
+            merged["bear_evidence"] = bear_evidence
+            merged.setdefault("raw_signal_score", lead.get("raw_signal_score", lead.get("score")))
+            if "llm_conviction" in lead:
+                merged["llm_conviction"] = lead["llm_conviction"]
+            resolved.append(merged)
+        return resolved
 
     @bounded_model_phase
     def screen_and_enrich(
@@ -414,212 +470,166 @@ class MultiStrategyEngine:
         epoch_id: str,
         policy_id: str,
     ) -> tuple[list[dict], dict, list[StrategyHealthRecord]]:
-        """Run strategy screening and LLM enrichment (steps 1-2).
+        """Run strategy screening and LLM enrichment with Tier-2 circuit-breaker isolation.
 
-        Returns enriched, deduped signals, regime model, and health records. These can be
-        shared across cohorts so LLM non-determinism doesn't confound results.
+        A failure in any Tier-2 strategy source marks *only* the affected
+        strategy ``unavailable`` for the session and never aborts sibling
+        strategies or invalidates clean Tier-1 accounting.
         """
-        from .congress_policy import configured, audit_scope, DECLARATION_KEY, POLICY as CONGRESS_POLICY
-        from .research_resilience import configured as resilience_configured, project_sources
+        from tradingagents.strategies.metrics.identity import _stable_id
+        from tradingagents.strategies.modules.admission import (
+            admit_candidates,
+            candidate_universe,
+        )
+        from .data_acquisition import evaluate_strategy_circuit_breaker
+        from .research_resilience import (
+            configured as resilience_configured,
+            digest as research_digest,
+            project_sources,
+            strategy_capability_holds,
+        )
+        from .source_inputs import source_codec_limits
+
         resilience = resilience_configured(self.ar_config)
         research_scope = None
-        research_hold_reasons = []
-        from .source_lifecycle_policy import declared_scope, DECLARATION_KEY as LIFECYCLE_KEY, health_evidence
-        retirement_scope = declared_scope(data, self.ar_config, self.paper_trade_strategies)
-        from .filing_research_policy import declared_scope as filing_scope, health_evidence as filing_health_evidence, DECLARATION_KEY as FILING_KEY
-        bulk_filing_scope = filing_scope(data, config=self.ar_config)
-        congress_audit_scope = audit_scope(data, self.ar_config, trading_date)
-        signal_data = ({key: value for key, value in data.items() if key not in ('congress', DECLARATION_KEY)}
-                       if configured(self.ar_config) else data)
-        if retirement_scope is not None:
-            signal_data = {key: value for key, value in signal_data.items() if key != LIFECYCLE_KEY}
-        if bulk_filing_scope is not None:
-            signal_data = {key: value for key, value in signal_data.items() if key != FILING_KEY}
-        if resilience:
-            from .source_inputs import source_codec_limits
-            names = set(data) | {'fred', 'yfinance'}
-            if self.ar_config.get('equity_universe_policy'):
-                names.add('equity_universe')
-            names.update(source for strategy in self.paper_trade_strategies
-                         for source in strategy.data_sources)
-            projected_sources, research_scope = project_sources(data, names,
-                codec_limits=source_codec_limits(self.config),
-                capability_policy=self.ar_config.get('source_capability_policy'))
-            signal_data = {key: projected_sources[key] for key in signal_data
-                           if key in projected_sources}
-        from .scoped_sources import source_scope_evidence, accepted_attribution_limitation
-        scope_errors, scope_limits, scope_proofs = source_scope_evidence(data, self.ar_config, trading_date)
-        if resilience and any(not isinstance(data.get(source), dict)
-                or not isinstance(data[source].get('error'), str) or not data[source]['error'].strip()
-                for source in scope_errors):
-            raise ValueError('invalid_scoped_source_evidence')
-        from .regulation_inputs import validate_regulation_policy
-        from .regulation_publication_policy import source_required as publication_source_required
-        regulation_source_scope = None
-        try:
-            if publication_source_required(self.ar_config, self.paper_trade_strategies) or 'regulations' in data:
-                regulation_source_scope = validate_regulation_policy(data, self.ar_config)
-        except ValueError:
-            if resilience:
-                raise
-            scope_errors['regulations'] = 'invalid_regulation_evidence_policy'
-        from .filing_policy_validation import validate_filing_comparison_policy
-        filing_comparison_scope = None
-        try:
-            filing_comparison_scope = validate_filing_comparison_policy(data, self.ar_config)
-        except ValueError:
-            if resilience:
-                raise
-            scope_errors['edgar'] = 'invalid_filing_comparison_policy'
-        from .filing_attribution_validation import validate_filing_attribution_policy
-        from tradingagents.strategies.data_sources.filing_attribution_policy import (
-            configured as filing_attribution_configured, signal_edgar,
-        )
-        filing_attribution_scope = None
-        try:
-            filing_attribution_scope = validate_filing_attribution_policy(data, self.ar_config)
-            if filing_attribution_configured(self.ar_config) and not resilience:
-                signal_data = dict(signal_data, edgar=(signal_edgar(data['edgar'], filing_attribution_scope)
-                    if filing_attribution_scope is not None else {}))
-        except ValueError:
-            if resilience:
-                raise
-            scope_errors['edgar'] = 'invalid_filing_attribution_policy'
-            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
-        from .filing_acquisition_validation import validate_filing_acquisition_policy
-        filing_acquisition_scope = None
-        try:
-            filing_acquisition_scope = validate_filing_acquisition_policy(data, self.ar_config)
-        except ValueError:
-            if resilience:
-                raise
-            scope_errors['edgar'] = 'invalid_filing_acquisition_policy'
-            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
-        from .filing_material_validation import validate_filing_material_policy, signal_edgar as material_signal_edgar
-        from tradingagents.strategies.data_sources.filing_material_policy import configured as filing_material_configured
-        filing_material_scope = None
-        try:
-            filing_material_scope = validate_filing_material_policy(data, self.ar_config)
-            if filing_material_configured(self.ar_config) and not resilience and 'edgar' not in scope_errors:
-                signal_data = dict(signal_data, edgar=(material_signal_edgar(data['edgar'],
-                    filing_material_scope, projected_edgar=signal_data.get('edgar'))
-                    if filing_material_scope is not None else {}))
-        except ValueError:
-            if resilience:
-                raise
-            scope_errors['edgar'] = 'invalid_filing_material_policy'
-            signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
-        filing_isolation = None
-        if resilience and filing_material_configured(self.ar_config):
-            from .filing_research_isolation import isolate_filing_research
-            projected_edgar, filing_isolation = isolate_filing_research(data.get('edgar', {}),
-                self.ar_config, strict_material_scope=filing_material_scope,
-                acquisition_scope=filing_acquisition_scope)
-            if filing_isolation['discovery_scope']['outcome'] == 'complete':
-                signal_data = dict(signal_data, edgar=projected_edgar)
-            else:
-                signal_data = {key: value for key, value in signal_data.items() if key != 'edgar'}
-        regime_model = self._build_regime_model(signal_data)
-        if resilience:
-            # Every analyzer and committee consumes the shared regime. Unknown
-            # dependencies therefore hold all new entries, including unrelated
-            # otherwise healthy source candidates.
-            if any(regime_model[key] is None for key in
-                   ('vix_level', 'credit_spread_bps', 'yield_curve_slope')):
-                research_hold_reasons.append('shared_regime_unavailable')
-            regime_model['research_source_scope'] = research_scope
-            regime_model['filing_research_isolation'] = filing_isolation
-            regime_model['research_hold_reasons'] = research_hold_reasons
-        regime_model.setdefault("timestamp", datetime.now().isoformat())
-        if 'courtlistener' in scope_proofs and (not resilience or 'courtlistener' in signal_data):
-            from .scoped_sources import litigation_context
-            regime_model['litigation_context'] = litigation_context(data, scope_proofs['courtlistener'])
+        research_hold_reasons: list[str] = []
+        signal_data = dict(data)
+        codec_limits = source_codec_limits(self.config)
 
         if resilience:
-            from .research_resilience import digest as research_digest
-            codec_limits = source_codec_limits(self.config)
-            regime_model['research_projection_sha256'] = research_digest(signal_data, codec_limits=codec_limits)
+            names = set(data) | {"fred", "yfinance"}
+            if self.ar_config.get("equity_universe_policy"):
+                names.add("equity_universe")
+            names.update(
+                source for strategy in self.paper_trade_strategies for source in strategy.data_sources
+            )
+            projected_sources, research_scope = project_sources(
+                data,
+                names,
+                codec_limits=codec_limits,
+                capability_policy=self.ar_config.get("source_capability_policy"),
+            )
+            signal_data = {
+                key: projected_sources[key] for key in signal_data if key in projected_sources
+            }
+
+        regime_model = self._build_regime_model(signal_data)
+        if resilience:
+            if any(
+                regime_model[key] is None
+                for key in ("vix_level", "credit_spread_bps", "yield_curve_slope")
+            ):
+                research_hold_reasons.append("shared_regime_unavailable")
+            regime_model["research_source_scope"] = research_scope
+            regime_model["research_hold_reasons"] = research_hold_reasons
+            regime_model["research_projection_sha256"] = research_digest(
+                signal_data, codec_limits=codec_limits
+            )
+        regime_model.setdefault("timestamp", datetime.now().isoformat())
 
         universe = None
         universe_failure = False
         if self.ar_config.get("equity_universe_policy"):
-            from tradingagents.strategies.data_sources.equity_universe import EquityUniverse, POLICY
-            if resilience and self.ar_config['equity_universe_policy'] != POLICY:
-                raise ValueError('invalid_research_universe_policy')
-            if resilience and 'equity_universe' not in signal_data:
-                universe_failure = True
-            else:
+            from tradingagents.strategies.data_sources.equity_universe import (
+                POLICY as UNIVERSE_POLICY,
+                EquityUniverse,
+            )
+
+            if self.ar_config["equity_universe_policy"] != UNIVERSE_POLICY:
+                raise ValueError("unsupported equity universe policy")
+            selected = signal_data if resilience else data
+            universe_data = selected.get("equity_universe", {})
+            if isinstance(universe_data, Mapping) and not universe_data.get("error") and universe_data.get("snapshot") is not None:
                 try:
-                    if self.ar_config["equity_universe_policy"] != POLICY:
-                        raise ValueError("unsupported equity universe policy")
-                    selected = signal_data if resilience else data
-                    universe_data = selected.get("equity_universe", {})
-                    if universe_data.get("error"):
-                        raise ValueError("equity universe acquisition failed")
-                    universe = EquityUniverse(universe_data.get("snapshot"),
-                        company_map=selected.get("edgar", {}).get("company_tickers"))
+                    universe = EquityUniverse(universe_data.get("snapshot"))
                 except (ValueError, TypeError, AttributeError):
-                    if resilience and universe_data.get('snapshot') is not None:
-                        raise
                     universe_failure = True
+            else:
+                universe_failure = True
         if resilience and universe_failure:
-            research_hold_reasons.append('required_universe_unavailable')
-        from tradingagents.strategies.data_sources.state_economics_policy import configured as state_configured
-        state_enabled = state_configured(self.ar_config)
-        state_failure = None
-        state_coverage = None
-        state_scope = None
-        if state_enabled:
-            signal_data = dict(signal_data, _state_economics_universe=universe)
-            try:
-                from .state_inputs import state_policy_scope
-                state_scope = state_policy_scope(data, self.ar_config, trading_date, universe=universe)
-                state_coverage = state_scope['source_coverage']
-                if state_scope['exposure_registry_error']:
-                    if resilience:
-                        raise ValueError('invalid_state_exposure_registry')
-                    state_failure = state_scope['exposure_registry_error']
-                elif not state_coverage['complete']:
-                    state_failure = 'incomplete_state_unemployment_coverage'
-            except (ValueError, TypeError, KeyError):
-                if resilience and (not isinstance(data.get('fred'), dict)
-                        or not data['fred'].get('error') or data['fred'].get('state_unemployment') is not None):
-                    raise
-                state_failure = 'invalid_state_unemployment_evidence'
-        analysis_inputs = {}
+            research_hold_reasons.append("required_universe_unavailable")
+
+        # Strict Tier-2 per-strategy circuit breaker
+        circuit_breaker = evaluate_strategy_circuit_breaker(data, self.paper_trade_strategies)
+        regime_model["strategy_circuit_breaker"] = circuit_breaker
+
+        analysis_inputs: dict[int, str] = {}
         all_signals: list[dict] = []
         health: list[StrategyHealthRecord] = []
+        session_date = date.fromisoformat(trading_date)
+
         for strategy in self.paper_trade_strategies:
             self._emit("strategy_start", name=strategy.name, track="paper_trade")
-            disabled_reason = self.ar_config.get("disabled_strategies", {}).get(strategy.name) or getattr(strategy, "retirement_reason", None)
+            disabled_reason = self.ar_config.get("disabled_strategies", {}).get(
+                strategy.name
+            ) or getattr(strategy, "retirement_reason", None)
             if disabled_reason:
-                from tradingagents.strategies.metrics.identity import _stable_id
-                disabled_evidence = {"reason": disabled_reason, "data_sources": sorted(strategy.data_sources), "candidate_count": 0}
-                disabled_evidence.update(health_evidence(retirement_scope, strategy.name))
-                disabled_evidence.update(filing_health_evidence(bulk_filing_scope, strategy.name))
-                if strategy.name == 'congressional_trades' and disabled_reason == CONGRESS_POLICY:
-                    disabled_evidence['disclosure_policy'] = CONGRESS_POLICY
-                    if congress_audit_scope is not None:
-                        disabled_evidence['source_scope_limits'] = {'congress': congress_audit_scope}
-                health.append(StrategyHealthRecord(
-                    health_id=_stable_id("health", epoch_id, date.fromisoformat(trading_date), policy_id, strategy.name),
-                    epoch_id=epoch_id, session=date.fromisoformat(trading_date), policy_id=policy_id,
-                    strategy=strategy.name, status="disabled_by_policy", signal_count=0,
-                    evidence=disabled_evidence))
+                health.append(
+                    StrategyHealthRecord(
+                        health_id=_stable_id(
+                            "health", epoch_id, session_date, policy_id, strategy.name
+                        ),
+                        epoch_id=epoch_id,
+                        session=session_date,
+                        policy_id=policy_id,
+                        strategy=strategy.name,
+                        status="disabled_by_policy",
+                        signal_count=0,
+                        evidence={
+                            "reason": disabled_reason,
+                            "data_sources": sorted(strategy.data_sources),
+                            "candidate_count": 0,
+                        },
+                    )
+                )
                 continue
+
+            breaker_state = circuit_breaker.get(strategy.name, {"available": True, "failed_sources": []})
+            if not breaker_state["available"]:
+                failed_sources = list(breaker_state.get("failed_sources", []))
+                provider_errors = _provider_errors(data, strategy.data_sources)
+                logger.warning(
+                    "Tier-2 circuit breaker: strategy %s marked unavailable due to failed sources %s "
+                    "(sibling strategies unaffected)",
+                    strategy.name,
+                    failed_sources,
+                )
+                health.append(
+                    StrategyHealthRecord(
+                        health_id=_stable_id(
+                            "health", epoch_id, session_date, policy_id, strategy.name
+                        ),
+                        epoch_id=epoch_id,
+                        session=session_date,
+                        policy_id=policy_id,
+                        strategy=strategy.name,
+                        status="unavailable",
+                        signal_count=0,
+                        evidence={
+                            "tier": "tier2_strategy",
+                            "failed_sources": failed_sources,
+                            "provider_errors": provider_errors,
+                            "data_sources": sorted(strategy.data_sources),
+                            "candidate_count": 0,
+                        },
+                    )
+                )
+                self._emit("strategy_done", name=strategy.name, num_signals=0)
+                continue
+
             try:
                 params = strategy.get_default_params(horizon=horizon)
-                from .research_resilience import strategy_capability_holds
-                capability_holds = (strategy_capability_holds(research_scope, strategy.name, strategy.data_sources)
-                    if resilience else [])
-                from tradingagents.strategies.modules.admission import admit_candidates, candidate_universe
+                capability_holds = (
+                    strategy_capability_holds(research_scope, strategy.name, strategy.data_sources)
+                    if resilience
+                    else []
+                )
                 with candidate_universe(universe):
-                    candidates = (admit_candidates(strategy.name, [], budget=None)
-                        if capability_holds or any(source in scope_errors or (resilience and source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES)
-                               for source in strategy.data_sources) or (resilience and filing_isolation is not None
-                                   and strategy.name == 'quantum_readiness'
-                                   and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete') or (strategy.name == 'state_economics' and state_failure == 'invalid_state_unemployment_evidence')
-                        else strategy.screen(signal_data, trading_date, params))
+                    candidates = (
+                        admit_candidates(strategy.name, [], budget=None)
+                        if capability_holds
+                        else strategy.screen(signal_data, trading_date, params)
+                    )
                     if not hasattr(candidates, "admission_manifest"):
                         candidates = admit_candidates(strategy.name, candidates, budget=None)
                 admission_manifest = candidates.admission_manifest
@@ -629,206 +639,120 @@ class MultiStrategyEngine:
                 admission_manifest = None
                 error = exc
                 logger.exception("Strategy %s screen failed", strategy.name)
+
             if resilience:
                 for candidate in candidates:
-                    analysis_inputs[id(candidate)] = research_digest({
-                        'candidate': asdict(candidate), 'strategy': strategy.name,
-                        'regime': regime_model, 'projection_sha256': regime_model['research_projection_sha256']},
-                        codec_limits=codec_limits)
+                    analysis_inputs[id(candidate)] = research_digest(
+                        {
+                            "candidate": asdict(candidate),
+                            "strategy": strategy.name,
+                            "regime": regime_model,
+                            "projection_sha256": regime_model["research_projection_sha256"],
+                        },
+                        codec_limits=codec_limits,
+                    )
             if research_hold_reasons:
                 for candidate in candidates:
                     candidate.journal_only = True
-                    candidate.metadata['non_actionable_reason'] = research_hold_reasons[0]
+                    candidate.metadata["non_actionable_reason"] = research_hold_reasons[0]
             if candidates and not research_hold_reasons:
-                filing_options = ({'filing_data': signal_data, 'universe': universe}
-                    if (self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
-                        or self.ar_config.get('regulation_evidence_policy') is not None) else {})
-                candidates = self._enrich_with_llm(candidates, strategy.name, regime_context=regime_model, **filing_options)
-            from .bounded_document_inputs import release_candidate_bytes
-            for candidate in candidates:
-                release_candidate_bytes(candidate)
+                candidates = self._enrich_with_llm(
+                    candidates, strategy.name, regime_context=regime_model
+                )
+
             universe_assessments = []
-            from ..data_sources.regulation_assessment import completed_abstention
             if universe is not None:
                 for candidate in candidates:
-                    if (candidate.metadata.get('state_economics_policy') == 'state_unemployment_v1' and not candidate.ticker):
-                        continue
-                    if (candidate.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1'
-                            and candidate.metadata.get('analysis_status') == 'validated'
-                            and ((candidate.metadata.get('document_assessment') == 'assessed_no_directional_thesis'
-                                  and candidate.metadata.get('regulation_evidence_status') == 'sufficient')
-                                 or (self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
-                                     and completed_abstention(candidate.metadata.get('llm_analysis'))))
-                            and candidate.journal_only and not candidate.ticker):
-                        continue
                     decision = universe.decision(candidate.ticker)
-                    assessment = {"discovery_id": candidate.metadata.get("discovery_id"),
-                        "symbol": candidate.ticker, "decision": decision,
+                    assessment = {
+                        "discovery_id": candidate.metadata.get("discovery_id"),
+                        "symbol": candidate.ticker,
+                        "decision": decision,
                         "policy": universe.evidence["policy"],
-                        "assets_sha256": universe.evidence["assets_sha256"]}
+                        "assets_sha256": universe.evidence["assets_sha256"],
+                    }
                     universe_assessments.append(assessment)
                     candidate.metadata["equity_universe_post_analysis"] = assessment
-                    if decision in {"outside_sip_exchange_universe", "inactive_asset", "absent_from_asset_master"}:
+                    if decision in {
+                        "outside_sip_exchange_universe",
+                        "inactive_asset",
+                        "absent_from_asset_master",
+                    }:
                         candidate.metadata["equity_universe_excluded"] = True
                     elif decision != "eligible":
-                        candidate.metadata.setdefault("non_actionable_reason", "equity_universe_unresolved")
+                        candidate.metadata.setdefault(
+                            "non_actionable_reason", "equity_universe_unresolved"
+                        )
                         candidate.journal_only = True
+
             provider_errors = _provider_errors(data, strategy.data_sources)
-            if resilience and self.ar_config.get('source_capability_policy'):
-                from .research_resilience import strategy_capability_holds
-                capability_holds = strategy_capability_holds(research_scope, strategy.name, strategy.data_sources)
-                for source in ('fred', 'yfinance'):
-                    if source in strategy.data_sources and source in signal_data and not any(
-                            name.startswith(source + '.') for name in capability_holds):
-                        provider_errors.pop(source, None)
-                if capability_holds:
-                    provider_errors['source_capability'] = ','.join(capability_holds)
-            if resilience:
-                for source in strategy.data_sources:
-                    if source not in signal_data and source not in OPTIONAL_ENRICHMENT_SOURCES:
-                        provider_errors.setdefault(source, research_scope['sources'][source]['reason'])
-                if filing_isolation is not None and strategy.name == 'quantum_readiness' and filing_isolation.get('aggregate_scopes', {}).get('pqc_filings', {}).get('outcome') != 'complete':
-                    provider_errors['edgar'] = 'aggregate_dependency_gap'
-                if research_hold_reasons:
-                    provider_errors['shared_regime'] = research_hold_reasons[0]
-            provider_errors.update({source: reason for source, reason in scope_errors.items()
-                                    if source in strategy.data_sources})
-            if strategy.name == 'state_economics' and state_enabled and state_failure:
-                provider_errors['fred_state_unemployment'] = state_failure
             if universe_failure:
-                provider_errors = dict(provider_errors, equity_universe="universe_evidence_unavailable")
-            non_actionable = sorted({c.metadata["non_actionable_reason"] for c in candidates if c.metadata.get("non_actionable_reason")})
-            if any(c.metadata.get('non_actionable_reason') and not
-                   (accepted_attribution_limitation(c, strategy.name, scope_proofs) or
-                    (c.metadata.get('state_economics_policy') == 'state_unemployment_v1' and
-                     c.metadata.get('non_actionable_reason') == 'no_verified_state_exposure')) for c in candidates):
-                provider_errors = dict(provider_errors, analysis="required_evidence_unavailable")
-            if error is None and any(str(c.metadata.get("analysis_failure_reason", "")).startswith("unsupported_required_analysis:") for c in candidates):
-                error = ValueError("unsupported_required_analysis")
+                provider_errors = dict(
+                    provider_errors, equity_universe="universe_evidence_unavailable"
+                )
             health_record = classify_strategy_run(
-                epoch_id=epoch_id, session=date.fromisoformat(trading_date),
-                policy_id=policy_id, strategy=strategy.name,
-                data_sources=tuple(strategy.data_sources), candidates=candidates,
-                provider_errors=provider_errors, exception=error, admission_manifest=admission_manifest)
-            if strategy.name == 'state_economics' and state_enabled:
-                health_record.evidence['state_source_scope'] = state_scope
-                health_record.evidence['state_source_coverage'] = state_coverage
-                health_record.evidence['state_economic_events'] = [dict(c.metadata, ticker=c.ticker,
-                    journal_only=c.journal_only, direction=c.direction, score=c.score) for c in candidates]
+                epoch_id=epoch_id,
+                session=session_date,
+                policy_id=policy_id,
+                strategy=strategy.name,
+                data_sources=tuple(strategy.data_sources),
+                candidates=candidates,
+                provider_errors=provider_errors,
+                exception=error,
+                admission_manifest=admission_manifest,
+            )
             if universe is not None:
                 health_record.evidence["universe_assessments"] = universe_assessments
                 health_record.evidence["universe_policy"] = universe.evidence["policy"]
-            if non_actionable:
-                health_record.evidence["non_actionable_reasons"] = non_actionable
-                health_record.evidence["actionable_candidate_count"] = sum(not c.journal_only for c in candidates)
-            source_coverage = {source: data[source]["coverage"] for source in strategy.data_sources if isinstance(data.get(source), dict) and "coverage" in data[source]}
+            source_coverage = {
+                source: data[source]["coverage"]
+                for source in strategy.data_sources
+                if isinstance(data.get(source), Mapping) and "coverage" in data[source]
+            }
             if source_coverage:
                 health_record.evidence["source_coverage"] = source_coverage
-            selected_limits = {source: value for source, value in scope_limits.items()
-                               if source in strategy.data_sources}
-            if selected_limits:
-                health_record.evidence['source_scope_limits'] = selected_limits
-            if 'courtlistener' in selected_limits:
-                health_record.evidence['litigation_context'] = {
-                    **selected_limits['courtlistener'],
-                    'docket_ids': sorted(row['docket_id'] for row in data['courtlistener']['dockets']),
-                    'actionable_from_docket_metadata': False}
-            full_filing_candidates = [c for c in candidates
-                if c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1']
-            regulation_candidates = [c for c in candidates
-                if c.metadata.get('regulation_evidence_policy') == 'complete_document_text_v1']
-            if regulation_candidates:
-                from copy import deepcopy
-                regulation_graph = data.get('regulations', {}).get('regulation_evidence', {})
-                health_record.evidence['regulation_assessments'] = [deepcopy({
-                    'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
-                    'document_id': c.metadata.get('document_id'),
-                    'regulation_evidence_ref': c.metadata.get('regulation_evidence_ref'),
-                    'source_manifest_sha256': regulation_graph.get('manifest_sha256'),
-                    'evidence_sha256': regulation_graph.get('corpus', {}).get(
-                        c.metadata.get('regulation_evidence_ref'), {}).get('manifest_sha256'),
-                    'source_rows': [row for row in regulation_graph.get('rows', [])
-                                    if row['document_id'] == c.metadata.get('document_id')],
-                    'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
-                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason'),
-                    'document_assessment': c.metadata.get('document_assessment'),
-                    'regulation_evidence_status': c.metadata.get('regulation_evidence_status'),
-                    'journal_only': c.journal_only,
-                    'assessment': c.metadata.get('llm_analysis') or c.metadata.get('regulation_assessment'),
-                    'model_provenance': c.metadata.get('model_provenance'),
-                    'model_attempt': c.metadata.get('regulation_model_attempt'),
-                }) for c in regulation_candidates]
-            if 'regulations' in strategy.data_sources and (
-                    regulation_source_scope is not None or self.ar_config.get('regulation_evidence_policy') is not None
-                    or 'regulations' in scope_errors):
-                from copy import deepcopy
-                health_record.evidence['regulation_source_coverage'] = deepcopy(regulation_source_scope)
-                health_record.evidence.setdefault('regulation_assessments', [])
-            if full_filing_candidates:
-                from copy import deepcopy
-                # Blank/unresolved securities do not become priceable signals,
-                # but their completed or failed document assessments are still
-                # authoritative evidence for every admitted discovery.
-                health_record.evidence['filing_assessments'] = [deepcopy({
-                    'discovery_id': c.metadata.get('discovery_id'), 'ticker': c.ticker,
-                    'analysis_type': c.metadata.get('analysis_type'),
-                    'filing_assessment_scope': c.metadata.get('filing_assessment_scope'),
-                    'prior_status': c.metadata.get('prior_status'),
-                    'comparison_binding': c.metadata.get('comparison_binding'),
-                    'filing_evidence_ref': c.metadata.get('filing_evidence_ref'),
-                    'filing_evidence_refs': c.metadata.get('filing_evidence_refs'),
-                    'analysis_status': c.metadata.get('analysis_status', 'not_completed'),
-                    'analysis_failure_reason': c.metadata.get('analysis_failure_reason'),
-                    'document_assessment': c.metadata.get('document_assessment'),
-                    'journal_only': c.journal_only,
-                    'assessment': c.metadata.get('llm_analysis') or c.metadata.get('filing_assessment'),
-                    'model_provenance': c.metadata.get('model_provenance'),
-                }) for c in full_filing_candidates]
-            if self.ar_config.get('filing_evidence_policy') == 'complete_submission_v1' and 'edgar' in strategy.data_sources:
-                health_record.evidence['filing_source_coverage'] = data.get('edgar', {}).get('filing_evidence', {}).get('coverage', {})
-                if filing_comparison_scope is not None:
-                    health_record.evidence['filing_comparison_scope'] = dict(filing_comparison_scope)
-                if filing_attribution_scope is not None:
-                    from copy import deepcopy
-                    health_record.evidence['filing_attribution_scope'] = deepcopy(filing_attribution_scope)
-                if filing_material_scope is not None:
-                    from copy import deepcopy
-                    health_record.evidence['filing_material_scope'] = deepcopy(filing_material_scope)
             if resilience:
-                health_record.evidence['research_source_scope'] = research_scope
-                health_record.evidence['filing_research_isolation'] = filing_isolation
-                health_record.evidence['research_hold_reasons'] = list(research_hold_reasons)
+                health_record.evidence["research_source_scope"] = research_scope
+                health_record.evidence["research_hold_reasons"] = list(research_hold_reasons)
             health.append(health_record)
+
             for c in candidates:
                 if c.metadata.get("equity_universe_excluded"):
                     continue
-                all_signals.append(
-                    {
-                        "ticker": c.ticker,
-                        "direction": c.direction,
-                        "score": c.score,
-                        "strategy": strategy.name,
-                        "metadata": c.metadata,
-                        "event_key": c.event_key,
-                        "source_event_keys": c.source_event_keys,
-                        "strategy_tags": c.strategy_tags,
-                        "risk_tags": c.risk_tags,
-                        "journal_only": c.journal_only,
-                    }
-                )
+                sig_dict: dict[str, Any] = {
+                    "ticker": c.ticker,
+                    "direction": c.direction,
+                    "score": c.score,
+                    "raw_signal_score": getattr(c, "raw_signal_score", c.score),
+                    "llm_conviction": getattr(c, "llm_conviction", None),
+                    "strategy": strategy.name,
+                    "metadata": c.metadata,
+                    "event_key": c.event_key,
+                    "source_event_keys": c.source_event_keys,
+                    "strategy_tags": c.strategy_tags,
+                    "risk_tags": c.risk_tags,
+                    "journal_only": c.journal_only,
+                }
+                all_signals.append(sig_dict)
             if resilience:
                 from .research_resilience import bind_signal
+
                 for candidate in candidates:
-                    if candidate.metadata.get('equity_universe_excluded'):
+                    if candidate.metadata.get("equity_universe_excluded"):
                         continue
-                    signal = next(row for row in reversed(all_signals) if row['metadata'] is candidate.metadata)
-                    bind_signal(signal, regime_model, strategy.data_sources, analysis_inputs[id(candidate)],
-                                codec_limits=codec_limits)
+                    signal = next(
+                        row for row in reversed(all_signals) if row["metadata"] is candidate.metadata
+                    )
+                    bind_signal(
+                        signal,
+                        regime_model,
+                        strategy.data_sources,
+                        analysis_inputs[id(candidate)],
+                        codec_limits=codec_limits,
+                    )
             self._emit("strategy_done", name=strategy.name, num_signals=len(candidates))
 
         all_signals, health = hold_incomplete_model_sample(all_signals, health)
-        # Preserve every event identity. Committee synthesis may aggregate a
-        # decision view, but the authoritative ledger must retain each catalyst.
         deduped_signals = [
             signal for signal in all_signals if signal.get("ticker", "").strip()
         ]
@@ -920,6 +844,9 @@ class MultiStrategyEngine:
         marked_account: Any,
         annualized_volatility_evidence: Mapping[str, float] | None = None,
         model_coverage: Mapping[str, Any] | None = None,
+        *,
+        horizon_recommendations: list[Any] | None = None,
+        horizon_decision_status: Mapping[str, Any] | None = None,
     ) -> dict:
         """Persist cutoff-safe signals and next-session intents without economics."""
         from tradingagents.strategies.execution import (
@@ -1019,8 +946,22 @@ class MultiStrategyEngine:
         policy_enabled = size_profile is not None and isinstance(
             policy_settings, dict
         )
+        effective_policy_settings = policy_settings
+        if (
+            policy_enabled
+            and "congressional_exposure_pct"
+            in getattr(PortfolioPolicyConfig, "__dataclass_fields__", {})
+            and "congressional_exposure_by_size" not in policy_settings
+            and hasattr(size_profile, "name")
+        ):
+            effective_policy_settings = {
+                **policy_settings,
+                "congressional_exposure_by_size": {size_profile.name: 0.0},
+            }
         policy_config = (
-            PortfolioPolicyConfig.from_size_profile(size_profile, policy_settings)
+            PortfolioPolicyConfig.from_size_profile(
+                size_profile, effective_policy_settings
+            )
             if policy_enabled
             else None
         )
@@ -1492,14 +1433,7 @@ class MultiStrategyEngine:
 
         self._journal.mirror_signals(records, {})
 
-        strategy_confidence = {
-            record.strategy: (
-                self._compute_strategy_confidence(record.strategy)
-                if self._adaptive_confidence
-                else 0.5
-            )
-            for _, record in timely
-        }
+        strategy_confidence = {record.strategy: 0.5 for _, record in timely}
         committee_signals = [signal for signal, _ in timely]
         # Policy eligibility may remove every timeout-held candidate. Phase
         # coverage remains independent of the surviving selection input.
@@ -1516,7 +1450,6 @@ class MultiStrategyEngine:
             research_authority = {'version': 'research-book-authority-v1', 'policy': RESEARCH_POLICY,
                 'source_bundle_sha256': shared_regime['research_source_scope']['source_bundle_sha256'],
                 'source_scope_sha256': research_digest(shared_regime['research_source_scope'], codec_limits=source_codec_limits(self.config)),
-                'filing_isolation_sha256': research_digest(shared_regime.get('filing_research_isolation'), codec_limits=source_codec_limits(self.config)),
                 'projection_sha256': shared_regime['research_projection_sha256'],
                 'shared_context_sha256': research_digest(shared_regime, codec_limits=source_codec_limits(self.config)),
                 'entry_hold': bool(incomplete_model_phase or shared_regime['research_hold_reasons']),
@@ -1525,36 +1458,78 @@ class MultiStrategyEngine:
                 'candidate_receipts': {record.signal_id: signal['metadata']['research_admission'] for signal, record in timely},
                 'retained_origins': {record.signal_id: signal['metadata']['retained_from_signal_id']
                     for signal, record in timely if signal['metadata'].get('retained_from_signal_id')}}
-        committee = PortfolioCommittee(self.config, size_profile=size_profile)
+        committee_config = self.config
+        if effective_policy_settings is not policy_settings:
+            committee_config = {
+                **self.config,
+                "autoresearch": {
+                    **self.ar_config,
+                    "portfolio_policy": effective_policy_settings,
+                },
+            }
+        committee = PortfolioCommittee(committee_config, size_profile=size_profile)
         frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
         if frozen_decision is None:
             from .runtime_recovery import require_acquisition_allowed
             require_acquisition_allowed('committee_decision')
-            positions = []
-            for position in self.ledger.open_positions():
-                item = dict(position)
-                ticker = str(item["ticker"])
-                mark = raw_bars[ticker].close
-                value = Decimal(str(item["quantity"])) * mark
-                direction = str(item.get("side", "long"))
-                signed_value = -value if direction == "short" else value
-                item.update(direction=direction, mark_price=str(mark), market_value=str(value),
-                            signed_market_value=str(signed_value),
-                            weight=float(value / marked_account.net_equity) if marked_account.net_equity else 0.0)
-                positions.append(item)
-            recommendations = committee.synthesize(
-                signals=committee_signals, regime_context=shared_regime or {},
-                strategy_confidence=strategy_confidence, current_positions=positions,
-                total_capital=float(marked_account.net_equity), enrichment=enrichment or {}, risk_context=risk_context,
-                model_coverage=phase_model_coverage,
-            )
-            decision_status = dict(committee.last_decision_status)
+            if horizon_recommendations is not None:
+                # 1-committee-call-per-horizon path: reuse the horizon-level
+                # ranked recommendations and size deterministically per tier.
+                from copy import deepcopy
+                eligible_recs = [
+                    deepcopy(rec)
+                    for rec in horizon_recommendations
+                    if (rec.direction != "short" or getattr(size_profile, "short_eligible", True))
+                ]
+                if policy_config is not None and risk_context is not None:
+                    from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicy
+                    policy_engine = PortfolioPolicy(policy_config)
+                    if hasattr(policy_engine, "apply"):
+                        applied = policy_engine.apply(eligible_recs, risk_context)
+                        if isinstance(applied, tuple) and len(applied) == 2:
+                            recommendations, policy_decisions_out = applied
+                        else:
+                            recommendations = list(applied)
+                            policy_decisions_out = tuple(getattr(policy_engine, "last_decisions", ()))
+                    else:
+                        recommendations, policy_decisions_out = policy_engine.evaluate(
+                            eligible_recs, risk_context
+                        )
+                    committee.last_policy_decisions = tuple(policy_decisions_out)
+                else:
+                    recommendations = eligible_recs
+                    committee.last_policy_decisions = ()
+                decision_status = dict(
+                    horizon_decision_status
+                    or {
+                        "status": "selected" if recommendations else "no_candidates",
+                        "model_coverage": phase_model_coverage,
+                        "shared_horizon_synthesis": True,
+                    }
+                )
+            else:
+                positions = []
+                for position in self.ledger.open_positions():
+                    item = dict(position)
+                    ticker = str(item["ticker"])
+                    mark = raw_bars[ticker].close
+                    value = Decimal(str(item["quantity"])) * mark
+                    direction = str(item.get("side", "long"))
+                    signed_value = -value if direction == "short" else value
+                    item.update(direction=direction, mark_price=str(mark), market_value=str(value),
+                                signed_market_value=str(signed_value),
+                                weight=float(value / marked_account.net_equity) if marked_account.net_equity else 0.0)
+                    positions.append(item)
+                recommendations = committee.synthesize(
+                    signals=committee_signals, regime_context=shared_regime or {},
+                    strategy_confidence=strategy_confidence, current_positions=positions,
+                    total_capital=float(marked_account.net_equity), enrichment=enrichment or {}, risk_context=risk_context,
+                    model_coverage=phase_model_coverage,
+                )
+                decision_status = dict(committee.last_decision_status)
             if research_authority is not None:
                 decision_status['research_authority'] = research_authority
                 decision_status['research_enrichment_scope'] = enrichment_scope
-                from .enrichment_capabilities import supported_complete
-                if not supported_complete(enrichment_scope, self.ar_config):
-                    decision_status['degraded'] = True
             failures = _enrichment_failures(original_enrichment or {})
             if failures:
                 decision_status["enrichment_failures"] = failures
@@ -1916,41 +1891,6 @@ class MultiStrategyEngine:
             )
         return exit_specs, cancellations
 
-    def run_learning_loop(self) -> dict:
-        """Refuse retired production learning before any state mutation."""
-        raise RuntimeError("production learning is disabled; no state was changed")
-
-    # ------------------------------------------------------------------
-    # Strategy confidence
-    # ------------------------------------------------------------------
-
-    def _compute_strategy_confidence(self, strategy_name: str) -> float:
-        """Compute confidence from governed v2 directional accuracy.
-
-        Maps hit_rate [0.3, 0.7] → confidence [0.2, 0.9].
-        Returns 0.5 (neutral) if fewer than 10 signals with outcomes.
-        """
-        outcomes = self._read_strategy_outcomes(strategy_name)
-        accuracy = directional_accuracy(outcomes)
-        if accuracy.actionable_count < 10 or accuracy.rate is None:
-            return 0.5  # neutral until proven
-        hit_rate = accuracy.rate
-
-        # Linear map: 30% hit rate → 0.2 confidence, 70% → 0.9
-        return max(0.2, min(0.9, (hit_rate - 0.3) / 0.4 * 0.7 + 0.2))
-
-    def _read_strategy_outcomes(self, strategy_name: str) -> tuple[OutcomeRecord, ...]:
-        rows = tuple(self._outcome_reader(strategy_name))
-        if any(row.strategy != strategy_name for row in rows):
-            raise ValueError(f"outcome strategy does not match {strategy_name!r}")
-        return tuple(
-            row for row in rows if row.holding_sessions == _DIAGNOSTIC_HOLDING_SESSIONS
-        )
-
-    # ------------------------------------------------------------------
-    # Regime model helpers
-    # ------------------------------------------------------------------
-
     def _build_regime_model(self, data: dict) -> dict:
         """Build regime model from available data (VIX, credit spreads, yield curve)."""
         vix_data = data.get("yfinance", {}).get("vix")
@@ -2028,1129 +1968,80 @@ class MultiStrategyEngine:
             return "benign"
         return "normal"
 
-    def _should_trigger_learning_loop(
-        self,
-        outcomes_by_strategy: Mapping[str, tuple[OutcomeRecord, ...]] | None = None,
-    ) -> bool:
-        """Check whether governed outcome evidence is ready for diagnostics."""
-        pt_config = self.ar_config.get("paper_trade", {})
-        ll_state = self.state.load_learning_loop_state()
-        outcomes = outcomes_by_strategy or {
-            strategy.name: self._read_strategy_outcomes(strategy.name)
-            for strategy in self.paper_trade_strategies
-        }
-
-        # Calendar check
-        last_run = ll_state.get("last_run")
-        calendar_days = pt_config.get("learning_loop_calendar_days", 30)
-        if last_run:
-            last_dt = datetime.fromisoformat(last_run)
-            if (datetime.now() - last_dt).days >= calendar_days:
-                return True
-        else:
-            # Never run before — trigger if any governed outcome is actionable.
-            if any(
-                directional_accuracy(rows).actionable_count
-                for rows in outcomes.values()
-            ):
-                return True
-
-        # Trade count check
-        min_strategies = pt_config.get("learning_loop_min_strategies", 5)
-        min_trades = pt_config.get("min_trades_for_evaluation", 20)
-        qualifying = 0
-        for s in self.paper_trade_strategies:
-            if (
-                directional_accuracy(outcomes.get(s.name, ())).actionable_count
-                >= min_trades
-            ):
-                qualifying += 1
-
-        return qualifying >= min_strategies
-
     # ------------------------------------------------------------------
-    # Price helpers
+    # Data acquisition delegation (owned by shared DataAcquisitionService)
     # ------------------------------------------------------------------
 
-    def _fetch_missing_prices(
+    @property
+    def registry(self) -> DataSourceRegistry:
+        return self._registry
+
+    @registry.setter
+    def registry(self, value: DataSourceRegistry) -> None:
+        self._registry = value
+        if hasattr(self, "data_acquisition") and self.data_acquisition is not None:
+            self.data_acquisition.registry = value
+
+    def _fetch_missing_prices(self, tickers: list[str], start_date: str, end_date: str) -> None:
+        self.data_acquisition.fetch_missing_prices(tickers, start_date, end_date)
+
+    def _fetch_all_data(
         self,
-        tickers: list[str],
         start_date: str,
         end_date: str,
-    ) -> None:
-        """Fetch prices for tickers not already in cache."""
-        from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
-
-        source = self.registry.get("yfinance")
-        if not isinstance(source, YFinanceSource):
-            return
-
-        logger.info("Fetching prices for %d signal tickers: %s", len(tickers), tickers)
-        extra_df = source.fetch_prices(tickers, start_date, end_date)
-        if not extra_df.empty and isinstance(extra_df.columns, pd.MultiIndex):
-            for ticker in tickers:
-                try:
-                    ticker_df = extra_df.xs(ticker, level=1, axis=1)
-                    if not ticker_df.empty:
-                        self._price_cache[ticker] = ticker_df
-                except (KeyError, ValueError):
-                    pass
-        elif not extra_df.empty and len(tickers) == 1:
-            self._price_cache[tickers[0]] = extra_df
-
-    # ------------------------------------------------------------------
-    # Data fetching
-    # ------------------------------------------------------------------
-
-    def _fetch_all_data(self, start_date: str, end_date: str, *,
-                        acquisition_deadline: float | None = None,
-                        litigation_target_owner=None,
-                        acquisition_purpose: str = 'decision') -> dict[str, Any]:
-        """Fetch all data needed by active strategies.
-
-        Returns nested dict: {source_name: {data_type: data}}. The explicit
-        screen diagnostic has no decision-clock authority and cannot supply a
-        decision acquisition receipt. Ordinary acquisition keeps its clock gate.
-        """
-        import time
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        from tradingagents.strategies.data_sources.request_policy import provider_budget
-        from tradingagents.strategies.orchestration.source_inputs import (
-            SourceInputError, SourceInputStore, cache_identity,
-            source_configuration_fingerprint, registered_source_fingerprint, source_codec_limits,
-        )
-
-        acquisition_start = time.monotonic()
-        acquisition_cutoff = datetime.now(timezone.utc)
-        from tradingagents.strategies.orchestration.decision_clock import mutable_vintage, policy, PROSPECTIVE
-        decision_policy = policy(self.config)
-        if not isinstance(acquisition_purpose, str) or acquisition_purpose not in {'decision', 'screen_diagnostic'}:
-            raise ValueError('invalid source acquisition purpose')
-        diagnostic = acquisition_purpose == 'screen_diagnostic'
-        if diagnostic:
-            from .trading_calendar import exchange_date
-            vintage = exchange_date(acquisition_cutoff).isoformat()
-        else:
-            vintage = mutable_vintage(self.config, date.fromisoformat(end_date), now=acquisition_cutoff)
-        fetch_timeout_s = max(0.0, _fetch_timeout_s())
-        outer_deadline = acquisition_deadline
-        if outer_deadline is not None:
-            if (isinstance(outer_deadline, bool) or not isinstance(outer_deadline, (int, float))
-                    or not math.isfinite(outer_deadline)):
-                raise SourceInputError("invalid source acquisition deadline")
-        acquisition_deadline = min(acquisition_start + fetch_timeout_s,
-                                   outer_deadline if outer_deadline is not None else float('inf'))
-        cache_dir = self.ar_config.get("source_cache_dir") or os.environ.get("EVENTEDGE_SOURCE_CACHE_DIR")
-        cache_store = None
-        config_fingerprint = ""
-        if cache_dir:
-            cache_store = SourceInputStore(
-                cache_dir, ttl_s=self.ar_config.get("source_cache_ttl_s", 300)
-            )
-            config_fingerprint = source_configuration_fingerprint(self.config, exclude_horizon=True)
-            if diagnostic:
-                config_fingerprint += ':screen-diagnostic-v1'
-
-        def acquire(name, fetcher, args):
-            diagnostics = []
-            if time.monotonic() >= acquisition_deadline:
-                return {"error": "source acquisition deadline exhausted",
-                        "_coverage": {"status": "failed", "reason_code": "deadline_exhausted"}}
-            try:
-                with provider_budget(name, acquisition_deadline, diagnostics=diagnostics):
-                    if name == "finnhub":
-                        args = (args[0], min(args[1], max(0.0, acquisition_deadline - time.monotonic())))
-                    result = fetcher(*args)
-                if not isinstance(result, Mapping):
-                    raise ValueError("invalid provider payload")
-                result = dict(result)
-            except Exception as error:
-                failure = source_fetch_error("source acquisition failed", error)
-                result = dict(failure.partial_data)
-                result["error"] = str(failure)
-                result["_coverage"] = {
-                    "status": "partial" if failure.partial_data else "failed",
-                    "reason_code": failure.reason_code, "http_status": failure.http_status,
-                    "attempts": failure.attempts,
-                }
-            if diagnostics:
-                result["_request_diagnostics"] = diagnostics
-            return result
-
-        self._emit("phase", phase="data_fetch", status="starting")
-        data: dict[str, Any] = {}
-        from .congress_policy import declaration
-        data.update(declaration(self.ar_config))
-        from .source_lifecycle_policy import declaration as lifecycle_declaration
-        data.update(lifecycle_declaration(self.ar_config, self.paper_trade_strategies))
-        from .filing_research_policy import declaration as filing_declaration
-        data.update(filing_declaration(self.ar_config))
-        from .source_inputs import public_source_configuration_declaration
-        # The shared source store is bound to the orchestrator's base profile;
-        # per-book risk/size overrides are separate ledger policy evidence.
-        if self.ar_config.get('stabilization_profile_policy') == 'supported_sixteen_books_v1':
-            binding_config = (litigation_target_owner._base_config
-                if litigation_target_owner is not None else self.config)
-            data.update(public_source_configuration_declaration(binding_config))
-        if decision_policy == PROSPECTIVE and not diagnostic:
-            data['_decision_acquisition'] = {'policy': decision_policy, 'reference_session': end_date,
-                                            'started_at': acquisition_cutoff.isoformat(), 'vintage_as_of': vintage}
-        universe_policy = self.ar_config.get("equity_universe_policy")
-        if universe_policy:
-            from tradingagents.strategies.data_sources.equity_universe import fetch_equity_universe, POLICY
-            data["equity_universe"] = (acquire("alpaca", fetch_equity_universe, ())
-                if universe_policy == POLICY else {"error": "unsupported equity universe policy"})
-
-        # Collect which sources are needed
-        needed_sources: set[str] = set()
-        for s in self.paper_trade_strategies:
-            needed_sources.update(s.data_sources)
-        needed_sources.difference_update(self.ar_config.get("retired_sources", {}))
-        from .regulation_publication_policy import source_required as publication_source_required
-        if not publication_source_required(self.ar_config, self.paper_trade_strategies):
-            needed_sources.discard('regulations')
-
-        available = set(self.registry.available_sources())
-        if self.ar_config.get('bounded_document_research_policy') is not None:
-            available.add('bounded_documents')
-        logger.info("Needed sources: %s, available: %s", needed_sources, available)
-        for source in sorted(needed_sources - available):
-            data[source] = {"error": "source unavailable or skipped"}
-        if "openbb" in needed_sources and "openbb" in available:
-            data["openbb"] = {"enrichment_only": True}
-
-        # Fetch yfinance data (VIX + core market data for regime model)
-        if "yfinance" in needed_sources and "yfinance" in available:
-            data["yfinance"] = acquire("yfinance", self._fetch_yfinance_data, (start_date, end_date))
-
-        # Fetch API-key sources in parallel (I/O bound, no dependency on each other)
-        api_fetches: dict[str, tuple] = {}
-        if 'bounded_documents' in needed_sources:
-            from .bounded_document_inputs import load_retained_documents
-            api_fetches['bounded_documents'] = (load_retained_documents, (self.ar_config, end_date))
-        if "finnhub" in needed_sources and "finnhub" in available:
-            finnhub_budget_cap_s = max(
-                fetch_timeout_s - _FINNHUB_FETCH_SAFETY_MARGIN_S,
-                0.0,
-            )
-            api_fetches["finnhub"] = (
-                self._fetch_finnhub_data,
-                (end_date, finnhub_budget_cap_s),
-            )
-        if "regulations" in needed_sources and "regulations" in available:
-            api_fetches["regulations"] = (self._fetch_regulations_data, (end_date,))
-        if "courtlistener" in needed_sources and "courtlistener" in available:
-            if self.ar_config.get('courtlistener_scope_policy') is not None:
-                from .scoped_sources import litigation_settings
-                from .litigation_targets import build_litigation_targets
-                def focused_targets():
-                    company_source = self.registry.get('edgar')
-                    if company_source is None:
-                        raise ValueError('Court issuer verification unavailable')
-                    company_map = company_source.company_ticker_map()
-                    targets = build_litigation_targets(litigation_target_owner,
-                        date.fromisoformat(end_date), cutoff=acquisition_cutoff,
-                        company_map=company_map, settings=litigation_settings(self.ar_config))
-                    return dict(targets, company_map=company_map)
-                targets = acquire('edgar', focused_targets, ())
-                data['_courtlistener_targets'] = targets
-                if targets.get('error'):
-                    data['courtlistener'] = {'error': 'Court issuer scope unavailable'}
-                else:
-                    api_fetches['courtlistener'] = (self._fetch_courtlistener_data,
-                        (end_date, targets['scope'], acquisition_deadline))
-            else:
-                api_fetches["courtlistener"] = (self._fetch_courtlistener_data, (end_date,))
-        if "fred" in needed_sources and "fred" in available:
-            api_fetches["fred"] = (self._fetch_fred_data, (start_date, end_date, vintage)
-                if self.ar_config.get('state_economics_policy') else (start_date, end_date))
-        if "congress" in needed_sources and "congress" in available:
-            api_fetches["congress"] = (self._fetch_congress_data,
-                (end_date, acquisition_deadline) if self.ar_config.get('congress_disclosure_policy') else (end_date,))
-        if "noaa" in needed_sources and "noaa" in available:
-            api_fetches["noaa"] = (self._fetch_noaa_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
-        if "usda" in needed_sources and "usda" in available:
-            api_fetches["usda"] = (self._fetch_usda_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
-        if "drought_monitor" in needed_sources and "drought_monitor" in available:
-            api_fetches["drought_monitor"] = (self._fetch_drought_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
-
-        # Also fetch EDGAR events for paper-trade strategies
-        if "edgar" in needed_sources and "edgar" in available:
-            api_fetches["edgar"] = (self._fetch_edgar_events,
-                (end_date, data["equity_universe"]) if universe_policy else (end_date,))
-        if "usaspending" in needed_sources and "usaspending" in available:
-            api_fetches["usaspending"] = (self._fetch_usaspending_data, (end_date,))
-        if "cftc" in needed_sources and "cftc" in available:
-            api_fetches["cftc"] = (self._fetch_cftc_data, (end_date, vintage) if decision_policy == PROSPECTIVE else (end_date,))
-
-        pending_fetches = {}
-        cache_keys = {}
-        cache_stores = {}
-        for name, (fetcher, args) in api_fetches.items():
-            source_fingerprint = config_fingerprint
-            if name == 'courtlistener' and '_courtlistener_targets' in data:
-                from tradingagents.strategies.data_sources.courtlistener_scope import digest
-                source_fingerprint += ':court-scope:' + digest(data['_courtlistener_targets']['scope'])
-            if decision_policy == PROSPECTIVE and name in {'noaa', 'usda', 'drought_monitor', 'cftc'}:
-                source_fingerprint += ':current-vintage:' + vintage
-            if name == 'fred' and self.ar_config.get('state_economics_policy'):
-                source_fingerprint += ':current-vintage:' + vintage
-            if name == "edgar" and universe_policy:
-                snapshot = data["equity_universe"].get("snapshot", {})
-                # A changed asset master may admit previously excluded filings.
-                # Such a source set cannot reuse text selected by the old scope.
-                source_fingerprint += ":" + snapshot.get("assets_sha256", "universe_unavailable")
-            identity = cache_identity(
-                name, start_date, end_date,
-                registered_source_fingerprint(source_fingerprint, self.registry.get(name)),
-            )
-            cache_keys[name] = identity
-            store = cache_store
-            limits = source_codec_limits(self.config, source=name)
-            if store and limits:
-                store = SourceInputStore(cache_dir, ttl_s=store.ttl_s, **limits)
-            cache_stores[name] = store
-            cached = store.load_cached(identity, cutoff=acquisition_cutoff) if store else None
-            if cached is not None:
-                data[name] = cached
-            else:
-                pending_fetches[name] = (acquire, (name, fetcher, args))
-        if pending_fetches:
-            fetched = _gather_with_timeout(
-                pending_fetches, max(0.0, acquisition_deadline - time.monotonic())
-            )
-            data.update(fetched)
-            if cache_store:
-                for name, payload in fetched.items():
-                    try:
-                        cache_stores[name].save_cached(cache_keys[name], payload)
-                    except (OSError, SourceInputError):
-                        logger.warning("Successful source %s could not be cached", name)
-
-        if outer_deadline is not None and time.monotonic() >= acquisition_deadline:
-            raise SourceInputError("source acquisition deadline exhausted before acceptance")
-        self._emit("phase", phase="data_fetch", status="done")
-        return data
-
-    def _fetch_finnhub_data(
-        self,
-        trading_date: str,
-        max_workflow_budget_s: float | None = None,
+        *,
+        acquisition_deadline: float | None = None,
+        acquisition_purpose: str = "decision",
     ) -> dict[str, Any]:
-        """Fetch all Finnhub subpaths under one cooperative scheduling deadline."""
-        source = self.registry.get("finnhub")
-        if source is None:
-            return {}
-
-        result: dict[str, Any] = {}
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        import hashlib
-        settings = getattr(self, "ar_config", {}).get("finnhub_acquisition", {})
-        if not isinstance(settings, dict):
-            raise ValueError("finnhub_acquisition must be a mapping")
-        budgets = {key: settings.get(key, default) for key, default in (
-            ("earnings_news_budget", 10), ("pqc_symbol_budget", 6),
-            ("earnings_article_budget", 5))}
-        if any(type(value) is not int or value < 0 for value in budgets.values()):
-            raise ValueError("Finnhub acquisition budgets must be nonnegative integers")
-        pqc_tickers = settings.get("pqc_universe", [
-            "CRWD", "PANW", "ZS", "FTNT", "IBM", "CSCO", "MSFT", "IONQ", "RGTI", "COIN"])
-        if (not isinstance(pqc_tickers, list)
-                or any(not isinstance(symbol, str) or not symbol.strip() for symbol in pqc_tickers)):
-            raise ValueError("Finnhub PQC universe must be a list of nonempty symbols")
-        pqc_tickers = sorted({symbol.strip().upper() for symbol in pqc_tickers})
-
-        def admit(records, budget, population, identity_fn, rank_fn, *, excluded_reason=None):
-            """Retain every fetched/query row before a deterministic request cap."""
-            entries = []
-            for record in records:
-                raw = json.dumps(record, sort_keys=True, default=str)
-                evidence_hash = hashlib.sha256(raw.encode()).hexdigest()
-                identity = identity_fn(record)
-                valid = identity is not None
-                identity = identity or {"invalid_source_payload_hash": evidence_hash}
-                encoded = json.dumps([population, identity], sort_keys=True, default=str)
-                discovery_id = "finnhub-discovery:" + hashlib.sha256(encoded.encode()).hexdigest()[:24]
-                row = {"discovery_id": discovery_id, "identity": identity, "evidence_hash": evidence_hash}
-                entries.append(((0 if valid else 1, *(rank_fn(record) if valid else ()),
-                                 discovery_id, evidence_hash), record, row, valid))
-            selected, discovered, admitted, excluded, seen = [], [], [], [], set()
-            for _, record, row, valid in sorted(entries, key=lambda item: item[0]):
-                reason = ("invalid_source_identity" if not valid else
-                          "duplicate_source_identity" if row["discovery_id"] in seen else
-                          excluded_reason if excluded_reason is not None else
-                          "acquisition_budget" if budget is not None and len(selected) >= budget else "admitted")
-                seen.add(row["discovery_id"])
-                row = dict(row, reason=reason)
-                discovered.append(row)
-                if reason == "admitted":
-                    selected.append((record, row))
-                    admitted.append(row)
-                else:
-                    excluded.append(row)
-            return selected, {"version": 1, "population": population,
-                "budget": budget, "discovered_count": len(discovered),
-                "admitted_count": len(admitted), "excluded_count": len(excluded),
-                "discovered": discovered, "admitted": admitted, "excluded": excluded}
-
-        def earnings_identity(record):
-            if not isinstance(record, dict) or not isinstance(record.get("symbol"), str) or not record["symbol"].strip():
-                return None
-            try:
-                report_date = date.fromisoformat(record.get("date", "")).isoformat()
-            except (TypeError, ValueError):
-                return None
-            return {"symbol": record["symbol"].strip().upper(), "date": report_date,
-                    "year": record.get("year"), "quarter": record.get("quarter")}
-
-        def article_identity(article):
-            if not isinstance(article, dict):
-                return None
-            locator = article.get("id") or article.get("article_id") or article.get("url")
-            return {"locator": str(locator)} if locator else {
-                "source": article.get("source", ""), "headline": article.get("headline", ""),
-                "published_at": article.get("published_at", article.get("datetime", ""))}
-
-        def article_rank(article):
-            stamp = article.get("published_at", article.get("datetime", ""))
-            try:
-                timestamp = float(stamp) if isinstance(stamp, (int, float)) else datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
-                if not math.isfinite(timestamp):
-                    timestamp = 0.
-            except (TypeError, ValueError):
-                timestamp = 0.
-            return (-timestamp, json.dumps(article_identity(article), sort_keys=True, default=str))
-
-        manifests: dict[str, Any] = {"earnings_articles": []}
-        failures = []
-        def acquire(operation, fn, *args, **kwargs):
-            try:
-                return fn(*args, **kwargs)
-            except Exception as exc:
-                error = source_fetch_error("Finnhub acquisition incomplete", exc)
-                failures.append(f"{operation}: {error}")
-                if operation == "peers":
-                    return error.partial_data
-                return error.partial_data.get("earnings" if operation == "earnings" else "news", [])
-        deadline = source.new_workflow_deadline(
-            max_budget_s=max_workflow_budget_s,
+        needed = {"yfinance", "fred"}
+        for strategy in self.paper_trade_strategies:
+            if not self.ar_config.get("disabled_strategies", {}).get(getattr(strategy, "name", "")):
+                needed.update(getattr(strategy, "data_sources", ()))
+        overrides = {}
+        for src_name, method_name in (
+            ("yfinance", "_fetch_yfinance_data"),
+            ("finnhub", "_fetch_finnhub_data"),
+            ("fred", "_fetch_fred_data"),
+            ("usaspending", "_fetch_usaspending_data"),
+            ("noaa", "_fetch_noaa_data"),
+            ("usda", "_fetch_usda_data"),
+            ("drought_monitor", "_fetch_drought_data"),
+            ("cftc", "_fetch_cftc_data"),
+        ):
+            if method_name in self.__dict__:
+                overrides[src_name] = self.__dict__[method_name]
+        return self.data_acquisition.fetch_all_data(
+            start_date,
+            end_date,
+            needed_sources=needed,
+            acquisition_deadline=acquisition_deadline,
+            acquisition_purpose=acquisition_purpose,
+            fetcher_overrides=overrides,
         )
 
-        # Earnings calendar: who reported recently? (P1/P2)
-        date_to = trading_date
-        date_from = (
-            datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=7)
-        ).strftime("%Y-%m-%d")
-        earnings = acquire("earnings", source.fetch_recent_earnings,
-            date_from,
-            date_to,
-            deadline=deadline,
-        )
-        earnings_selected, manifests["earnings_news"] = admit(
-            earnings, budgets["earnings_news_budget"], "reported_earnings_calendar",
-            earnings_identity, lambda record: (-date.fromisoformat(record["date"]).toordinal(),
-                record["symbol"].strip().upper(), str(record.get("year", "")), str(record.get("quarter", ""))))
-        manifests["earnings_news"]["policy"] = "report_date_desc_symbol_fiscal_identity_v1"
-        if earnings_selected:
-            # News around explicitly admitted earnings events proxies transcripts.
-            transcripts = []
-            for e, discovery in earnings_selected:
-                symbol = e.get("symbol", "").strip().upper()
-                edate = e.get("date", "")
-                prior_failures = len(failures)
-                news = acquire("earnings_news", source.fetch_earnings_news,
-                    symbol,
-                    edate,
-                    deadline=deadline,
-                )
-                discovery.update(request_status="failed" if len(failures) > prior_failures else "succeeded", result_count=len(news))
-                selected_articles, article_manifest = admit(news, budgets["earnings_article_budget"],
-                    "earnings_news_articles", article_identity, article_rank)
-                article_manifest.update(policy="publication_desc_source_identity_v1", parent_discovery_id=discovery["discovery_id"])
-                manifests["earnings_articles"].append(article_manifest)
-                if selected_articles:
-                    # Build a pseudo-transcript from earnings news
-                    news_text = "\n".join(
-                        f"[{n.get('source', 'Unknown')}]: {n.get('headline', '')} — {n.get('summary', '')}"
-                        for n, _row in selected_articles
-                    )
-                    publication_times = [
-                        str(article["published_at"])
-                        for article, _row in selected_articles
-                        if article.get("published_at")
-                    ]
-                    transcripts.append(
-                        {
-                            "symbol": symbol,
-                            "acquisition_discovery_id": discovery["discovery_id"],
-                            "article_discovery_ids": [row["discovery_id"] for _article, row in selected_articles],
-                            "year": e.get("year"),
-                            "quarter": e.get("quarter"),
-                            "transcript_text": news_text,
-                            "text_source": "earnings_news",
-                            "eps_actual": e.get("epsActual"),
-                            "eps_estimate": e.get("epsEstimate"),
-                            "revenue_actual": e.get("revenueActual"),
-                            "revenue_estimate": e.get("revenueEstimate"),
-                            **(
-                                {"published_at": max(publication_times)}
-                                if publication_times
-                                else {}
-                            ),
-                        }
-                    )
-            result["transcripts"] = transcripts
-        logger.info(
-            "Finnhub strategy fetch strategy=earnings_call candidate_count=%d "
-            "qualifying_count=%d",
-            len(earnings),
-            len(result.get("transcripts", [])),
-        )
+    def _fetch_finnhub_data(self, trading_date: str, max_workflow_budget_s: float | None = None) -> dict[str, Any]:
+        return self.data_acquisition.fetch_finnhub_data(trading_date, max_workflow_budget_s=max_workflow_budget_s)
 
-        # Company news for supply chain disruption detection (P6)
-        sc_symbols = ["AAPL", "TSLA", "NVDA", "AMZN", "BA", "CAT", "DE"]
-        all_news = []
-        for symbol in sc_symbols:
-            news = acquire("company_news", source.fetch_company_news,
-                symbol,
-                date_from,
-                date_to,
-                deadline=deadline,
-            )
-            for article in news:
-                article["symbol"] = symbol
-            all_news.extend(news)
-        if all_news:
-            result["disruption_news"] = all_news
-
-        # Supply chain / peer relationships
-        chains: dict[str, list[str]] = {}
-        peer_batches = acquire("peers", source.fetch_supply_chains,
-            sc_symbols,
-            deadline=deadline,
-        )
-        for symbol, peers in peer_batches.items():
-            chains[symbol] = [p["ticker"] for p in peers]
-        if chains:
-            result["supply_chains"] = chains
-
-        # PQC migration news for quantum_readiness strategy
-        pqc_kw = ["quantum", "pqc", "post-quantum", "encryption", "cryptograph", "nist"]
-        pqc_news = []
-        queries = [{"symbol": symbol, "from": date_from, "to": date_to} for symbol in pqc_tickers]
-        pqc_disabled = bool(getattr(self, 'ar_config', {}).get('disabled_strategies', {}).get('quantum_readiness'))
-        pqc_selected, manifests["pqc_news"] = admit(queries, budgets["pqc_symbol_budget"],
-            "declared_pqc_query_universe", lambda query: query, lambda query: (query["symbol"],),
-            excluded_reason='strategy_disabled' if pqc_disabled else None)
-        manifests["pqc_news"].update(policy="symbol_ascending_v1", keyword_filter=pqc_kw)
-        if pqc_disabled:
-            manifests['pqc_news'].update(consumer='quantum_readiness', exclusion_reason='strategy_disabled')
-        manifests["pqc_articles"] = []
-        for query, discovery in pqc_selected:
-            symbol = query["symbol"]
-            prior_failures = len(failures)
-            news = acquire("company_news", source.fetch_company_news,
-                symbol,
-                date_from,
-                date_to,
-                deadline=deadline,
-            )
-            discovery.update(request_status="failed" if len(failures) > prior_failures else "succeeded", result_count=len(news))
-            observed, article_manifest = admit(news, None, "pqc_news_articles", article_identity, article_rank)
-            article_manifest.update(policy="all_returned_articles_publication_identity_v1", parent_discovery_id=discovery["discovery_id"])
-            manifests["pqc_articles"].append(article_manifest)
-            for article, article_discovery in observed:
-                text = (
-                    article.get("headline", "") + " " + article.get("summary", "")
-                ).lower()
-                if any(kw in text for kw in pqc_kw):
-                    pqc_news.append(dict(article, symbol=symbol,
-                        acquisition_discovery_id=article_discovery["discovery_id"],
-                        acquisition_query_id=discovery["discovery_id"]))
-                else:
-                    article_discovery["reason"] = "pqc_keyword_absent"
-                    article_manifest["admitted"].remove(article_discovery)
-                    article_manifest["excluded"].append(article_discovery)
-            article_manifest["admitted_count"] = len(article_manifest["admitted"])
-            article_manifest["excluded_count"] = len(article_manifest["excluded"])
-            discovery["qualifying_count"] = article_manifest["admitted_count"]
-        if pqc_news:
-            result["pqc_news"] = pqc_news
-
-        logger.info(
-            "Finnhub fetch: %d earnings_candidates, %d earnings_qualifying, "
-            "%d news, %d chains, %d pqc_news",
-            len(earnings),
-            len(result.get("transcripts", [])),
-            len(result.get("disruption_news", [])),
-            len(result.get("supply_chains", {})),
-            len(result.get("pqc_news", [])),
-        )
-        if failures:
-            result["error"] = "; ".join(failures)
-        result["coverage"] = {"contract": "finnhub-acquisition-admission-v1",
-            "status": "partial" if failures else "complete_within_declared_admission",
-            "request_window": {"from": date_from, "to": date_to},
-            "supply_chain_query_universe": sc_symbols,
-            "acquisition_admission": manifests}
-        return result
-
-    def _fetch_regulations_data(self, trading_date: str | None = None) -> dict[str, Any]:
-        """Fetch regulations.gov data for regulatory pipeline strategy."""
-        from tradingagents.strategies.learning.event_monitor import EventMonitor
-
-        monitor = EventMonitor(self.registry)
-        monitor.as_of = trading_date
-        result: dict[str, Any] = {}
-
-        rules = monitor.poll_proposed_rules(
-            agencies=["SEC", "EPA", "FDA", "FTC", "DOL", "CFPB"],
-            days_back=14,
-            **({'evidence_policy': self.ar_config['regulation_evidence_policy']}
-               if self.ar_config.get('regulation_evidence_policy') is not None else {}),
-            **({'retrieval_policy': self.ar_config['regulation_retrieval_policy']}
-               if self.ar_config.get('regulation_retrieval_policy') is not None else {}),
-            **({'publication_policy': self.ar_config['regulation_publication_policy']}
-               if self.ar_config.get('regulation_publication_policy') is not None else {}),
-        )
-        result["proposed_rules"] = list(rules)
-        if hasattr(rules, "coverage"):
-            result["coverage"] = rules.coverage
-        if hasattr(rules, 'regulation_evidence'):
-            result['regulation_evidence'] = rules.regulation_evidence
-
-        logger.info("Regulations.gov fetch: %d proposed rules", len(rules))
-        return result
-
-    def _fetch_edgar_events(self, trading_date: str | None = None,
-                            universe_data: dict | None = None) -> dict[str, Any]:
-        """Preserve valid EDGAR categories while exposing every failed operation."""
-        from .filing_research_policy import configured as filing_research_disabled
-        if filing_research_disabled(self.ar_config):
-            return {'error': 'filing_research_disabled',
-                    'coverage': {'complete': False, 'reason': 'filing_research_disabled',
-                                 'filing_research_policy': 'disabled_v1'}}
-        from tradingagents.strategies.learning.event_monitor import EventMonitor
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        filing_policy = self.ar_config.get('filing_evidence_policy')
-        comparator_policy = self.ar_config.get('filing_comparison_policy')
-        parser_policy = self.ar_config.get('filing_parser_policy')
-        attribution_policy = self.ar_config.get('filing_attribution_policy')
-        monitor_options = {'filing_policy': filing_policy} if filing_policy else {}
-        if comparator_policy is not None:
-            monitor_options['comparator_policy'] = comparator_policy
-        if parser_policy is not None:
-            monitor_options['parser_policy'] = parser_policy
-        if attribution_policy is not None:
-            monitor_options['attribution_policy'] = attribution_policy
-        if self.ar_config.get('filing_material_policy') is not None:
-            monitor_options['material_policy'] = self.ar_config['filing_material_policy']
-        if self.ar_config.get('filing_acquisition_policy') is not None:
-            monitor_options.update(acquisition_policy=self.ar_config['filing_acquisition_policy'],
-                                   spool_root=self.ar_config.get('filing_spool_dir'))
-        monitor = EventMonitor(self.registry, **monitor_options)
-        monitor.as_of = trading_date
-        result, failures = {}, []
-        company_map = None
-        collections = {}
-        if universe_data is not None:
-            from tradingagents.strategies.data_sources.equity_universe import EquityUniverse
-            if universe_data.get("error"):
-                return {"error": "equity universe evidence unavailable"}
-            source = self.registry.get("edgar")
-            company_map = source.company_ticker_map()
-            monitor.equity_universe = EquityUniverse(universe_data.get("snapshot"), company_map=company_map)
-            result["company_tickers"] = company_map
-            if self.ar_config.get('state_economics_policy'):
-                from datetime import timezone
-                from tradingagents.strategies.data_sources.state_economics_policy import digest
-                result['company_tickers_available_at'] = datetime.now(timezone.utc).isoformat()
-                result['company_tickers_sha256'] = digest(company_map)
-        text_options = {'fetch_text': False} if filing_policy else {}
-        operations = {
-            "filings": lambda: monitor.poll_edgar_filings(["10-K", "10-Q", "DEF 14A", "8-K"], days_back=14, **text_options),
-            "form4": lambda: monitor.poll_form4_filings(["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "JPM"], days_back=14),
-            "activist_13d": lambda: monitor.poll_edgar_filings(["SCHEDULE 13D"], days_back=14, **text_options),
-            "passive_13g": lambda: monitor.poll_edgar_filings(["SCHEDULE 13G"], days_back=14, **text_options),
-            "pqc_filings": lambda: monitor.poll_keyword_filings(["8-K", "10-K", "10-Q"],
-                ["post-quantum", "quantum-resistant", "quantum-safe", "cryptographic agility"], days_back=30, **text_options),
-        }
-        for name, operation in operations.items():
-            try:
-                result[name] = operation()
-                if name != 'form4':
-                    collections[name] = result[name]
-                if hasattr(result[name], "coverage"):
-                    result.setdefault("coverage", {})[name] = result[name].coverage
-                    result[name] = dict(result[name]) if isinstance(result[name], dict) else list(result[name])
-            except Exception as exc:
-                error = source_fetch_error("EDGAR acquisition incomplete", exc)
-                partial = error.partial_data.get(name)
-                if partial is None and name in {"activist_13d", "passive_13g"}:
-                    partial = error.partial_data.get("filings")
-                if partial is not None:
-                    if name != 'form4':
-                        collections[name] = partial
-                    result[name] = list(partial) if isinstance(partial, list) else partial
-                    if hasattr(partial, "coverage"):
-                        result.setdefault("coverage", {})[name] = partial.coverage
-                failures.append(f"{name}: {error}")
-        if filing_policy:
-            try:
-                graph = monitor.hydrate_collections(
-                    {name: collections.get(name, []) for name in operations if name != 'form4'},
-                    company_map=company_map)
-                result.update(graph['collections'])
-                result['filing_evidence'] = {key: value for key, value in graph.items() if key != 'collections'}
-                complete = graph.get('coverage', {}).get('complete') is True
-                if self.ar_config.get('filing_material_policy') is not None:
-                    from .filing_material_validation import validate_filing_material_policy
-                    # A temporary failure label permits validating incomplete graphs;
-                    # it is never persisted or used to erase other operation errors.
-                    material = validate_filing_material_policy(
-                        {'edgar': dict(result, error='full filing evidence incomplete')}, self.ar_config)
-                    complete = material is not None and material['scoped_complete'] is True
-                if not complete:
-                    failures.append('full filing evidence incomplete')
-            except Exception as exc:
-                error = source_fetch_error('Full filing evidence acquisition incomplete', exc)
-                failures.append(str(error))
-        if failures:
-            result["error"] = "; ".join(failures)
-        return result
-
-    def _fetch_courtlistener_data(self, trading_date: str | None = None,
-                                focused_scope: dict | None = None,
-                                acquisition_deadline: float | None = None) -> dict[str, Any]:
-        """Fetch CourtListener data for litigation strategy."""
-        if self.ar_config.get('courtlistener_scope_policy') is not None:
-            from .scoped_sources import litigation_settings
-            litigation_settings(self.ar_config)
-            if focused_scope is None or acquisition_deadline is None or trading_date is None:
-                raise ValueError('focused Court scope and parent deadline required')
-            source = self.registry.get('courtlistener')
-            if source is None:
-                return {'error': 'CourtListener unavailable'}
-            result = source.fetch_focused_litigation(focused_scope,
-                date_filed_after=(date.fromisoformat(trading_date) - timedelta(days=14)).isoformat(),
-                date_filed_before=trading_date, absolute_deadline=acquisition_deadline,
-                request_cap=10, subbudget_seconds=120)
-            return dict(result, courtlistener_scope_policy='focused_litigation_v1')
-        from tradingagents.strategies.learning.event_monitor import EventMonitor
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-
-        monitor = EventMonitor(self.registry)
-        result: dict[str, Any] = {}
-        failures: list[str] = []
-
-        monitor.as_of = trading_date
-        # Search for securities-related cases
-        for query in ["securities class action", "SEC enforcement", "antitrust"]:
-            try:
-                dockets = monitor.poll_court_dockets(query=query, days_back=14)
-            except Exception as exc:
-                safe_error = source_fetch_error("CourtListener docket fetch failed", exc)
-                result.setdefault("dockets", []).extend(safe_error.partial_data.get("dockets", []))
-                failures.append(f"{query.lower().replace(' ', '_')}: {safe_error}")
-                logger.error("%s", safe_error)
-                continue
-            if hasattr(dockets, "coverage"):
-                result.setdefault("coverage", {})[query] = dockets.coverage
-            existing = result.get("dockets", [])
-            existing.extend(dockets)
-            result["dockets"] = existing
-
-        if failures:
-            result["error"] = "; ".join(failures)
-        logger.info(
-            "CourtListener fetch: %d dockets",
-            len(result.get("dockets", [])),
-        )
-        return result
-
-    def _fetch_fred_data(self, start_date: str, end_date: str, state_vintage: str | None = None) -> dict[str, Any]:
-        """Fetch FRED credit spreads and economic indicators."""
-        from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
-
-        source = self.registry.get("fred")
-        start_date = min(start_date, (pd.Timestamp(end_date) - pd.DateOffset(months=18)).date().isoformat())
-        if source is None:
-            return {}
-
-        from .research_resilience import capability_configured, acquisition_group, acquisition_manifest, FRED_GROUPS
-        from datetime import timezone
-        capability = capability_configured(self.ar_config)
-        started_at = datetime.now(timezone.utc).isoformat()
-        groups = {}
-        result: dict[str, Any] = {}
-        failures: list[str] = []
-
-        # Credit spreads for regime model
-        try:
-            spreads = source.fetch_credit_spreads(start_date, end_date)
-            if capability:
-                groups['credit_spreads'] = acquisition_group(FRED_GROUPS['credit_spreads'])
-            result.update(
-                spreads
-            )  # Keys are FRED series IDs (BAMLH0A0HYM2, BAMLC0A4CBBB)
-        except SourceFetchError as exc:
-            result.update(exc.partial_data)
-            failures.append(str(exc))
-            if capability:
-                groups['credit_spreads'] = acquisition_group(FRED_GROUPS['credit_spreads'], error=exc, independent=True)
-        except Exception:
-            logger.error("Failed to fetch FRED credit spreads")
-            failures.append("FRED credit spreads [provider_error]")
-            if capability:
-                groups['credit_spreads'] = acquisition_group(FRED_GROUPS['credit_spreads'], error_text=failures[-1])
-
-        # Economic indicators for regime model
-        try:
-            indicators = source.fetch_economic_indicators(start_date, end_date)
-            if capability:
-                groups['economic_indicators'] = acquisition_group(FRED_GROUPS['economic_indicators'])
-            result.update(indicators)  # Keys are FRED series IDs (UNRATE, PAYEMS, etc.)
-        except SourceFetchError as exc:
-            result.update(exc.partial_data)
-            failures.append(str(exc))
-            if capability:
-                groups['economic_indicators'] = acquisition_group(FRED_GROUPS['economic_indicators'], error=exc, independent=True)
-        except Exception:
-            logger.error("Failed to fetch FRED economic indicators")
-            failures.append("FRED economic indicators [provider_error]")
-            if capability:
-                groups['economic_indicators'] = acquisition_group(FRED_GROUPS['economic_indicators'], error_text=failures[-1])
-
-        if capability:
-            result['_capability_acquisition'] = acquisition_manifest('fred', groups, start_date, end_date,
-                started_at, datetime.now(timezone.utc).isoformat())
-        if failures:
-            result["error"] = "; ".join(failures)
-
-        if self.ar_config.get('state_economics_policy'):
-            from copy import deepcopy
-            from tradingagents.strategies.data_sources.state_economics_policy import acquire_states
-            result['state_unemployment'] = acquire_states(source, start_date, state_vintage or end_date)
-            result['state_exposure_registry'] = deepcopy(self.ar_config['state_exposure_manifest'])
-            result['state_policy_settings'] = {'policy': self.ar_config['state_economics_policy'],
-                'release_lookback_days': self.ar_config.get('state_release_lookback_days', 7)}
-            result['coverage'] = {'state_unemployment': result['state_unemployment']['coverage']}
-
-        # Both Series.attrs and this convenience metadata survive the bundle codec.
-        result["vintage"] = {"as_of": end_date, "realtime_start": end_date, "realtime_end": end_date}
-        # Map friendly names for strategies that use them
-        from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
-
-        for friendly_name, series_id in SERIES_MAP.items():
-            if series_id in result:
-                result[friendly_name] = result[series_id]
-
-        if self.ar_config.get('state_economics_policy'):
-            from .source_inputs import SourceInputStore, SourceInputError
-            try:
-                SourceInputStore.encode(result)
-            except SourceInputError:
-                # State acceptance cannot discard independently valid macro inputs.
-                from tradingagents.strategies.data_sources.state_economics_policy import STATES
-                state = result['state_unemployment']
-                state['states'] = {}
-                state['coverage'] = {'expected_states': 51, 'accepted_states': 0,
-                    'failed_states': {code: 'invalid_response' for code in STATES}, 'complete': False}
-                result['coverage'] = {'state_unemployment': state['coverage']}
-                result['state_evidence_error'] = 'state_source_codec_limit'
-                try:
-                    SourceInputStore.encode(result)
-                except SourceInputError:
-                    result.pop('state_exposure_registry', None)
-                    SourceInputStore.encode(result)
-        logger.info("FRED fetch: %d series loaded", len(result))
-        return result
-
-    def _fetch_congress_data(self, trading_date: str, acquisition_deadline: float | None = None) -> dict[str, Any]:
-        """Fetch the declared display snapshot or the legacy trading input."""
-        source = self.registry.get("congress")
-        if source is None:
-            return {}
-        from .congress_policy import configured
-        if configured(self.ar_config):
-            import time
-            from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
-            deadline = acquisition_deadline if acquisition_deadline is not None else current_provider_deadline('congress')
-            if deadline is None:
-                deadline = time.monotonic() + 90
-            return source.get_audit_snapshot(
-                date_filed_after=(date.fromisoformat(trading_date) - timedelta(days=30)).isoformat(),
-                date_filed_before=trading_date, absolute_deadline=deadline)
-
-        result: dict[str, Any] = {}
-        try:
-            trades = source.get_recent_trades(days_back=30, as_of=trading_date, complete_window=True)
-            result["recent_trades"] = list(trades)
-            if hasattr(trades, "coverage"):
-                result["coverage"] = trades.coverage
-            logger.info("Congress fetch: %d recent trades", len(trades))
-        except Exception as exc:
-            from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-            error = source_fetch_error("Source acquisition failed", exc)
-            result.update(error.partial_data)
-            result["error"] = str(error)
-
-        return result
+    def _fetch_fred_data(self, start_date: str, end_date: str) -> dict[str, Any]:
+        return self.data_acquisition.fetch_fred_data(start_date, end_date)
 
     def _fetch_usaspending_data(self, trading_date: str) -> dict[str, Any]:
-        """Fetch recent large federal contract awards."""
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-
-        source = self.registry.get("usaspending")
-        if source is None:
-            return {}
-
-        payload = {}
-        try:
-            contracts = source.get_recent_large_contracts(
-                min_amount=50_000_000,
-                days_back=30,
-                as_of=trading_date,
-            )
-            result = {"contracts": list(contracts)}
-            if hasattr(contracts, "coverage"):
-                result["coverage"] = contracts.coverage
-            logger.info("USASpending fetch: %d large contracts", len(contracts))
-            payload = {"data": result, **({"coverage": contracts.coverage} if hasattr(contracts, "coverage") else {})}
-            policy = self.ar_config.get('award_attribution_policy')
-            if policy is not None:
-                from tradingagents.strategies.data_sources.award_attribution_policy import (
-                    POLICY, apply_attribution_policy,
-                )
-                if policy != POLICY:
-                    raise ValueError('unsupported award attribution policy')
-                scoped = apply_attribution_policy(list(contracts), getattr(contracts, 'coverage', None), session=trading_date)
-                payload.update(scoped)
-                result['coverage'] = scoped['coverage']
-            elif (hasattr(contracts, "coverage")
-                    and contracts.coverage.get('issuer_attribution', {}).get('complete') is False):
-                payload['error'] = 'USASpending issuer attribution incomplete'
-            return payload
-        except Exception as exc:
-            safe_error = source_fetch_error("USASpending contract fetch failed", exc)
-            logger.error("%s", safe_error)
-            return {**payload, **safe_error.partial_data, "error": str(safe_error)}
+        return self.data_acquisition.fetch_usaspending_data(trading_date)
 
     def _fetch_noaa_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
-        """Fetch NOAA weather anomaly summary for Corn Belt ag regions."""
-        source = self.registry.get("noaa")
-        if source is None:
-            return {}
-
-        try:
-            options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
-            return source.fetch_ag_weather_summary(trading_date, lookback_days=30, **options)
-        except Exception as exc:
-            from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-            error = source_fetch_error("Source acquisition failed", exc)
-            return {**error.partial_data, "error": str(error), "_coverage": {
-                "status": "partial" if error.partial_data else "failed",
-                "reason_code": error.reason_code, "http_status": error.http_status,
-                "attempts": error.attempts,
-                "failed_operations": dict(error.failed_operations),
-                "failed_http_statuses": dict(error.failed_http_statuses),
-            }}
+        return self.data_acquisition.fetch_noaa_data(trading_date, vintage_as_of=vintage_as_of)
 
     def _fetch_usda_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
-        """Preserve crops fetched before any required crop failure."""
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        from tradingagents.strategies.data_sources.usda_source import condition_scope
-        source = self.registry.get("usda")
-        if source is None:
-            return {}
-        crop_progress, failures, crop_coverage = {}, [], {}
-        for commodity in ("CORN", "SOYBEANS", "WHEAT"):
-            scope = condition_scope(commodity, trading_date)
-            year = scope["reporting_year"]
-            try:
-                options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
-                observations = source.fetch_crop_progress(commodity, year, as_of=trading_date, **options)
-                crop_progress[commodity] = list(observations)
-                crop_coverage[commodity] = getattr(observations, "coverage", {**scope, "complete": False, "reason": "missing_survey_coverage"})
-                if crop_coverage[commodity].get("complete") is not True:
-                    failures.append(f"{commodity}: incomplete declared survey coverage")
-            except Exception as exc:
-                error = source_fetch_error("USDA crop acquisition incomplete", exc)
-                crop_progress.update(error.partial_data.get("crop_progress", {}))
-                crop_coverage[commodity] = error.partial_data.get("coverage", {**scope, "complete": False})
-                failures.append(f"{commodity}: {error}")
-        acquisition_times = [str(row["available_at"]) for weeks in crop_progress.values() for row in weeks if isinstance(row, dict) and row.get("available_at")]
-        result = {"crop_progress": crop_progress, "coverage": {
-            "complete": not failures and all(row.get("complete") is True for row in crop_coverage.values()),
-            "crops": crop_coverage,
-        }}
-        if acquisition_times:
-            acquired = max(acquisition_times)
-            result.update(available_at=acquired, acquired_at=acquired)
-        if failures:
-            result["error"] = "; ".join(failures)
-        return result
+        return self.data_acquisition.fetch_usda_data(trading_date, vintage_as_of=vintage_as_of)
 
     def _fetch_drought_data(self, trading_date: str, vintage_as_of: str | None = None) -> dict[str, Any]:
-        """Fetch Drought Monitor severity and composite score."""
-        source = self.registry.get("drought_monitor")
-        if source is None:
-            return {}
-
-        try:
-            end = trading_date
-            options = {'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}
-            severity = source.fetch_drought_severity(end=end, **options)
-            composite = source.fetch_composite_score(date=trading_date, **options)
-            result = {"composite_score": composite, "states": severity}
-            acquisition_times = [str(row["available_at"]) for row in severity.values() if isinstance(row, dict) and row.get("available_at")]
-            if acquisition_times:
-                acquired = max(acquisition_times)
-                result.update(available_at=acquired, acquired_at=acquired)
-            return result
-        except Exception as exc:
-            from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-            error = source_fetch_error("Source acquisition failed", exc)
-            return {**error.partial_data, "error": str(error), "_coverage": {
-                "status": "partial" if error.partial_data else "failed",
-                "reason_code": error.reason_code, "http_status": error.http_status,
-                "attempts": error.attempts,
-            }}
+        return self.data_acquisition.fetch_drought_data(trading_date, vintage_as_of=vintage_as_of)
 
     def _fetch_cftc_data(self, trading_date: str | None = None, vintage_as_of: str | None = None) -> dict[str, Any]:
-        """Fetch CFTC COT positioning data for commodity strategy."""
-        source = self.registry.get("cftc")
-        if source is None:
-            return {}
-
-        return source.fetch(
-            {
-                "method": "cot_positioning",
-                "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
-                "lookback_weeks": 52,
-                "as_of": trading_date,
-                **({'vintage_as_of': vintage_as_of} if vintage_as_of is not None else {}),
-            }
-        )
+        return self.data_acquisition.fetch_cftc_data(trading_date, vintage_as_of=vintage_as_of)
 
     def _fetch_yfinance_data(self, start_date: str, end_date: str) -> dict[str, Any]:
-        """Fetch all yfinance data needed by strategies."""
-        from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
-
-        source = self.registry.get("yfinance")
-        if not isinstance(source, YFinanceSource):
-            logger.warning("yfinance source not available")
-            return {}
-
-        from .research_resilience import capability_configured, acquisition_group, acquisition_manifest, _project_capabilities
-        from datetime import timezone
-        capability = capability_configured(self.ar_config)
-        started_at = datetime.now(timezone.utc).isoformat()
-        groups = {}
-        result: dict[str, Any] = {}
-        from tradingagents.strategies.data_sources.fetch_errors import source_fetch_error
-        failures = []
-
-        # Core market tickers for regime model and general context
-        # Includes ag ETFs for weather_ag strategy
-        core_tickers = [
-            # Market + regime model
-            "SPY",
-            "SHY",
-            "TLT",
-            # Ag ETFs for weather_ag
-            "DBA",
-            "WEAT",
-            "CORN",
-            "MOO",
-            "SOYB",
-            "ADM",
-            "BG",
-            "CTVA",
-            "DE",
-            "FMC",
-            # Regional ETFs for state_economics
-            "KRE",
-            "IWN",
-            "XRT",
-            "IYR",
-            "XHB",
-            "ITB",
-            "VNQ",
-            "SOXX",
-            "XLI",
-            "XLRE",
-            # Defense contractors for govt_contracts (momentum fallback)
-            "LMT",
-            "RTX",
-            "NOC",
-            "GD",
-            "BA",
-            "LHX",
-            "LDOS",
-            "SAIC",
-            "BAH",
-            "PLTR",
-            "KTOS",
-            "CACI",
-            "HEI",
-            "TDG",
-        ]
-
-        logger.info("Fetching prices for %d core tickers", len(core_tickers))
-        try:
-            prices_df = source.fetch_prices(core_tickers, start_date, end_date)
-            if capability:
-                groups['research_prices'] = acquisition_group(core_tickers)
-        except Exception as exc:
-            error = source_fetch_error("Yahoo research history failed", exc)
-            failures.append(str(error))
-            if capability:
-                groups['research_prices'] = acquisition_group(core_tickers, error=error)
-            prices_df = error.partial_data.get("prices", pd.DataFrame())
-
-        # Split into per-ticker DataFrames
-        prices: dict[str, pd.DataFrame] = {}
-        if not prices_df.empty and isinstance(prices_df.columns, pd.MultiIndex):
-            for ticker in core_tickers:
-                try:
-                    ticker_df = prices_df.xs(ticker, level=1, axis=1)
-                    if not ticker_df.empty:
-                        prices[ticker] = ticker_df
-                except (KeyError, ValueError):
-                    logger.debug("No data for %s in batch download", ticker)
-        elif not prices_df.empty and len(core_tickers) == 1:
-            prices[core_tickers[0]] = prices_df
-
-        result["prices"] = prices
-        if not capability:
-            self._price_cache.update(prices)
-
-        # Fetch VIX for regime model
-        try:
-            vix_df = source.fetch_vix(start_date, end_date)
-            if capability:
-                groups['vix'] = acquisition_group(['^VIX'])
-        except Exception as exc:
-            error = source_fetch_error("Yahoo VIX history failed", exc)
-            failures.append(str(error))
-            if capability:
-                groups['vix'] = acquisition_group(['^VIX'], error=error)
-            # Preserve rejected observations in immutable evidence. The failed
-            # outcome still excludes this frame from projection and acceptance.
-            vix_df = error.partial_data.get('vix', pd.DataFrame()) if capability else pd.DataFrame()
-        if not vix_df.empty:
-            result["vix"] = vix_df
-
-        if failures:
-            result["error"] = "; ".join(failures)
-        if capability:
-            result['_capability_acquisition'] = acquisition_manifest('yfinance', groups, start_date, end_date,
-                started_at, datetime.now(timezone.utc).isoformat())
-            from .source_inputs import source_codec_limits
-            accepted, _, _ = _project_capabilities(result, 'yfinance', codec_limits=source_codec_limits(self.config))
-            self._price_cache.update(accepted.get('prices', {}))
-        return result
+        return self.data_acquisition.fetch_yfinance_data(start_date, end_date)
 
     # ------------------------------------------------------------------
     # LLM enrichment
@@ -3307,10 +2198,13 @@ class MultiStrategyEngine:
                        if self.ar_config.get('regulation_assessment_policy') is not None else {}))
                 c.metadata['document_assessment'] = llm_result['document_assessment']
                 c.metadata['regulation_evidence_status'] = llm_result['regulation_evidence_status']
-                from ..data_sources.regulation_assessment import completed_abstention
+                abstained_reg = (
+                    isinstance(llm_result, dict)
+                    and llm_result.get('document_assessment') == 'assessed_no_directional_thesis'
+                )
                 if llm_result['regulation_evidence_status'] != 'sufficient' and not (
                         self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
-                        and completed_abstention(llm_result)):
+                        and abstained_reg):
                     c.metadata['regulation_assessment'] = llm_result
                     provenance = getattr(analyzer, 'last_call_provenance', None)
                     if isinstance(provenance, dict) and provenance:
@@ -3435,8 +2329,9 @@ class MultiStrategyEngine:
             if not isinstance(llm_result, dict) or not llm_result:
                 raise ValueError("analysis_unavailable")
             llm_result = dict(llm_result)
-            from ..data_sources.regulation_assessment import completed_abstention
-            abstained = full_regulation and completed_abstention(llm_result)
+            abstained = full_regulation and (
+                llm_result.get("document_assessment") == "assessed_no_directional_thesis"
+            )
             if not abstained and llm_result.get("direction") not in {"long", "short", "neutral"}:
                 raise ValueError("invalid_direction")
             score_key = "conviction" if "conviction" in llm_result else "score"
@@ -3529,14 +2424,6 @@ class MultiStrategyEngine:
                 c.metadata.setdefault("non_actionable_reason", "required_analysis_failed")
             logger.warning("LLM analysis failed for %s/%s: %s", strategy_name, c.ticker, reason)
         finally:
-            if analysis_type == 'bounded_document_research':
-                # Exact bytes already live in the immutable daily source bundle.
-                # Retain compact identity in each horizon/book checkpoint.
-                from .bounded_document_inputs import release_candidate_bytes
-                release_candidate_bytes(c)
-                attempt = getattr(analyzer, 'last_bounded_document_attempt', None)
-                if isinstance(attempt, dict) and c.metadata.get('analysis_status') != 'validated':
-                    c.metadata['bounded_document_attempt'] = deepcopy(attempt)
             if resilience:
                 observed = getattr(analyzer, 'last_call_response', None)
                 text = observed.get('text') if isinstance(observed, dict) and observed.get('received') is True else None
