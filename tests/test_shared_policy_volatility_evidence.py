@@ -143,7 +143,7 @@ def _run_staging_matrix(
 
     first_engine = orchestrator.cohorts[0]["engine"]
 
-    def fetch_shared_data(_start: str, _end: str) -> dict:
+    def fetch_shared_data(_start: str, _end: str, **_kwargs: object) -> dict:
         first_engine._price_cache.update(histories)
         return {"yfinance": {"prices": histories}}
 
