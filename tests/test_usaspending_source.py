@@ -189,3 +189,48 @@ class TestGovtContractsStagingRegression:
 def offline_request_policy(monkeypatch):
     monkeypatch.setattr('tradingagents.strategies.data_sources.request_policy.PROVIDER_LIMITS', {})
     monkeypatch.setattr('time.sleep', lambda _: None)
+
+
+def test_standalone_budget_and_detail_timeout_skip_resolved_ueis(source):
+    import time
+    from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
+
+    unresolved_row = {
+        **API_ROW,
+        "Award ID": "AWARD-UNRESOLVED",
+        "generated_internal_id": "CONT_AWD_AWARD-UNRESOLVED_9700_NONE_NONE",
+        "internal_id": 456,
+        "Recipient Name": "PRIVATE CONTRACTOR INC",
+        "Recipient UEI": "ZZZZ9999ZZZZ",
+    }
+    observed_remaining = []
+    detail_timeouts = []
+    detail_urls = []
+
+    def fake_post(url, **kwargs):
+        deadline = current_provider_deadline("usaspending")
+        assert deadline is not None
+        observed_remaining.append(deadline - time.monotonic())
+        return _api_response([API_ROW, unresolved_row])
+
+    def fake_get(url, **kwargs):
+        detail_urls.append(url)
+        detail_timeouts.append(kwargs.get("timeout"))
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_content.return_value = [
+            (
+                '{"generated_unique_award_id":"CONT_AWD_AWARD-UNRESOLVED_9700_NONE_NONE",'
+                '"id":456,"recipient":{"recipient_uei":"ZZZZ9999ZZZZ","parent_recipient_uei":"ZZZZ9999ZZZZ"}}'
+            ).encode()
+        ]
+        return resp
+
+    with patch("requests.post", side_effect=fake_post), patch("requests.get", side_effect=fake_get):
+        results = source.search_contracts(date_from="2026-07-01", date_to="2026-08-06")
+
+    assert len(results) == 2
+    assert observed_remaining and observed_remaining[0] >= 90.0
+    assert len(detail_urls) == 1 and "AWARD-UNRESOLVED" in detail_urls[0]
+    assert detail_timeouts[0] is not None and 15.0 < detail_timeouts[0] <= 30.0

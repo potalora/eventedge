@@ -312,6 +312,20 @@ def test_operating_contract_validates_gen003_clean_profile():
         "weather_ag",
         "commodity_macro",
     )
+    assert profile.config["autoresearch"]["award_attribution_policy"] == "verified_listed_targets_v1"
+
+
+def test_gen003_clean_applies_verified_listed_targets_policy():
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.strategies.orchestration.generation_config import (
+        apply_generation_config,
+        read_generation_config,
+    )
+
+    profile_path = REPO_ROOT / "config" / "profiles" / "gen003-clean.json"
+    _, _, digest = read_generation_config(profile_path)
+    applied = apply_generation_config(DEFAULT_CONFIG, profile_path, digest)
+    assert applied["autoresearch"]["award_attribution_policy"] == "verified_listed_targets_v1"
 
 
 def test_recover_runtime_idle_tick_performs_zero_git_sqlite_and_fsync(tmp_path, monkeypatch):

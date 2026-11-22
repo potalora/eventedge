@@ -103,6 +103,10 @@ def profile_contract(
     ar.setdefault("decision_clock_policy", "prospective_next_open_v1")
     ar.setdefault("research_resilience_policy", "dependency_isolation_v1")
     ar.setdefault("stabilization_profile_policy", POLICY)
+    if "govt_contracts" in gen_cfg.enabled_strategies and not (
+        ar.get("disabled_strategies") or {}
+    ).get("govt_contracts"):
+        ar.setdefault("award_attribution_policy", "verified_listed_targets_v1")
     ledger_cfg = ar.setdefault("paper_ledger", {})
     base_policy = ledger_cfg.get("policy_id")
     if isinstance(base_policy, str) and base_policy.endswith(f"generation-config-{profile_sha256}"):

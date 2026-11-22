@@ -146,6 +146,10 @@ def apply_generation_config(
         ar_typed.setdefault("decision_clock_policy", "prospective_next_open_v1")
         ar_typed.setdefault("research_resilience_policy", "dependency_isolation_v1")
         ar_typed.setdefault("stabilization_profile_policy", "gen003_clean_v1")
+        if "govt_contracts" in typed.enabled_strategies and not (
+            ar_typed.get("disabled_strategies") or {}
+        ).get("govt_contracts"):
+            ar_typed.setdefault("award_attribution_policy", "verified_listed_targets_v1")
         result["_generation_config"] = typed
     else:
         result = copy.deepcopy(dict(defaults))

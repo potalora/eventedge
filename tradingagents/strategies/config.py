@@ -936,6 +936,11 @@ class GenerationConfig:
             "autoresearch_model": self.bounded_model,
             "llm_effort": self.bounded_effort,
             "llm_temperature": 0.0,
+            **(
+                {"award_attribution_policy": "verified_listed_targets_v1"}
+                if "govt_contracts" in self.enabled_strategies
+                else {}
+            ),
             "paper_trade": {
                 "portfolio_committee_enabled": True,
                 "portfolio_committee_model": self.portfolio_committee_model,
