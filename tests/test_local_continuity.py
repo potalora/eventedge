@@ -104,3 +104,24 @@ def test_recovery_under_a_different_candidate_or_profile_is_not_automatic_contin
     old['profile_sha256'] = 'e' * 64
     rows = [old, *[classify(observation(session)) for session in SESSIONS]]
     assert summarize_continuity(rows, through=date(2026, 10, 16))['automatic_recovery_observed'] is False
+
+
+def test_classify_session_accepts_gpt_6_2_sol_native_model_evidence():
+    from tradingagents.strategies.orchestration.local_continuity import summarize_continuity
+    value = observation()
+    value['native_models'] = ['gpt-6-luna', 'gpt-6.2-sol']
+    classified = classify(value)
+    assert classified['qualifies'] is True
+    assert 'native_model_evidence' not in classified['reasons']
+
+    earlier = observation('2026-10-09')
+    earlier['unexpected_failures'] = ['fred']
+    earlier['source_observations']['fred'] = 'failed'
+    rows = [classify(earlier)]
+    for session in SESSIONS:
+        obs = observation(session)
+        obs['native_models'] = ['gpt-6-luna', 'gpt-6.2-sol']
+        rows.append(classify(obs))
+    summary = summarize_continuity(rows, through=date(2026, 10, 16))
+    assert summary['local_operational_acceptance'] is True
+    assert summary['native_models_observed'] == ['gpt-6-luna', 'gpt-6.2-sol']

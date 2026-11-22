@@ -218,8 +218,8 @@ def prepare(repo, profile, watchdog, dotenv):
             and ar.get('research_resilience_policy') == 'dependency_isolation_v1'
             and ar.get('llm_billing_mode') == 'chatgpt_plan'
             and ar.get('autoresearch_model') == 'gpt-6-luna' and ar.get('llm_effort') == 'high'
-            and ar.get('thesis_model') == 'gpt-6.1-sol' and ar.get('thesis_effort') == 'high'
-            and ar.get('paper_trade', {}).get('portfolio_committee_model') == 'gpt-6.1-sol'
+            and ar.get('thesis_model') in ('gpt-6.1-sol', 'gpt-6.2-sol') and ar.get('thesis_effort') == 'high'
+            and ar.get('paper_trade', {}).get('portfolio_committee_model') in ('gpt-6.1-sol', 'gpt-6.2-sol')
             and ar.get('paper_trade', {}).get('portfolio_committee_effort') == 'high', 'approved_profile_required')
     require(overlay.get('execution') == {'mode': 'paper', 'execution_enabled': False}, 'paper_only')
     folder = repo / 'data/local-continuity'; folder.mkdir(mode=0o700, parents=True)

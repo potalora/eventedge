@@ -281,15 +281,16 @@ def test_retained_state_event_outcome_is_validated_even_if_no_priceable_signal(e
     assert not result['qualifies'] and not result['checks']['model_outcomes']
 
 
+@pytest.mark.parametrize('sol_model', ['gpt-6.1-sol', 'gpt-6.2-sol'])
 @pytest.mark.parametrize('decision_status', ['abstained', 'selected'])
-def test_successful_native_sol_committee_is_observed_from_wire_and_ledger(evidence, decision_status):
+def test_successful_native_sol_committee_is_observed_from_wire_and_ledger(evidence, decision_status, sol_model):
     from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
     repo,state,wire,sha,_,_,attempt=evidence
     status={'mode':'model','status':decision_status,'degraded':False,'reason':'',
         'eligible_count':1,'input_count':1,'selected_count':1 if decision_status=='selected' else 0,
-        'model_request':request_receipt(model='gpt-6.1-sol',role='committee',effort='high',
+        'model_request':request_receipt(model=sol_model,role='committee',effort='high',
             max_tokens=8192,temperature=0.0,system='system',prompt='prompt'),
-        'model_provenance':{'configured_model':'gpt-6.1-sol','returned_model':'gpt-6.1-sol',
+        'model_provenance':{'configured_model':sol_model,'returned_model':sol_model,
             'reasoning_effort':'high','billing_mode':'chatgpt_plan','effective_output_limit':None,'response_id':'resp_sol'}}
     wire[COHORTS[0]]['committee_decision_status']=status
     with sqlite3.connect(state / GENERATION_DB_FILENAME) as db:
@@ -298,7 +299,7 @@ def test_successful_native_sol_committee_is_observed_from_wire_and_ledger(eviden
     _rewrite_screen(evidence,lambda payload:None)
     result=collect(evidence)
     assert result['qualifies'],result
-    assert result['native_models']==['gpt-6.1-sol']
+    assert result['native_models']==[sol_model]
 
 
 def test_collector_does_not_modify_retained_files(evidence):

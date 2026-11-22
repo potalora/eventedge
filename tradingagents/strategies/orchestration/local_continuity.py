@@ -13,7 +13,9 @@ from .trading_calendar import is_session, previous_session
 
 REQUIRED_CHECKS = ('accounting', 'staging', 'sources', 'screening', 'model_outcomes',
                    'committee', 'timeliness', 'report', 'replay', 'cleanup')
-EXPECTED_MODELS = frozenset(('gpt-6-luna', 'gpt-6.1-sol'))
+_LUNA_MODELS = frozenset(('gpt-6-luna',))
+_SOL_MODELS = frozenset(('gpt-6.1-sol', 'gpt-6.2-sol'))
+EXPECTED_MODELS = _LUNA_MODELS | _SOL_MODELS
 _SUCCESS = frozenset(('success', 'success_empty', 'complete'))
 _FAILURE = frozenset(('failed', 'partial', 'invalid'))
 
@@ -106,13 +108,19 @@ def summarize_continuity(records, *, through: date, required_sessions=5):
                                   'recovered_session': session.isoformat()})
                 del failed[provider]
     continuity = len(window) == required_sessions
+    observed_models = set(models)
+    models_covered = (
+        observed_models <= EXPECTED_MODELS
+        and bool(observed_models & _LUNA_MODELS)
+        and bool(observed_models & _SOL_MODELS)
+    )
     return {'required_consecutive_sessions': required_sessions, 'through': through.isoformat(),
         'consecutive_qualifying_sessions': len(window),
         'qualifying_sessions': [row['session'] for row in reversed(window)],
         'five_session_continuity_accepted': continuity,
         'native_models_observed': models,
         'automatic_recovery_observed': bool(recovered), 'recoveries': recovered,
-        'local_operational_acceptance': continuity and set(models) == EXPECTED_MODELS and bool(recovered),
+        'local_operational_acceptance': continuity and models_covered and bool(recovered),
         'fill_lifecycle_observed': any(row.get('fill_lifecycle_observed') is True for row in window),
         'carried_positions_observed': any(row.get('carried_positions_observed') is True for row in window),
         'deployed_runtime_reliability_verified': False}

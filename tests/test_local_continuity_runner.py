@@ -73,6 +73,10 @@ def test_state_copy_uses_sqlite_backup_including_wal(runner, tmp_path):
 
 @pytest.fixture
 def prepared(runner, tmp_path, monkeypatch):
+    return _prepare_with_sol_model(runner, tmp_path, monkeypatch, 'gpt-6.1-sol')
+
+
+def _prepare_with_sol_model(runner, tmp_path, monkeypatch, sol_model):
     repo = tmp_path / 'clone'; repo.mkdir()
     (repo / 'scripts').mkdir()
     shutil.copyfile(Path(runner.__file__), repo / 'scripts/run_local_continuity.py')
@@ -88,8 +92,8 @@ def prepared(runner, tmp_path, monkeypatch):
         'autoresearch': {'decision_clock_policy': 'prospective_next_open_v1',
         'filing_research_policy': 'disabled_v1', 'research_resilience_policy': 'dependency_isolation_v1',
         'llm_billing_mode': 'chatgpt_plan', 'autoresearch_model': 'gpt-6-luna', 'llm_effort': 'high',
-        'thesis_model': 'gpt-6.1-sol', 'thesis_effort': 'high',
-        'paper_trade': {'portfolio_committee_model': 'gpt-6.1-sol', 'portfolio_committee_effort': 'high'}}}))
+        'thesis_model': sol_model, 'thesis_effort': 'high',
+        'paper_trade': {'portfolio_committee_model': sol_model, 'portfolio_committee_effort': 'high'}}}))
     contract = runner.prepare(repo, profile, watchdog, dotenv)
     contract['prepared_at'] = '2026-10-12T17:00:00+00:00'
     runner.save(repo / 'data/local-continuity/contract.json', contract, replace=True)
@@ -150,3 +154,8 @@ def test_health_reports_missing_and_incomplete_runs_without_retry(prepared):
     runner.save(current / 'started.json', {'started_at': '2026-10-12T20:05:00+00:00'})
     assert runner.health(repo, now=datetime(2026, 10, 12, 21, 10, tzinfo=timezone.utc))['issues'] == ['session_incomplete_after_bounds']
     assert not (current / 'manager-result.json').exists()
+
+
+def test_prepare_accepts_gpt_6_2_sol_profile(runner, tmp_path, monkeypatch):
+    _, repo, contract = _prepare_with_sol_model(runner, tmp_path, monkeypatch, 'gpt-6.2-sol')
+    assert runner.generation(repo, contract)['status'] == 'active'
