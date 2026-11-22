@@ -524,14 +524,18 @@ def test_script_imports_checkout_from_unrelated_cwd(tmp_path):
     assert "--expected-commit" in result.stdout
 
 
-@pytest.mark.parametrize('reason', ['unsupported_state_event_proxy', 'invented_exception'])
-def test_readiness_distinguishes_explicit_retirement_from_missing_coverage(tmp_path, reason):
+@pytest.mark.parametrize('reason', ['explicit_retirement_reason', 'invented_exception'])
+def test_readiness_distinguishes_explicit_retirement_from_missing_coverage(tmp_path, monkeypatch, reason):
+    from tradingagents.strategies.modules import get_paper_trade_strategies
+
     repo, state, _ = _fixture(tmp_path)
+    target_strategy = get_paper_trade_strategies()[0]
+    monkeypatch.setattr(type(target_strategy), "retirement_reason", "explicit_retirement_reason", raising=False)
     with _db(state / 'metrics_v2.sqlite3') as connection:
         connection.execute(
             "UPDATE strategy_health SET payload_json = json_set(payload_json, "
             "'$.status', 'disabled_by_policy', '$.signal_count', 0, '$.evidence', json(?)) "
-            "WHERE json_extract(payload_json, '$.strategy') = 'state_economics'",
-            (json.dumps({'reason': reason}),),
+            "WHERE json_extract(payload_json, '$.strategy') = ?",
+            (json.dumps({'reason': reason}), target_strategy.name),
         )
-    assert _assess(repo)['ready'] is (reason == 'unsupported_state_event_proxy')
+    assert _assess(repo)['ready'] is (reason == 'explicit_retirement_reason')

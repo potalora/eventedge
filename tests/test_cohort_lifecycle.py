@@ -260,60 +260,6 @@ class TestLearningLoop:
 
 
 # ---------------------------------------------------------------------------
-# Test: Adaptive confidence diverges from fixed
-# ---------------------------------------------------------------------------
-
-
-class TestAdaptiveConfidence:
-    def test_confidence_from_journal(self, tmp_path):
-        """Adaptive engine derives confidence from governed v2 outcomes."""
-        from tradingagents.strategies.metrics.models import OutcomeRecord
-
-        state_dir = str(tmp_path / "adaptive")
-        config = {
-            "autoresearch": {"state_dir": state_dir, "total_capital": 5000},
-            "execution": {"mode": "paper"},
-        }
-        state = StateManager(state_dir)
-        outcomes = tuple(
-            OutcomeRecord(
-                outcome_id=f"outcome-{index}",
-                signal_id=f"signal-{index}",
-                event_key=f"event-{index}",
-                epoch_id="epoch-1",
-                strategy="fake_strat",
-                policy_id="policy-1",
-                ticker="AAPL",
-                direction="long",
-                holding_sessions=5,
-                entry_session=date(2026, 3, 2),
-                exit_session=date(2026, 3, 9),
-                entry_price=Decimal("100"),
-                exit_price=Decimal("105" if index < 12 else "95"),
-                raw_return=Decimal("0.05" if index < 12 else "-0.05"),
-                signed_return=Decimal("0.05" if index < 12 else "-0.05"),
-                status="valid",
-                invalid_reason="",
-            )
-            for index in range(15)
-        )
-        engine = MultiStrategyEngine(
-            config=config,
-            strategies=[FakeStrategy()],
-            state_manager=state,
-            use_llm=False,
-            outcome_reader=lambda strategy: (
-                outcomes if strategy == "fake_strat" else ()
-            ),
-        )
-
-        conf = engine._compute_strategy_confidence("fake_strat")
-        assert conf > 0.5  # 80% hit rate should give above-average confidence
-
-        assert engine._adaptive_confidence is False
-
-
-# ---------------------------------------------------------------------------
 # Test: Full 30-day multi-day simulation
 # ---------------------------------------------------------------------------
 
@@ -376,7 +322,7 @@ class TestMultiDaySimulation:
             (("AAPL", "MSFT"), session),
         ]
         assert all(
-            cohort["engine"]._adaptive_confidence is False
+            not hasattr(cohort["engine"], "_adaptive_confidence")
             and cohort["config"].learning_policy.mode == "disabled"
             for cohort in orchestrator.cohorts
         )

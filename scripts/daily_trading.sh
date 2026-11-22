@@ -89,12 +89,6 @@ trap write_operational_report EXIT
 # (or move to the always-on VPS) for reliable execution.
 RUN_CMD=("$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" run-daily --date "$TODAY")
 
-# The screen remains an integration warning. It cannot authorize P0 trading.
-echo "=== Screen preflight: $TODAY ===" >> "$LOG_FILE"
-if ! "$VENV_PYTHON" "$REPO_ROOT/scripts/run_generations.py" preflight --date "$TODAY" --preflight-mode screen >> "$LOG_FILE" 2>&1; then
-    echo "SCREEN PREFLIGHT FAILED for $TODAY (continuing to governed gate)" >> "$LOG_FILE"
-fi
-
 # The after-close governed probe is the hard P0 gate. Python owns exact XNYS
 # close readiness; shell time comparisons and fallback execution are forbidden.
 echo "=== Governed preflight: $TODAY ===" >> "$LOG_FILE"

@@ -126,41 +126,6 @@ def _report(repo):
     return build_operational_report(repo, GENERATION, SESSION, snapshot_guaranteed=True)
 
 
-@pytest.mark.parametrize('kind', ['missing', 'missing_credentials', 'corrupt', 'deeply_nested', 'wrong_identity'])
-def test_optional_clef_status_is_reported_without_changing_financial_validity(native_evidence, kind):
-    from tradingagents.strategies.orchestration.decision_shadow import evaluate_shadow
-    repo, state, wire = native_evidence
-    _attempt(repo, wire)
-    baseline = _report(repo)
-    path = state / 'decision_shadow' / f'{SESSION}.json'
-    if kind != 'missing':
-        evaluate_shadow(state_dir=state, generation=GENERATION, session=SESSION, epoch_id=EPOCH, generation_commit=COMMIT,
-            signals=[{'event_key':'docket-1','ticker':'NVDA','strategy':'litigation','direction':'short',
-                      'metadata':{'docket_id':1,'llm_analysis':{'evidence_claim':'NVDA faces a patent suit.'}}}],
-            data={'courtlistener':{'dockets':[{'docket_id':1,'case_name':'Patent holder v NVDA','nature_of_suit':'Patent'}]}},
-            config={'enabled':True,'mode':'shadow'}, environ={})
-        if kind == 'corrupt':
-            path.write_text('{')
-        elif kind == 'deeply_nested':
-            path.write_text('['*1200+'0'+']'*1200)
-        elif kind == 'wrong_identity':
-            document = json.loads(path.read_text())
-            document['generation'] = 'gen_other'
-            path.write_text(json.dumps(document))
-    report = _report(repo)
-    expected = 'unavailable' if kind in {'corrupt','deeply_nested','wrong_identity'} else kind
-    assert report['decision_shadow']['status'] == expected
-    if kind == 'missing_credentials':
-        assert report['decision_shadow']['event_counts'] == {'missing_credentials':1}
-        assert report['decision_shadow']['assessed_events'] == 0
-    assert {key:value for key,value in report.items() if key!='decision_shadow'} == {
-        key:value for key,value in baseline.items() if key!='decision_shadow'}
-    assert report['outcome'] == 'clean' and report['evidence_complete']
-    markdown = render_operational_report(report)
-    assert 'Clef evidence shadow' in markdown and expected in markdown
-    assert 'does not affect trading' in markdown
-
-
 def test_multiple_daily_attempts_preserve_preflight_incident_without_tainting_clean(native_evidence):
     repo, state, wire = native_evidence
     _attempt(repo,None,outcome='failed',ordinal=1,return_code=1)
@@ -396,7 +361,7 @@ def test_unresolved_required_acquisition_cannot_be_hidden_by_clean_wire(native_e
     repo,state,wire=native_evidence
     path=next((state/'source_inputs').glob('*.json'))
     envelope=SourceInputStore.decode(path.read_text())
-    envelope['payload']['edgar']['error']='provider acquisition failed'
+    envelope['payload']['usaspending']['error']='provider acquisition failed'
     envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
     _attempt(repo,wire)
@@ -411,9 +376,9 @@ def test_frozen_source_presence_and_explicit_coverage_cannot_be_hidden(native_ev
     path=next((state/'source_inputs').glob('*.json'))
     envelope=SourceInputStore.decode(path.read_text())
     if damage=='empty': envelope['payload']={}
-    elif damage=='missing': envelope['payload'].pop('edgar')
-    elif damage=='non_mapping': envelope['payload']['edgar']=[]
-    else: envelope['payload']['edgar']['_coverage']={'status':{'failed_coverage':'failed','partial_coverage':'partial','unknown_coverage':'wrong'}[damage]}
+    elif damage=='missing': envelope['payload'].pop('usaspending')
+    elif damage=='non_mapping': envelope['payload']['usaspending']=[]
+    else: envelope['payload']['usaspending']['_coverage']={'status':{'failed_coverage':'failed','partial_coverage':'partial','unknown_coverage':'wrong'}[damage]}
     envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
     _attempt(repo,wire)
@@ -427,16 +392,16 @@ def test_failed_source_requires_health_failure_in_every_affected_strategy_scope(
     repo,state,wire=native_evidence
     path=next((state/'source_inputs').glob('*.json'))
     envelope=SourceInputStore.decode(path.read_text())
-    envelope['payload']['edgar']['error']='provider acquisition failed'
+    envelope['payload']['usaspending']['error']='provider acquisition failed'
     envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
     with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
-        row=connection.execute("SELECT health_id,payload_json FROM strategy_health WHERE payload_json LIKE '%foundation-30d%' LIMIT 1").fetchone()
-        payload=json.loads(row[1]); payload['status']='data_failure'; payload['evidence']['provider_errors']={'edgar':'http_error'}
+        row=connection.execute("SELECT health_id,payload_json FROM strategy_health WHERE payload_json LIKE '%foundation-30d%' AND payload_json LIKE '%govt_contracts%' LIMIT 1").fetchone()
+        payload=json.loads(row[1]); payload['status']='data_failure'; payload['evidence']['provider_errors']={'usaspending':'http_error'}
         connection.execute('UPDATE strategy_health SET payload_json=? WHERE health_id=?',(json.dumps(payload),row[0]))
     affected=sorted(name for name in COHORTS if name.startswith('horizon_30d_'))
     failure={key:payload[key] for key in ('health_id','epoch_id','session','policy_id','strategy','status')}
-    failure.update(sources=['edgar'],affected_cohorts=affected)
+    failure.update(sources=['usaspending'],affected_cohorts=affected)
     for name in affected: wire[name].update(degraded=True,input_coverage_valid=False,source_health_failures=[failure])
     _attempt(repo,wire,outcome='degraded')
     report=_report(repo)
@@ -552,38 +517,6 @@ def test_cli_writes_deterministic_json_and_markdown_for_completed_session(native
     assert main(['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
                  '--output-dir',str(output),'--snapshot-guaranteed'])==0
     assert len(list(output.glob('*-operational-report.json')))==len(list(output.glob('*.md')))==1
-    assert len(list(output.glob('*-source-repair.json')))==1
-
-
-def test_cli_publishes_actionable_source_incident_without_rewriting_trading_evidence(native_evidence,tmp_path,capsys):
-    from scripts.generate_operational_report import main
-    repo,state,wire=native_evidence
-    source_path=next((state/'source_inputs').glob('*.json'))
-    envelope=SourceInputStore.decode(source_path.read_text())
-    envelope['payload']['edgar']={'error':'provider response invalid',
-        '_coverage':{'status':'failed','reason_code':'invalid_response'}}
-    envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
-    source_path.write_text(SourceInputStore.encode(envelope))
-    _attempt(repo,wire)
-    before_source=source_path.read_bytes()
-    before_manifest=(state.parent/'manifest.json').read_bytes()
-    output=tmp_path/'reports'
-    args=['--repo-root',str(repo),'--generation',GENERATION,'--date',SESSION,
-          '--output-dir',str(output),'--snapshot-guaranteed']
-    assert main(args)==2  # Existing contradictory clean evidence remains invalid.
-    summary=json.loads(capsys.readouterr().out)['reports'][0]
-    published=json.loads((output/f'{SESSION}-{GENERATION}-operational-report.json').read_text())
-    policy=published['source_incidents']
-    edgar=next(row for row in policy['open_incidents'] if row['provider']=='edgar')
-    assert edgar['status']=='repair_required'
-    assert summary['source_incidents']==policy
-    assert policy['alerts']
-    assert 'repair_required' in next(output.glob('*.md')).read_text()
-    assert main(args)==2
-    repeated=json.loads(capsys.readouterr().out)['reports'][0]
-    assert repeated['source_incidents']==policy
-    assert source_path.read_bytes()==before_source
-    assert (state.parent/'manifest.json').read_bytes()==before_manifest
 
 
 def test_source_policy_cannot_suppress_report_for_invalid_manifest(native_evidence,tmp_path,capsys):

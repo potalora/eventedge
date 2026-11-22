@@ -187,6 +187,17 @@ class TransportFixture:
                 # Native GHCN catalog fixed columns: ID 1-11, state 39-40.
                 return self.response("\n".join(f"{station:<11}{'':27}{state} OFFLINE STATION"
                                                 for station, state in stations.items()))
+            if url.endswith(".csv.gz"):
+                import gzip
+                year = int(url.rsplit("/", 1)[1].removesuffix(".csv.gz"))
+                days = pd.date_range(f"{year}-08-20", f"{year}-10-05", freq="D")
+                rows = [
+                    f"{station},{day.strftime('%Y%m%d')},{dtype},{val},,,S,"
+                    for station in stations
+                    for day in days
+                    for dtype, val in (("TMAX", "294"), ("TMIN", "128"), ("PRCP", "30"))
+                ]
+                return self.response(gzip.compress(("\n".join(rows) + "\n").encode("utf-8")))
             assert url.endswith("ghcnd-inventory.txt")
             # Native inventory: element 32-35, first year 37-40, last 42-45.
             return self.response("\n".join(f"{station:<11}{'':20}{dtype} 2020 2026"
@@ -343,13 +354,19 @@ def pipeline(monkeypatch, tmp_path):
         def now(cls, tz=None):
             return fixture.now.astimezone(tz) if tz else fixture.now.replace(tzinfo=None)
 
-    for name in ("cohort_orchestrator", "multi_strategy_engine", "session_executor", "governed_market_data", "daily_pipeline", "generation_manager", "outcome_evidence"):
+    for name in ("cohort_orchestrator", "data_acquisition", "multi_strategy_engine", "session_executor", "governed_market_data", "daily_pipeline", "generation_manager", "outcome_evidence"):
         module = importlib.import_module("tradingagents.strategies.orchestration." + name)
         monkeypatch.setattr(module, "datetime", FixedDatetime)
     # Fresh acquisitions run against the fixture's current New York date.
-    for source_name in ("cftc", "noaa", "usda", "drought_monitor"):
+    for source_name in ("cftc", "noaa_yearly", "usda", "drought_monitor"):
         module = importlib.import_module("tradingagents.strategies.data_sources." + source_name + "_source")
-        monkeypatch.setattr(module, "current_session_date", lambda:fixture.now.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat())
+        ny_date = lambda: fixture.now.astimezone(__import__('zoneinfo').ZoneInfo('America/New_York')).date().isoformat()
+        if hasattr(module, "current_session_date"):
+            monkeypatch.setattr(module, "current_session_date", ny_date)
+        if hasattr(module, "current_vintage_date"):
+            monkeypatch.setattr(module, "current_vintage_date", ny_date)
+        if hasattr(module, "_yearly_http_get"):
+            monkeypatch.setattr(module, "_yearly_http_get", lambda url, **kwargs: fixture.http("GET", url, **kwargs))
         if hasattr(module, "acquisition_time"):
             monkeypatch.setattr(module, "acquisition_time", lambda:fixture.now.isoformat())
     monkeypatch.setattr('tradingagents.strategies.data_sources.openbb_source.acquisition_time', lambda:fixture.now.isoformat())
@@ -359,6 +376,7 @@ def pipeline(monkeypatch, tmp_path):
     monkeypatch.delenv("EVENTEDGE_RUNTIME_LOCK_FD", raising=False)
     monkeypatch.delenv("EVENTEDGE_RUNTIME_LOCK_MODE", raising=False)
     config = deepcopy(DEFAULT_CONFIG)
+    config["autoresearch"]["llm_billing_mode"] = "api"
     config["autoresearch"]["state_dir"] = str(tmp_path / "data/generations" / GENERATION)
     config["autoresearch"]["finnhub_reliability"]["rate_delay_s"] = 0
     for key in ("finnhub_api_key", "fred_api_key", "regulations_api_key", "courtlistener_token", "usda_nass_api_key", "fmp_api_key"):

@@ -958,7 +958,7 @@ def test_daily_worker_wire_constants_are_exact_and_shared():
 
 
 def test_reset_refuses_before_constructing_ledger_orchestrator(monkeypatch, capsys):
-    """A reset cannot delete P0 ledgers or retain a mismatched metric store."""
+    """The removed --reset flag is rejected by argparse before constructing anything."""
 
     def fail_if_constructed(*args, **kwargs):
         raise AssertionError("ledger-backed orchestrator must not be constructed")
@@ -975,10 +975,7 @@ def test_reset_refuses_before_constructing_ledger_orchestrator(monkeypatch, caps
         run_cohorts.main()
 
     assert error.value.code == 2
-    assert (
-        "reset is disabled for ledger-backed generation state"
-        in capsys.readouterr().err
-    )
+    assert "unrecognized arguments: --reset" in capsys.readouterr().err
 
 
 def test_orchestrator_reset_refuses_before_deleting_ledger_state():

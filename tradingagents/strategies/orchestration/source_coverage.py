@@ -11,7 +11,7 @@ from typing import Any
 
 _HEALTHY = frozenset({'signals', 'legitimate_no_event'})
 _DISABLED = 'disabled_by_policy'
-_FAILURES = frozenset({'data_failure', 'strategy_defect', 'missing_health'})
+_FAILURES = frozenset({'data_failure', 'strategy_defect', 'missing_health', 'unavailable'})
 _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}')
 _KEYS = frozenset({'health_id', 'epoch_id', 'session', 'policy_id', 'strategy', 'status', 'sources', 'affected_cohorts'})
 

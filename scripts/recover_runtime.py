@@ -19,6 +19,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tradingagents.strategies.orchestration._io import open_sqlite
 from tradingagents.strategies.orchestration.runtime_recovery import (
     VERSION, MAX_ATTEMPTS, MAX_INCIDENTS, RECOVERY_TIMEOUT_SECONDS,
     DAILY_TIMEOUT_SECONDS, atomic_json, bounded_process, finish_attempt,
@@ -32,6 +33,7 @@ from tradingagents.strategies.orchestration.runtime_lock import (
 from tradingagents.strategies.orchestration.trading_calendar import (
     exchange_date, is_session, session_close,
 )
+from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
 
 
 def generation_for_session(row, session):
@@ -69,16 +71,18 @@ def _discover_sessions(row, now):
     sessions = set()
     state = Path(row['state_dir']).resolve()
     oldest = (exchange_date(now) - timedelta(days=10)).isoformat()
-    for path in sorted(state.glob('horizon_*/portfolio.db'))[:16]:
-        with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as connection:
+    unified = state / GENERATION_DB_FILENAME
+    db_paths = [unified] if unified.is_file() else sorted(state.glob('horizon_*/portfolio.db'))[:16]
+    for path in db_paths:
+        with open_sqlite(path, readonly=True) as connection:
             values = connection.execute('SELECT DISTINCT c.session FROM session_execution_contexts c '
                 'LEFT JOIN staging_runs s ON s.session=c.session AND s.cohort_id=c.cohort_id '
                 'WHERE c.session>=? AND s.session IS NULL LIMIT 10', (oldest,)).fetchall()
-            sessions.update(day for (day,) in values)
+            sessions.update(row_val[0] for row_val in values)
     return sorted(sessions)
 
 
-def launch(repo, row, session, action, *, heartbeat=None, expected_roster=None):
+def launch(repo, row, session, action, *, heartbeat=None, expected_roster=None, inherited_lock=None):
     env = os.environ.copy()
     binding = validate_generation_retirement(row, repo=repo)
     if binding is not None:
@@ -107,10 +111,15 @@ def launch(repo, row, session, action, *, heartbeat=None, expected_roster=None):
     from tradingagents.strategies.orchestration.generation_config import CONFIG_FILE_ENV, CONFIG_SHA_ENV
     env[CONFIG_FILE_ENV], env[CONFIG_SHA_ENV] = row['config_file'], row['config_sha256']
     env['PYTHONPATH'] = str(Path(row['worktree_path']).resolve())
+    pass_fds = ()
+    if inherited_lock is not None:
+        env['EVENTEDGE_RUNTIME_LOCK_FD'] = str(inherited_lock.fd)
+        env['EVENTEDGE_RUNTIME_LOCK_MODE'] = 'exclusive'
+        pass_fds = (inherited_lock.fd,)
     python = os.environ.get('EVENTEDGE_PYTHON') or str(repo/'.venv/bin/python')
     return bounded_process([python, 'scripts/recover_runtime.py', '--worker', '--date', session,
                             '--repo-root', str(repo)], cwd=Path(row['worktree_path']), env=env,
-                            timeout=RECOVERY_TIMEOUT_SECONDS, heartbeat=heartbeat)
+                            timeout=RECOVERY_TIMEOUT_SECONDS, heartbeat=heartbeat, pass_fds=pass_fds)
 
 
 def _daily_process(repo, lock, *, heartbeat=None, prospective_args=()):
@@ -303,7 +312,7 @@ def _terminal_report(report):
     if 'completion' in report:
         completion = report['completion']
         if (not isinstance(completion, dict)
-                or completion.get('version') != 'supported_sixteen_books_v1'):
+                or completion.get('version') not in {'gen003_clean_v1', 'supported_sixteen_books_v1'}):
             return _result('requires_user', 'checkpoint_invalid')
         if (completion.get('workflow_complete') is True and report.get('evidence_complete') is True
                 and report.get('accounting_valid') is True and report.get('staging_valid') is True):
@@ -342,6 +351,24 @@ def _terminal_report(report):
     return None
 
 
+def _has_unrecorded_missed_session(rows, journal, today):
+    recorded_by_gen = {
+        (record['identity']['generation_id'], record['identity']['session'])
+        for record in journal['incidents'].values()
+        if isinstance(record, dict) and isinstance(record.get('identity'), dict)
+    }
+    for row in rows:
+        created = row.get('created_at')
+        if not created:
+            continue
+        first = max(date.fromisoformat(created[:10]), today - timedelta(days=10))
+        for offset in range((today - first).days):
+            day = first + timedelta(days=offset)
+            if is_session(day) and (row['gen_id'], day.isoformat()) not in recorded_by_gen:
+                return True
+    return False
+
+
 def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discover_sessions, clock=None):
     """One bounded scheduler pass; fake clocks/transports support fault acceptance."""
     repo = Path(repo).resolve()
@@ -358,11 +385,20 @@ def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discove
             rows = manifest_rows(repo)
             by_id = {row['gen_id']: row for row in rows}
             today = exchange_date(now)
-            for row in rows:
-                identity_for(repo, row, today.isoformat())
             # 18:00 New York is the retained daily schedule (DST aware).
             from zoneinfo import ZoneInfo
             due = is_session(today) and now >= session_close(today) and now.astimezone(ZoneInfo('America/New_York')).hour >= 18
+            has_pending = any(
+                record.get('disposition') == 'retrying' or record.get('running')
+                for record in journal['incidents'].values()
+            )
+            if not has_pending and not due and not _has_unrecorded_missed_session(rows, journal, today):
+                # Short-circuit idle ticks: 0 git forks, 0 SQLite opens, 0 fsync writes.
+                projection = status_projection(journal, now, active_ids=by_id)
+                projection['controller_reason_code'] = None
+                return projection
+            for row in rows:
+                identity_for(repo, row, today.isoformat())
             def heartbeat():
                 fresh = clock()
                 atomic_json(status_path, status_projection(journal, fresh, active_ids=by_id))
@@ -434,19 +470,25 @@ def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discove
                     continue
                 if record['next_attempt_at'] and datetime.fromisoformat(record['next_attempt_at']) > now:
                     continue
-                report = reporter(repo, row, identity['session'])
-                terminal = _terminal_report(report)
+                # Pre-check existing evidence without writing a duplicate report.
+                pre_report = _report(repo, row['gen_id'], identity['session']) if reporter is _report_only else reporter(repo, row, identity['session'])
+                terminal = _terminal_report(pre_report)
                 if terminal:
+                    if reporter is _report_only:
+                        from tradingagents.strategies.orchestration.operational_report import write_operational_report
+                        write_operational_report(pre_report, repo/'docs/reports')
                     finish_attempt(record, terminal, now)
                     continue
-                # Busy ordinary work is deferred without consuming a recovery
-                # attempt. The worker independently reacquires this same lock.
-                with runtime_lock(canonical_runtime_lock_path(repo), exclusive=True):
-                    pass
-                record.update(attempt_count=record['attempt_count']+1, running=True, updated_at=now.isoformat())
-                atomic_json(journal_path, journal)
-                atomic_json(status_path, status_projection(journal, now, active_ids=by_id))
-                code, output = launcher(repo, row, identity['session'], 'recovery', heartbeat=heartbeat)
+                # Hold the canonical runtime lock continuously across recovery
+                # worker spawn to eliminate the lock TOCTOU gap.
+                with runtime_lock(canonical_runtime_lock_path(repo), exclusive=True) as recovery_lock:
+                    record.update(attempt_count=record['attempt_count']+1, running=True, updated_at=now.isoformat())
+                    atomic_json(journal_path, journal)
+                    atomic_json(status_path, status_projection(journal, now, active_ids=by_id))
+                    launch_kwargs = {'heartbeat': heartbeat}
+                    if launcher is launch:
+                        launch_kwargs['inherited_lock'] = recovery_lock
+                    code, output = launcher(repo, row, identity['session'], 'recovery', **launch_kwargs)
                 result = _worker_result(code, output)
                 post_report = reporter(repo, row, identity['session'])
                 if result['disposition'] == 'recovered':
@@ -483,10 +525,11 @@ def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discove
                     if identity_for(repo, row, today.isoformat()) != record['identity']:
                         finish_attempt(record, _result('requires_user', 'identity_mismatch'), clock())
                     else:
-                        report = reporter(repo, row, today.isoformat())
+                        # daily_trading.sh already wrote the operational report on exit;
+                        # read the report once instead of writing it a second time.
+                        report = _report(repo, row['gen_id'], today.isoformat()) if reporter is _report_only else reporter(repo, row, today.isoformat())
                         finish_attempt(record, _terminal_report(report) or
                             _result('retrying', 'worker_timeout' if code == 124 else 'daily_failed'), clock())
-                atomic_json(journal_path, journal)
             atomic_json(journal_path, journal)
             projection = status_projection(journal, clock(), active_ids=by_id)
             projection['controller_reason_code'] = None
@@ -503,7 +546,14 @@ def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discove
 def worker(repo, session):
     from scripts.run_cohorts import _build_parser, _build_config, _build_orchestrator
     from tradingagents.strategies.orchestration.runtime_recovery import RecoveryUnavailable
-    with runtime_lock(canonical_runtime_lock_path(repo), exclusive=True):
+    inherited_fd = None
+    raw_fd = os.environ.get('EVENTEDGE_RUNTIME_LOCK_FD')
+    if raw_fd is not None and os.environ.get('EVENTEDGE_RUNTIME_LOCK_MODE') == 'exclusive':
+        inherited_fd = int(raw_fd)
+    lock_kwargs = {'exclusive': True}
+    if inherited_fd is not None:
+        lock_kwargs.update(inherited_fd=inherited_fd, inherited_exclusive=True)
+    with runtime_lock(canonical_runtime_lock_path(repo), **lock_kwargs):
         matches = [row for row in manifest_rows(repo) if row['gen_id'] == os.environ.get('EVENTEDGE_GENERATION_ID')]
         if len(matches) != 1:
             return _result('requires_user', 'identity_mismatch')

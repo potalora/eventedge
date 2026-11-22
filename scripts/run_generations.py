@@ -9,7 +9,6 @@ Usage:
     python scripts/run_generations.py start "Initial 7-strategy baseline"
     python scripts/run_generations.py run-daily [--date 2026-04-01]
     python scripts/run_generations.py preflight [--date 2026-04-01]
-    python scripts/run_generations.py run-learning  # refused: production learning is disabled
     python scripts/run_generations.py compare [--gens gen_001,gen_002]
     python scripts/run_generations.py list
     python scripts/run_generations.py pause gen_001
@@ -45,10 +44,6 @@ _PROMOTION_HEADLINE_BOOKS = tuple(
 )
 
 
-class PromotionAdvisoryUnavailable(RuntimeError):
-    """Authoritative inputs do not support a fail-closed promotion decision."""
-
-
 def _exit_runtime_lock_error(error: Exception) -> None:
     from tradingagents.strategies.orchestration.runtime_lock import RuntimeLockBusy
 
@@ -64,202 +59,6 @@ def _exit_runtime_lock_error(error: Exception) -> None:
         file=sys.stderr,
     )
     raise SystemExit(1)
-
-
-def _read_generation_manifest(repo: Path) -> dict[str, Mapping[str, object]]:
-    """Read the manifest directly; unlike GenerationManager this creates nothing."""
-    manifest_path = repo / "data" / "generations" / "manifest.json"
-    if not manifest_path.is_file():
-        raise PromotionAdvisoryUnavailable(
-            f"missing generation manifest: {manifest_path}"
-        )
-    try:
-        payload = json.loads(manifest_path.read_text())
-        records = payload["generations"]
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        raise PromotionAdvisoryUnavailable(
-            "generation manifest is unreadable"
-        ) from error
-    if not isinstance(records, list):
-        raise PromotionAdvisoryUnavailable(
-            "generation manifest has invalid generations"
-        )
-    result: dict[str, Mapping[str, object]] = {}
-    for record in records:
-        if not isinstance(record, dict):
-            raise PromotionAdvisoryUnavailable("generation manifest has invalid record")
-        generation_id = record.get("gen_id")
-        state_dir = record.get("state_dir")
-        if (
-            not isinstance(generation_id, str)
-            or not generation_id
-            or not isinstance(state_dir, str)
-        ):
-            raise PromotionAdvisoryUnavailable(
-                "generation manifest record is incomplete"
-            )
-        if generation_id in result:
-            raise PromotionAdvisoryUnavailable("generation manifest has duplicate IDs")
-        result[generation_id] = record
-    return result
-
-
-def _promotion_service(generation_id: str, record: Mapping[str, object]):
-    """Open only the four existing headline ledgers and their v2 store read-only."""
-    from tradingagents.strategies.metrics.service import MetricsService
-    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
-
-    state_dir_value = record["state_dir"]
-    if not isinstance(state_dir_value, str):  # defensive for fixture injection
-        raise PromotionAdvisoryUnavailable(
-            f"invalid state directory for {generation_id}"
-        )
-    state_dir = Path(state_dir_value)
-    metrics_path = state_dir / "metrics_v2.sqlite3"
-    if not metrics_path.is_file():
-        raise PromotionAdvisoryUnavailable(
-            f"missing v2 metric store for {generation_id}: {metrics_path}"
-        )
-    ledgers = {}
-    try:
-        for cohort_id in _PROMOTION_HEADLINE_BOOKS:
-            ledger_path = state_dir / cohort_id / "portfolio.db"
-            if not ledger_path.is_file():
-                raise PromotionAdvisoryUnavailable(
-                    f"missing headline ledger for {generation_id}: {cohort_id}"
-                )
-            ledger = PortfolioLedger.open_existing(ledger_path)
-            if ledger.cohort_id != cohort_id:
-                ledger.close()
-                raise PromotionAdvisoryUnavailable(
-                    f"headline ledger identity mismatch for {generation_id}: {cohort_id}"
-                )
-            ledgers[cohort_id] = ledger
-        return MetricsService(state_dir, ledgers, read_only=True), tuple(
-            ledgers.values()
-        )
-    except BaseException:
-        for ledger in ledgers.values():
-            ledger.close()
-        raise
-
-
-def _current_promotion_epoch(service, generation_id: str):
-    """Require the exact current schema-v2 epoch; never substitute an older one."""
-    epoch = service.store.current_epoch()
-    if epoch is None:
-        raise PromotionAdvisoryUnavailable(
-            f"no current metric epoch for {generation_id}"
-        )
-    try:
-        service._require_available_epoch(epoch, epoch.epoch_id)
-    except ValueError as error:
-        raise PromotionAdvisoryUnavailable(
-            f"current metric epoch is unavailable for {generation_id}: {error}"
-        ) from error
-    if epoch.generation_id != generation_id:
-        raise PromotionAdvisoryUnavailable(
-            f"current metric epoch belongs to {epoch.generation_id!r}, not {generation_id!r}"
-        )
-    return epoch
-
-
-def _build_promotion_evidence(
-    candidate_id: str,
-    baseline_id: str,
-    repo: Path,
-    *,
-    service_opener: Callable[
-        [str, Mapping[str, object]], tuple[object, tuple[object, ...]]
-    ] = _promotion_service,
-):
-    """Resolve only authoritative v2 inputs, then refuse absent risk sensitivities.
-
-    The ledger currently stores normal fill history, but not a versioned delayed-fill
-    or adverse-slippage revaluation. Inventing either would turn this advisory into a
-    backtest with undocumented assumptions, so the CLI deliberately stops short.
-    """
-    records = _read_generation_manifest(repo)
-    try:
-        candidate_record = records[candidate_id]
-        baseline_record = records[baseline_id]
-    except KeyError as error:
-        raise PromotionAdvisoryUnavailable(
-            f"unknown generation: {error.args[0]}"
-        ) from error
-    candidate, candidate_ledgers = service_opener(candidate_id, candidate_record)
-    baseline_ledgers: tuple[object, ...] = ()
-    try:
-        baseline, baseline_ledgers = service_opener(baseline_id, baseline_record)
-        candidate_epoch = _current_promotion_epoch(candidate, candidate_id)
-        baseline_epoch = _current_promotion_epoch(baseline, baseline_id)
-        candidate_reports = candidate.generation_report(candidate_epoch.epoch_id)
-        baseline_reports = baseline.generation_report(baseline_epoch.epoch_id)
-        for generation_id, report in (
-            (candidate_id, candidate_reports),
-            (baseline_id, baseline_reports),
-        ):
-            books = report.get("headline_books")
-            if not isinstance(books, dict) or set(books) != set(
-                _PROMOTION_HEADLINE_BOOKS
-            ):
-                raise PromotionAdvisoryUnavailable(
-                    f"exact four headline books unavailable for {generation_id}"
-                )
-            if report.get("missing_headline_books"):
-                raise PromotionAdvisoryUnavailable(
-                    f"missing headline books for {generation_id}"
-                )
-
-        comparisons = tuple(
-            candidate.compare(
-                cohort_id,
-                candidate_epoch.epoch_id,
-                baseline,
-                cohort_id,
-                baseline_epoch.epoch_id,
-            )
-            for cohort_id in _PROMOTION_HEADLINE_BOOKS
-        )
-        common_windows = {comparison.common_sessions for comparison in comparisons}
-        if len(common_windows) != 1:
-            raise PromotionAdvisoryUnavailable(
-                "headline books lack one common-session window"
-            )
-        common_sessions = next(iter(common_windows))
-        if not common_sessions:
-            raise PromotionAdvisoryUnavailable(
-                "candidate and baseline have no common sessions"
-            )
-
-        # We deliberately prove the structural inputs are available, but cannot
-        # manufacture the two approved execution sensitivities from them.
-        raise PromotionAdvisoryUnavailable(
-            "promotion sensitivity evidence unavailable: delayed-fill and "
-            "20bps-slippage results are not persisted authoritatively"
-        )
-    finally:
-        for ledger in (*candidate_ledgers, *baseline_ledgers):
-            ledger.close()
-
-
-def _promotion_payload(
-    candidate_id: str,
-    baseline_id: str,
-    *,
-    repo: Path,
-    evidence_builder: Callable[[str, str, Path], object] = _build_promotion_evidence,
-) -> dict[str, object]:
-    """Fixture-injectable, side-effect-free JSON payload builder for the CLI."""
-    from tradingagents.strategies.metrics.promotion import PromotionEvaluator
-
-    evidence = evidence_builder(candidate_id, baseline_id, repo)
-    decision = PromotionEvaluator().evaluate(evidence)
-    return {
-        "candidate": candidate_id,
-        "baseline": baseline_id,
-        "decision": asdict(decision),
-    }
 
 
 def _repo_root() -> str:
@@ -392,9 +191,6 @@ def _main():
         help="Preflight checks to run (default: all)",
     )
 
-    # run-learning
-    sub.add_parser("run-learning", help="Refuse retired production learning")
-
     # compare
     p_compare = sub.add_parser("compare", help="Compare generations")
     p_compare.add_argument(
@@ -445,37 +241,10 @@ def _main():
         "--json", default=None, help="Optional path to dump full result as JSON"
     )
 
-    # promotion-status intentionally runs before any environment loading,
-    # resource-limit setup, or GenerationManager construction.
-    p_promotion = sub.add_parser(
-        "promotion-status", help="Evaluate advisory promotion evidence"
-    )
-    p_promotion.add_argument("--candidate", required=True)
-    p_promotion.add_argument("--baseline", required=True)
-
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
-        return
-
-    if args.command == "run-learning":
-        print(
-            "Production learning is disabled; no generation state was changed.",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
-    if args.command == "promotion-status":
-        try:
-            payload = _promotion_payload(
-                args.candidate,
-                args.baseline,
-                repo=Path(_repo_root()),
-            )
-        except PromotionAdvisoryUnavailable as error:
-            parser.error(f"promotion advisory unavailable: {error}")
-        print(json.dumps(payload, indent=2, default=str))
         return
 
     # Load env

@@ -2661,16 +2661,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
         try:
             return state.owner._fetch_openbb_enrichment(all_signals)
         except SourceFetchError as error:
-            if not resilience:
-                raise
-            # Only typed provider failures cross this boundary. Codec, identity,
-            # accounting and unexpected internal exceptions remain hard failures.
-            from .enrichment_capabilities import declaration
-            from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
-            return {**declaration(state.owner._base_config.get('autoresearch', {}), {
-                ETF_TO_FUTURES_UNDERLYING[signal['ticker']] for signal in all_signals
-                if ETF_TO_FUTURES_UNDERLYING.get(signal.get('ticker'))}),
-                'errors': {'openbb': {'reason_code': error.reason_code}}}
+            # Tier-2 optional enrichment failure never aborts staging.
+            return {'errors': {'openbb': {'reason_code': error.reason_code, 'status': 'unavailable'}}}
     try:
         with provider_budget("openbb", state.model_deadline):
             enrichment, decision_context = prepare_decision_inputs(
@@ -2686,10 +2678,39 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     reference_bars = dict(state.governed_reference_bars)
     reference_bars.update(state.candidate_reference_bars)
     state.shared_data["_execution_reference_bars"] = reference_bars
+
+    # 1 committee synthesis call per horizon (4/day, not 16/day).
+    # Each size tier (5k/10k/50k/100k) then applies deterministic PortfolioPolicy sizing.
+    from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+    horizon_committee_cache: dict[str, tuple[list[Any], dict[str, Any]]] = {}
+    if hasattr(PortfolioCommittee, "synthesize_horizon"):
+        seen_horizons = sorted({c["config"].horizon for c in state.valid})
+        for h in seen_horizons:
+            h_signals, h_regime, _ = state.horizon_signals[h]
+            h_committee = PortfolioCommittee(state.owner._base_config)
+            with model_budget(state.model_deadline):
+                h_recs = h_committee.synthesize_horizon(
+                    horizon=h,
+                    signals=h_signals,
+                    regime=h_regime,
+                    enrichment=enrichment,
+                    model_coverage=state.model_coverage,
+                )
+            h_status = dict(
+                getattr(h_committee, "last_decision_status", None)
+                or {
+                    "status": "selected" if h_recs else "no_candidates",
+                    "model_coverage": dict(state.model_coverage or {"complete": True}),
+                    "shared_horizon_synthesis": True,
+                }
+            )
+            horizon_committee_cache[h] = (list(h_recs), h_status)
+
     for cohort in state.valid:
         cfg, engine = cohort["config"], cohort["engine"]
         signals, regime, _ = state.horizon_signals[cfg.horizon]
         summaries = state.governed_summaries_by_cohort.get(cfg.name, [])
+        h_cached = horizon_committee_cache.get(cfg.horizon)
         try:
             with model_budget(state.model_deadline):
                 staged = engine.screen_and_stage(
@@ -2702,6 +2723,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                     marked_account=cohort["marked_account"],
                     annualized_volatility_evidence=state.shared_volatility_evidence,
                     model_coverage=state.model_coverage,
+                    horizon_recommendations=h_cached[0] if h_cached is not None else None,
+                    horizon_decision_status=h_cached[1] if h_cached is not None else None,
                 )
             fills = cohort["ledger"].read_fills(state.session, state.session)
             staged.update(
@@ -2738,17 +2761,7 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 governed_bar_recoveries=summaries,
                 governed_failure_map={},
             )
-    finalized = state.finalize()
-    # Shadow evidence can run only after the whole session is durably staged.
-    # Its result is never inserted into the financial worker-result contract.
-    from .runtime_recovery import local_recovery
-    if not local_recovery() and all(isinstance(result, dict) and not result.get("error") for result in finalized.values()):
-        try:
-            from tradingagents.strategies.orchestration.decision_shadow import run_decision_shadow
-            run_decision_shadow(state)
-        except Exception:
-            logger.warning("Clef decision shadow unavailable")
-    return finalized
+    return state.finalize()
 
 
 @dataclass(frozen=True)
