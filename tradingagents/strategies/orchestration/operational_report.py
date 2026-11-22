@@ -376,9 +376,14 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
                 if not equity.is_finite():
                     diagnose('snapshot_equity_invalid', name)
                     valid = False
-            stages = connection.execute('SELECT cohort_id,epoch_id,completed_at FROM staging_runs WHERE session=?', (session,)).fetchall()
-            result['staging_complete'] = len(stages)==1 and stages[0]['cohort_id']==name and stages[0]['epoch_id']==epoch and bool(stages[0]['completed_at'])
-            policy_rows=connection.execute("SELECT * FROM policy_session_contexts WHERE session=? AND binding_kind='staging'",(session,)).fetchall()
+            if unified:
+                stages = connection.execute('SELECT cohort_id,epoch_id,completed_at FROM staging_runs WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                result['staging_complete'] = len(stages)==1 and stages[0]['cohort_id']==name and stages[0]['epoch_id']==epoch and bool(stages[0]['completed_at'])
+                policy_rows=connection.execute("SELECT * FROM policy_audit_records WHERE cohort_id=? AND session=? AND record_type='policy_session_context' AND record_id=?", (name, session, f'{session}:staging')).fetchall()
+            else:
+                stages = connection.execute('SELECT cohort_id,epoch_id,completed_at FROM staging_runs WHERE session=?', (session,)).fetchall()
+                result['staging_complete'] = len(stages)==1 and stages[0]['cohort_id']==name and stages[0]['epoch_id']==epoch and bool(stages[0]['completed_at'])
+                policy_rows=connection.execute("SELECT * FROM policy_session_contexts WHERE session=? AND binding_kind='staging'",(session,)).fetchall()
             if not policy_rows and result['staging_complete']:
                 diagnose('staging_volatility_context_missing',name)
             elif policy_rows:
@@ -397,9 +402,14 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
                         result['document_review_clock'] = clock
                 except (LedgerConflictError,ValueError,TypeError,KeyError,AttributeError):
                     diagnose('staging_volatility_context_invalid',name)
-            fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
-                i.side AS intent_side,i.eligible_session,i.price_rule FROM fills f LEFT JOIN order_intents i ON i.intent_id=f.intent_id
-                WHERE f.session=? ORDER BY f.fill_id''', (session,)).fetchall()
+            if unified:
+                fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
+                    i.side AS intent_side,i.eligible_session,i.price_rule FROM fills f LEFT JOIN order_intents i ON i.intent_id=f.intent_id
+                    WHERE f.cohort_id=? AND f.session=? ORDER BY f.fill_id''', (name, session)).fetchall()
+            else:
+                fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
+                    i.side AS intent_side,i.eligible_session,i.price_rule FROM fills f LEFT JOIN order_intents i ON i.intent_id=f.intent_id
+                    WHERE f.session=? ORDER BY f.fill_id''', (session,)).fetchall()
             def eligible(row):
                 eligible_session=date.fromisoformat(row['eligible_session'])
                 if eligible_session.isoformat()!=row['eligible_session']:
@@ -501,7 +511,10 @@ def _accepted_envelope(path: Path, generation: str, session: str, commit: str, *
     if raw_doc['digest'] != hashlib.sha256(payload_json.encode('utf-8')).hexdigest():
         raise ValueError('source identity/content conflict')
     acquired_raw = raw_doc['acquired_at']
-    acquired = (datetime.fromisoformat(acquired_raw) if isinstance(acquired_raw, str) else acquired_raw)
+    if isinstance(acquired_raw, dict):
+        acquired = _from_plain(acquired_raw, depth=0)
+    else:
+        acquired = (datetime.fromisoformat(acquired_raw) if isinstance(acquired_raw, str) else acquired_raw)
     if not isinstance(acquired, datetime) or acquired.tzinfo is None or acquired > datetime.now(timezone.utc):
         raise ValueError('source identity/content conflict')
     table_dir = path.parent / (path.stem + '.tables')
@@ -747,30 +760,6 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         diagnose('accepted_sources_invalid')
     return result
-
-
-def _decision_shadow(state: Path, generation: str, session: str, epoch: str | None, commit: str) -> dict:
-    """Summarize optional semantic observations independently of run validity."""
-    unavailable = {'status':'unavailable','mode':'shadow','affects_trading':False,
-                   'model':'@cf/cloudflare/clef','event_counts':{},'assessed_events':0,
-                   'choices':{},'skipped_events':0,'selection_truncated':False}
-    try:
-        from collections import Counter
-        from tradingagents.strategies.orchestration.decision_shadow import read_shadow_summary
-        document = read_shadow_summary(state/'decision_shadow'/f'{session}.json',
-            generation=generation, session=session, epoch_id=epoch, generation_commit=commit)
-        events = document.get('events', [])
-        return {'status':document['status'], 'mode':'shadow', 'affects_trading':False,
-                'model':document.get('model','@cf/cloudflare/clef'),
-                'event_counts':dict(sorted(Counter(row['status'] for row in events).items())),
-                'assessed_events':sum(row['status']=='ok' for row in events),
-                'choices':dict(sorted(Counter(row['answer']['choice'] for row in events if row['status']=='ok').items())),
-                'skipped_events':document.get('skipped_events',0),
-                'selection_truncated':document.get('selection_truncated',False)}
-    except Exception:
-        # Optional classifier corruption or failure must not suppress the
-        # authoritative financial report, including parser recursion failures.
-        return unavailable
 
 
 def report_runtime_guard(repo, *, snapshot_guaranteed=False):
@@ -1021,13 +1010,17 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
 def _completion_facts(state, profile, report, health, source_envelope, diagnose, *, enrichment_observation=None):
     """Read immutable screening and native committee rows without store writes."""
     from .research_screening import _decode, _digest, VERSION, screening_codec_limits
+    from .source_inputs import source_codec_limits
     facts = {'report': report, 'health': health, 'source_envelope': source_envelope or {}, 'committees': {}}
     sample = {}
     try:
         identity = source_envelope['identity']
+        source_digest = hashlib.sha256(
+            SourceInputStore.encode(source_envelope['payload'], **source_codec_limits(profile.config)).encode()
+        ).hexdigest()
         binding = {'policy': 'dependency_isolation_v1', 'source_identity': identity,
-            'epoch_id': report['epoch_id'], 'source_digest': source_envelope['digest'],
-            'horizon_policies': profile.horizon_policies, 'strategies': list(profile.strategies)}
+            'epoch_id': report['epoch_id'], 'source_digest': source_digest,
+            'horizon_policies': profile.horizon_policies, 'strategies': sorted(profile.strategies)}
         store = SourceInputStore(state / 'source_cache', accepted_dir=state / 'source_inputs/screening',
             **screening_codec_limits())
         checkpoint_identity = {**identity, 'purpose': VERSION, 'epoch_id': report['epoch_id'],
@@ -1120,7 +1113,12 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose,
                 from .research_resilience import validate_book_source_scope
                 regime = sample[name.split('_')[1]][1]
                 validate_book_source_scope(status, regime, codec_limits=store.codec_limits)
-                _validate_committee_content(connection, name, profile, report, document, sample[name.split('_')[1]][0])
+                accepted_pool = (
+                    [s for h_signals, _, _ in sample.values() for s in h_signals]
+                    if unified
+                    else sample[name.split('_')[1]][0]
+                )
+                _validate_committee_content(connection, name, profile, report, document, accepted_pool)
                 facts['committees'][name] = document
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             diagnose('accepted_committee_invalid', name)
@@ -1153,7 +1151,9 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
     store = SourceInputStore(state / 'source_cache', accepted_dir=state / 'source_inputs/decision_inputs',
         **source_codec_limits(config))
     source = source_envelope['payload']
-    source_digest = source_envelope['digest']
+    source_digest = hashlib.sha256(
+        SourceInputStore.encode(source, **source_codec_limits(config)).encode()
+    ).hexdigest()
     clock._require_research_source(store, source, source_digest)
     purpose = ('research-historical-decision-inputs-v1' if clock.policy(config) == clock.HISTORICAL
         else 'prospective-decision-inputs-v1')
@@ -1162,7 +1162,8 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
     with ExitStack() as stack:
         cohorts, protected = [], set()
         for name in profile.roster:
-            connection = stack.enter_context(_database(state / name / 'portfolio.db'))
+            db_path, _unified = _cohort_db_path(state, name)
+            connection = stack.enter_context(_database(db_path))
             ledger = PortfolioLedger.__new__(PortfolioLedger)
             ledger._connection, ledger.cohort_id = connection, name
             economic_context = ledger.session_execution_context(session)
@@ -1181,7 +1182,7 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
 
         eligibility = None
         if ar.get('new_entry_eligibility_policy') == ELIGIBILITY_POLICY:
-            metrics = MetricStore.open_existing(state / 'metrics_v2.sqlite3')
+            metrics = MetricStore.open_existing(_metrics_db_path(state))
             binding = metrics.read_candidate_signal_identity_binding(epoch, session)
             if binding is None or binding.epoch_id != epoch or binding.session != session:
                 raise ValueError('accepted enrichment lacks candidate identity binding')
@@ -1457,16 +1458,6 @@ def render_operational_report(report: dict) -> str:
             'Runtime observations are separate from provider repair incidents. Recovery requires a later successful equivalent screen; original failures remain preserved.', ''])
         for row in report['preflight_runtime_observations']:
             lines.append(f"- {row['attempt_id']}: {row['status']}; generation={row['generation_id']}; session={row['session']}; mode={row['preflight_mode']}; phase={row['phase']}; reason={row['reason_code']}; commit={row['generation_commit']}; configuration={row['configuration']}; resolved_by={row['resolved_by'] or 'none'}.")
-    if 'decision_shadow' in report:
-        shadow = report['decision_shadow']
-        counts = ', '.join(f'{status}: {count}' for status,count in sorted(shadow['event_counts'].items())) or 'no recorded events'
-        lines.extend(['','## Clef evidence shadow','',
-            f"Status: {shadow['status']}; assessed events: {shadow['assessed_events']}; {counts}.",
-            'This optional evidence check does not affect trading, accounting validity or source coverage. Its probabilities describe evidence support, not trading returns.'])
-        if shadow['choices']:
-            lines.append('Answers: '+', '.join(f'{choice}: {count}' for choice,count in sorted(shadow['choices'].items()))+'.')
-        if shadow['selection_truncated']:
-            lines.append(f"Session sampling cap excluded {shadow['skipped_events']} additional events.")
     if report['diagnostics']:
         lines.extend(['','## Evidence diagnostics',''])
         lines.extend(f"- {row['code']}" + (f" ({row['scope']})" if 'scope' in row else '') for row in report['diagnostics'])

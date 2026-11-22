@@ -123,7 +123,7 @@ class SignalJournal:
 
     def drain_outbox(self, limit: int = 256) -> int:
         """Project one bounded ledger outbox batch with crash-safe tail recovery."""
-        if self._ledger is None:
+        if self._ledger is None or not hasattr(self._ledger, "pending_signal_journal_outbox"):
             return 0
         pending = self._ledger.pending_signal_journal_outbox(limit)
         if not pending:
@@ -221,11 +221,31 @@ class SignalJournal:
         since: str | None = None,
     ) -> list[dict]:
         """Read journal entries, optionally filtered."""
+        cutoff = datetime.fromisoformat(since) if since else None
+        if self._ledger is not None and hasattr(self._ledger, "read_signal_observations"):
+            results: list[dict] = []
+            for _signal, _ctx, journal_payload in self._ledger.read_signal_observations():
+                if not isinstance(journal_payload, dict) or not journal_payload:
+                    continue
+                entry = dict(journal_payload)
+                if strategy and entry.get("strategy") != strategy:
+                    continue
+                if ticker and str(entry.get("ticker", "")).upper() != ticker.upper():
+                    continue
+                if cutoff:
+                    try:
+                        ts = datetime.fromisoformat(str(entry["timestamp"]))
+                        if ts < cutoff:
+                            continue
+                    except (KeyError, ValueError):
+                        continue
+                results.append(entry)
+            if results or not self._path.exists():
+                return results
         if not self._path.exists():
             return []
 
-        cutoff = datetime.fromisoformat(since) if since else None
-        results: list[dict] = []
+        results = []
 
         for line in self._path.read_text().splitlines():
             line = line.strip()

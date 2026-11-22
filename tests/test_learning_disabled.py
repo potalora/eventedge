@@ -69,34 +69,14 @@ def test_generation_manager_learning_refuses_without_subprocess(
     assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
 
 
-def test_engine_rejects_adaptive_confidence_before_state_creation(tmp_path) -> None:
+def test_engine_does_not_expose_legacy_learning_controls() -> None:
     from tradingagents.strategies.orchestration.multi_strategy_engine import (
         MultiStrategyEngine,
     )
+    import inspect
 
-    with pytest.raises(ValueError, match="production learning is disabled"):
-        MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            adaptive_confidence=True,
-        )
-
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_engine_learning_loop_refuses_without_state_mutation(tmp_path) -> None:
-    from tradingagents.strategies.orchestration.multi_strategy_engine import (
-        MultiStrategyEngine,
-    )
-
-    engine = MultiStrategyEngine(
-        config={"autoresearch": {"state_dir": str(tmp_path)}}, strategies=[]
-    )
-    before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
-
-    with pytest.raises(RuntimeError, match="production learning is disabled"):
-        engine.run_learning_loop()
-
-    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
+    assert "adaptive_confidence" not in inspect.signature(MultiStrategyEngine.__init__).parameters
+    assert not hasattr(MultiStrategyEngine, "run_learning_loop")
 
 
 def test_subclassed_learning_policy_is_rejected_before_state_creation(tmp_path) -> None:

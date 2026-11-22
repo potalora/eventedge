@@ -807,24 +807,24 @@ def test_governed_resume_rejects_broken_record_before_persisted_phase(tmp_path, 
     with sqlite3.connect(db_path) as connection:
         if tamper == "delete":
             connection.execute(
-                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                "DELETE FROM bar_recoveries WHERE recovery_id = ?",
                 (record.recovery_id,),
             )
         elif tamper == "payload":
             connection.execute(
-                "UPDATE governed_bar_recoveries SET payload_json = payload_json || ' '",
+                "UPDATE bar_recoveries SET payload_json = payload_json || ' '",
             )
         elif tamper == "digest":
             connection.execute(
-                "UPDATE governed_bar_recoveries SET evidence_digest = 'sha256:changed'",
+                "UPDATE bar_recoveries SET evidence_digest = 'sha256:changed'",
             )
         elif tamper == "recovery_id":
             connection.execute(
-                "UPDATE governed_bar_recoveries SET recovery_id = 'changed-id'",
+                "UPDATE bar_recoveries SET recovery_id = 'changed-id'",
             )
         else:
             connection.execute(
-                "UPDATE governed_bar_recoveries SET contract_version = 'yfinance-60m-v0'",
+                "UPDATE bar_recoveries SET contract_version = 'yfinance-60m-v0'",
             )
     try:
         before = _replay_mutation_state(ledger, db_path, intent.intent_id)
@@ -849,7 +849,7 @@ def test_complete_governed_replay_record_deletion_is_read_only(tmp_path):
         before = _replay_mutation_state(ledger, store_path, intent.intent_id)
         with sqlite3.connect(store_path) as connection:
             connection.execute(
-                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                "DELETE FROM bar_recoveries WHERE recovery_id = ?",
                 (record.recovery_id,),
             )
 

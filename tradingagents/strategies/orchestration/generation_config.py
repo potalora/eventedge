@@ -137,7 +137,15 @@ def apply_generation_config(
     _, overlay, digest = read_generation_config(path, expected_sha256)
     if is_typed_generation_payload(overlay):
         typed = GenerationConfig.from_dict(overlay)
-        result = typed.to_runtime_dict()
+        runtime_overlay = typed.to_runtime_dict()
+        if defaults.get("autoresearch", {}).get("state_dir"):
+            runtime_overlay.get("autoresearch", {}).pop("state_dir", None)
+        result = copy.deepcopy(dict(defaults))
+        _merge(result, runtime_overlay)
+        ar_typed = result.setdefault("autoresearch", {})
+        ar_typed.setdefault("decision_clock_policy", "prospective_next_open_v1")
+        ar_typed.setdefault("research_resilience_policy", "dependency_isolation_v1")
+        ar_typed.setdefault("stabilization_profile_policy", "gen003_clean_v1")
         result["_generation_config"] = typed
     else:
         result = copy.deepcopy(dict(defaults))

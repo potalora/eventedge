@@ -27,9 +27,7 @@ CAPABILITY_POLICY = 'regime_strategy_capabilities_v1'
 ACQUISITION_KEY = '_capability_acquisition'
 FRED_GROUPS = {'credit_spreads': ['BAMLH0A0HYM2', 'BAMLC0A4CBBB'],
     'economic_indicators': ['UNRATE', 'CPIAUCSL', 'PAYEMS', 'ICSA', 'FEDFUNDS', 'VIXCLS', 'T10Y2Y']}
-YAHOO_TICKERS = ['SPY', 'SHY', 'TLT', 'DBA', 'WEAT', 'CORN', 'MOO', 'SOYB', 'ADM', 'BG', 'CTVA', 'DE', 'FMC',
-    'KRE', 'IWN', 'XRT', 'IYR', 'XHB', 'ITB', 'VNQ', 'SOXX', 'XLI', 'XLRE', 'LMT', 'RTX', 'NOC', 'GD', 'BA',
-    'LHX', 'LDOS', 'SAIC', 'BAH', 'PLTR', 'KTOS', 'CACI', 'HEI', 'TDG']
+YAHOO_TICKERS = ['SPY', 'SHY', 'TLT', 'DBA', 'WEAT', 'CORN', 'MOO', 'SOYB', 'ADM', 'BG', 'CTVA', 'DE', 'FMC']
 _REASONS = {'timeout', 'transport_error', 'http_error', 'invalid_response', 'provider_error', 'provider_maintenance', 'batch_failure'}
 
 
@@ -93,7 +91,7 @@ def _capability_manifest(payload, provider):
             raise ValueError()
         groups = manifest['groups']
         requested = FRED_GROUPS if provider == 'fred' else {'research_prices': YAHOO_TICKERS, 'vix': ['^VIX']}
-        if not isinstance(groups, dict) or list(groups) != list(requested):
+        if not isinstance(groups, dict) or set(groups) != set(requested):
             raise ValueError()
         errors = []
         for name, operations in requested.items():
@@ -122,7 +120,7 @@ def _capability_manifest(payload, provider):
                     raise ValueError()
                 errors.append(group['error'])
             outcomes = group['outcomes']
-            if not isinstance(outcomes, dict) or list(outcomes) != operations:
+            if not isinstance(outcomes, dict) or set(outcomes) != set(operations):
                 raise ValueError()
             scoped = any(row.get('status') != 'unavailable' for row in outcomes.values() if isinstance(row, dict))
             if group['status'] == 'failed' and scoped and (provider != 'fred' or not failures or not set(failures) <= set(operations)):

@@ -592,6 +592,10 @@ class PortfolioPolicy:
             weight = min(requested, allowed)
             trimmed = weight + self._EPSILON < requested
             approved_weight = round(weight, 8) if trimmed else requested
+            if trimmed and approved_weight >= requested:
+                from math import floor
+
+                approved_weight = floor(weight * 1e8) / 1e8
             # A positive cap residual can round to zero at approval precision.
             if weight <= self._EPSILON or approved_weight <= self._EPSILON:
                 decisions.append(

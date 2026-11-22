@@ -354,6 +354,7 @@ class AuthoritativePriceSource:
         self.action_calls: list[tuple[tuple[str, ...], date]] = []
         self.benchmark_calls: list[date] = []
         self._raw_fetched_at: dict[date, datetime] = {}
+        self._benchmark_fetched_at: dict[date, datetime] = {}
 
     def get_daily_bars(
         self, tickers, start_session, end_session_inclusive, adjusted=False
@@ -416,7 +417,9 @@ class AuthoritativePriceSource:
     def get_total_return_closes(self, symbols, start_session, end_session_inclusive):
         from tradingagents.strategies.orchestration.trading_calendar import previous_session
         self.benchmark_calls.append(end_session_inclusive)
-        fetched_at = datetime.now(timezone.utc)
+        fetched_at = self._benchmark_fetched_at.setdefault(
+            end_session_inclusive, datetime.now(timezone.utc)
+        )
         return {
             (symbol, session): AdjustedClose(symbol, session, Decimal("650") if symbol == "SPY" else Decimal("91"), "fixture-adjusted", fetched_at, previous_session(session), Decimal("650") if symbol == "SPY" else Decimal("91"))
             for symbol in symbols for session in (start_session, end_session_inclusive)
@@ -442,6 +445,7 @@ def _authoritative_orchestrator(
     *,
     cohort_configs=None,
     source=None,
+    state_dir_override=None,
 ):
     source = source or AuthoritativePriceSource()
     configs = cohort_configs or [
@@ -450,7 +454,7 @@ def _authoritative_orchestrator(
     config = {
         "execution": {"mode": "paper"},
         "autoresearch": {
-            "state_dir": str(tmp_path / "base"),
+            "state_dir": str(state_dir_override or (tmp_path / "base")),
             "autoresearch_model": model,
             "total_capital": 5000,
             "paper_trade": {"portfolio_committee_enabled": False},
@@ -1886,9 +1890,14 @@ class TestIdempotencyDoubleRun:
             cohort["ledger"].close()
 
         configs = [_cohort_config(tmp_path, "cohort_0")]
+        state_dir_override = None
         if topology == "renamed":
             configs.append(_cohort_config(tmp_path, "renamed", "renamed_state"))
         elif topology == "changed_state_path":
+            import shutil
+
+            shutil.copytree(tmp_path / "base", tmp_path / "fresh_base")
+            state_dir_override = tmp_path / "fresh_base"
             configs.append(_cohort_config(tmp_path, "cohort_1", "fresh_cohort_1"))
         elif topology == "duplicate":
             configs.append(_cohort_config(tmp_path, "cohort_1"))
@@ -1896,6 +1905,7 @@ class TestIdempotencyDoubleRun:
             tmp_path,
             strategy_modules=[FakeStrategy()],
             cohort_configs=configs,
+            state_dir_override=state_dir_override,
         )
         if topology == "duplicate":
             restarted.cohorts.append(restarted.cohorts[0])
@@ -1959,10 +1969,14 @@ class TestIdempotencyDoubleRun:
             restarted.run_daily(gap_session.isoformat())
 
         assert store.pending_critical_gap() is not None
-        with sqlite3.connect(tmp_path / "cohort_1" / "portfolio.db") as connection:
+        from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+
+        with sqlite3.connect(tmp_path / "base" / GENERATION_DB_FILENAME) as connection:
             assert (
                 connection.execute(
-                    "SELECT COUNT(*) FROM corporate_action_batch_rejections"
+                    "SELECT COUNT(*) FROM corporate_action_batch_rejections "
+                    "WHERE cohort_id = ?",
+                    ("cohort_1",),
                 ).fetchone()[0]
                 == 0
             )
@@ -2352,14 +2366,16 @@ class TestIdempotencyDoubleRun:
     def test_cohorts_share_generation_metric_store_not_cohort_metric_databases(
         self, tmp_path
     ):
+        from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+
         orchestrator, _ = _authoritative_orchestrator(tmp_path, cohorts=2)
 
         paths = {
             cohort["executor"].metric_store.path for cohort in orchestrator.cohorts
         }
-        assert paths == {tmp_path / "base" / "metrics_v2.sqlite3"}
+        assert paths == {tmp_path / "base" / GENERATION_DB_FILENAME}
         assert all(
-            not (Path(cohort["config"].state_dir) / "metrics_v2.sqlite3").exists()
+            not (Path(cohort["config"].state_dir) / GENERATION_DB_FILENAME).exists()
             for cohort in orchestrator.cohorts
         )
 
@@ -3123,7 +3139,7 @@ class TestReactivatedStrategies:
 
         strategy = GovtContractsStrategy()
         assert strategy.track == "paper_trade"
-        assert "openbb" in strategy.data_sources
+        assert strategy.data_sources == ["yfinance", "usaspending"]
 
         # Provide synthetic USASpending contract data
         data = {

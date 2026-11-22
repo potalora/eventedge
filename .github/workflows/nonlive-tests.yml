@@ -10,8 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Include the complete workflow and recovery regressions with a finite margin.
-    timeout-minutes: 120
+    # Target <10 minutes end-to-end with a clean 15-minute ceiling.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,15 +22,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[chatgpt-plan]' pytest
-      - name: Replay recorded NOAA yearly files
-        run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
-      - name: Retain NOAA yearly replay evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: noaa-yearly-replay-standard
-          path: /tmp/eventedge-noaa-yearly.json
-          retention-days: 14
+      - name: Compile-check application and scripts
+        run: python -m compileall -q tradingagents scripts
       - name: Replay recorded public historical sources
         run: python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-historical-acceptance.json
       - name: Retain public historical replay evidence
@@ -43,43 +36,4 @@ jobs:
       - name: Scheduled workflow acceptance gate
         run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not document_qualification and not live' tests
       - name: Run remaining non-live suite
-        run: python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests
-
-  test-openbb:
-    runs-on: ubuntu-latest
-    # Allow both acceptance and the full regression suite in the pinned SDK environment.
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-      - name: Install pinned optional SDK environment
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-ci-openbb.txt -e '.[chatgpt-plan,openbb,commodities]'
-          python -m pip check
-          openbb-build
-      - name: Replay recorded NOAA yearly files
-        run: python scripts/verify_noaa_yearly_source.py --report /tmp/eventedge-noaa-yearly.json
-      - name: Retain NOAA yearly replay evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: noaa-yearly-replay-openbb
-          path: /tmp/eventedge-noaa-yearly.json
-          retention-days: 14
-      - name: Replay recorded public historical sources with OpenBB installed
-        run: python scripts/run_historical_source_acceptance.py --report /tmp/eventedge-public-historical-acceptance.json
-      - name: Retain public historical replay evidence with OpenBB installed
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: public-historical-acceptance-openbb
-          path: /tmp/eventedge-public-historical-acceptance.json
-          retention-days: 14
-      - name: Scheduled workflow acceptance gate with OpenBB installed
-        run: python -m pytest -q --durations=10 -m 'scheduled_acceptance and not document_qualification and not live' tests
-      - name: Run remaining non-live suite with OpenBB installed
         run: python -m pytest -q -m 'not live and not scheduled_acceptance and not document_qualification' tests

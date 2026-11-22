@@ -7,12 +7,11 @@ import sqlite3
 import pytest
 
 from tradingagents.strategies.metrics.health import classify_strategy_run
-from tradingagents.strategies.metrics.store import _SCHEMA
 from tradingagents.strategies.modules import get_paper_trade_strategies
 from tradingagents.strategies.orchestration.run_evidence import persist_run_evidence
 from tradingagents.strategies.orchestration.run_outcome import DAILY_RESULT_PREFIX, DAILY_RESULT_WIRE_VERSION
 from tradingagents.strategies.orchestration.source_inputs import SourceInputStore
-from tradingagents.strategies.state.portfolio_ledger import _DDL
+from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME, GenerationDB
 from tradingagents.strategies.orchestration.operational_report import build_operational_report, render_operational_report, write_operational_report
 
 SESSION = '2026-10-06'
@@ -40,10 +39,14 @@ def _policy_context(connection,name,volatility):
     context_digest=stable_id('policy_context',context_json)
     payload_json=_canonical_json({'cohort_id':name,'session':SESSION,'binding_kind':'staging',
         'epoch_id':EPOCH,'policy_version':'fixture-v1','policy_config_digest':config_digest,'context_digest':context_digest})
-    _insert(connection,'policy_session_contexts',cohort_id=name,session=SESSION,binding_kind='staging',epoch_id=EPOCH,
-        policy_version='fixture-v1',policy_config_json=config_json,policy_config_digest=config_digest,
-        context_json=context_json,context_digest=context_digest,payload_json=payload_json,
-        payload_digest=stable_id('policy_binding',payload_json),bound_at=SESSION+'T20:00:00+00:00')
+    envelope_json=_canonical_json({'cohort_id':name,'session':SESSION,'binding_kind':'staging','epoch_id':EPOCH,
+        'policy_version':'fixture-v1','policy_config_json':config_json,'policy_config_digest':config_digest,
+        'context_json':context_json,'context_digest':context_digest,'payload_json':payload_json,
+        'payload_digest':stable_id('policy_binding',payload_json),'bound_at':SESSION+'T20:00:00+00:00'})
+    _insert(connection,'policy_audit_records',cohort_id=name,record_type='policy_session_context',
+        record_id=f'{SESSION}:staging',session=SESSION,epoch_id=EPOCH,
+        payload_json=envelope_json,payload_sha256=hashlib.sha256(envelope_json.encode()).hexdigest(),
+        created_at=SESSION+'T20:00:00+00:00')
 
 
 def _attempt(repo, wire, *, action='daily', outcome='clean', ordinal=1, commit=COMMIT, return_code=0):
@@ -82,31 +85,28 @@ def native_evidence(tmp_path):
     state.mkdir(parents=True)
     manifest = {'generations':[{'gen_id':GENERATION,'git_commit':COMMIT,'state_dir':str(state),'run_history':[],'status':'active'}]}
     (state.parent / 'manifest.json').write_text(json.dumps(manifest))
-    for name in COHORTS:
-        folder = state / name
-        folder.mkdir()
-        with sqlite3.connect(folder / 'portfolio.db') as connection:
-            for ddl in _DDL:
-                connection.execute(ddl)
-            _insert(connection,'schema_metadata',metadata_key='cohort_id',metadata_value=name)
+    db_path = state / GENERATION_DB_FILENAME
+    GenerationDB(db_path).initialize()
+    from tradingagents.strategies.state.ledger.connection import _AUXILIARY_DDL
+    with sqlite3.connect(db_path) as connection:
+        for stmt in _AUXILIARY_DDL:
+            connection.execute(stmt)
+        epoch = {'epoch_id':EPOCH,'generation_id':GENERATION,'generation_commit':COMMIT,'start_session':SESSION,'end_session':None,'status':'active'}
+        _insert(connection,'metric_epochs',epoch_id=EPOCH,generation_id=GENERATION,schema_version=2,status='active',start_session=SESSION,payload_json=json.dumps(epoch))
+        for name in COHORTS:
             _insert(connection,'session_runs',session_run_id=name,cohort_id=name,session=SESSION,valid=1,invalid_reason='',started_at=SESSION,completed_at=SESSION)
             _insert(connection,'session_execution_contexts',execution_context_id=name,cohort_id=name,session=SESSION,epoch_id=EPOCH)
             _insert(connection,'account_snapshots',snapshot_id=name,cohort_id=name,epoch_id=EPOCH,session=SESSION,valid=1,invalid_reason='',net_equity='5000')
             horizon = name.split('_')[1]
             _insert(connection,'staging_runs',staging_run_id=name,cohort_id=name,session=SESSION,epoch_id=EPOCH,policy_id='foundation-'+horizon,completed_at=SESSION)
             _policy_context(connection,name,{})
-        connection.close()
-    with sqlite3.connect(state / 'metrics_v2.sqlite3') as connection:
-        connection.executescript(_SCHEMA)
-        epoch = {'epoch_id':EPOCH,'generation_id':GENERATION,'generation_commit':COMMIT,'start_session':SESSION,'end_session':None,'status':'active'}
-        _insert(connection,'metric_epochs',epoch_id=EPOCH,payload_json=json.dumps(epoch))
         for horizon in ('30d','3m','6m','1y'):
             for strategy in get_paper_trade_strategies():
                 record = classify_strategy_run(epoch_id=EPOCH,session=date.fromisoformat(SESSION),policy_id='foundation-'+horizon,
                     strategy=strategy.name,data_sources=strategy.data_sources,candidates=[],provider_errors={},exception=None)
                 payload = asdict(record)
                 payload['session'] = SESSION
-                _insert(connection,'strategy_health',health_id=record.health_id,epoch_id=EPOCH,session=SESSION,payload_json=json.dumps(payload))
+                _insert(connection,'strategy_health',health_id=record.health_id,epoch_id=EPOCH,session=SESSION,strategy=strategy.name,status=record.status,payload_json=json.dumps(payload))
     connection.close()
     wire = {name:{'error':False,'execution_valid':True,'staging_valid':True,'degraded':False,
                   'input_coverage_valid':True,'source_health_failures':[]} for name in COHORTS}
@@ -243,13 +243,13 @@ def test_report_rejects_malformed_native_source_diagnostics(native_evidence, dam
 
 def test_degraded_coverage_keeps_completed_valid_accounting(native_evidence):
     repo, state, wire = native_evidence
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         row = connection.execute("SELECT health_id,payload_json FROM strategy_health WHERE payload_json LIKE '%foundation-30d%' LIMIT 1").fetchone()
-        payload = json.loads(row[1]); payload['status']='data_failure'; payload['evidence']['provider_errors']={'edgar':'http_error'}
+        payload = json.loads(row[1]); payload['status']='data_failure'; payload['evidence']['provider_errors']={'finnhub':'http_error'}
         connection.execute('UPDATE strategy_health SET payload_json=? WHERE health_id=?',(json.dumps(payload),row[0]))
     affected = sorted(name for name in COHORTS if name.startswith('horizon_30d_'))
     failure = {key:payload[key] for key in ('health_id','epoch_id','session','policy_id','strategy','status')}
-    failure.update(sources=['edgar'],affected_cohorts=affected)
+    failure.update(sources=['finnhub'],affected_cohorts=affected)
     for name in affected:
         wire[name].update(degraded=True,input_coverage_valid=False,source_health_failures=[failure])
     path = _attempt(repo,wire,outcome='degraded',return_code=2)
@@ -265,12 +265,13 @@ def test_degraded_coverage_keeps_completed_valid_accounting(native_evidence):
 
 def test_missing_book_withholds_performance_and_report_still_written(native_evidence,tmp_path):
     repo,state,wire=native_evidence
-    (state/COHORTS[-1]/'portfolio.db').unlink()
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+        connection.execute('DELETE FROM session_runs WHERE cohort_id = ?', (COHORTS[-1],))
     _attempt(repo,wire)
     report=_report(repo)
     assert report['evidence_complete'] is False
     assert report['performance_claims_withheld'] is True
-    assert any(item['code']=='ledger_missing' for item in report['diagnostics'])
+    assert any(item['code'] in ('ledger_missing', 'ledger_session_invalid') for item in report['diagnostics'])
     paths=write_operational_report(report,tmp_path/'reports')
     assert paths['json'].exists() and paths['markdown'].exists()
     assert json.loads(paths['json'].read_text())==report
@@ -287,7 +288,7 @@ def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(n
         expected_sessions=(date.fromisoformat(SESSION),),observed_sessions=(),retryable=True,
         affected_signal_identities=({'event_key':'nvda-event','strategy':'earnings_call'},),affected_cohorts=COHORTS)
     ref=dict(issue.reference()); ref['affected_cohorts']=list(issue.affected_cohorts)
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         if damage!='missing':
             _insert(connection,'candidate_input_issues',issue_id=issue.issue_id,epoch_id=EPOCH,
                 session=SESSION,dependency_kind=issue.dependency_kind,ticker='BAD' if damage=='metadata' else issue.ticker,
@@ -320,8 +321,8 @@ def test_conflicting_or_corrupt_evidence_cannot_be_reported_clean(native_evidenc
     repo,state,wire=native_evidence
     if damage=='bundle': next((state/'source_inputs').glob('*.json')).write_text('{}')
     if damage=='epoch':
-        with sqlite3.connect(state/COHORTS[0]/'portfolio.db') as connection:
-            connection.execute("UPDATE account_snapshots SET epoch_id='wrong'")
+        with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+            connection.execute("UPDATE account_snapshots SET epoch_id='wrong' WHERE cohort_id=?", (COHORTS[0],))
     if damage=='misleading_wire': wire[COHORTS[0]].update(error=True,staging_valid=False)
     _attempt(repo,wire,commit='wrong' if damage=='attempt_commit' else COMMIT)
     report=_report(repo)
@@ -332,17 +333,17 @@ def test_conflicting_or_corrupt_evidence_cannot_be_reported_clean(native_evidenc
 
 def test_distinct_fill_ids_not_partial_close_rows_and_read_only_databases(native_evidence):
     repo,state,wire=native_evidence
-    ledger=state/COHORTS[0]/'portfolio.db'
+    ledger=state / GENERATION_DB_FILENAME
     with sqlite3.connect(ledger) as connection:
         for index,side in enumerate(('buy','short','sell')):
             _insert(connection,'order_intents',intent_id=f'i{index}',cohort_id=COHORTS[0],side=side,requested_qty=10,eligible_session=SESSION,price_rule='next_session_open')
-            _insert(connection,'fills',fill_id=f'f{index}',intent_id=f'i{index}',side=side,session=SESSION,quantity=10)
+            _insert(connection,'fills',fill_id=f'f{index}',cohort_id=COHORTS[0],intent_id=f'i{index}',side=side,session=SESSION,quantity=10)
         for index in range(2):
             _insert(connection,'lots',lot_id=f'l{index}',fill_id=f'f{index}',cohort_id=COHORTS[0],ticker='AAA',direction='long',opened_session=SESSION)
-            _insert(connection,'lot_closures',closure_id=f'c{index}',lot_id=f'l{index}',fill_id='f2',quantity=5)
+            _insert(connection,'lot_closures',closure_id=f'c{index}',cohort_id=COHORTS[0],lot_id=f'l{index}',fill_id='f2',quantity=5)
     connection.close()
     _attempt(repo,wire)
-    before={path:path.read_bytes() for path in state.rglob('*.sqlite3')} | {path:path.read_bytes() for path in state.rglob('portfolio.db')}
+    before={path:path.read_bytes() for path in state.rglob('*.sqlite3')}
     report=_report(repo)
     assert report['cohorts'][COHORTS[0]]['fills']=={'total':3,'entries':2,'exits':1}
     assert all(path.read_bytes()==content for path,content in before.items())
@@ -395,7 +396,7 @@ def test_failed_source_requires_health_failure_in_every_affected_strategy_scope(
     envelope['payload']['usaspending']['error']='provider acquisition failed'
     envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         row=connection.execute("SELECT health_id,payload_json FROM strategy_health WHERE payload_json LIKE '%foundation-30d%' AND payload_json LIKE '%govt_contracts%' LIMIT 1").fetchone()
         payload=json.loads(row[1]); payload['status']='data_failure'; payload['evidence']['provider_errors']={'usaspending':'http_error'}
         connection.execute('UPDATE strategy_health SET payload_json=? WHERE health_id=?',(json.dumps(payload),row[0]))
@@ -414,10 +415,13 @@ def test_native_later_resting_stop_fill_counts_once_without_conflict(native_evid
     from tradingagents.strategies.execution import Fill, OrderIntent, SignalRecord
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
     repo,state,wire=native_evidence
-    name=COHORTS[0]; path=state/name/'portfolio.db'; path.unlink()
+    name=COHORTS[0]; path=state / GENERATION_DB_FILENAME
+    with sqlite3.connect(path) as connection:
+        for table in ('session_runs','session_execution_contexts','account_snapshots','staging_runs','policy_audit_records','accounting_state'):
+            connection.execute(f'DELETE FROM {table} WHERE cohort_id=?', (name,))
     ledger=PortfolioLedger(path,name,Decimal('5000'))
     decision=datetime(2026,10,2,20,tzinfo=timezone.utc)
-    signal=SignalRecord('stop-signal',EPOCH,'foundation-30d','stop-event','litigation','NVDA','long',decision,decision,
+    signal=SignalRecord('stop-signal',EPOCH,'foundation-30d','stop-event','earnings_call','NVDA','long',decision,decision,
         date(2026,10,2),Decimal('100'),decision,'stop-evidence')
     ledger.record_signal(signal)
     entry=OrderIntent('stop-entry',(signal.signal_id,),name,'buy',10,decision,date(2026,10,5),'next_session_open','pending',None,None)
@@ -471,11 +475,12 @@ def test_accepted_volatility_matches_persisted_staging_policy_context(native_evi
     if damage=='empty_history': envelope['payload']['price_history']={}
     envelope['digest']=hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
-    with sqlite3.connect(state/COHORTS[0]/'portfolio.db') as connection:
-        connection.execute('DELETE FROM policy_session_contexts')
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+        connection.execute("DELETE FROM policy_audit_records WHERE cohort_id=? AND record_type='policy_session_context'", (COHORTS[0],))
         if damage!='missing_context':
             _policy_context(connection,COHORTS[0],{'NVDA':0.2 if damage=='changed_context' else 0.15})
-        if damage=='context_digest': connection.execute("UPDATE policy_session_contexts SET context_digest='bad'")
+        if damage=='context_digest':
+            connection.execute("UPDATE policy_audit_records SET payload_json = json_set(payload_json, '$.context_digest', 'bad') WHERE cohort_id=? AND record_type='policy_session_context'", (COHORTS[0],))
     _attempt(repo,wire)
     report=_report(repo)
     assert report['evidence_complete'] is (damage is None), report['diagnostics']
@@ -489,7 +494,7 @@ def test_accepted_volatility_matches_persisted_staging_policy_context(native_evi
 
 def test_missing_exact_health_is_diagnostic_and_withholds_performance(native_evidence):
     repo,state,wire=native_evidence
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         connection.execute('DELETE FROM strategy_health WHERE health_id=(SELECT health_id FROM strategy_health LIMIT 1)')
     connection.close()
     _attempt(repo,wire)
@@ -574,7 +579,7 @@ def test_corrupt_unknown_attempt_and_malformed_health_fail_visibly(native_eviden
     repo,state,wire=native_evidence
     _attempt(repo,wire)
     (repo/'data/logs/run_attempts/corrupt.json').write_text('{}')
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         row=connection.execute('SELECT health_id,payload_json FROM strategy_health LIMIT 1').fetchone()
         value=json.loads(row[1]);value['evidence']=[]
         connection.execute('UPDATE strategy_health SET payload_json=? WHERE health_id=?',(json.dumps(value),row[0]))
@@ -588,10 +593,10 @@ def test_corrupt_unknown_attempt_and_malformed_health_fail_visibly(native_eviden
 def test_unbound_health_policy_is_conflicting_evidence(native_evidence):
     repo,state,wire=native_evidence
     _attempt(repo,wire)
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
-        row=connection.execute('SELECT payload_json FROM strategy_health LIMIT 1').fetchone()
-        value=json.loads(row[0]);value.update(health_id='health_unknown',policy_id='unbound')
-        _insert(connection,'strategy_health',health_id=value['health_id'],epoch_id=EPOCH,session=SESSION,payload_json=json.dumps(value))
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+        row=connection.execute('SELECT strategy,status,payload_json FROM strategy_health LIMIT 1').fetchone()
+        value=json.loads(row[2]);value.update(health_id='health_unknown',policy_id='unbound')
+        _insert(connection,'strategy_health',health_id=value['health_id'],epoch_id=EPOCH,session=SESSION,strategy=row[0],status=row[1],payload_json=json.dumps(value))
     connection.close()
     report=_report(repo)
     assert report['evidence_complete'] is False
@@ -634,10 +639,10 @@ def test_report_binds_transport_diagnostics_to_the_observed_source(native_eviden
 
 def test_wrong_shared_epoch_window_cannot_claim_accounting_valid(native_evidence):
     repo,state,wire=native_evidence
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as connection:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         row=connection.execute('SELECT payload_json FROM metric_epochs WHERE epoch_id=?',(EPOCH,)).fetchone()
         value=json.loads(row[0]);value['start_session']='2026-10-07'
-        connection.execute('UPDATE metric_epochs SET payload_json=? WHERE epoch_id=?',(json.dumps(value),EPOCH))
+        connection.execute('UPDATE metric_epochs SET start_session=?, payload_json=? WHERE epoch_id=?',('2026-10-07', json.dumps(value),EPOCH))
     connection.close()
     _attempt(repo,wire)
     report=_report(repo)
@@ -687,10 +692,6 @@ def test_native_successful_preflight_is_not_fabricated_incident(native_evidence)
 
 def test_shared_metric_epoch_is_authoritative_when_book_epoch_tables_are_empty(native_evidence):
     repo,state,wire=native_evidence
-    for name in COHORTS:
-        with sqlite3.connect(state/name/'portfolio.db') as connection:
-            connection.execute('DELETE FROM metric_epochs')
-        connection.close()
     _attempt(repo,wire)
     report=_report(repo)
     assert report['outcome']=='clean'

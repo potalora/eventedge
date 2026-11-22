@@ -1,8 +1,8 @@
 """Paper-trading-first multi-strategy engine.
 
 Screens event-driven strategies for signals, synthesizes through a
-portfolio committee, gates through risk controls, and executes via
-PaperBroker or AlpacaBroker.
+portfolio committee, gates through risk controls, and executes directly
+into ``PortfolioLedger`` via ``SessionExecutor``.
 """
 
 from __future__ import annotations
@@ -44,9 +44,9 @@ _FINNHUB_FETCH_SAFETY_MARGIN_S = 30.0
 _DIAGNOSTIC_HOLDING_SESSIONS = 5
 
 
-# Shared fetch uses OpenBB only for optional enrichment/expansion, not for
-# required screen inputs. Keep this distinction consistent with preflight.
-OPTIONAL_ENRICHMENT_SOURCES = frozenset({"openbb"})
+# Shared fetch uses OpenBB/enrichment only for optional enrichment/expansion, not
+# for required screen inputs. Keep this distinction consistent with preflight.
+OPTIONAL_ENRICHMENT_SOURCES = frozenset({"openbb", "enrichment"})
 
 
 def _enrichment_failures(enrichment: Mapping[str, Any]) -> list[dict]:
@@ -298,8 +298,8 @@ class MultiStrategyEngine:
 
     Screens event-driven strategies for signals, synthesizes through
     a portfolio committee, gates through risk controls, and executes
-    via PaperBroker or AlpacaBroker. Weights evolve through a
-    conservative learning loop based on realized trade outcomes.
+    directly into ``PortfolioLedger`` via ``SessionExecutor``. Weights
+    evolve through a conservative learning loop based on realized trade outcomes.
     """
 
     def __init__(
@@ -322,7 +322,11 @@ class MultiStrategyEngine:
         capability_configured(self.ar_config)
 
         # Load strategies (active paper-trade strategies only)
-        self.paper_trade_strategies = list(strategies or get_paper_trade_strategies())
+        self._all_strategies = list(strategies or get_paper_trade_strategies())
+        self.paper_trade_strategies = list(self._all_strategies)
+
+        from .source_lifecycle_policy import configured as lifecycle_configured
+        lifecycle_configured(self.ar_config, self._all_strategies)
 
         from .operating_contract import configured as profile_configured, configure_strategies
         if profile_configured(self.config) or self.ar_config.get("enabled_strategies") or self.ar_config.get("disabled_strategies"):
@@ -494,7 +498,8 @@ class MultiStrategyEngine:
         research_scope = None
         research_hold_reasons: list[str] = []
         signal_data = dict(data)
-        codec_limits = source_codec_limits(self.config)
+        cfg = self.__dict__.get("config") or {"autoresearch": self.ar_config}
+        codec_limits = source_codec_limits(cfg)
 
         if resilience:
             names = set(data) | {"fred", "yfinance"}
@@ -512,6 +517,19 @@ class MultiStrategyEngine:
             signal_data = {
                 key: projected_sources[key] for key in signal_data if key in projected_sources
             }
+
+        from .scoped_sources import accepted_attribution_limitation, source_scope_evidence
+
+        scope_errors, scope_limits, scope_proofs = source_scope_evidence(
+            data, self.ar_config, trading_date
+        )
+        if resilience and any(
+            not isinstance(data.get(source), dict)
+            or not isinstance(data[source].get("error"), str)
+            or not data[source]["error"].strip()
+            for source in scope_errors
+        ):
+            raise ValueError("invalid_scoped_source_evidence")
 
         regime_model = self._build_regime_model(signal_data)
         if resilience:
@@ -549,8 +567,10 @@ class MultiStrategyEngine:
         if resilience and universe_failure:
             research_hold_reasons.append("required_universe_unavailable")
 
-        # Strict Tier-2 per-strategy circuit breaker
-        circuit_breaker = evaluate_strategy_circuit_breaker(data, self.paper_trade_strategies)
+        # Strict Tier-2 per-strategy circuit breaker (when capability resilience is not active)
+        circuit_breaker = evaluate_strategy_circuit_breaker(
+            signal_data if resilience else data, self.paper_trade_strategies
+        )
         regime_model["strategy_circuit_breaker"] = circuit_breaker
 
         analysis_inputs: dict[int, str] = {}
@@ -585,7 +605,11 @@ class MultiStrategyEngine:
                 continue
 
             breaker_state = circuit_breaker.get(strategy.name, {"available": True, "failed_sources": []})
-            if not breaker_state["available"]:
+            if (
+                not breaker_state["available"]
+                and not resilience
+                and not any(s in scope_errors for s in strategy.data_sources)
+            ):
                 failed_sources = list(breaker_state.get("failed_sources", []))
                 provider_errors = _provider_errors(data, strategy.data_sources)
                 logger.warning(
@@ -603,14 +627,18 @@ class MultiStrategyEngine:
                         session=session_date,
                         policy_id=policy_id,
                         strategy=strategy.name,
-                        status="unavailable",
+                        status="data_failure",
                         signal_count=0,
                         evidence={
                             "tier": "tier2_strategy",
+                            "circuit_breaker": "unavailable",
                             "failed_sources": failed_sources,
                             "provider_errors": provider_errors,
                             "data_sources": sorted(strategy.data_sources),
                             "candidate_count": 0,
+                            "admission_manifest": admit_candidates(
+                                strategy.name, [], budget=None
+                            ).admission_manifest,
                         },
                     )
                 )
@@ -625,9 +653,16 @@ class MultiStrategyEngine:
                     else []
                 )
                 with candidate_universe(universe):
+                    missing_projected = (
+                        resilience
+                        and not all(src in signal_data for src in strategy.data_sources)
+                    )
+                    scope_blocked = any(
+                        source in scope_errors for source in strategy.data_sources
+                    )
                     candidates = (
                         admit_candidates(strategy.name, [], budget=None)
-                        if capability_holds
+                        if (capability_holds or missing_projected or scope_blocked)
                         else strategy.screen(signal_data, trading_date, params)
                     )
                     if not hasattr(candidates, "admission_manifest"):
@@ -686,10 +721,49 @@ class MultiStrategyEngine:
                         candidate.journal_only = True
 
             provider_errors = _provider_errors(data, strategy.data_sources)
+            if resilience and self.ar_config.get("source_capability_policy"):
+                for source in ("fred", "yfinance"):
+                    if (
+                        source in strategy.data_sources
+                        and source in signal_data
+                        and not any(name.startswith(source + ".") for name in capability_holds)
+                    ):
+                        provider_errors.pop(source, None)
+            if resilience and research_hold_reasons:
+                provider_errors = dict(provider_errors, shared_regime=research_hold_reasons[0])
+            provider_errors.update(
+                {
+                    source: reason
+                    for source, reason in scope_errors.items()
+                    if source in strategy.data_sources
+                }
+            )
             if universe_failure:
                 provider_errors = dict(
                     provider_errors, equity_universe="universe_evidence_unavailable"
                 )
+            non_actionable = sorted(
+                {
+                    c.metadata["non_actionable_reason"]
+                    for c in candidates
+                    if c.metadata.get("non_actionable_reason")
+                }
+            )
+            if any(
+                c.metadata.get("non_actionable_reason")
+                and not accepted_attribution_limitation(c, strategy.name, scope_proofs)
+                for c in candidates
+            ):
+                provider_errors = dict(
+                    provider_errors, analysis="required_evidence_unavailable"
+                )
+            if error is None and any(
+                str(c.metadata.get("analysis_failure_reason", "")).startswith(
+                    "unsupported_required_analysis:"
+                )
+                for c in candidates
+            ):
+                error = ValueError("unsupported_required_analysis")
             health_record = classify_strategy_run(
                 epoch_id=epoch_id,
                 session=session_date,
@@ -704,6 +778,11 @@ class MultiStrategyEngine:
             if universe is not None:
                 health_record.evidence["universe_assessments"] = universe_assessments
                 health_record.evidence["universe_policy"] = universe.evidence["policy"]
+            if non_actionable:
+                health_record.evidence["non_actionable_reasons"] = non_actionable
+                health_record.evidence["actionable_candidate_count"] = sum(
+                    not c.journal_only for c in candidates
+                )
             source_coverage = {
                 source: data[source]["coverage"]
                 for source in strategy.data_sources
@@ -711,6 +790,13 @@ class MultiStrategyEngine:
             }
             if source_coverage:
                 health_record.evidence["source_coverage"] = source_coverage
+            selected_limits = {
+                source: value
+                for source, value in scope_limits.items()
+                if source in strategy.data_sources
+            }
+            if selected_limits:
+                health_record.evidence["source_scope_limits"] = selected_limits
             if resilience:
                 health_record.evidence["research_source_scope"] = research_scope
                 health_record.evidence["research_hold_reasons"] = list(research_hold_reasons)
@@ -1472,18 +1558,30 @@ class MultiStrategyEngine:
         if frozen_decision is None:
             from .runtime_recovery import require_acquisition_allowed
             require_acquisition_allowed('committee_decision')
-            if horizon_recommendations is not None:
-                # 1-committee-call-per-horizon path: reuse the horizon-level
-                # ranked recommendations and size deterministically per tier.
+            if (
+                horizon_recommendations is not None
+                and policy_config is not None
+                and risk_context is not None
+            ):
+                # 1-committee-call-per-horizon path: bind per-tier signal provenance
+                # (event_key, source_event_keys, strategy_tags, risk_tags) from
+                # committee_signals, then size deterministically via PortfolioPolicy.
                 from copy import deepcopy
-                eligible_recs = [
+                raw_recs = [
                     deepcopy(rec)
                     for rec in horizon_recommendations
                     if (rec.direction != "short" or getattr(size_profile, "short_eligible", True))
                 ]
+                eligible_recs = (
+                    committee._finalize_recommendations(
+                        raw_recs, committee_signals, zero_size=False
+                    )
+                    if committee_signals and raw_recs
+                    else []
+                )
                 if policy_config is not None and risk_context is not None:
                     from tradingagents.strategies.trading.portfolio_policy import PortfolioPolicy
-                    policy_engine = PortfolioPolicy(policy_config)
+                    policy_engine = PortfolioPolicy()
                     if hasattr(policy_engine, "apply"):
                         applied = policy_engine.apply(eligible_recs, risk_context)
                         if isinstance(applied, tuple) and len(applied) == 2:
@@ -1507,6 +1605,16 @@ class MultiStrategyEngine:
                         "shared_horizon_synthesis": True,
                     }
                 )
+                decision_status["input_count"] = len(committee_signals)
+                decision_status["eligible_count"] = len(committee_signals)
+                decision_status["selected_count"] = len(recommendations)
+                if decision_status.get("status") not in {"failed", "research_hold"}:
+                    if not committee_signals:
+                        decision_status["status"] = "no_candidates"
+                    elif recommendations:
+                        decision_status["status"] = "selected"
+                    else:
+                        decision_status["status"] = "abstained"
             else:
                 positions = []
                 for position in self.ledger.open_positions():
@@ -1974,13 +2082,30 @@ class MultiStrategyEngine:
 
     @property
     def registry(self) -> DataSourceRegistry:
-        return self._registry
+        return self.__dict__["_registry"]
 
     @registry.setter
     def registry(self, value: DataSourceRegistry) -> None:
-        self._registry = value
-        if hasattr(self, "data_acquisition") and self.data_acquisition is not None:
-            self.data_acquisition.registry = value
+        self.__dict__["_registry"] = value
+        da = self.__dict__.get("_data_acquisition")
+        if da is not None:
+            da.registry = value
+
+    @property
+    def data_acquisition(self) -> Any:
+        da = self.__dict__.get("_data_acquisition")
+        if da is None:
+            from .data_acquisition import DataAcquisitionService
+
+            cfg = self.__dict__.get("config") or {"autoresearch": self.__dict__.get("ar_config", {})}
+            reg = self.__dict__.get("_registry") or self.__dict__.get("registry")
+            da = DataAcquisitionService(cfg, registry=reg)
+            self.__dict__["_data_acquisition"] = da
+        return da
+
+    @data_acquisition.setter
+    def data_acquisition(self, value: Any) -> None:
+        self.__dict__["_data_acquisition"] = value
 
     def _fetch_missing_prices(self, tickers: list[str], start_date: str, end_date: str) -> None:
         self.data_acquisition.fetch_missing_prices(tickers, start_date, end_date)
@@ -1994,8 +2119,9 @@ class MultiStrategyEngine:
         acquisition_purpose: str = "decision",
     ) -> dict[str, Any]:
         needed = {"yfinance", "fred"}
-        for strategy in self.paper_trade_strategies:
-            if not self.ar_config.get("disabled_strategies", {}).get(getattr(strategy, "name", "")):
+        ar_cfg = self.__dict__.get("ar_config", {})
+        for strategy in self.__dict__.get("paper_trade_strategies", ()):
+            if not ar_cfg.get("disabled_strategies", {}).get(getattr(strategy, "name", "")):
                 needed.update(getattr(strategy, "data_sources", ()))
         overrides = {}
         for src_name, method_name in (
@@ -2010,7 +2136,7 @@ class MultiStrategyEngine:
         ):
             if method_name in self.__dict__:
                 overrides[src_name] = self.__dict__[method_name]
-        return self.data_acquisition.fetch_all_data(
+        data = self.data_acquisition.fetch_all_data(
             start_date,
             end_date,
             needed_sources=needed,
@@ -2018,6 +2144,15 @@ class MultiStrategyEngine:
             acquisition_purpose=acquisition_purpose,
             fetcher_overrides=overrides,
         )
+        from .source_lifecycle_policy import declaration as lifecycle_declaration
+        data.update(
+            lifecycle_declaration(
+                ar_cfg,
+                self.__dict__.get("_all_strategies")
+                or self.__dict__.get("paper_trade_strategies", ()),
+            )
+        )
+        return data
 
     def _fetch_finnhub_data(self, trading_date: str, max_workflow_budget_s: float | None = None) -> dict[str, Any]:
         return self.data_acquisition.fetch_finnhub_data(trading_date, max_workflow_budget_s=max_workflow_budget_s)

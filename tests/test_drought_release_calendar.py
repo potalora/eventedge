@@ -67,7 +67,7 @@ def test_engine_preserves_typed_drought_failure_for_incident_reporting(reason, s
     owner.registry = SimpleNamespace(get=lambda _: SimpleNamespace(fetch_drought_severity=unavailable))
     result = owner._fetch_drought_data('2026-10-14')
     assert result['_coverage'] == {
-        'status': 'partial' if partial else 'failed',
+        'status': 'partial' if partial else 'unavailable',
         'reason_code': reason, 'http_status': status, 'attempts': 3,
     }
     assert result.get('states', {}) == partial.get('states', {})

@@ -2488,11 +2488,25 @@ def run_candidate_volatility_validation(
             )
             _finish_volatility_validation(state)
             return None
-        if state.completed or any(
-            cohort["ledger"].read_policy_session_context(
-                state.session, binding_kind="staging"
-            ) is not None
-            for cohort in state.owner.cohorts
+        staging_marker = f"staging_began:{state.epoch_id}:{state.session}"
+        owner_cohorts = getattr(state.owner, "cohorts", ())
+        if (
+            state.completed
+            or any(
+                cohort["ledger"].read_policy_session_context(
+                    state.session, binding_kind="staging"
+                )
+                is not None
+                for cohort in owner_cohorts
+            )
+            or (
+                bool(owner_cohorts)
+                and owner_cohorts[0]["ledger"]._connection.execute(
+                    "SELECT 1 FROM schema_metadata WHERE metadata_key = ?",
+                    (staging_marker,),
+                ).fetchone()
+                is not None
+            )
         ):
             raise ValueError("accepted staging volatility missing after staging began")
         from .runtime_recovery import require_acquisition_allowed
@@ -2617,12 +2631,24 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     staging_valid = not (
         state.candidate_bar_quarantines or state.volatility_quarantines
     )
-    for horizon, (_, regime, _) in state.horizon_signals.items():
+    if state.horizon_signals:
+        selected_horizon = (
+            "3m" if "3m" in state.horizon_signals else sorted(state.horizon_signals)[0]
+        )
+        owner_horizons = {
+            c["config"].horizon for c in getattr(state.owner, "cohorts", ())
+        }
+        canonical_horizon = (
+            "3m"
+            if "3m" in owner_horizons
+            else (sorted(owner_horizons)[0] if owner_horizons else selected_horizon)
+        )
+        _, regime, _ = state.horizon_signals[selected_horizon]
         state.first_engine.state.save_regime_snapshot(
             regime,
             session=state.session,
             epoch_id=state.epoch_id,
-            horizon=horizon,
+            horizon=canonical_horizon,
             execution_valid=True,
             staging_valid=staging_valid,
             candidate_bar_quarantines=tuple(state.candidate_bar_quarantines),
@@ -2682,18 +2708,57 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     # 1 committee synthesis call per horizon (4/day, not 16/day).
     # Each size tier (5k/10k/50k/100k) then applies deterministic PortfolioPolicy sizing.
     from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+    from .research_resilience import project_enrichment
+    horizon_enrichment = project_enrichment(enrichment)[0] if resilience else enrichment
     horizon_committee_cache: dict[str, tuple[list[Any], dict[str, Any]]] = {}
     if hasattr(PortfolioCommittee, "synthesize_horizon"):
+        if state.valid:
+            staging_marker = f"staging_began:{state.epoch_id}:{state.session}"
+            conn = getattr(state.valid[0].get("ledger"), "_connection", None)
+            if conn is not None:
+                with conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO schema_metadata (metadata_key, metadata_value) VALUES (?, '1')",
+                        (staging_marker,),
+                    )
         seen_horizons = sorted({c["config"].horizon for c in state.valid})
         for h in seen_horizons:
             h_signals, h_regime, _ = state.horizon_signals[h]
-            h_committee = PortfolioCommittee(state.owner._base_config)
+            h_cohorts = [c for c in state.valid if c["config"].horizon == h]
+            if h_cohorts and all(
+                callable(getattr(c.get("ledger"), "committee_decision", None))
+                and c["ledger"].committee_decision(
+                    state.session,
+                    state.epoch_id,
+                    c["engine"].ar_config.get("paper_ledger", {}).get("policy_id")
+                    or state.owner._policy_id_for_horizon(h),
+                )
+                is not None
+                for c in h_cohorts
+            ):
+                continue
+            h_committee_cfg = state.owner._base_config
+            if h_cohorts and all(
+                not getattr(c["engine"], "config", {}).get("autoresearch", {}).get("paper_trade", {}).get("portfolio_committee_enabled", True)
+                for c in h_cohorts
+            ):
+                h_committee_cfg = {
+                    **state.owner._base_config,
+                    "autoresearch": {
+                        **state.owner._base_config.get("autoresearch", {}),
+                        "paper_trade": {
+                            **state.owner._base_config.get("autoresearch", {}).get("paper_trade", {}),
+                            "portfolio_committee_enabled": False,
+                        },
+                    },
+                }
+            h_committee = PortfolioCommittee(h_committee_cfg)
             with model_budget(state.model_deadline):
                 h_recs = h_committee.synthesize_horizon(
                     horizon=h,
                     signals=h_signals,
                     regime=h_regime,
-                    enrichment=enrichment,
+                    enrichment=horizon_enrichment,
                     model_coverage=state.model_coverage,
                 )
             h_status = dict(

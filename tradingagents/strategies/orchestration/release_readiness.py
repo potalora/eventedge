@@ -71,10 +71,22 @@ def _cohort_db(state_dir: Path, cohort: str) -> tuple[Path, bool]:
     return state_dir / cohort / "portfolio.db", False
 
 
-def _one_valid_row(connection: sqlite3.Connection, table: str, session: str) -> bool:
-    rows = connection.execute(
-        f"SELECT valid, completed_at FROM {table} WHERE session = ?", (session,)
-    ).fetchall()
+def _one_valid_row(
+    connection: sqlite3.Connection,
+    table: str,
+    session: str,
+    *,
+    cohort_id: str | None = None,
+) -> bool:
+    if cohort_id is not None:
+        rows = connection.execute(
+            f"SELECT valid, completed_at FROM {table} WHERE cohort_id = ? AND session = ?",
+            (cohort_id, session),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            f"SELECT valid, completed_at FROM {table} WHERE session = ?", (session,)
+        ).fetchall()
     return len(rows) == 1 and rows[0][0] == 1 and bool(rows[0][1])
 
 
@@ -113,36 +125,59 @@ def _accounting_and_staging(
                     )
                 ):
                     accounting_complete = staging_complete = False
-                # Refuse mixed identities, rather than silently filtering them away.
+                if not unified:
+                    # Refuse mixed identities in legacy per-cohort DBs.
+                    for table in (
+                        "session_runs",
+                        "session_phases",
+                        "session_invalidations",
+                        "staging_runs",
+                        "account_snapshots",
+                        "benchmark_observations",
+                        "session_execution_contexts",
+                    ):
+                        if connection.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE session = ? AND cohort_id != ?",
+                            (session, cohort),
+                        ).fetchone()[0]:
+                            accounting_complete = staging_complete = False
                 for table in (
-                    "session_runs",
-                    "session_phases",
-                    "session_invalidations",
                     "staging_runs",
                     "account_snapshots",
-                    "benchmark_observations",
                     "session_execution_contexts",
                 ):
-                    if connection.execute(
-                        f"SELECT COUNT(*) FROM {table} WHERE session = ? AND cohort_id != ?",
-                        (session, cohort),
-                    ).fetchone()[0]:
+                    if unified:
+                        mismatch = connection.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE cohort_id = ? AND session = ? AND epoch_id != ?",
+                            (cohort, session, epoch_id),
+                        ).fetchone()[0]
+                    else:
+                        mismatch = connection.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE session = ? AND epoch_id != ?",
+                            (session, epoch_id),
+                        ).fetchone()[0]
+                    if mismatch:
                         accounting_complete = staging_complete = False
-                for table in (
-                    "staging_runs",
-                    "account_snapshots",
-                    "benchmark_observations",
-                    "session_execution_contexts",
-                ):
+                if unified:
                     if connection.execute(
-                        f"SELECT COUNT(*) FROM {table} WHERE session = ? AND epoch_id != ?",
+                        "SELECT COUNT(*) FROM benchmark_observations WHERE session = ? AND epoch_id != ?",
                         (session, epoch_id),
                     ).fetchone()[0]:
                         accounting_complete = staging_complete = False
-                contexts = connection.execute(
-                    "SELECT epoch_id, economic_inputs_json, input_digest, market_digest FROM session_execution_contexts WHERE session = ?",
-                    (session,),
-                ).fetchall()
+                    contexts = connection.execute(
+                        "SELECT epoch_id, economic_inputs_json, input_digest, market_digest FROM session_execution_contexts WHERE cohort_id = ? AND session = ?",
+                        (cohort, session),
+                    ).fetchall()
+                else:
+                    if connection.execute(
+                        "SELECT COUNT(*) FROM benchmark_observations WHERE session = ? AND epoch_id != ?",
+                        (session, epoch_id),
+                    ).fetchone()[0]:
+                        accounting_complete = staging_complete = False
+                    contexts = connection.execute(
+                        "SELECT epoch_id, economic_inputs_json, input_digest, market_digest FROM session_execution_contexts WHERE session = ?",
+                        (session,),
+                    ).fetchall()
                 expected_benchmarks: set[str] = set()
                 if len(contexts) != 1 or contexts[0][0] != epoch_id:
                     accounting_complete = False
@@ -161,20 +196,39 @@ def _accounting_and_staging(
                         accounting_complete = False
                     else:
                         expected_benchmarks = set(declared)
-                if not _one_valid_row(connection, "session_runs", session):
+                if not _one_valid_row(
+                    connection,
+                    "session_runs",
+                    session,
+                    cohort_id=cohort if unified else None,
+                ):
                     accounting_complete = False
-                snapshots = connection.execute(
-                    "SELECT valid FROM account_snapshots WHERE session = ?",
-                    (session,),
-                ).fetchall()
-                invalidations = connection.execute(
-                    "SELECT COUNT(*) FROM session_invalidations WHERE session = ?",
-                    (session,),
-                ).fetchone()[0]
-                phases = connection.execute(
-                    "SELECT phase, completed_at FROM session_phases WHERE session = ?",
-                    (session,),
-                ).fetchall()
+                if unified:
+                    snapshots = connection.execute(
+                        "SELECT valid FROM account_snapshots WHERE cohort_id = ? AND session = ?",
+                        (cohort, session),
+                    ).fetchall()
+                    invalidations = connection.execute(
+                        "SELECT COUNT(*) FROM session_invalidations WHERE cohort_id = ? AND session = ?",
+                        (cohort, session),
+                    ).fetchone()[0]
+                    phases = connection.execute(
+                        "SELECT phase, completed_at FROM session_phases WHERE cohort_id = ? AND session = ?",
+                        (cohort, session),
+                    ).fetchall()
+                else:
+                    snapshots = connection.execute(
+                        "SELECT valid FROM account_snapshots WHERE session = ?",
+                        (session,),
+                    ).fetchall()
+                    invalidations = connection.execute(
+                        "SELECT COUNT(*) FROM session_invalidations WHERE session = ?",
+                        (session,),
+                    ).fetchone()[0]
+                    phases = connection.execute(
+                        "SELECT phase, completed_at FROM session_phases WHERE session = ?",
+                        (session,),
+                    ).fetchall()
                 if (
                     len(snapshots) != 1
                     or snapshots[0][0] != 1
@@ -195,10 +249,16 @@ def _accounting_and_staging(
                     or any(valid != 1 for _, valid in benchmarks)
                 ):
                     accounting_complete = False
-                staged = connection.execute(
-                    "SELECT completed_at, policy_id FROM staging_runs WHERE session = ?",
-                    (session,),
-                ).fetchall()
+                if unified:
+                    staged = connection.execute(
+                        "SELECT completed_at, policy_id FROM staging_runs WHERE cohort_id = ? AND session = ?",
+                        (cohort, session),
+                    ).fetchall()
+                else:
+                    staged = connection.execute(
+                        "SELECT completed_at, policy_id FROM staging_runs WHERE session = ?",
+                        (session,),
+                    ).fetchall()
                 if (
                     len(staged) != 1
                     or not staged[0][0]
@@ -216,25 +276,41 @@ def _candidate_and_health(
     state_dir: Path, session: str, epoch_id: str, policy_id: str | None
 ) -> tuple[bool, bool]:
     try:
-        with open_sqlite(_metrics_db(state_dir), readonly=True) as connection:
+        db_path = _metrics_db(state_dir)
+        unified = db_path.name == GENERATION_DB_FILENAME
+        with open_sqlite(db_path, readonly=True) as connection:
+            recovery_table = "bar_recoveries" if unified else "candidate_bar_recoveries"
             for table in (
                 "strategy_health",
                 "candidate_input_issues",
-                "candidate_bar_recoveries",
+                recovery_table,
             ):
-                if connection.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE session = ? AND epoch_id != ?",
-                    (session, epoch_id),
-                ).fetchone()[0]:
+                if unified and table == "bar_recoveries":
+                    mismatch = connection.execute(
+                        "SELECT COUNT(*) FROM bar_recoveries WHERE recovery_kind = 'candidate' AND session = ? AND epoch_id != ?",
+                        (session, epoch_id),
+                    ).fetchone()[0]
+                else:
+                    mismatch = connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE session = ? AND epoch_id != ?",
+                        (session, epoch_id),
+                    ).fetchone()[0]
+                if mismatch:
                     return False, False
             issues = connection.execute(
                 "SELECT COUNT(*) FROM candidate_input_issues WHERE session = ?",
                 (session,),
             ).fetchone()[0]
-            recoveries = connection.execute(
-                "SELECT payload_json FROM candidate_bar_recoveries WHERE session = ?",
-                (session,),
-            ).fetchall()
+            if unified:
+                recoveries = connection.execute(
+                    "SELECT payload_json FROM bar_recoveries WHERE recovery_kind = 'candidate' AND session = ?",
+                    (session,),
+                ).fetchall()
+            else:
+                recoveries = connection.execute(
+                    "SELECT payload_json FROM candidate_bar_recoveries WHERE session = ?",
+                    (session,),
+                ).fetchall()
             recovery_rows = [json.loads(payload) for (payload,) in recoveries]
             health = [
                 json.loads(payload)
@@ -585,7 +661,7 @@ def assess_generation(
                 # The canonical report shares the financial snapshot and
                 # reads copied immutable inputs. Read-only WAL opens against
                 # authoritative state can still create SQLite shm sidecars.
-                for name in ('source_inputs', 'runtime_recovery', 'decision_shadow'):
+                for name in ('source_inputs', 'runtime_recovery'):
                     source = state / name
                     if source.exists():
                         if source.is_symlink() or any(path.is_symlink() for path in source.rglob('*')):

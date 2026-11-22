@@ -34,7 +34,11 @@ def evidence_file(config, kind):
 
 
 def rewrite_payload(path, mutate):
-    document = SourceInputStore.decode(path.read_text())
+    table_dir = path.parent / (path.stem + ".tables")
+    document = SourceInputStore.decode(
+        path.read_text(),
+        table_dir=table_dir if table_dir.is_dir() else None,
+    )
     mutate(document['payload'])
     # A self-consistent envelope cannot replace the independently bound payload.
     document['digest'] = hashlib.sha256(SourceInputStore.encode(document['payload']).encode()).hexdigest()
@@ -116,33 +120,3 @@ def test_completed_replay_rechecks_original_protected_scope(pipeline, monkeypatc
     monkeypatch.setattr(executor, 'benchmark_symbols', (*executor.benchmark_symbols, 'NVDA'))
     with pytest.raises(ValueError):
         decision_clock.validate_completed_replay(owner, SESSION, epoch, owner.cohorts)
-
-
-def test_completed_replay_uses_full_filing_source_codec(tmp_path):
-    from tradingagents.strategies.orchestration.source_inputs import daily_source_store, MAX_BYTES
-    config = {'autoresearch': {'state_dir': str(tmp_path),
-        'filing_evidence_policy': 'complete_submission_v1',
-        'decision_clock_policy': decision_clock.PROSPECTIVE}}
-    owner = SimpleNamespace(_base_config=config,
-        _metric_epoch_context=SimpleNamespace(generation_id='review', generation_commit='a' * 40),
-        _metric_store=SimpleNamespace(read_candidate_signal_identity_binding=lambda *args:
-            SimpleNamespace(epoch_id='epoch', session=SESSION, identities=())))
-    shared, identity = daily_source_store(owner, str(SESSION))
-    source = {'_decision_acquisition': {'policy': decision_clock.PROSPECTIVE,
-        'reference_session': str(SESSION), 'started_at': '2026-10-03T18:00:00+00:00',
-        'vintage_as_of': '2026-10-03'}, 'filing_text': 'X' * (MAX_BYTES + 1)}
-    shared.freeze(identity, source)
-    context = decision_clock.create_context(config, SESSION,
-        acquired_at=datetime(2026, 10, 3, 18, tzinfo=timezone.utc),
-        cutoff=datetime(2026, 10, 3, 19, tzinfo=timezone.utc),
-        source_digest=hashlib.sha256(shared.encode(source, **shared.codec_limits).encode()).hexdigest(),
-        enrichment_digest=hashlib.sha256(shared.encode({}).encode()).hexdigest())
-    decisions = SourceInputStore(shared.cache_dir, accepted_dir=shared.accepted_dir / 'decision_inputs')
-    decisions.freeze({**identity, 'purpose': 'prospective-decision-inputs-v1'},
-                     {'context': context, 'enrichment': {}})
-    owner.cohorts = [{'executor': SimpleNamespace(benchmark_symbols=('SPY',),
-        validate_bound_context=lambda *args: None,
-        persisted_input_bundle=lambda *args: SimpleNamespace(tickers=('SPY',))),
-        'ledger': SimpleNamespace(read_policy_session_context=lambda *args:
-            {'epoch_id': 'epoch', 'context': {'decision_clock': context}})}]
-    assert decision_clock.validate_completed_replay(owner, SESSION, 'epoch', owner.cohorts) == context

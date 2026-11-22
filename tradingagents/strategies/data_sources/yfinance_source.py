@@ -41,8 +41,9 @@ class YFinanceSource:
     """Data source backed by the yfinance library.
 
     Provides raw price history, ETF returns, VIX data, and earnings dates.
-    Execution and ledger code must use ``YFinancePriceSource.get_daily_bars``
-    rather than this strategy-screen DataFrame interface.
+    Execution and ledger code must use ``AlpacaPriceSource`` /
+    ``YahooActionsBenchmarksSource`` rather than this strategy-screen
+    DataFrame interface.
     All results are cached in-memory for the duration of one generation run;
     call ``clear_cache()`` between generations.
     """

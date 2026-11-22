@@ -21,7 +21,14 @@ def _fake_client(text="ok"):
 
 
 def test_committee_call_uses_temperature_zero_by_default():
-    committee = PortfolioCommittee(config={})
+    committee = PortfolioCommittee(
+        config={
+            "autoresearch": {
+                "llm_billing_mode": "api",
+                "paper_trade": {"portfolio_committee_model": "claude-haiku-4-5-20251001"},
+            }
+        }
+    )
     client = _fake_client("[]")
     with patch.object(PortfolioCommittee, "_get_client", return_value=client):
         committee._call_llm(system="sys", prompt="hi")
@@ -30,7 +37,15 @@ def test_committee_call_uses_temperature_zero_by_default():
 
 
 def test_committee_temperature_is_configurable():
-    committee = PortfolioCommittee(config={"autoresearch": {"llm_temperature": 0.4}})
+    committee = PortfolioCommittee(
+        config={
+            "autoresearch": {
+                "llm_billing_mode": "api",
+                "paper_trade": {"portfolio_committee_model": "claude-haiku-4-5-20251001"},
+                "llm_temperature": 0.4,
+            }
+        }
+    )
     client = _fake_client("[]")
     with patch.object(PortfolioCommittee, "_get_client", return_value=client):
         committee._call_llm(system="sys", prompt="hi")

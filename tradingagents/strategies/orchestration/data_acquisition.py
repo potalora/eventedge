@@ -414,7 +414,8 @@ class DataAcquisitionService:
                 }
             diagnostics: list[dict[str, Any]] = []
             try:
-                with provider_budget(name, deadline=effective_deadline, diagnostics=diagnostics):
+                budget_name = "alpaca" if name == "equity_universe" else name
+                with provider_budget(budget_name, deadline=effective_deadline, diagnostics=diagnostics):
                     cache_id = None
                     if cache_store is not None:
                         registered = self.registry.get(name)
@@ -428,11 +429,15 @@ class DataAcquisitionService:
                             cache_id, now=datetime.now(timezone.utc), cutoff=acquisition_cutoff
                         )
                         if cached is not None:
+                            if diagnostics and isinstance(cached, dict):
+                                cached = {**cached, "_request_diagnostics": list(diagnostics)}
                             return cached
                     acquired_at = datetime.now(timezone.utc)
                     payload = fetcher(*args)
                     if not isinstance(payload, dict):
                         payload = {"data": payload}
+                    if diagnostics:
+                        payload["_request_diagnostics"] = list(diagnostics)
                     if cache_store is not None and cache_id is not None:
                         cache_store.save_cached(cache_id, payload, acquired_at=acquired_at)
                     return payload
@@ -442,6 +447,7 @@ class DataAcquisitionService:
                 return {
                     **safe.partial_data,
                     "error": str(safe),
+                    **({"_request_diagnostics": list(diagnostics)} if diagnostics else {}),
                     "_coverage": {
                         "status": "unavailable",
                         "reason_code": safe.reason_code,
@@ -451,6 +457,20 @@ class DataAcquisitionService:
                 }
 
         data: dict[str, Any] = {}
+        universe_policy = self.ar_config.get("equity_universe_policy")
+        if universe_policy:
+            from tradingagents.strategies.data_sources.equity_universe import (
+                POLICY as UNIVERSE_POLICY,
+                fetch_equity_universe,
+            )
+            if universe_policy == UNIVERSE_POLICY:
+                data["equity_universe"] = _acquire(
+                    "equity_universe",
+                    _fn("equity_universe", fetch_equity_universe),
+                    (),
+                )
+            else:
+                data["equity_universe"] = {"error": "unsupported equity universe policy"}
         # Sequential yfinance batch first (shared regime + weather_ag core prices)
         if "yfinance" in requested and ("yfinance" in available or "yfinance" in overrides):
             data["yfinance"] = _acquire(
@@ -574,12 +594,22 @@ class DataAcquisitionService:
     def fetch_yfinance_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch Yahoo research prices for the 13 live core tickers + VIX."""
         from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
+        from tradingagents.strategies.orchestration.research_resilience import (
+            _project_capabilities,
+            acquisition_group,
+            acquisition_manifest,
+            capability_configured,
+        )
+        from tradingagents.strategies.orchestration.source_inputs import source_codec_limits
 
         source = self.registry.get("yfinance")
         if not isinstance(source, YFinanceSource):
             logger.warning("yfinance research source not available")
             return {}
 
+        capability = capability_configured(self.ar_config)
+        started_at = datetime.now(timezone.utc).isoformat()
+        groups: dict[str, Any] = {}
         core_tickers = list(YAHOO_RESEARCH_CORE_TICKERS)
         result: dict[str, Any] = {}
         failures: list[str] = []
@@ -587,9 +617,13 @@ class DataAcquisitionService:
         logger.info("Fetching Yahoo research prices for %d live core tickers", len(core_tickers))
         try:
             prices_df = source.fetch_prices(core_tickers, start_date, end_date)
+            if capability:
+                groups["research_prices"] = acquisition_group(core_tickers)
         except Exception as exc:
             error = source_fetch_error("Yahoo research history failed", exc)
             failures.append(str(error))
+            if capability:
+                groups["research_prices"] = acquisition_group(core_tickers, error=error)
             prices_df = error.partial_data.get("prices", pd.DataFrame())
 
         prices: dict[str, pd.DataFrame] = {}
@@ -605,19 +639,39 @@ class DataAcquisitionService:
             prices[core_tickers[0]] = prices_df
 
         result["prices"] = prices
-        self.price_cache.update(prices)
+        if not capability:
+            self.price_cache.update(prices)
 
         try:
             vix_df = source.fetch_vix(start_date, end_date)
+            if capability:
+                groups["vix"] = acquisition_group(["^VIX"])
         except Exception as exc:
             error = source_fetch_error("Yahoo VIX history failed", exc)
             failures.append(str(error))
-            vix_df = pd.DataFrame()
+            if capability:
+                groups["vix"] = acquisition_group(["^VIX"], error=error)
+            vix_df = error.partial_data.get("vix", pd.DataFrame()) if capability else pd.DataFrame()
         if not vix_df.empty:
             result["vix"] = vix_df
 
         if failures:
             result["error"] = "; ".join(failures)
+        if capability:
+            result["_capability_acquisition"] = acquisition_manifest(
+                "yfinance",
+                groups,
+                start_date,
+                end_date,
+                started_at,
+                datetime.now(timezone.utc).isoformat(),
+            )
+            accepted, _, _ = _project_capabilities(
+                result,
+                "yfinance",
+                codec_limits=source_codec_limits(self.config or {"autoresearch": self.ar_config}),
+            )
+            self.price_cache.update(accepted.get("prices", {}))
         return result
 
     def fetch_finnhub_data(
@@ -638,9 +692,14 @@ class DataAcquisitionService:
         settings = self.ar_config.get("finnhub_acquisition", {})
         if not isinstance(settings, Mapping):
             raise ValueError("finnhub_acquisition must be a mapping")
-        earnings_news_budget = int(settings.get("earnings_news_budget", 10))
-        earnings_article_budget = int(settings.get("earnings_article_budget", 5))
-        if earnings_news_budget < 0 or earnings_article_budget < 0:
+        earnings_news_budget = settings.get("earnings_news_budget", 10)
+        earnings_article_budget = settings.get("earnings_article_budget", 5)
+        if (
+            type(earnings_news_budget) is not int
+            or type(earnings_article_budget) is not int
+            or earnings_news_budget < 0
+            or earnings_article_budget < 0
+        ):
             raise ValueError("Finnhub acquisition budgets must be nonnegative integers")
 
         result: dict[str, Any] = {}
@@ -801,6 +860,12 @@ class DataAcquisitionService:
     def fetch_fred_data(self, start_date: str, end_date: str) -> dict[str, Any]:
         """Fetch FRED credit spreads and economic indicators."""
         from tradingagents.strategies.data_sources.fred_source import SERIES_MAP
+        from tradingagents.strategies.orchestration.research_resilience import (
+            FRED_GROUPS,
+            acquisition_group,
+            acquisition_manifest,
+            capability_configured,
+        )
 
         source = self.registry.get("fred")
         if source is None:
@@ -808,24 +873,46 @@ class DataAcquisitionService:
         start_date = min(
             start_date, (pd.Timestamp(end_date) - pd.DateOffset(months=18)).date().isoformat()
         )
+        capability = capability_configured(self.ar_config)
+        started_at = datetime.now(timezone.utc).isoformat()
+        groups: dict[str, Any] = {}
         result: dict[str, Any] = {}
         failures: list[str] = []
 
-        for label, method_name in (
-            ("credit spreads", "fetch_credit_spreads"),
-            ("economic indicators", "fetch_economic_indicators"),
+        for label, group_key, method_name in (
+            ("credit spreads", "credit_spreads", "fetch_credit_spreads"),
+            ("economic indicators", "economic_indicators", "fetch_economic_indicators"),
         ):
             try:
                 series_map = getattr(source, method_name)(start_date, end_date)
+                if capability:
+                    groups[group_key] = acquisition_group(FRED_GROUPS[group_key])
                 if isinstance(series_map, Mapping):
                     result.update(series_map)
             except SourceFetchError as exc:
                 result.update(exc.partial_data)
                 failures.append(str(exc))
+                if capability:
+                    groups[group_key] = acquisition_group(
+                        FRED_GROUPS[group_key], error=exc, independent=True
+                    )
             except Exception as exc:
                 logger.warning("FRED %s fetch failed: %s", label, exc)
                 failures.append(f"FRED {label} [provider_error]")
+                if capability:
+                    groups[group_key] = acquisition_group(
+                        FRED_GROUPS[group_key], error_text=failures[-1]
+                    )
 
+        if capability:
+            result["_capability_acquisition"] = acquisition_manifest(
+                "fred",
+                groups,
+                start_date,
+                end_date,
+                started_at,
+                datetime.now(timezone.utc).isoformat(),
+            )
         if failures:
             result["error"] = "; ".join(failures)
         result["vintage"] = {
@@ -871,6 +958,11 @@ class DataAcquisitionService:
                 )
                 payload.update(scoped)
                 result["coverage"] = scoped["coverage"]
+            elif (
+                hasattr(contracts, "coverage")
+                and contracts.coverage.get("issuer_attribution", {}).get("complete") is False
+            ):
+                payload["error"] = "USASpending issuer attribution incomplete"
             return payload
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)

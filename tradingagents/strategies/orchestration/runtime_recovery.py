@@ -475,20 +475,28 @@ def session_recovery_proof(state, generation, session, epoch_id):
                     raise ValueError('recovery phase proof invalid')
                 expected = row['post_state_digest']
             economics = {}
-            tables = (
-                ('fills','cash_events','marks','borrow_accruals','financing_accruals',
-                 'dividend_events','benchmark_observations','session_runs')
-                if use_unified
-                else ('fills','cash_events','marks','borrow_accruals','financing_accruals',
-                      'dividend_events','fee_events','benchmark_observations','session_runs',
-                      'session_invalidations')
-            )
-            for table in tables:
-                rows = connection.execute('SELECT * FROM '+table+' WHERE session=? ORDER BY 1 LIMIT 10001',
-                                          (session,)).fetchall()
-                if len(rows)>10000:
-                    raise ValueError('recovery economic proof exceeds bounds')
-                economics[table] = _hash_document([dict(row) for row in rows])
+            if use_unified:
+                for table in ('fills','cash_events','borrow_accruals','financing_accruals','session_runs','dividend_receivables'):
+                    rows = connection.execute('SELECT * FROM '+table+' WHERE cohort_id=? AND session=? ORDER BY 1 LIMIT 10001',
+                                              (name,session)).fetchall()
+                    if len(rows)>10000:
+                        raise ValueError('recovery economic proof exceeds bounds')
+                    economics[table] = _hash_document([dict(row) for row in rows])
+                for table, col in (('marks','session'),('benchmark_observations','session'),('dividend_events','ex_session')):
+                    rows = connection.execute('SELECT * FROM '+table+' WHERE '+col+'=? ORDER BY 1 LIMIT 10001',
+                                              (session,)).fetchall()
+                    if len(rows)>10000:
+                        raise ValueError('recovery economic proof exceeds bounds')
+                    economics[table] = _hash_document([dict(row) for row in rows])
+            else:
+                for table in ('fills','cash_events','marks','borrow_accruals','financing_accruals',
+                              'dividend_events','fee_events','benchmark_observations','session_runs',
+                              'session_invalidations'):
+                    rows = connection.execute('SELECT * FROM '+table+' WHERE session=? ORDER BY 1 LIMIT 10001',
+                                              (session,)).fetchall()
+                    if len(rows)>10000:
+                        raise ValueError('recovery economic proof exceeds bounds')
+                    economics[table] = _hash_document([dict(row) for row in rows])
             opening = (
                 connection.execute("SELECT * FROM cash_events WHERE cohort_id=? AND session IS NULL ORDER BY cash_event_id LIMIT 10001", (name,)).fetchall()
                 if use_unified

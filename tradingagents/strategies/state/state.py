@@ -92,7 +92,22 @@ class StateManager:
 
     @property
     def has_portfolio_ledger(self) -> bool:
-        return os.path.lexists(self.portfolio_ledger_path)
+        path = self.portfolio_ledger_path
+        if not os.path.lexists(path):
+            return False
+        gen_db = self._resolve_generation_db_path()
+        if gen_db is None:
+            return True
+        db = self._db if self._db is not None else GenerationDB(gen_db, readonly=True)
+        with db.connect(readonly=True) as conn:
+            if self.cohort_id is not None:
+                row = conn.execute(
+                    "SELECT 1 FROM accounting_state WHERE cohort_id = ? LIMIT 1",
+                    (self.cohort_id,),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT 1 FROM accounting_state LIMIT 1").fetchone()
+        return row is not None
 
     # --- Paper Trades (strictly read-only projection from PortfolioLedger) ---
 

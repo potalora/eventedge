@@ -336,6 +336,15 @@ def _extract_preflight_report(stdout: str) -> dict | None:
     if not stdout:
         return None
     lines = stdout.splitlines()
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                obj = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict):
+                return obj
     end = next(
         (i for i in range(len(lines) - 1, -1, -1) if lines[i].rstrip() == "}"), None
     )

@@ -221,42 +221,17 @@ def test_engine_retains_post_analysis_outside_target_in_health_but_not_priced_si
     assert health[0].evidence['universe_assessments'][0]['decision']=='outside_sip_exchange_universe'
     assert len(health[0].evidence['admission_manifest']['admitted'])==1
 
-def test_acquisition_fetches_asset_snapshot_before_edgar_with_same_deadline(monkeypatch):
-    from types import SimpleNamespace
+def test_acquisition_fetches_asset_snapshot_once(monkeypatch):
     from tradingagents.strategies.data_sources import equity_universe as module
     from tradingagents.strategies.data_sources.request_policy import current_provider_deadline
     engine=engine_for([]);engine.config={'autoresearch':engine.ar_config}
-    engine.paper_trade_strategies=[SimpleNamespace(data_sources=['edgar'])]
-    engine.registry=SimpleNamespace(available_sources=lambda:['edgar'],get=lambda name:None)
     events=[];master={'snapshot':snapshot([row()]),'coverage':{'complete':True}}
     def assets():
         events.append(('assets',current_provider_deadline('alpaca')));return master
-    def edgar(session, universe_data=None):
-        events.append(('edgar',current_provider_deadline('edgar')))
-        assert universe_data is not None and universe_data['snapshot']==master['snapshot']
-        return {'filings':[]}
     monkeypatch.setattr(module,'fetch_equity_universe',assets)
-    engine._fetch_edgar_events=edgar
     data=engine._fetch_all_data('2026-09-25','2026-10-09')
     assert data['equity_universe']['snapshot']==master['snapshot']
-    assert [x[0] for x in events]==['assets','edgar'] and events[0][1]==events[1][1]
-
-def test_monitor_excludes_only_bound_outside_filings_from_text_requests():
-    from types import SimpleNamespace
-    from tradingagents.strategies.learning.event_monitor import EventMonitor
-    from tradingagents.strategies.data_sources.evidence import CoverageRecords
-    rows=[{'adsh':str(i),'ciks':[str(i)],'form_type':'8-K','file_url':'https://fixture/'+str(i)} for i in (1,2,3)]
-    calls=[]
-    source=SimpleNamespace(is_available=lambda:True,
-        search_filings=lambda **kwargs:CoverageRecords(rows,coverage={'complete':True}),
-        get_filing_text=lambda url:calls.append(url) or 'Substantive filing text')
-    monitor=EventMonitor(SimpleNamespace(get=lambda name:source));monitor.as_of='2026-10-09'
-    monitor.equity_universe=EquityUniverse(snapshot([row('LISTED'),row('PINK','OTC')]),
-        company_map={'0':{'cik_str':1,'ticker':'PINK'},'1':{'cik_str':2,'ticker':'LISTED'}})
-    result=monitor.poll_edgar_filings(['8-K'])
-    assert calls==['https://fixture/2','https://fixture/3'] and len(result)==3
-    assert result[0]['text_status']=='outside_declared_equity_universe'
-    assert result[0]['universe_membership']['status']=='excluded'
+    assert [x[0] for x in events]==['assets'] and events[0][1] is not None
 
 
 def test_possible_alias_remains_required_in_ordinary_admission_and_postanalysis():

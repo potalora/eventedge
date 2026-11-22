@@ -77,7 +77,7 @@ def test_complete_inactive_tape_excludes_only_new_entry_and_preserves_analysis(p
     assert frozen['decisions']['NVDA']['daily_failure_reason'] == 'zero_activity'
     assert frozen['daily_attempts']['NVDA'][-1]['validation_error']
     assert frozen['evidence']['row_count'] == 1
-    assert len(owner._metric_store.read_strategy_health(session=SESSION)) == 48
+    assert len(owner._metric_store.read_strategy_health(session=SESSION)) == 20
     assert fixture.model_calls['enrichment'] >= 1
     assert all(row['input_coverage_valid'] and row['staging_valid'] for row in wire.values())
     assert all(not any(s['ticker'] == 'NVDA' for s in row['signals']) for row in wire.values())

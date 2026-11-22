@@ -100,6 +100,9 @@ def profile_contract(
         raise ValueError(f"invalid_generation_profile: {exc}") from exc
 
     ar = runtime_cfg.setdefault("autoresearch", {})
+    ar.setdefault("decision_clock_policy", "prospective_next_open_v1")
+    ar.setdefault("research_resilience_policy", "dependency_isolation_v1")
+    ar.setdefault("stabilization_profile_policy", POLICY)
     ledger_cfg = ar.setdefault("paper_ledger", {})
     base_policy = ledger_cfg.get("policy_id")
     if isinstance(base_policy, str) and base_policy.endswith(f"generation-config-{profile_sha256}"):
@@ -155,6 +158,82 @@ def optional_source_failure(item: Mapping[str, Any], payload: Any = None, failed
     if not source:
         return False
     return SOURCE_TAXONOMY.is_tier2(source) or source in {"openbb", "yahoo_research", "yfinance"}
+
+
+def source_support(
+    config: Mapping[str, Any], payload: Mapping[str, Any]
+) -> tuple[dict[str, Any], set[str]]:
+    """Reconstruct admitted capabilities and required supported sources."""
+    from ..modules import get_paper_trade_strategies
+    from .research_resilience import project_sources, strategy_capability_holds
+    from .source_inputs import source_codec_limits
+
+    ar = config.get("autoresearch", {})
+    capability_policy = ar.get("source_capability_policy")
+    strategies = configure_strategies(get_paper_trade_strategies(), ar, full_config=config)
+    names = set(payload) | {"fred", "yfinance"}
+    if ar.get("equity_universe_policy"):
+        names.add("equity_universe")
+    names.update(source for strategy in strategies for source in strategy.data_sources)
+    _, scope = project_sources(
+        payload,
+        names,
+        codec_limits=source_codec_limits(config),
+        capability_policy=capability_policy,
+    )
+    failed: set[str] = set()
+    if capability_policy is not None:
+        capabilities = scope.get("capabilities", {})
+        usable = lambda name: capabilities.get(name, {}).get("status") == "usable"
+        if not usable("fred.hy_spread") or not usable("fred.yield_curve"):
+            failed.add("fred")
+        if not usable("fred.vix") and not usable("yfinance.vix"):
+            failed.update(("fred", "yfinance"))
+    disabled = ar.get("disabled_strategies") or {}
+    for strategy in strategies:
+        if strategy.name in disabled:
+            continue
+        if capability_policy is not None:
+            failed.update(
+                name.split(".")[0]
+                for name in strategy_capability_holds(scope, strategy.name, strategy.data_sources)
+            )
+        failed.update(
+            source
+            for source in strategy.data_sources
+            if source not in {"fred", "yfinance", "openbb", "enrichment"}
+            and scope.get("sources", {}).get(source, {}).get("status") != "usable"
+        )
+    if (
+        ar.get("equity_universe_policy")
+        and scope.get("sources", {}).get("equity_universe", {}).get("status") != "usable"
+    ):
+        failed.add("equity_universe")
+    return scope, failed
+
+
+def healthy_supported_record(row: Mapping[str, Any], data_sources: Sequence[str]) -> bool:
+    """Keep healthy classifications consistent with the native health producer."""
+    evidence = row.get("evidence", {})
+    count = row.get("signal_count")
+    return (
+        type(evidence) is dict
+        and evidence.get("data_sources") == sorted(data_sources)
+        and type(count) is int
+        and count >= 0
+        and type(evidence.get("candidate_count")) is int
+        and evidence["candidate_count"] == count
+        and not evidence.get("provider_errors")
+        and not evidence.get("error_type")
+        and not evidence.get("error")
+        and (
+            row.get("status") == "signals"
+            and count > 0
+            or row.get("status") == "legitimate_no_event"
+            and count == 0
+            and evidence.get("screen_completed") is True
+        )
+    )
 
 
 def evaluate_completion(profile: OperatingProfile, facts: Mapping[str, Any]) -> dict[str, Any]:

@@ -1133,15 +1133,17 @@ def test_completed_projection_resume_retains_accepted_volatility_history(
                     _position(ticker) for ticker in _projection
                 ),
             )
-        before = {
-            cohort["config"].name: tuple(
-                cohort["ledger"]._connection.execute(
-                    f"SELECT COUNT(*) FROM {table}"
-                ).fetchone()[0]
-                for table in ("signals", "order_intents", "fills", "marks")
+        def _counts(cohort):
+            conn = cohort["ledger"]._connection
+            cid = cohort["config"].name
+            pid = f"foundation-{cohort['config'].horizon}"
+            return (
+                conn.execute("SELECT COUNT(*) FROM signals WHERE policy_id = ?", (pid,)).fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM order_intents WHERE cohort_id = ?", (cid,)).fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM fills WHERE cohort_id = ?", (cid,)).fetchone()[0],
+                conn.execute("SELECT COUNT(*) FROM marks").fetchone()[0],
             )
-            for cohort in orchestrator.cohorts
-        }
+        before = {cohort["config"].name: _counts(cohort) for cohort in orchestrator.cohorts}
         frozen_path = next((tmp_path / "source_inputs").glob("*.json"))
         accepted_bytes = frozen_path.read_bytes()
         histories["UI"] = pd.DataFrame(
@@ -1159,24 +1161,10 @@ def test_completed_projection_resume_retains_accepted_volatility_history(
         assert orchestrator._metric_store.read_candidate_input_issues(
             orchestrator._epoch_id, SESSION
         ) == ()
-        after = {
-            cohort["config"].name: tuple(
-                cohort["ledger"]._connection.execute(
-                    f"SELECT COUNT(*) FROM {table}"
-                ).fetchone()[0]
-                for table in ("signals", "order_intents", "fills", "marks")
-            )
-            for cohort in orchestrator.cohorts
-        }
+        after = {cohort["config"].name: _counts(cohort) for cohort in orchestrator.cohorts}
         assert all(after[name] == counts for name, counts in before.items() if name != unfinished_name)
         orchestrator.run_daily(SESSION.isoformat())
-        repeated = {
-            cohort["config"].name: tuple(
-                cohort["ledger"]._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                for table in ("signals", "order_intents", "fills", "marks")
-            )
-            for cohort in orchestrator.cohorts
-        }
+        repeated = {cohort["config"].name: _counts(cohort) for cohort in orchestrator.cohorts}
         assert repeated == after
     finally:
         for cohort in orchestrator.cohorts:

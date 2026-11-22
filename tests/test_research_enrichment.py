@@ -58,25 +58,25 @@ def test_failed_optional_facts_never_reach_any_of_16_committees(pipeline, monkey
     from test_research_hold_staging import _enable, _run
     from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
     fixture, owner, _ = _enable(pipeline)
-    fixture.fault = 'edgar_partial'
+    fixture.fault = 'usaspending_partial'
     poison = {'profiles': {'AAPL': {'sector': 'UNTRUSTED'}},
               'errors': {'profiles': {'AAPL': {'reason_code': 'timeout'}}}}
     monkeypatch.setattr(type(owner), '_fetch_openbb_enrichment', lambda self, _: deepcopy(poison))
-    original, seen = PortfolioCommittee.synthesize, []
-    def synthesize(self, *args, **kwargs):
+    original, seen = PortfolioCommittee.synthesize_horizon, []
+    def synthesize_horizon(self, *args, **kwargs):
         seen.append(deepcopy(kwargs['enrichment']))
         return original(self, *args, **kwargs)
-    monkeypatch.setattr(PortfolioCommittee, 'synthesize', synthesize)
+    monkeypatch.setattr(PortfolioCommittee, 'synthesize_horizon', synthesize_horizon)
     result, wire, _ = _run(pipeline)
     assert not any(row['error'] for row in wire.values()), wire
-    assert len(seen) == 16 and seen == [{'profiles': {}}] * 16
+    assert len(seen) == 4 and seen == [{'profiles': {}}] * 4
     assert all(row['committee_decision_status']['research_enrichment_scope']['excluded'] for row in wire.values())
     assert all(row['degraded'] for row in wire.values())
     fixture.block_all = True
     monkeypatch.setattr(type(owner), '_fetch_openbb_enrichment', lambda self, _: pytest.fail('must reuse frozen enrichment'))
     repeated, repeated_wire, _ = _run(pipeline)
     assert repeated['outcome'] == result['outcome']
-    assert len(seen) == 16
+    assert len(seen) == 4
     assert all(row['committee_decision_status']['research_enrichment_scope']['excluded'] for row in repeated_wire.values())
 
 
@@ -85,7 +85,7 @@ def test_deadline_expires_after_screening_preserves_all_16_books_exits(pipeline,
     from test_research_hold_staging import _enable, _run, _seed_books, _assert_safe_hold
     from tradingagents.strategies.orchestration import daily_pipeline
     fixture, owner, _ = _enable(pipeline)
-    fixture.fault = 'edgar_partial'
+    fixture.fault = 'usaspending_partial'
     seeded = _seed_books(owner)
     original = daily_pipeline.run_candidate_volatility_validation
     def expire_after_prices(state):
@@ -110,7 +110,7 @@ def test_only_typed_optional_provider_failures_are_contained(pipeline, monkeypat
     from test_research_hold_staging import _enable, _run
     from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
     fixture, owner, _ = _enable(pipeline)
-    fixture.fault = 'edgar_partial'
+    fixture.fault = 'usaspending_partial'
     def failed(self, _):
         if failure == 'provider':
             raise SourceFetchError('offline provider', reason_code='timeout')
@@ -129,11 +129,11 @@ def test_only_typed_optional_provider_failures_are_contained(pipeline, monkeypat
     ('research_authority', 'projection_sha256'), ('research_authority', 'shared_context_sha256'),
     ('research_enrichment_scope', 'original_sha256')])
 def test_completed_staging_checks_original_durable_research_receipts(pipeline, monkeypatch, receipt, field):
-    import json
+    import hashlib, json
     from test_research_hold_staging import _enable, _run
     from tradingagents.strategies.orchestration.multi_strategy_engine import MultiStrategyEngine
     fixture, _, _ = _enable(pipeline)
-    fixture.fault = 'edgar_partial'
+    fixture.fault = 'usaspending_partial'
     original, captured = MultiStrategyEngine.screen_and_stage, []
     def remember(self, **kwargs):
         if not captured:
@@ -146,29 +146,31 @@ def test_completed_staging_checks_original_durable_research_receipts(pipeline, m
     fixture.block_all = True
     assert original(engine, **kwargs)['replayed'] is True
     ledger = engine.ledger
-    row = ledger._connection.execute('SELECT session,epoch_id,policy_id,payload_json FROM committee_decisions').fetchone()
+    row = ledger._connection.execute('SELECT session,epoch_id,policy_id,payload_json FROM committee_decisions WHERE cohort_id=?', (ledger.cohort_id,)).fetchone()
     payload = json.loads(row['payload_json'])
     payload['status'][receipt][field] = 'f' * 64
-    ledger._connection.execute('UPDATE committee_decisions SET payload_json=? WHERE session=? AND epoch_id=? AND policy_id=?',
-        (json.dumps(payload, sort_keys=True, separators=(',', ':')), row['session'], row['epoch_id'], row['policy_id']))
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    ledger._connection.execute('UPDATE committee_decisions SET payload_json=?, payload_sha256=? WHERE cohort_id=? AND session=? AND epoch_id=? AND policy_id=?',
+        (encoded, hashlib.sha256(encoded.encode('utf-8')).hexdigest(), ledger.cohort_id, row['session'], row['epoch_id'], row['policy_id']))
     with pytest.raises(ValueError, match='research_.*conflict'):
         original(engine, **kwargs)
     assert not fixture.blocked_calls
 
 
 def test_completed_daily_replay_checks_original_durable_source_authority(pipeline):
-    import json
+    import hashlib, json
     from test_research_hold_staging import _enable, _run
     fixture, owner, _ = _enable(pipeline)
-    fixture.fault = 'edgar_partial'
+    fixture.fault = 'usaspending_partial'
     result, wire, _ = _run(pipeline)
     assert result['outcome'] == 'degraded' and all(not row['error'] for row in wire.values())
     ledger = owner.cohorts[0]['ledger']
-    row = ledger._connection.execute('SELECT session,epoch_id,policy_id,payload_json FROM committee_decisions').fetchone()
+    row = ledger._connection.execute('SELECT session,epoch_id,policy_id,payload_json FROM committee_decisions WHERE cohort_id=?', (ledger.cohort_id,)).fetchone()
     payload = json.loads(row['payload_json'])
     payload['status']['research_authority']['source_scope_sha256'] = 'f' * 64
-    ledger._connection.execute('UPDATE committee_decisions SET payload_json=? WHERE session=? AND epoch_id=? AND policy_id=?',
-        (json.dumps(payload, sort_keys=True, separators=(',', ':')), row['session'], row['epoch_id'], row['policy_id']))
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    ledger._connection.execute('UPDATE committee_decisions SET payload_json=?, payload_sha256=? WHERE cohort_id=? AND session=? AND epoch_id=? AND policy_id=?',
+        (encoded, hashlib.sha256(encoded.encode('utf-8')).hexdigest(), ledger.cohort_id, row['session'], row['epoch_id'], row['policy_id']))
     fixture.block_all = True
     repeated, repeated_wire, _ = _run(pipeline)
     assert repeated['outcome'] == 'failed'

@@ -421,9 +421,12 @@ class LedgerConnection:
             path = Path(path_or_db)
             if not os.path.lexists(path):
                 raise FileNotFoundError(path)
-            db = GenerationDB.open_readonly(
-                path, busy_timeout_ms=busy_timeout_ms, immutable=immutable
-            )
+            try:
+                db = GenerationDB.open_readonly(
+                    path, busy_timeout_ms=busy_timeout_ms, immutable=immutable
+                )
+            except ValueError:
+                db = None
             use_immutable = immutable
         conn = _open_ledger_connection(
             path,

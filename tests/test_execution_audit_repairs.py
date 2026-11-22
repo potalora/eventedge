@@ -70,7 +70,11 @@ def test_stop_cooldown_and_intraday_cash_causality(tmp_path,stop_price,opening,l
 def test_cost_reserve(tmp_path):
     l=PortfolioLedger(tmp_path/'p.db','cohort',D(1000)); new=intent(l,'new','MSFT',qty=9)
     r=SessionExecutor(l,cfg(cash_reserve_pct=.1)).execute_open_and_mark(MON,'epoch',bundle({'MSFT':bar('MSFT')}),{},at(MON))
-    assert r.valid and l.intent(new.intent_id).status=='rejected'; l.close()
+    # T+1 open trimming reduces qty from 9 to 8 to preserve the 10% costed cash reserve.
+    assert r.valid and l.intent(new.intent_id).status=='filled'
+    fills = l.read_fills(MON, MON)
+    assert len(fills) == 1 and fills[0].quantity == 8
+    assert l.account_state().cash >= D('100'); l.close()
 
 @pytest.mark.parametrize('value',[None,float('nan')])
 def test_missing_action_evidence_is_not_zero(value):
@@ -233,6 +237,9 @@ def test_costed_policy_rebases_existing_and_pending_exposure(tmp_path,held_pendi
     l.mark(FRI,marks,'epoch',at(FRI))
     new=fixture._stage_entry(l,ex,'MSFT',MON,10,suffix='new')
     r=ex.execute_open_and_mark(MON,'epoch',bundle({'AAPL':bar('AAPL'),'HELD':bar('HELD'),'MSFT':bar('MSFT',p='99.96')},benchmarks=ex.benchmark_symbols),{},at(MON))
-    assert r.valid and l.intent(new.intent_id).status=='rejected'
-    assert l.account_state().net_equity==D(5000)
+    # T+1 open trimming reduces qty from 10 to 9 when costed slippage pushes notional over cap.
+    assert r.valid and l.intent(new.intent_id).status=='filled'
+    fills = l.read_fills(MON, MON)
+    assert len(fills) == 1 and fills[0].quantity == 9
+    assert l.account_state().net_equity < D(5000)
     l.close()

@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import hashlib
 import json
 
 import pytest
@@ -715,9 +716,9 @@ def test_fully_complete_replay_revalidates_staged_volatility_without_market_io(
         fill_count = len(ledger.read_fills(MONDAY, MONDAY))
 
         ledger.connection.execute(
-            "DELETE FROM policy_session_contexts "
-            "WHERE cohort_id = ? AND session = ? AND binding_kind = 'staging'",
-            (ledger.cohort_id, FRIDAY.isoformat()),
+            "DELETE FROM policy_audit_records "
+            "WHERE cohort_id = ? AND record_type = 'policy_session_context' AND record_id = ?",
+            (ledger.cohort_id, f"{FRIDAY.isoformat()}:staging"),
         )
         ledger.connection.commit()
 
@@ -926,39 +927,44 @@ def test_restart_rejects_missing_or_changed_committed_execution_policy_binding(
 
         if mutation == "delete":
             ledger.connection.execute(
-                "DELETE FROM policy_session_contexts "
-                "WHERE cohort_id = ? AND session = ? AND binding_kind = 'execution'",
-                (ledger.cohort_id, MONDAY.isoformat()),
+                "DELETE FROM policy_audit_records "
+                "WHERE cohort_id = ? AND record_type = 'policy_session_context' AND record_id = ?",
+                (ledger.cohort_id, f"{MONDAY.isoformat()}:execution"),
             )
         else:
             row = ledger.connection.execute(
-                "SELECT * FROM policy_session_contexts "
-                "WHERE cohort_id = ? AND session = ? AND binding_kind = 'execution'",
-                (ledger.cohort_id, MONDAY.isoformat()),
+                "SELECT * FROM policy_audit_records "
+                "WHERE cohort_id = ? AND record_type = 'policy_session_context' AND record_id = ?",
+                (ledger.cohort_id, f"{MONDAY.isoformat()}:execution"),
             ).fetchone()
             assert row is not None
-            context = json.loads(row["context_json"])
+            envelope = json.loads(row["payload_json"])
+            context = json.loads(envelope["context_json"])
             context["cash"] = float(context["cash"]) + 1.0
             context_json = json.dumps(
                 context, sort_keys=True, separators=(",", ":"), ensure_ascii=True
             )
             context_digest = stable_id("policy_context", context_json)
-            payload = json.loads(row["payload_json"])
-            payload["context_digest"] = context_digest
-            payload_json = json.dumps(
-                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            binding_payload = json.loads(envelope["payload_json"])
+            binding_payload["context_digest"] = context_digest
+            binding_payload_json = json.dumps(
+                binding_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            )
+            envelope["context_json"] = context_json
+            envelope["context_digest"] = context_digest
+            envelope["payload_json"] = binding_payload_json
+            envelope["payload_digest"] = stable_id("policy_binding", binding_payload_json)
+            envelope_json = json.dumps(
+                envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True
             )
             ledger.connection.execute(
-                "UPDATE policy_session_contexts SET context_json = ?, "
-                "context_digest = ?, payload_json = ?, payload_digest = ? "
-                "WHERE cohort_id = ? AND session = ? AND binding_kind = 'execution'",
+                "UPDATE policy_audit_records SET payload_json = ?, payload_sha256 = ? "
+                "WHERE cohort_id = ? AND record_type = 'policy_session_context' AND record_id = ?",
                 (
-                    context_json,
-                    context_digest,
-                    payload_json,
-                    stable_id("policy_binding", payload_json),
+                    envelope_json,
+                    hashlib.sha256(envelope_json.encode("utf-8")).hexdigest(),
                     ledger.cohort_id,
-                    MONDAY.isoformat(),
+                    f"{MONDAY.isoformat()}:execution",
                 ),
             )
         ledger.connection.commit()

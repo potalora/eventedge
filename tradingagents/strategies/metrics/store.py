@@ -15,7 +15,11 @@ import json
 from pathlib import Path
 import sqlite3
 
-from tradingagents.strategies.execution.recovery_evidence import RecoveryEvidenceStore
+from tradingagents.strategies.execution.recovery_evidence import (
+    RecoveryEvidenceStore,
+    _decode_candidate_bar_recovery,
+    _decode_candidate_input_issue,
+)
 from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
 from tradingagents.strategies.state.generation_db import (
     DEFAULT_BUSY_TIMEOUT_MS,
@@ -129,6 +133,9 @@ class MetricStore:
     @property
     def read_only(self) -> bool:
         return self._read_only
+
+    def _connect(self):
+        return self.db.connect(readonly=self._read_only)
 
     @staticmethod
     def _json(record: object) -> str:
@@ -892,3 +899,6 @@ class MetricStore:
         return self.recovery_evidence.read_candidate_signal_identity_binding(
             epoch_id, session
         )
+
+    _candidate_bar_recovery = staticmethod(_decode_candidate_bar_recovery)
+    _candidate_input_issue = staticmethod(_decode_candidate_input_issue)

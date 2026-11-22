@@ -113,7 +113,7 @@ def claim_session(parent, session):
 def logical_database(path):
     from tradingagents.strategies.orchestration._io import open_sqlite
     with open_sqlite(path, readonly=True) as db:
-        require(db.execute('PRAGMA quick_check').fetchall() == [('ok',)], 'sqlite_integrity')
+        require([tuple(r) for r in db.execute('PRAGMA quick_check').fetchall()] == [('ok',)], 'sqlite_integrity')
         schema = [tuple(r) for r in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()]
         tables = {}
         for kind, name, _, _ in schema:

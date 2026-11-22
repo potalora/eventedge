@@ -26,8 +26,6 @@ def test_cli_exit_follows_reconstructed_workflow_completion(
     monkeypatch.setattr(cli, "build_operational_report", lambda *a, **k: report)
     paths = {"json": tmp_path / "report.json", "markdown": tmp_path / "report.md"}
     monkeypatch.setattr(cli, "write_operational_report", lambda *a, **k: paths)
-    monkeypatch.setattr(cli, "publish_repair_proposal", lambda *a: None)
-    monkeypatch.setattr(cli, "publish_intervention_proposal", lambda *a: {})
 
     result = cli.main([
         "--repo-root", str(tmp_path), "--generation", "gen_100",
@@ -46,8 +44,6 @@ def test_legacy_report_exit_retains_existing_coverage_contract(tmp_path, monkeyp
     monkeypatch.setattr(cli, "write_operational_report", lambda *a, **k: {
         "json": tmp_path / "report.json", "markdown": tmp_path / "report.md",
     })
-    monkeypatch.setattr(cli, "publish_repair_proposal", lambda *a: None)
-    monkeypatch.setattr(cli, "publish_intervention_proposal", lambda *a: {})
     assert cli.main([
         "--repo-root", str(tmp_path), "--generation", "gen_100",
         "--date", "2026-10-15", "--snapshot-guaranteed",

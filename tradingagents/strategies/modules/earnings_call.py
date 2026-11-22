@@ -35,10 +35,16 @@ def _eps_surprise_magnitude(item: Mapping[str, Any]) -> float | None:
     pct = _finite_float(item.get("eps_surprise_pct"))
     if pct is not None:
         return abs(pct) / 100.0
-    eps_actual = _finite_float(item.get("eps_actual"))
-    eps_estimate = _finite_float(item.get("eps_estimate"))
-    if eps_actual is not None and eps_estimate is not None and eps_estimate != 0.0:
-        return abs((eps_actual - eps_estimate) / abs(eps_estimate))
+    eps_actual = _finite_float(
+        item.get("eps_actual") if item.get("eps_actual") is not None else item.get("epsActual")
+    )
+    eps_estimate = _finite_float(
+        item.get("eps_estimate") if item.get("eps_estimate") is not None else item.get("epsEstimate")
+    )
+    if eps_actual is not None and eps_estimate is not None:
+        denom = max(abs(eps_estimate), 0.10) if "epsActual" in item else abs(eps_estimate)
+        if denom > 0.0:
+            return abs(eps_actual - eps_estimate) / denom
     meta = item.get("metadata")
     if isinstance(meta, Mapping):
         return _eps_surprise_magnitude(meta)
@@ -47,13 +53,26 @@ def _eps_surprise_magnitude(item: Mapping[str, Any]) -> float | None:
 
 def _liquidity_metric(item: Mapping[str, Any]) -> float:
     """Extract market cap / dollar volume liquidity signal (0.0 if absent)."""
-    for key in ("market_cap", "avg_dollar_volume", "dollar_volume", "liquidity", "volume"):
+    keys = (
+        "marketCap",
+        "market_cap",
+        "revenueActual",
+        "revenue_actual",
+        "revenueEstimate",
+        "avg_dollar_volume",
+        "dollar_volume",
+        "avgVolume",
+        "avg_volume",
+        "liquidity",
+        "volume",
+    )
+    for key in keys:
         val = _finite_float(item.get(key))
         if val is not None and val > 0:
             return val
     meta = item.get("metadata")
     if isinstance(meta, Mapping):
-        for key in ("market_cap", "avg_dollar_volume", "dollar_volume", "liquidity", "volume"):
+        for key in keys:
             val = _finite_float(meta.get(key))
             if val is not None and val > 0:
                 return val

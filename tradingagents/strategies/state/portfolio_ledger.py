@@ -7,11 +7,13 @@ resting-stop, policy-audit, and 10-phase digest invariants.
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 
 from tradingagents.strategies.execution.cost_model import PaperCostModel
+from tradingagents.strategies.execution.ids import stable_id
 from tradingagents.strategies.state.generation_db import (
     DEFAULT_BUSY_TIMEOUT_MS,
     GenerationDB,
@@ -99,6 +101,17 @@ class PortfolioLedger(
         ledger._cost_model = PaperCostModel()
         ledger._borrow_cost_reject_above = Decimal("0.05")
         return ledger
+
+    def recovery_binding_id(self) -> str:
+        """Return a path-sensitive opaque identity for critical-gap recovery."""
+        stat = self.path.stat()
+        return stable_id(
+            "ledger_recovery_binding",
+            self.cohort_id,
+            os.path.abspath(self.path),
+            stat.st_dev,
+            stat.st_ino,
+        )
 
 
 __all__ = [

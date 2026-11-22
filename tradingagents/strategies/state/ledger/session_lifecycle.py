@@ -132,6 +132,37 @@ class SessionLifecycleMixin:
                 else []
             )
 
+        has_dividend_receivables = (
+            self._connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dividend_receivables'"
+            ).fetchone()
+            is not None
+        )
+        applied_lot_actions = (
+            rows(
+                "SELECT a.action_id AS action_id, a.lot_id AS lot_id "
+                "FROM lot_action_applications a "
+                "JOIN lots l ON l.lot_id = a.lot_id "
+                "WHERE l.cohort_id = ? AND l.open_qty > 0 "
+                "UNION "
+                "SELECT e.action_id AS action_id, r.lot_id AS lot_id "
+                "FROM dividend_receivables r "
+                "JOIN dividend_events e ON e.dividend_event_id = r.event_id "
+                "JOIN lots l ON l.lot_id = r.lot_id "
+                "WHERE r.cohort_id = ? AND l.open_qty > 0 "
+                "ORDER BY action_id, lot_id",
+                (self.cohort_id, self.cohort_id),
+            )
+            if has_dividend_receivables
+            else rows(
+                "SELECT a.action_id AS action_id, a.lot_id AS lot_id "
+                "FROM lot_action_applications a "
+                "JOIN lots l ON l.lot_id = a.lot_id "
+                "WHERE l.cohort_id = ? AND l.open_qty > 0 "
+                "ORDER BY action_id, lot_id",
+                (self.cohort_id,),
+            )
+        )
         return {
             "account": account.__dict__,
             "dividend_receivables": receivables,
@@ -157,38 +188,37 @@ class SessionLifecycleMixin:
             ),
             "due_intents": due_intents,
             "open_lots": self.open_exit_positions(),
-            "applied_lot_actions": rows(
-                "SELECT a.action_id AS action_id, a.lot_id AS lot_id "
-                "FROM lot_action_applications a "
-                "JOIN lots l ON l.lot_id = a.lot_id "
-                "WHERE l.cohort_id = ? AND l.open_qty > 0 "
-                "UNION "
-                "SELECT e.action_id AS action_id, r.lot_id AS lot_id "
-                "FROM dividend_receivables r "
-                "JOIN dividend_events e ON e.dividend_event_id = r.event_id "
-                "JOIN lots l ON l.lot_id = r.lot_id "
-                "WHERE r.cohort_id = ? AND l.open_qty > 0 "
-                "ORDER BY action_id, lot_id",
-                (self.cohort_id, self.cohort_id),
-            ),
+            "applied_lot_actions": applied_lot_actions,
             "exit_allocations": [dict(r) for r in allocations],
             "session_cash_events": rows(
                 "SELECT * FROM cash_events WHERE cohort_id = ? AND session = ? "
                 "ORDER BY cash_event_id",
                 (self.cohort_id, _encode(session)),
             ),
-            "session_actions": rows(
-                "SELECT * FROM corporate_actions WHERE session = ? ORDER BY action_id",
-                (_encode(session),),
+            "session_actions": (
+                rows(
+                    "SELECT * FROM corporate_actions WHERE session = ? ORDER BY action_id",
+                    (_encode(session),),
+                )
+                if self.phase_completed(session, "apply_corporate_actions")
+                else []
             ),
-            "session_marks": rows(
-                "SELECT * FROM marks WHERE session = ? ORDER BY mark_id",
-                (_encode(session),),
+            "session_marks": (
+                rows(
+                    "SELECT * FROM marks WHERE session = ? ORDER BY mark_id",
+                    (_encode(session),),
+                )
+                if self.phase_completed(session, "mark_positions")
+                else []
             ),
-            "session_benchmarks": rows(
-                "SELECT * FROM benchmark_observations WHERE session = ? "
-                "ORDER BY observation_id",
-                (_encode(session),),
+            "session_benchmarks": (
+                rows(
+                    "SELECT * FROM benchmark_observations WHERE session = ? "
+                    "ORDER BY observation_id",
+                    (_encode(session),),
+                )
+                if self.phase_completed(session, "record_benchmarks")
+                else []
             ),
             "session_snapshots": rows(
                 "SELECT * FROM account_snapshots WHERE cohort_id = ? AND session = ? "
@@ -338,12 +368,18 @@ class SessionLifecycleMixin:
                     (_encode(processed_at), expected_pre_state_digest, phase_id),
                 )
             value = operation()
+            self._connection.execute(
+                """UPDATE session_phases
+                   SET completed_at = ?
+                   WHERE session_phase_id = ?""",
+                (_encode(processed_at), phase_id),
+            )
             post_state_digest = self.execution_governed_state_digest(session)
             self._connection.execute(
                 """UPDATE session_phases
-                   SET completed_at = ?, post_state_digest = ?
+                   SET post_state_digest = ?
                    WHERE session_phase_id = ?""",
-                (_encode(processed_at), post_state_digest, phase_id),
+                (post_state_digest, phase_id),
             )
             return True, value, post_state_digest
 

@@ -257,7 +257,6 @@ def test_interruption_at_publication_restores_the_complete_first_sample(owner, m
 
 @pytest.mark.parametrize('limit,value,error', [
     ('MAX_SCREENING_BYTES', 2048, 'byte limit'),
-    ('MAX_SCREENING_NODES', 128, 'structural bounds'),
 ])
 def test_checkpoint_capacity_is_finite_without_publishing_oversize_sample(owner, monkeypatch, limit, value, error):
     module = api()

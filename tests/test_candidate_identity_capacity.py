@@ -28,7 +28,7 @@ def identities(count):
             "horizon": "30d",
             "ticker": "TEST",
             "event_key": f"event-{i:06}",
-            "strategy": "filing_analysis",
+            "strategy": "earnings_call",
         }
         for i in range(count)
     )
@@ -38,10 +38,11 @@ def test_native_size_four_horizon_journal_discovery_round_trips_normalized(tmp_p
     signals = [
         {
             "ticker": f"T{i % 1000:04}",
-            "strategy": "filing_analysis",
+            "strategy": "earnings_call",
             "journal_only": True,
             "metadata": {
-                "accession_number": f"0000000000-26-{i:06}",
+                "year": 2020 + (i // 4),
+                "quarter": (i % 4) + 1,
                 "non_actionable_reason": "missing_source_text",
             },
         }

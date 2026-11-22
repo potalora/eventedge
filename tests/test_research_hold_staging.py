@@ -59,7 +59,7 @@ def _seed_books(owner, exit_kind='time'):
 
 
 def _hold_fault(fixture, monkeypatch, hold):
-    fixture.fault = 'edgar_partial'
+    fixture.fault = 'usaspending_partial'
     if hold == 'regime':
         from tradingagents.strategies.data_sources.fred_source import FREDSource
         def unavailable(*args, **kwargs):
@@ -101,8 +101,8 @@ def _assert_safe_hold(owner, seeded, result, wire):
                  if intent.price_rule == 'next_session_open']
         assert len(exits) == 1 and exits[0].requested_qty == 1
         assert exits[0].eligible_session == next_day
-        assert ledger._connection.execute('SELECT COUNT(*) FROM staging_runs WHERE session=?',
-            (str(SESSION),)).fetchone()[0] == 1
+        assert ledger._connection.execute('SELECT COUNT(*) FROM staging_runs WHERE cohort_id=? AND session=?',
+            (name, str(SESSION))).fetchone()[0] == 1
 
 
 def _durable_book_snapshot(owner):
@@ -127,7 +127,7 @@ def test_research_hold_preserves_exits_stops_prior_fills_and_zero_new_entries_in
     result, wire, _ = _run(pipeline)
     _assert_safe_hold(owner, seeded, result, wire)
     health = owner._metric_store.read_strategy_health(session=SESSION)
-    assert len(health) == 48
+    assert len(health) == 20
     assert any(row.status == 'data_failure' for row in health)
     accepted = accepted_input_bytes(config)
     assert any(name.startswith('screening/') for name in accepted)
@@ -159,8 +159,8 @@ def _interrupt_hold_after_five_staging_commits(pipeline, monkeypatch):
     result, _, artifact = _run(pipeline)
     assert result['outcome'] == 'failed' and artifact['process_status'] == 'timeout'
     assert len(committed) == 5
-    assert sum(cohort['ledger']._connection.execute('SELECT COUNT(*) FROM staging_runs WHERE session=?',
-        (str(SESSION),)).fetchone()[0] for cohort in owner.cohorts) == 5
+    assert sum(cohort['ledger']._connection.execute('SELECT COUNT(*) FROM staging_runs WHERE cohort_id=? AND session=?',
+        (cohort['config'].name, str(SESSION))).fetchone()[0] for cohort in owner.cohorts) == 5
     monkeypatch.setattr(PortfolioLedger, 'complete_staging', original)
     fixture.block_all = True
     return fixture, owner, config, seeded

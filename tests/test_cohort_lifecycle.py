@@ -1356,7 +1356,7 @@ class TestCandidateBarLifecycle:
             with sqlite3.connect(orchestrator._metric_store.path) as connection:
                 payload = json.loads(
                     connection.execute(
-                        "SELECT payload_json FROM candidate_bar_recoveries "
+                        "SELECT payload_json FROM bar_recoveries "
                         "WHERE recovery_id = ?",
                         (recovery.recovery_id,),
                     ).fetchone()[0]
@@ -1373,7 +1373,7 @@ class TestCandidateBarLifecycle:
                 else:
                     final_attempt["fetched_at"] = "2026-03-31 19:00:00+00:00"
                 connection.execute(
-                    "UPDATE candidate_bar_recoveries SET payload_json = ? "
+                    "UPDATE bar_recoveries SET payload_json = ? "
                     "WHERE recovery_id = ?",
                     (
                         json.dumps(payload, sort_keys=True, separators=(",", ":")),
@@ -1444,11 +1444,16 @@ class TestCandidateBarLifecycle:
             durable_candidate_payloads = " ".join(
                 row[0]
                 for table in (
-                    "candidate_bar_recoveries",
+                    "bar_recoveries",
                     "candidate_input_issues",
-                    "candidate_signal_identity_bindings",
                 )
                 for row in connection.execute(f"SELECT payload_json FROM {table}")
+            ) + " " + " ".join(
+                str(value)
+                for row in connection.execute(
+                    "SELECT horizon, ticker, event_key, strategy FROM candidate_signal_identity_rows"
+                )
+                for value in row
             )
         assert sentinel not in durable_candidate_payloads
         assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
@@ -1551,24 +1556,15 @@ class TestCandidateBarLifecycle:
             ).canonical_payload()
             with sqlite3.connect(orchestrator._metric_store.path) as connection:
                 row = connection.execute(
-                    "SELECT binding_id, payload_json "
+                    "SELECT binding_id "
                     "FROM candidate_signal_identity_bindings "
                     "WHERE epoch_id = ? AND session = ?",
                     (orchestrator._epoch_id, session.isoformat()),
                 ).fetchone()
-                binding = json.loads(row[1])
-                binding["identities"] = [
-                    identity
-                    for identity in binding["identities"]
-                    if identity["ticker"] != "ALX"
-                ]
                 connection.execute(
-                    "UPDATE candidate_signal_identity_bindings SET payload_json = ? "
-                    "WHERE binding_id = ?",
-                    (
-                        json.dumps(binding, sort_keys=True, separators=(",", ":")),
-                        row[0],
-                    ),
+                    "DELETE FROM candidate_signal_identity_rows "
+                    "WHERE binding_id = ? AND ticker = ?",
+                    (row[0], "ALX"),
                 )
             candidate_calls = len(source.candidate_calls)
             source.resolve_candidate_daily_bars = (

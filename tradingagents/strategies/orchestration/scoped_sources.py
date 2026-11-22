@@ -73,7 +73,14 @@ def accepted_attribution_limitation(candidate, strategy: str, proofs: dict) -> b
             or meta.get('analysis_failure_reason')):
         return False
     rows = [row for row in scope['awards'] if row['award_key'] == meta.get('award_key')]
+    issuer_attr = meta.get('issuer_attribution')
+    if not isinstance(issuer_attr, dict):
+        return False
+    normalized_attr = {
+        k: v for k, v in issuer_attr.items()
+        if k not in {'match_method', 'crosswalk_sha256'}
+    }
     return (len(rows) == 1 and rows[0]['status'] in {'unresolved', 'verified_no_listed_target'}
             and rows[0]['award_id'] == meta.get('award_id')
-            and rows[0]['attribution'] == meta.get('issuer_attribution')
+            and rows[0]['attribution'] == normalized_attr
             and rows[0]['attribution']['reason'] == meta.get('non_actionable_reason'))

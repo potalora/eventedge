@@ -97,7 +97,8 @@ def test_tier2_circuit_breaker_isolates_failed_source_to_dependent_strategy_only
     )
 
     by_strategy = {rec.strategy: rec for rec in health}
-    assert by_strategy["weather_ag"].status == "unavailable"
+    assert by_strategy["weather_ag"].status == "data_failure"
+    assert by_strategy["weather_ag"].evidence["circuit_breaker"] == "unavailable"
     assert by_strategy["weather_ag"].evidence["failed_sources"] == ["noaa"]
     assert by_strategy["govt_contracts"].status == "signals"
     assert len(signals) == 1 and signals[0]["ticker"] == "LMT"

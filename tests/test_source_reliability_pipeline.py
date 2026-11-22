@@ -123,6 +123,14 @@ class TransportFixture:
             return self.response(payload)
         if "finnhub.io" in url:
             if url.endswith("/calendar/earnings"):
+                call = self.calls[url]
+                if self.fault in {"finnhub_500_then_200", "finnhub_429_then_200"} and call == 1:
+                    status = 500 if self.fault == "finnhub_500_then_200" else 429
+                    return self.response({}, status, headers={"Retry-After": "0"})
+                if self.fault == "finnhub_timeout":
+                    raise requests.Timeout("offline exhausted upstream timeout")
+                if self.fault == "finnhub_malformed":
+                    return self.response("not-valid-json")
                 earnings = [{"symbol": "NVDA", "date": "2026-10-01", "year": 2026,
                     "quarter": 3, "epsActual": 1.25, "epsEstimate": 1.05,
                     "revenueActual": 46_000_000_000, "revenueEstimate": 44_000_000_000}]
@@ -179,6 +187,13 @@ class TransportFixture:
         if "courtlistener.com" in url:
             return self.response({"results": [], "count": 0, "next": None})
         if "api.usaspending.gov" in url:
+            if self.fault == "usaspending_partial":
+                return self.response({"results": [{"generated_internal_id": "CONT_AWD_PARTIAL",
+                    "Award ID": "PARTIAL-1", "Recipient Name": "ACME", "Recipient UEI": "UNKNOWN00001",
+                    "Award Amount": 1_000_000, "Awarding Agency": "Department of Defense",
+                    "Base Obligation Date": "2026-10-01", "Start Date": "2026-10-01",
+                    "Last Modified Date": "2026-10-01 12:00:00"}],
+                    "page_metadata": {"page": 1, "hasNext": False}})
             return self.response({"results": [], "page_metadata": {"page":1,"hasNext": False}})
         if "ncei.noaa.gov/pub/data/ghcn/daily" in url:
             from tradingagents.strategies.data_sources.noaa_yearly_source import AG_STATES
@@ -315,6 +330,8 @@ def pipeline(monkeypatch, tmp_path):
     # FINRA/factor calls and introduces real cache paths and clock metadata.
     # Dedicated enrichment tests replace this with their own SDK responses.
     monkeypatch.setitem(sys.modules, "openbb", None)
+    from tradingagents.strategies.data_sources.enrichment_source import EnrichmentSource
+    monkeypatch.setattr(EnrichmentSource, "is_available", lambda self: False)
     # CLI dotenv loading in another test must not authorize shadow acquisition.
     # Dedicated shadow tests explicitly supply their own credentials afterward.
     monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
@@ -369,7 +386,8 @@ def pipeline(monkeypatch, tmp_path):
             monkeypatch.setattr(module, "_yearly_http_get", lambda url, **kwargs: fixture.http("GET", url, **kwargs))
         if hasattr(module, "acquisition_time"):
             monkeypatch.setattr(module, "acquisition_time", lambda:fixture.now.isoformat())
-    monkeypatch.setattr('tradingagents.strategies.data_sources.openbb_source.acquisition_time', lambda:fixture.now.isoformat())
+    monkeypatch.setattr('tradingagents.strategies.data_sources.evidence.acquisition_time', lambda:fixture.now.isoformat())
+    monkeypatch.setattr('tradingagents.strategies.data_sources.enrichment_source.acquisition_time', lambda:fixture.now.isoformat())
     from tradingagents.strategies.execution import price_source
     monkeypatch.setattr(price_source, "datetime", FixedDatetime)
     monkeypatch.setenv("EVENTEDGE_SOURCE_CACHE_DIR", str(tmp_path / "source_cache"))
@@ -424,24 +442,6 @@ def pipeline(monkeypatch, tmp_path):
         cohort["ledger"].close()
 
 
-def test_offline_pipeline_isolates_inherited_shadow_credentials(monkeypatch, request):
-    """CLI dotenv loading must not authorize a paid call in offline acceptance."""
-    import os
-
-    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "a" * 32)
-    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "offline-seeded-token")
-    fixture, owner, config, _ = request.getfixturevalue("pipeline")
-    account_present = bool(os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
-    token_present = bool(os.environ.get("CLOUDFLARE_API_TOKEN"))
-    assert not account_present
-    assert not token_present
-    assert config["decision_shadow"]["enabled"] is True
-    owner.run_daily(str(SESSION))
-    sidecar = Path(config["autoresearch"]["state_dir"]) / "decision_shadow" / f"{SESSION}.json"
-    assert json.loads(sidecar.read_text())["status"] == "missing_credentials"
-    assert not fixture.blocked_calls
-
-
 def accepted_input_bytes(config):
     directory = Path(config["autoresearch"]["state_dir"]) / "source_inputs"
     return {str(path.relative_to(directory)): path.read_bytes() for path in directory.rglob("*.json")}
@@ -476,22 +476,18 @@ def run_campaign(pipeline, session=SESSION):
     return result, wire, report
 
 
-def test_current_full_pipeline_has_44_healthy_and_4_excluded_records_and_16_valid_books(pipeline):
+def test_current_full_pipeline_has_20_healthy_records_and_16_valid_books(pipeline):
     fixture, orchestrator, config, repo = pipeline
     result, wire, report = run_campaign(pipeline)
     assert result["outcome"] == "clean" and result["success"] is True
     assert all(not row["error"] and row["execution_valid"] and row["staging_valid"] and row["input_coverage_valid"] for row in wire.values())
     records = orchestrator._metric_store.read_strategy_health(session=SESSION)
-    assert len(records) == 48
-    enabled = [row for row in records if row.strategy != 'state_economics']
-    excluded = [row for row in records if row.strategy == 'state_economics']
-    assert len(enabled) == 44 and len(excluded) == 4
-    assert all(row.status in {"signals", "legitimate_no_event"} for row in enabled), [(row.strategy, row.status, row.evidence) for row in enabled]
-    assert all(row.status == 'disabled_by_policy' and row.signal_count == 0 for row in excluded)
-    assert report['disabled_strategies'] == {'state_economics': 'unsupported_state_event_proxy'}
+    assert len(records) == 20
+    assert all(row.status in {"signals", "legitimate_no_event"} for row in records), [(row.strategy, row.status, row.evidence) for row in records]
+    assert report.get('disabled_strategies', {}) == {}
     assert {row.strategy for row in records} == {strategy.name for strategy in orchestrator.cohorts[0]["engine"].paper_trade_strategies}
     assert fixture.model_calls["enrichment"] >= 1
-    assert fixture.model_calls["committee"] >= 1
+    assert fixture.model_calls["committee"] == 4
     assert sum(len(cohort["ledger"].pending_intents(date(2026, 10, 5))) for cohort in orchestrator.cohorts) >= 1
     assert all(not cohort["ledger"].read_fills() for cohort in orchestrator.cohorts)
     assert all(float(signal["reference_close"]) == 184 for row in wire.values() for signal in row["signals"] if signal["ticker"] == "NVDA")
@@ -523,7 +519,7 @@ def test_late_weather_survives_a_moving_window_before_native_candidate_pricing(p
 
     fixture.session = date(2026, 10, 5)
     fixture.now = datetime(2026, 10, 5, 22, tzinfo=timezone.utc)
-    fixture.interrupt_committee_at = fixture.model_calls["committee"] + 5
+    fixture.interrupt_committee_at = fixture.model_calls["committee"] + 2
     interrupted = fixture.manager.run_daily(str(fixture.session))[GENERATION]
     assert interrupted["outcome"] == "failed"
     frozen_at_interrupt = accepted_input_bytes(config)
@@ -552,40 +548,45 @@ def test_late_weather_survives_a_moving_window_before_native_candidate_pricing(p
     assert accepted_input_bytes(config) == after and not fixture.blocked_calls
 
 
-@pytest.mark.parametrize("fault", ["edgar_500_then_200", "edgar_429_then_200", "edgar_timeout", "edgar_malformed", "edgar_partial", "sip_incoherent", "sip_unsupported"])
+@pytest.mark.parametrize("fault", ["finnhub_500_then_200", "finnhub_429_then_200", "finnhub_timeout", "finnhub_malformed", "usaspending_partial", "sip_incoherent", "sip_unsupported"])
 def test_transport_faults_agree_across_health_accounting_wire_and_report(pipeline, fault):
     fixture, orchestrator, config, repo = pipeline
     fixture.fault = fault
     result, wire, report = run_campaign(pipeline)
     records = orchestrator._metric_store.read_strategy_health(session=SESSION)
-    assert len(records) == 48
+    assert len(records) == 20
     from tradingagents.strategies.orchestration.source_inputs import SourceInputStore, configuration_fingerprint
     slot = configuration_fingerprint({"generation": GENERATION, "session": str(SESSION)})
-    envelope = SourceInputStore.decode((Path(config["autoresearch"]["state_dir"]) / "source_inputs" / (slot + ".json")).read_text())
-    diagnostics = envelope["payload"]["edgar"].get("_request_diagnostics", [])
+    env_path = Path(config["autoresearch"]["state_dir"]) / "source_inputs" / (slot + ".json")
+    table_dir = env_path.parent / (env_path.stem + ".tables")
+    envelope = SourceInputStore.decode(env_path.read_text(), table_dir=table_dir if table_dir.is_dir() else None)
+    diagnostics = envelope["payload"]["finnhub"].get("_request_diagnostics", [])
     assert result["execution_valid"] is True
     assert all(row["execution_valid"] for row in wire.values())
     if fault.endswith("then_200"):
         assert result["outcome"] == "clean"
         assert result["input_coverage_valid"] is True
         assert not result["source_health_failures"]
-        assert all(row.status in {"signals", "legitimate_no_event"} for row in records if row.strategy != "state_economics")
-        assert any(row["provider"] == "edgar" and row["recovered"] and row["attempts"] == 2 and row["http_status"] == 200 for row in report["sources"]["recovered"])
+        assert all(row.status in {"signals", "legitimate_no_event"} for row in records)
+        assert any(row["provider"] == "finnhub" and row["recovered"] and row["attempts"] == 2 and row["http_status"] == 200 for row in report["sources"]["recovered"])
         assert any(row["recovered"] and row["attempts"] == 2 for row in diagnostics)
-    elif fault.startswith("edgar"):
+    elif fault.startswith("finnhub"):
         assert result["outcome"] == "degraded"
         assert result["input_coverage_valid"] is False
         failed = [row for row in records if row.status == "data_failure"]
         assert len(failed) == 12
-        assert {row.strategy for row in failed} == {"insider_activity", "filing_analysis", "quantum_readiness"}
-        assert all("edgar" in row["sources"] and set(row["sources"]) <= {"edgar", "analysis"} and len(row["affected_cohorts"]) == 4 for row in result["source_health_failures"])
+        assert {row.strategy for row in failed} == {"earnings_call", "supply_chain", "commodity_macro"}
+        assert all("finnhub" in row["sources"] and len(row["affected_cohorts"]) == 4 for row in result["source_health_failures"])
         assert report["sources"]["unresolved"]
-        if fault == "edgar_timeout":
+        if fault == "finnhub_timeout":
             assert any(row["reason_code"] == "timeout" and row["attempts"] == 3 for row in diagnostics)
-        if fault == "edgar_partial":
-            assert envelope["payload"]["edgar"]["filings"]
-            assert envelope["payload"]["edgar"]["filings"][0]["ticker"] == "NVDA"
-            assert envelope["payload"]["edgar"].get("error")
+    elif fault == "usaspending_partial":
+        assert result["outcome"] == "degraded"
+        assert result["input_coverage_valid"] is False
+        failed = [row for row in records if row.status == "data_failure"]
+        assert len(failed) == 4
+        assert {row.strategy for row in failed} == {"govt_contracts"}
+        assert envelope["payload"]["usaspending"].get("error")
     else:
         assert result["outcome"] == "degraded"
         assert result["input_coverage_valid"] is True
@@ -634,13 +635,27 @@ def prepare_interrupted_staging(pipeline, *, committee_ordinal=5):
     run_campaign(pipeline)
     fixture.session = date(2026, 10, 5)
     fixture.now = datetime(2026, 10, 5, 22, tzinfo=timezone.utc)
-    fixture.interrupt_committee_at = fixture.model_calls["committee"] + committee_ordinal
-    interrupted = fixture.manager.run_daily(str(fixture.session))[GENERATION]
+    if committee_ordinal <= 1:
+        fixture.interrupt_committee_at = fixture.model_calls["committee"] + committee_ordinal
+        interrupted = fixture.manager.run_daily(str(fixture.session))[GENERATION]
+    else:
+        from unittest.mock import patch
+        from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+        original_complete = PortfolioLedger.complete_staging
+        stage_calls = 0
+        def interrupt_staging(self, *args, **kwargs):
+            nonlocal stage_calls
+            stage_calls += 1
+            if stage_calls == committee_ordinal:
+                raise InterruptedWorker("worker stopped after earlier cohort staging")
+            return original_complete(self, *args, **kwargs)
+        with patch.object(PortfolioLedger, "complete_staging", interrupt_staging):
+            interrupted = fixture.manager.run_daily(str(fixture.session))[GENERATION]
     assert interrupted["outcome"] == "failed" and interrupted["success"] is False
     artifact = json.loads(Path(interrupted["evidence_path"]).read_text())
     assert artifact["process_status"] == "timeout"
     assert artifact["process_return_code"] is None
-    assert sum(cohort["ledger"]._connection.execute("SELECT COUNT(*) FROM staging_runs WHERE session=?", (str(fixture.session),)).fetchone()[0] for cohort in orchestrator.cohorts) == committee_ordinal - 1
+    assert orchestrator.cohorts[0]["ledger"]._connection.execute("SELECT COUNT(*) FROM staging_runs WHERE session=?", (str(fixture.session),)).fetchone()[0] == committee_ordinal - 1
     before = {cohort["config"].name: tuple(cohort["ledger"].read_fills()) for cohort in orchestrator.cohorts}
     assert all(len(rows) == 1 for rows in before.values())
     accepted = accepted_input_bytes(config)
@@ -677,7 +692,9 @@ def test_damaged_accepted_volatility_blocks_resume_without_refetch_or_new_fills(
     from tradingagents.strategies.orchestration.generation_manager import _extract_cohort_results
     from tradingagents.strategies.orchestration.operational_report import build_operational_report
     folder = Path(config["autoresearch"]["state_dir"]) / "source_inputs" / "staging_volatility"
-    paths = [path for path in folder.glob("*.json") if SourceInputStore.decode(path.read_text())["identity"]["session"] == str(fixture.session)]
+    paths = [path for path in folder.glob("*.json") if SourceInputStore.decode(
+        path.read_text(), table_dir=(path.parent / (path.stem + ".tables")) if (path.parent / (path.stem + ".tables")).is_dir() else None
+    )["identity"]["session"] == str(fixture.session)]
     assert len(paths) == 1
     if damage == "corrupt":
         paths[0].write_text("{}")

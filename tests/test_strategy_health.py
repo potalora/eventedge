@@ -128,7 +128,7 @@ def test_store_keeps_exactly_one_health_record_per_active_strategy(tmp_path) -> 
         for strategy in strategies
     ]
 
-    assert len({record.strategy for record in records}) == 12
+    assert len({record.strategy for record in records}) == 5
     for record in records:
         store.save_strategy_health(record)
         store.save_strategy_health(record)
@@ -137,7 +137,7 @@ def test_store_keeps_exactly_one_health_record_per_active_strategy(tmp_path) -> 
     assert {record.strategy for record in stored} == {
         record.strategy for record in records
     }
-    assert len(stored) == 12
+    assert len(stored) == 5
 
 
 def test_screen_and_enrich_returns_health_for_exception_zero_and_signals(
@@ -183,7 +183,7 @@ def test_screen_and_enrich_returns_health_for_exception_zero_and_signals(
 def test_absent_required_source_is_data_failure(tmp_path) -> None:
     engine = MultiStrategyEngine(
         config={"autoresearch": {"state_dir": str(tmp_path)}},
-        strategies=[_ScreenStrategy("missing_source", [], data_sources=("edgar",))],
+        strategies=[_ScreenStrategy("missing_source", [], data_sources=("usaspending",))],
     )
     engine._build_regime_model = lambda data: {}
 
@@ -193,7 +193,7 @@ def test_absent_required_source_is_data_failure(tmp_path) -> None:
 
     assert health[0].status == "data_failure"
     assert health[0].evidence["provider_errors"] == {
-        "edgar": "missing from shared data"
+        "usaspending": "missing from shared data"
     }
 
 
@@ -202,7 +202,7 @@ def test_unavailable_required_source_is_explicit_data_failure(tmp_path) -> None:
 
     engine = MultiStrategyEngine(
         config={"autoresearch": {"state_dir": str(tmp_path)}},
-        strategies=[_ScreenStrategy("unavailable_source", [], data_sources=("edgar",))],
+        strategies=[_ScreenStrategy("unavailable_source", [], data_sources=("usaspending",))],
         registry=DataSourceRegistry(),
     )
     engine._build_regime_model = lambda data: {}
@@ -212,8 +212,11 @@ def test_unavailable_required_source_is_explicit_data_failure(tmp_path) -> None:
         "2026-08-03", data, epoch_id="epoch-1", policy_id="policy-1"
     )
 
-    assert data["edgar"]["error"] == "source unavailable or skipped"
+    assert "usaspending" not in data
     assert health[0].status == "data_failure"
+    assert health[0].evidence["provider_errors"] == {
+        "usaspending": "missing from shared data"
+    }
 
 
 def test_available_openbb_enrichment_source_is_not_missing_data_failure(
@@ -221,17 +224,17 @@ def test_available_openbb_enrichment_source_is_not_missing_data_failure(
 ) -> None:
     engine = MultiStrategyEngine(
         config={"autoresearch": {"state_dir": str(tmp_path)}},
-        strategies=[_ScreenStrategy("openbb_enriched", [], data_sources=("openbb",))],
+        strategies=[_ScreenStrategy("openbb_enriched", [], data_sources=("enrichment",))],
         registry=_OpenBBRegistry(available=True),
     )
     engine._build_regime_model = lambda data: {}
     data = engine._fetch_all_data("2026-07-01", "2026-08-03")
 
     _, _, health = engine.screen_and_enrich(
-        "2026-08-03", data, epoch_id="epoch-1", policy_id="policy-1"
+        "2026-08-03", {**data, "enrichment": {"enrichment_only": True}}, epoch_id="epoch-1", policy_id="policy-1"
     )
 
-    assert data["openbb"] == {"enrichment_only": True}
+    assert "enrichment" not in data
     assert health[0].status == "legitimate_no_event"
 
 
@@ -240,17 +243,16 @@ def test_unavailable_openbb_enrichment_source_is_optional(
 ) -> None:
     engine = MultiStrategyEngine(
         config={"autoresearch": {"state_dir": str(tmp_path)}},
-        strategies=[_ScreenStrategy("openbb_enriched", [], data_sources=("openbb",))],
+        strategies=[_ScreenStrategy("openbb_enriched", [], data_sources=("enrichment",))],
         registry=_OpenBBRegistry(available=False),
     )
     engine._build_regime_model = lambda data: {}
     data = engine._fetch_all_data("2026-07-01", "2026-08-03")
 
     _, _, health = engine.screen_and_enrich(
-        "2026-08-03", data, epoch_id="epoch-1", policy_id="policy-1"
+        "2026-08-03", {**data, "enrichment": {"error": "source unavailable or skipped"}}, epoch_id="epoch-1", policy_id="policy-1"
     )
 
-    assert data["openbb"]["error"] == "source unavailable or skipped"
     assert health[0].status == "legitimate_no_event"
 
 
@@ -524,5 +526,5 @@ def test_configured_health_policy_is_horizon_scoped_without_conflicts(tmp_path) 
         assert orchestrator._persist_horizon_health(records, session, policy_id)
 
     stored = store.read_strategy_health(epoch_id="epoch-1", session=session)
-    assert len(stored) == 24
+    assert len(stored) == 10
     assert set(policies) == {record.policy_id for record in stored}

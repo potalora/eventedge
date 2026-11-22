@@ -36,7 +36,8 @@ def transport(monkeypatch):
 
 def engine(tmp_path, **settings):
     cfg = {"autoresearch": {"state_dir": str(tmp_path), "autoresearch_model": "gpt-6-luna",
-                            "thesis_model": "gpt-6-astra", "llm_effort": "high", "thesis_effort": "high"}}
+                            "thesis_model": "gpt-6.2-sol", "llm_effort": "high", "thesis_effort": "high",
+                            "llm_billing_mode": "api"}}
     result = MultiStrategyEngine(config=cfg, registry=DataSourceRegistry(), use_llm=True)
     result._analyzer._client = OpenAI(api_key="offline-private", base_url="https://offline.invalid/v1", **settings)
     return result
@@ -44,30 +45,35 @@ def engine(tmp_path, **settings):
 
 def filing(**metadata):
     return Candidate(ticker="AAPL", date="2026-03-30", metadata={
-        "needs_llm_analysis": True, "analysis_type": "filing_change", "current_text": "Retained filing",
+        "needs_llm_analysis": True, "analysis_type": "earnings_call", "analysis_text": "Retained earnings release",
+        "text_source": "transcript", "year": 2026, "quarter": 1,
         "discovery_id": "discovery_fixture", **metadata})
 
 
 def enrich(worker, candidate=None):
-    return worker._enrich_with_llm([candidate or filing()], "filing_analysis")[0]
+    return worker._enrich_with_llm([candidate or filing()], "earnings_call")[0]
 
 
 def test_daily_four_horizons_validate_each_filing_with_one_physical_request(tmp_path, transport, monkeypatch):
     from test_30day_simulation import _authoritative_orchestrator, _cohort_config, _authoritative_committee
-    from tradingagents.strategies.modules.filing_analysis import FilingAnalysisStrategy
+    from tradingagents.strategies.modules.earnings_call import EarningsCallStrategy
     import tradingagents.strategies.learning.llm_analyzer as analyzer_module
 
     configs = [replace(_cohort_config(tmp_path, horizon), horizon=horizon, use_llm=True)
                for horizon in ("30d", "3m", "6m", "1y")]
     orch, _ = _authoritative_orchestrator(tmp_path, cohort_configs=configs,
-                                         strategy_modules=[FilingAnalysisStrategy()], model="gpt-6-astra")
-    inputs = {"yfinance": {}, "edgar": {"filings": [{"ticker": "AAPL", "form_type": "10-K",
-              "file_date": "2026-03-30", "accession_number": "0000320193-26-000001",
-              "current_text": "Retained filing", "file_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019326000001/report.htm"}]}}
+                                         strategy_modules=[EarningsCallStrategy()], model="gpt-6.2-sol")
+    inputs = {"yfinance": {}, "finnhub": {"transcripts": [{"symbol": "AAPL", "date": "2026-03-30",
+              "year": 2026, "quarter": 1, "eps_actual": 1.5, "eps_estimate": 1.2,
+              "revenue_actual": 95_000_000_000, "revenue_estimate": 90_000_000_000,
+              "published_at": "2026-03-30T17:00:00+00:00",
+              "transcript_text": "Retained earnings release", "text_source": "transcript"}]}}
     validated = []
     parse = analyzer_module._parse_json_response
     monkeypatch.setattr(analyzer_module, "_parse_json_response", lambda text: (validated.append(text), parse(text))[1])
     for cohort in orch.cohorts:
+        cohort["engine"].config["autoresearch"]["llm_billing_mode"] = "api"
+        cohort["engine"]._analyzer.config["autoresearch"]["llm_billing_mode"] = "api"
         cohort["engine"]._fetch_all_data = lambda start, end: deepcopy(inputs)
         cohort["engine"]._analyzer._client = OpenAI(api_key="offline-private", base_url="https://offline.invalid/v1")
     try:
@@ -76,9 +82,10 @@ def test_daily_four_horizons_validate_each_filing_with_one_physical_request(tmp_
         assert all(row["execution_valid"] for row in results.values()), results
         assert len(validated) == 4
         assert len(transport[0]) == 1
-        records = [row for cohort in orch.cohorts for row in cohort["ledger"].read_signals()
-                   if row.strategy == "filing_analysis"]
+        records = [row for row in orch.cohorts[0]["ledger"].read_signals()
+                   if row.strategy == "earnings_call"]
         assert len(records) == 4
+        assert len({row.policy_id for row in records}) == 4
         assert len({row.event_key for row in records}) == 1
         assert len({row.evidence_hash for row in records}) == 1
         from tradingagents.strategies.candidate_response_reuse import _MEMO, _CANDIDATE
@@ -127,9 +134,11 @@ def test_request_or_validation_changes_do_not_reuse(tmp_path, transport, change,
         with candidate_response_memo():
             assert enrich(worker).metadata["analysis_status"] == "validated"
             if change == "prompt":
-                candidate.metadata["current_text"] += " changed"
+                candidate.metadata["analysis_text"] += " changed"
             elif change == "override":
-                worker._analyzer.set_prompt_override("filing_change", "Override system")
+                request = deepcopy(transport[0][0]["request"])
+                monkeypatch.setattr(worker._analyzer, "analyze_earnings_call", lambda *args, **kwargs: json.loads(worker._analyzer._call_llm(
+                    "Override system", request["prompt"])))
             elif change == "effort":
                 worker._analyzer._thesis_effort = "medium"
             elif change == "model":
@@ -152,7 +161,7 @@ def test_request_or_validation_changes_do_not_reuse(tmp_path, transport, change,
                     transport[0][0]["request"]["system"], transport[0][0]["request"]["prompt"])))
             else:
                 request = deepcopy(transport[0][0]["request"])
-                monkeypatch.setattr(worker._analyzer, "analyze_filing_change", lambda *args, **kwargs: json.loads(worker._analyzer._call_llm(
+                monkeypatch.setattr(worker._analyzer, "analyze_earnings_call", lambda *args, **kwargs: json.loads(worker._analyzer._call_llm(
                     request["system"], request["prompt"], max_tokens=1024 if change == "max_tokens" else request["max_tokens"],
                     role="bounded" if change == "role" else "thesis")))
             assert enrich(worker, candidate).metadata["analysis_status"] == "validated"
@@ -216,7 +225,7 @@ def test_cached_hit_after_deadline_still_holds_entire_candidate_sample(tmp_path,
         with candidate_response_memo(), model_budget(110.):
             enrich(worker)
             now[0] = 111.
-            candidates = worker._enrich_with_llm([filing(), filing(discovery_id="second")], "filing_analysis")
+            candidates = worker._enrich_with_llm([filing(), filing(discovery_id="second")], "earnings_call")
         assert len(transport[0]) == 1
         assert all(c.journal_only and c.metadata["analysis_failure_reason"] == "model_deadline_exhausted" for c in candidates)
     finally:
@@ -227,14 +236,14 @@ def test_committee_and_standalone_requests_are_not_reused(tmp_path, transport):
     from tradingagents.strategies.candidate_response_reuse import candidate_response_memo
     from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
     worker = engine(tmp_path)
-    committee = PortfolioCommittee({"autoresearch": {"autoresearch_model": "gpt-6-astra"}})
+    committee = PortfolioCommittee({"autoresearch": {"llm_billing_mode": "api", "paper_trade": {"portfolio_committee_model": "gpt-6.2-sol"}}})
     committee._client = worker._analyzer._client
     try:
         with candidate_response_memo():
             enrich(worker)
             for _ in range(2):
                 committee._call_llm(system="sys", prompt="committee")
-                worker._analyzer.analyze_filing_change("Retained filing", "", "AAPL")
+                worker._analyzer.analyze_earnings_call("Retained earnings release", "AAPL")
         assert len(transport[0]) == 5
     finally:
         worker._analyzer._client.close()
@@ -309,7 +318,7 @@ def test_deadline_expiring_in_cached_candidate_entity_validation_holds_sample(tm
         with candidate_response_memo(), model_budget(110.):
             assert enrich(worker, unresolved()).metadata["analysis_status"] == "validated"
             slow[0] = True
-            result = worker._enrich_with_llm([unresolved()], "filing_analysis")
+            result = worker._enrich_with_llm([unresolved()], "earnings_call")
         assert len(transport[0]) == 1
         assert all(row.journal_only and row.metadata["analysis_status"] == "failed" for row in result)
         assert all(row.metadata["analysis_failure_reason"] == "model_deadline_exhausted" for row in result)
@@ -325,7 +334,7 @@ def test_digest_collision_cannot_authorize_different_requests(tmp_path, transpor
     try:
         with reuse.candidate_response_memo():
             enrich(worker)
-            enrich(worker, filing(current_text="Different retained filing"))
+            enrich(worker, filing(analysis_text="Different retained earnings release"))
         assert len(transport[0]) == 2
     finally:
         worker._analyzer._client.close()
@@ -357,7 +366,7 @@ def test_anthropic_auth_configuration_is_part_of_exact_client_namespace(tmp_path
     from tradingagents.strategies.candidate_response_reuse import candidate_response_memo
     worker = engine(tmp_path)
     worker._analyzer._client.close()
-    worker._analyzer._model_name = worker._analyzer._thesis_model = "claude-sonnet-5"
+    worker._analyzer._model_name = worker._analyzer._thesis_model = "claude-haiku-4-5-20251001"
     clients = [Anthropic(api_key="offline-private", auth_token=token, base_url="https://offline.invalid")
                for token in ("token-one", "token-one", "token-two")]
     try:

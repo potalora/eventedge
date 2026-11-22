@@ -20,10 +20,9 @@ def fingerprint(owner):
     tables = ('fills', 'cash_events', 'fee_events', 'dividend_events', 'borrow_accruals',
               'financing_accruals', 'marks', 'account_snapshots', 'order_status_transitions',
               'session_execution_contexts', 'session_phases', 'staging_runs', 'accounting_state',
-              'lots', 'order_intents', 'intent_signals', 'intent_policy_provenance',
-              'policy_session_contexts', 'committee_decisions', 'ticker_quarantines',
-              'corporate_actions', 'dividend_receivables',
-              'dividend_payment_terms', 'dividend_payment_observations')
+              'lots', 'order_intents', 'intent_signals', 'policy_audit_records',
+              'committee_decisions', 'ticker_quarantines',
+              'corporate_actions', 'dividend_receivables')
     return [[tuple(tuple(r) for r in c['ledger'].connection.execute('SELECT * FROM '+t+' ORDER BY 1'))
              for t in tables] for c in owner.cohorts]
 
@@ -228,7 +227,10 @@ def test_missing_actual_last_book_staging_volatility_rejects_before_good_books_a
     monkeypatch.setattr(executor, 'execute_open_and_mark', original)
     # Remove the actual source of the sealed entry-risk inputs, keeping the
     # immutable seal intact. It must never silently default missing volatility.
-    owner.cohorts[-1]['ledger'].connection.execute("DELETE FROM policy_session_contexts WHERE binding_kind='staging'")
+    owner.cohorts[-1]['ledger'].connection.execute(
+        "DELETE FROM policy_audit_records WHERE cohort_id=? AND record_type='policy_session_context' AND record_id LIKE '%:staging'",
+        (owner.cohorts[-1]['ledger'].cohort_id,),
+    )
     before, before_calls, before_models = fingerprint(owner), fixture.calls.copy(), fixture.model_calls.copy()
     fixture.block_all = True
     result = recovery.recover_owner(owner, session, now=fixture.now)
@@ -360,12 +362,12 @@ def exact_supported_owner(pipeline, monkeypatch):
     from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator, build_default_cohorts
     from test_source_reliability_pipeline import GENERATION, COMMIT
     fixture, historical, base, repo = prospective(pipeline, monkeypatch)
-    profile = Path(__file__).parents[1] / 'config/profiles/stabilization-v1.json'
+    profile = Path(__file__).parents[1] / 'config/profiles/gen003-clean.json'
     digest = hashlib.sha256(profile.read_bytes()).hexdigest()
     config = apply_generation_config(base, profile, digest)
     ar = config['autoresearch']
     ar['state_dir'] = str(repo / 'supported-profile-state')
-    for name in ('finnhub_api_key', 'fred_api_key', 'courtlistener_token', 'usda_nass_api_key', 'fmp_api_key'):
+    for name in ('finnhub_api_key', 'fred_api_key', 'usda_nass_api_key', 'fmp_api_key'):
         ar[name] = base['autoresearch'].get(name, '')
     ar['finnhub_reliability']['rate_delay_s'] = 0
     # The historical transport fixture predates capability acquisition metadata.
@@ -383,8 +385,7 @@ def exact_supported_owner(pipeline, monkeypatch):
         return values
     monkeypatch.setattr(FREDSource, '_get_series', fred_series)
     from tradingagents.strategies.orchestration import daily_pipeline
-    from tradingagents.strategies.data_sources import courtlistener_source, usaspending_source
-    monkeypatch.setattr(courtlistener_source, 'datetime', daily_pipeline.datetime)
+    from tradingagents.strategies.data_sources import usaspending_source
     monkeypatch.setattr(usaspending_source, 'datetime', daily_pipeline.datetime)
     monkeypatch.setenv('EVENTEDGE_GENERATION_CONFIG_FILE', str(profile))
     monkeypatch.setenv('EVENTEDGE_GENERATION_CONFIG_SHA256', digest)

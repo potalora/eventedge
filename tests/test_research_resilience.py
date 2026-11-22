@@ -140,12 +140,13 @@ def test_failed_shared_regime_cannot_influence_unrelated_candidate(tmp_path):
     assert next(item for item in health if item.strategy == 'good').status == 'data_failure'
 
 
-def test_policy_absence_preserves_existing_provider_projection(tmp_path):
+def test_policy_absence_runs_tier2_circuit_breaker_per_strategy(tmp_path):
     engine, strategies = _screen_engine(tmp_path, enabled=False)
-    signals, regime, _ = engine.screen_and_enrich(
+    signals, regime, health = engine.screen_and_enrich(
         '2026-10-09', _research_data(), epoch_id='epoch', policy_id='policy')
-    assert {row['strategy'] for row in signals} == {'good', 'bad'}
-    assert len(strategies[1].seen) == 1
+    assert [row['strategy'] for row in signals] == ['good']
+    assert len(strategies[1].seen) == 0
+    assert next(row for row in health if row.strategy == 'bad').status == 'data_failure'
     assert 'research_source_scope' not in regime
 
 
@@ -202,49 +203,6 @@ def test_staging_reconstructs_projection_before_research_use(tmp_path):
         validate_projection(engine, original, regime)
 
 
-def test_engine_isolates_mixed_filings_before_strategy_screen(tmp_path, monkeypatch):
-    from test_filing_research_isolation import mixed, CONFIG
-    engine, strategies = _screen_engine(tmp_path / 'engine')
-    (tmp_path / 'capture').mkdir()
-    data, _, good, bad = mixed(tmp_path / 'capture', monkeypatch)
-    data.update(_research_data())
-    engine.ar_config.update(CONFIG)
-    strategies[0].name, strategies[0].data_sources = 'filing_analysis', ('edgar',)
-    seen = []
-    def screen(projected, *args):
-        seen.append(projected['edgar'])
-        return []
-    strategies[0].screen = screen
-    _, regime, health = engine.screen_and_enrich('2026-10-09', data, epoch_id='epoch', policy_id='policy')
-    assert [row['adsh'] for row in seen[0]['filings']] == [good]
-    assert bad not in seen[0]['filing_evidence']['corpus']
-    assert regime['filing_research_isolation']['original_full_coverage'] is False
-    assert next(row for row in health if row.strategy == 'filing_analysis').status == 'data_failure'
-    from tradingagents.strategies.orchestration.research_resilience import validate_projection
-    assert validate_projection(engine, data, regime)['edgar'] == seen[0]
-
-
-def test_recorded_regulation_outage_without_published_graph_is_contained(tmp_path):
-    engine, strategies = _screen_engine(tmp_path)
-    engine.ar_config['regulation_evidence_policy'] = 'complete_document_text_v1'
-    strategies[1].data_sources = ('regulations',)
-    data = _research_data()
-    data['regulations'] = {'error': 'document source unavailable', 'proposed_rules': []}
-    signals, regime, health = engine.screen_and_enrich('2026-10-09', data, epoch_id='epoch', policy_id='policy')
-    assert [row['strategy'] for row in signals] == ['good']
-    assert strategies[1].seen == []
-    assert next(row for row in health if row.strategy == 'bad').status == 'data_failure'
-
-
-def test_corrupt_published_regulation_graph_is_integrity_failure(tmp_path):
-    engine, _ = _screen_engine(tmp_path)
-    engine.ar_config['regulation_evidence_policy'] = 'complete_document_text_v1'
-    data = _research_data()
-    data['regulations'] = {'error': 'cannot excuse a corrupt published graph', 'regulation_evidence': {}}
-    with pytest.raises(ValueError, match='regulation_evidence_policy'):
-        engine.screen_and_enrich('2026-10-09', data, epoch_id='epoch', policy_id='policy')
-
-
 def test_invalid_declared_positive_scope_is_not_a_research_gap(tmp_path):
     engine, _ = _screen_engine(tmp_path)
     engine.ar_config['award_attribution_policy'] = 'verified_award_issuer_attribution_v1'
@@ -265,36 +223,6 @@ def test_missing_required_universe_holds_all_entries_without_models(tmp_path):
     assert all(row['journal_only'] for row in signals)
     assert regime['research_hold_reasons'] == ['required_universe_unavailable']
     validate_projection(engine, data, regime)
-
-
-def _regulation_outage_health(tmp_path):
-    engine, strategies = _screen_engine(tmp_path)
-    engine.ar_config['regulation_evidence_policy'] = 'complete_document_text_v1'
-    strategies[1].data_sources = ('regulations',)
-    data = _research_data()
-    data['regulations'] = {'error': 'document source unavailable', 'proposed_rules': []}
-    _, _, health = engine.screen_and_enrich('2026-10-09', data, epoch_id='epoch', policy_id='policy')
-    return engine, data, health
-
-
-def test_recorded_regulation_outage_can_replay_same_failed_health(tmp_path):
-    from tradingagents.strategies.orchestration.regulation_validation import validate_regulation_health
-    engine, data, health = _regulation_outage_health(tmp_path)
-    assert validate_regulation_health(data, health, {'policy'}, {'bad': ('regulations',)}, engine.ar_config) is None
-
-
-@pytest.mark.parametrize('damage', ['status', 'assessment', 'error', 'missing'])
-def test_regulation_outage_replay_rejects_erased_failure(tmp_path, damage):
-    from dataclasses import replace
-    from tradingagents.strategies.orchestration.regulation_validation import validate_regulation_health
-    engine, data, health = _regulation_outage_health(tmp_path)
-    bad = next(row for row in health if row.strategy == 'bad')
-    if damage == 'status': health = [replace(row, status='legitimate_no_event') if row is bad else row for row in health]
-    elif damage == 'assessment': bad.evidence['regulation_assessments'] = [{'fake': 'success'}]
-    elif damage == 'error': bad.evidence['provider_errors'].pop('regulations')
-    else: health.remove(bad)
-    with pytest.raises(ValueError, match='regulation_health'):
-        validate_regulation_health(data, health, {'policy'}, {'bad': ('regulations',)}, engine.ar_config)
 
 
 def test_declared_incomplete_universe_never_reenters_candidate_context(tmp_path):

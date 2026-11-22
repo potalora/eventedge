@@ -9,31 +9,43 @@ class TestAutoresearchConfig:
     def test_all_expected_keys_present(self):
         ar = DEFAULT_CONFIG["autoresearch"]
         expected_keys = [
-            "max_generations", "strategies_per_generation", "tickers_per_strategy",
-            "walk_forward_windows", "holdout_weeks", "min_trades_for_scoring",
-            "cache_model", "live_model", "strategist_model", "cro_model",
-            "fitness_min_sharpe", "fitness_min_win_rate", "fitness_min_trades",
-            "paper_min_trades", "paper_max_divergence_pct",
-            "analyst_weight_min", "analyst_weight_max",
-            "complexity_penalty_factor", "stop_unchanged_generations",
-            "universe", "budget_cap_usd",
+            "enabled_strategies",
+            "llm_billing_mode",
+            "thesis_model",
+            "thesis_effort",
+            "portfolio_committee_model",
+            "portfolio_committee_effort",
+            "bounded_model",
+            "bounded_effort",
+            "blocked_tickers",
+            "candidate_analysis_workers",
+            "proposals_per_strategy",
+            "total_capital",
+            "paper_ledger",
+            "portfolio_policy",
+            "risk_discipline",
+            "short_selling",
+            "risk_gate",
+            "finnhub_reliability",
         ]
         for key in expected_keys:
             assert key in ar, f"Missing key: {key}"
 
     def test_numeric_types(self):
         ar = DEFAULT_CONFIG["autoresearch"]
-        assert isinstance(ar["max_generations"], int)
-        assert isinstance(ar["fitness_min_sharpe"], float)
-        assert isinstance(ar["budget_cap_usd"], float)
-        assert isinstance(ar["universe"], str)
+        assert isinstance(ar["candidate_analysis_workers"], int)
+        assert isinstance(ar["proposals_per_strategy"], int)
+        assert isinstance(ar["total_capital"], float)
+        assert isinstance(ar["thesis_model"], str)
+        assert ar["thesis_model"] == "gpt-6.2-sol"
+        assert ar["portfolio_committee_model"] == "gpt-6.2-sol"
 
     def test_config_is_copyable(self):
         import copy
         config_copy = copy.deepcopy(DEFAULT_CONFIG)
         assert config_copy["autoresearch"] == DEFAULT_CONFIG["autoresearch"]
-        config_copy["autoresearch"]["max_generations"] = 999
-        assert DEFAULT_CONFIG["autoresearch"]["max_generations"] == 15
+        config_copy["autoresearch"]["proposals_per_strategy"] = 999
+        assert DEFAULT_CONFIG["autoresearch"]["proposals_per_strategy"] == 3
 
     def test_finnhub_reliability_defaults_are_endpoint_scoped_and_bounded(self):
         policy = DEFAULT_CONFIG["autoresearch"]["finnhub_reliability"]

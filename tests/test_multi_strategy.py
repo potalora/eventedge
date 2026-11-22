@@ -111,56 +111,13 @@ class TestStateManager:
 
         return StateManager(str(tmp_path / "state"))
 
-    def test_save_load_generation(self, state):
-        results = {"scores": {"a": 1.5}, "gen": 1}
-        state.save_generation(1, results)
-        loaded = state.load_generation(1)
-        assert loaded["scores"]["a"] == 1.5
-
-    def test_get_latest_generation(self, state):
-        assert state.get_latest_generation() == 0
-        state.save_generation(1, {"gen": 1})
-        state.save_generation(2, {"gen": 2})
-        assert state.get_latest_generation() == 2
-
-    def test_paper_trades(self, state):
-        state.save_paper_trade({"strategy": "vix", "ticker": "SPY"})
-        state.save_paper_trade({"strategy": "pead", "ticker": "AAPL"})
-
-        all_trades = state.load_paper_trades()
-        assert len(all_trades) == 2
-
-        vix_trades = state.load_paper_trades(strategy="vix")
-        assert len(vix_trades) == 1
-        assert vix_trades[0]["ticker"] == "SPY"
-        assert "trade_id" in vix_trades[0]
-
-    def test_update_paper_trade(self, state):
-        state.save_paper_trade({"strategy": "test", "ticker": "SPY"})
-        trades = state.load_paper_trades()
-        trade_id = trades[0]["trade_id"]
-
-        state.update_paper_trade(trade_id, {"status": "closed", "pnl": 50.0})
-        updated = state.load_paper_trades()
-        assert updated[0]["status"] == "closed"
-        assert updated[0]["pnl"] == 50.0
-
-    def test_leaderboard(self, state):
-        lb = [{"name": "strat_a", "score": 1.5}]
-        state.save_leaderboard(lb)
-        loaded = state.load_leaderboard()
-        assert loaded[0]["name"] == "strat_a"
-
-    def test_reflections(self, state):
-        state.save_reflection(1, {"summary": "gen 1 went well"})
-        reflections = state.load_reflections()
-        assert len(reflections) == 1
-        assert reflections[0]["generation"] == 1
-
-    def test_reset(self, state):
-        state.save_paper_trade({"strategy": "test", "ticker": "SPY"})
-        state.reset()
+    def test_regime_snapshots_and_reset(self, state):
+        assert state.load_latest_regime() is None
+        state.save_regime_snapshot({"overall_regime": "normal"})
+        assert state.load_latest_regime()["overall_regime"] == "normal"
         assert state.load_paper_trades() == []
+        state.reset()
+        assert state.load_regime_history() == []
 
 
 # ---------------------------------------------------------------------------
@@ -281,83 +238,24 @@ class TestMultiStrategyEngine:
         engine.registry = MagicMock()
         engine.registry.get.return_value = source
 
-        from tradingagents.strategies.orchestration.data_acquisition import (
-            DEFAULT_SUPPLY_CHAIN_TICKERS,
+        from tradingagents.strategies.modules.supply_chain import (
+            get_supply_chain_universe,
         )
 
+        expected_universe = list(get_supply_chain_universe(engine.ar_config))
         result = engine._fetch_finnhub_data("2026-07-30")
 
         source.fetch_supply_chains.assert_called_once_with(
-            list(DEFAULT_SUPPLY_CHAIN_TICKERS),
+            expected_universe,
             deadline=42.0,
         )
         assert all(
             call.kwargs["deadline"] == 42.0
             for call in source.fetch_company_news.call_args_list
         )
-        assert len(result["disruption_news"]) == len(DEFAULT_SUPPLY_CHAIN_TICKERS)
+        assert len(result["disruption_news"]) == len(expected_universe)
         assert "transcripts" not in result
         assert "supply_chains" not in result
-
-
-# ---------------------------------------------------------------------------
-# New state manager tests (Layer 1 extensions)
-# ---------------------------------------------------------------------------
-
-
-class TestPlaybookState:
-    @pytest.fixture
-    def state(self, tmp_path):
-        from tradingagents.strategies.state.state import StateManager
-
-        return StateManager(str(tmp_path / "state"))
-
-    def test_save_load_playbook(self, state):
-        playbook = {"strategies": ["vix", "pead"], "version": 2}
-        state.save_playbook(playbook)
-        loaded = state.load_playbook()
-        assert loaded == playbook
-
-    def test_load_playbook_default_none(self, state):
-        assert state.load_playbook() is None
-
-
-class TestVintageState:
-    @pytest.fixture
-    def state(self, tmp_path):
-        from tradingagents.strategies.state.state import StateManager
-
-        return StateManager(str(tmp_path / "state"))
-
-    def test_save_load_vintage(self, state):
-        state.save_vintage({"strategy": "vix", "params": {"threshold": 30}})
-        vintages = state.load_vintages()
-        assert len(vintages) == 1
-        assert "vintage_id" in vintages[0]
-        assert "created_at" in vintages[0]
-        assert vintages[0]["strategy"] == "vix"
-
-    def test_load_vintages_filter_by_strategy(self, state):
-        state.save_vintage({"strategy": "vix", "params": {"threshold": 30}})
-        state.save_vintage({"strategy": "pead", "params": {"window": 5}})
-        state.save_vintage({"strategy": "vix", "params": {"threshold": 25}})
-
-        vix_vintages = state.load_vintages(strategy="vix")
-        assert len(vix_vintages) == 2
-        assert all(v["strategy"] == "vix" for v in vix_vintages)
-
-        pead_vintages = state.load_vintages(strategy="pead")
-        assert len(pead_vintages) == 1
-
-    def test_update_vintage(self, state):
-        state.save_vintage({"strategy": "vix", "completed_trade_count": 0})
-        vintages = state.load_vintages()
-        vid = vintages[0]["vintage_id"]
-
-        state.update_vintage(vid, {"completed_trade_count": 5, "status": "active"})
-        updated = state.load_vintages()
-        assert updated[0]["completed_trade_count"] == 5
-        assert updated[0]["status"] == "active"
 
 
 class TestPortfolioCommittee:
@@ -602,121 +500,6 @@ class TestSignalJournal:
             aapl = journal.get_entries(ticker="AAPL")
             assert len(aapl) == 2
 
-    def test_convergence_detection(self):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-
-            # 3 strategies agree on AAPL long
-            for strat in ["earnings_call", "supply_chain", "insider_activity"]:
-                journal.log_signal(
-                    JournalEntry(
-                        timestamp="2026-03-30",
-                        strategy=strat,
-                        ticker="AAPL",
-                        direction="long",
-                        score=0.7,
-                        traded=True,
-                        entry_price=175.0,
-                    )
-                )
-
-            # Only 1 strategy on GOOGL
-            journal.log_signal(
-                JournalEntry(
-                    timestamp="2026-03-30",
-                    strategy="filing_analysis",
-                    ticker="GOOGL",
-                    direction="short",
-                    score=0.5,
-                    traded=False,
-                    entry_price=140.0,
-                )
-            )
-
-            convergence = journal.get_convergence_signals(
-                "2026-03-30", min_strategies=2
-            )
-            assert len(convergence) == 1
-            assert convergence[0]["ticker"] == "AAPL"
-            assert convergence[0]["count"] == 3
-
-    def test_convergence_empty_journal(self):
-        from tradingagents.strategies.learning.signal_journal import SignalJournal
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-            assert journal.get_convergence_signals("2026-03-30") == []
-
-    def test_fill_outcomes(self):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-
-            # Log a signal from 10 days ago
-            journal.log_signal(
-                JournalEntry(
-                    timestamp="2026-03-20",
-                    strategy="earnings_call",
-                    ticker="AAPL",
-                    direction="long",
-                    score=0.7,
-                    traded=True,
-                    entry_price=170.0,
-                )
-            )
-
-            # Mock price cache: AAPL now at 180
-            mock_prices = pd.DataFrame({"Close": [180.0]})
-            price_cache = {"AAPL": mock_prices}
-
-            updated = journal.fill_outcomes(price_cache, "2026-03-30")
-            assert updated == 1
-
-            entries = journal.get_entries()
-            assert entries[0]["return_5d"] is not None
-            assert entries[0]["return_10d"] is not None
-            # 30d not yet elapsed
-            assert entries[0]["return_30d"] is None
-
-            # Return should be (180 - 170) / 170 ≈ 0.0588
-            assert abs(entries[0]["return_5d"] - 0.058824) < 0.001
-
-    def test_fill_outcomes_no_update_when_recent(self):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-
-            # Signal from 2 days ago — too recent for any outcome
-            journal.log_signal(
-                JournalEntry(
-                    timestamp="2026-03-28",
-                    strategy="earnings_call",
-                    ticker="AAPL",
-                    direction="long",
-                    score=0.7,
-                    traded=True,
-                    entry_price=170.0,
-                )
-            )
-
-            mock_prices = pd.DataFrame({"Close": [180.0]})
-            updated = journal.fill_outcomes({"AAPL": mock_prices}, "2026-03-30")
-            assert updated == 0
-
-
 class TestLLMAnalyzerRegime:
     """Test regime context integration in LLM analyzer."""
 
@@ -763,77 +546,8 @@ class TestLLMAnalyzerPrompts:
         analyzer = LLMAnalyzer()
         assert analyzer.get_prompt("nonexistent") == ""
 
-    def test_set_and_get_override(self):
-        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-
-        analyzer = LLMAnalyzer()
-        original = analyzer.get_prompt("litigation")
-        analyzer.set_prompt_override("litigation", "Custom prompt for testing")
-        assert analyzer.get_prompt("litigation") == "Custom prompt for testing"
-
-        # Revert
-        analyzer.set_prompt_override("litigation", "")
-        assert analyzer.get_prompt("litigation") == original
-
-
-# ---------------------------------------------------------------------------
-# Prompt optimizer tests
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Signal journal high-conviction failures test
-# ---------------------------------------------------------------------------
-
 
 class TestSignalJournalFailures:
-    def test_get_high_conviction_failures(self, tmp_path):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        journal = SignalJournal(str(tmp_path))
-
-        # Log some signals with outcomes
-        entries = [
-            JournalEntry(
-                timestamp="2024-06-01",
-                strategy="litigation",
-                ticker="AAPL",
-                direction="short",
-                score=0.8,
-                llm_conviction=0.9,
-                entry_price=100.0,
-                return_5d=-0.05,  # Direction-signed loss on the short
-            ),
-            JournalEntry(
-                timestamp="2024-06-02",
-                strategy="litigation",
-                ticker="MSFT",
-                direction="short",
-                score=0.7,
-                llm_conviction=0.8,
-                entry_price=200.0,
-                return_5d=0.03,  # Direction-signed profit on the short
-            ),
-            JournalEntry(
-                timestamp="2024-06-03",
-                strategy="litigation",
-                ticker="GOOGL",
-                direction="short",
-                score=0.6,
-                llm_conviction=0.3,
-                entry_price=150.0,
-                return_5d=-0.02,  # Direction-signed loss, but low conviction
-            ),
-        ]
-        journal.log_signals(entries)
-
-        failures = journal.get_high_conviction_failures("litigation")
-        assert len(failures) == 1
-        assert failures[0]["ticker"] == "AAPL"
-
     def test_prompt_version_field_in_journal(self, tmp_path):
         from tradingagents.strategies.learning.signal_journal import (
             JournalEntry,

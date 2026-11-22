@@ -861,7 +861,7 @@ def test_probe_mode_with_existing_store_never_writes(tmp_path) -> None:
     assert resolved.recovery_bindings["ESS"].recovery_id
     with sqlite3.connect(path) as connection:
         count = connection.execute(
-            "SELECT COUNT(*) FROM governed_bar_recoveries"
+            "SELECT COUNT(*) FROM bar_recoveries WHERE recovery_kind = 'governed'"
         ).fetchone()[0]
     assert count == 0
 
@@ -869,32 +869,10 @@ def test_probe_mode_with_existing_store_never_writes(tmp_path) -> None:
 def test_probe_mode_legacy_read_only_store_preserves_schema_and_data_version(
     tmp_path,
 ) -> None:
+    from tradingagents.strategies.state.generation_db import GenerationDB
+
     path = tmp_path / "legacy-metrics.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE metric_epochs (
-              epoch_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL
-            );
-            CREATE TABLE outcomes (
-              outcome_id TEXT PRIMARY KEY,
-              epoch_id TEXT NOT NULL,
-              payload_json TEXT NOT NULL
-            );
-            CREATE TABLE strategy_health (
-              health_id TEXT PRIMARY KEY,
-              epoch_id TEXT NOT NULL,
-              session TEXT NOT NULL,
-              payload_json TEXT NOT NULL
-            );
-            CREATE TABLE critical_gap_markers (
-              marker_id TEXT PRIMARY KEY,
-              status TEXT NOT NULL,
-              gap_session TEXT NOT NULL,
-              payload_json TEXT NOT NULL
-            );
-            """
-        )
+    GenerationDB(path).initialize()
     store = MetricStore.open_existing(path)
     with sqlite3.connect(path) as observer:
         tables_before = observer.execute(
@@ -910,11 +888,14 @@ def test_probe_mode_legacy_read_only_store_preserves_schema_and_data_version(
             "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
         ).fetchall()
         data_version_after = observer.execute("PRAGMA data_version").fetchone()[0]
+        bar_count = observer.execute(
+            "SELECT COUNT(*) FROM bar_recoveries WHERE recovery_kind = 'governed'"
+        ).fetchone()[0]
 
     assert resolved.recovery_bindings["ESS"].recovery_id
     assert tables_after == tables_before
     assert data_version_after == data_version_before
-    assert "governed_bar_recoveries" not in {row[0] for row in tables_after}
+    assert bar_count == 0
 
 
 def test_probe_mode_applies_store_equivalent_schedule_validation() -> None:

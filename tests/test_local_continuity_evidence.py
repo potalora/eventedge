@@ -14,6 +14,7 @@ from tradingagents.strategies.execution.ids import stable_id
 from tradingagents.strategies.orchestration.source_inputs import SourceInputStore, configuration_fingerprint
 from tradingagents.strategies.orchestration.research_screening import _receipt, _digest
 from tradingagents.strategies.orchestration.session_executor import PHASES
+from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
 
 
 @pytest.fixture
@@ -24,11 +25,13 @@ def evidence(native_evidence, request):
     filing_exclusion = getattr(request, 'param', None) == 'filing_exclusion'
     if filing_exclusion:
         profile['autoresearch']['filing_research_policy']='disabled_v1'
+    from tradingagents.default_config import DEFAULT_CONFIG
     body = json.dumps(profile).encode()
     profile_path = state / 'generation-config.json'
     profile_path.write_bytes(body)
     sha = hashlib.sha256(body).hexdigest()
-    policy = 'generation-config-' + sha
+    configured = DEFAULT_CONFIG.get('autoresearch', {}).get('paper_ledger', {}).get('policy_id')
+    policy = ((configured + '-') if configured else '') + 'generation-config-' + sha
     manifest_path = state.parent / 'manifest.json'
     manifest = json.loads(manifest_path.read_text())
     manifest['generations'][0].update(config_file=str(profile_path), config_sha256=sha)
@@ -43,10 +46,11 @@ def evidence(native_evidence, request):
     source['acquired_at']=datetime(2026,10,6,20,1,tzinfo=timezone.utc)
     (state/'source_inputs'/(slot+'.json')).write_text(SourceInputStore.encode(source))
     policies = {h: policy + ':health:' + h for h in ('30d', '3m', '6m', '1y')}
-    with sqlite3.connect(state / 'metrics_v2.sqlite3') as db:
+    db_path = state / GENERATION_DB_FILENAME
+    with sqlite3.connect(db_path) as db:
         epoch = json.loads(db.execute('SELECT payload_json FROM metric_epochs').fetchone()[0])
         epoch['status'] = 'open'
-        db.execute('UPDATE metric_epochs SET payload_json=?', (json.dumps(epoch),))
+        db.execute("UPDATE metric_epochs SET status='open', payload_json=?", (json.dumps(epoch),))
         records = []
         for hid, payload in db.execute('SELECT health_id,payload_json FROM strategy_health').fetchall():
             record = json.loads(payload)
@@ -57,10 +61,11 @@ def evidence(native_evidence, request):
             record['policy_id'] = policies[horizon]
             from tradingagents.strategies.metrics.identity import _stable_id
             record['health_id'] = _stable_id('health', EPOCH, date.fromisoformat(SESSION), policies[horizon], record['strategy'])
-            db.execute('UPDATE strategy_health SET health_id=?,payload_json=? WHERE health_id=?',
-                       (record['health_id'], json.dumps(record), hid))
+            db.execute('UPDATE strategy_health SET health_id=?,status=?,payload_json=? WHERE health_id=?',
+                       (record['health_id'], record['status'], json.dumps(record), hid))
             record['session'] = date.fromisoformat(SESSION)
             records.append(record)
+        _insert(db,'benchmark_observations',observation_id=SESSION+'SPY',epoch_id=EPOCH,session=SESSION,symbol='SPY',valid=1)
     db.close()
     screening_store = SourceInputStore(repo/'cache', accepted_dir=state/'source_inputs/screening')
     binding = {'policy':'dependency_isolation_v1', 'source_identity':source['identity'],
@@ -74,20 +79,18 @@ def evidence(native_evidence, request):
     identity = {**source['identity'], 'purpose':'research-screening-v1', 'epoch_id':EPOCH,
         'research_resilience_policy':'dependency_isolation_v1', 'screening_binding_sha256':_digest(screening_store,binding)}
     screening_store.freeze(identity, screening, acquired_at=datetime(2026,10,6,20,1,tzinfo=timezone.utc))
-    for name in COHORTS:
-        wire[name].update(committee_decision_status={'mode':'model','status':'no_candidates',
-            'degraded':False,'reason':'','eligible_count':0,'input_count':0,'selected_count':0},
-            research_screening_receipt=screening['receipt'])
-        with sqlite3.connect(state/name/'portfolio.db') as db:
-            _insert(db,'metric_epochs',epoch_id=EPOCH,generation_id=GENERATION,status='open',start_session=SESSION,end_session=None)
-            economic={'market':{'benchmarks':[{'symbol':'SPY'}]}}
-            db.execute('UPDATE session_execution_contexts SET economic_inputs_json=?,input_digest=?,market_digest=?',
-                (json.dumps(economic),stable_id('session_economic_inputs',economic),stable_id('session_market_inputs',economic['market'])))
+    economic={'market':{'benchmarks':[{'symbol':'SPY'}]}}
+    with sqlite3.connect(db_path) as db:
+        for name in COHORTS:
+            wire[name].update(committee_decision_status={'mode':'model','status':'no_candidates',
+                'degraded':False,'reason':'','eligible_count':0,'input_count':0,'selected_count':0},
+                research_screening_receipt=screening['receipt'])
+            db.execute('UPDATE session_execution_contexts SET economic_inputs_json=?,input_digest=?,market_digest=? WHERE cohort_id=?',
+                (json.dumps(economic),stable_id('session_economic_inputs',economic),stable_id('session_market_inputs',economic['market']),name))
             for phase in PHASES:
                 _insert(db,'session_phases',session_phase_id=name+phase,cohort_id=name,session=SESSION,phase=phase,completed_at=SESSION)
-            _insert(db,'benchmark_observations',cohort_id=name,session=SESSION,epoch_id=EPOCH,symbol='SPY',valid=1)
-            db.execute('UPDATE staging_runs SET policy_id=?',(policy,))
-            _insert(db,'committee_decisions',session=SESSION,epoch_id=EPOCH,policy_id=policy,
+            db.execute('UPDATE staging_runs SET policy_id=? WHERE cohort_id=?',(policy,name))
+            _insert(db,'committee_decisions',cohort_id=name,session=SESSION,epoch_id=EPOCH,policy_id=policy,
                 payload_json=json.dumps({'status':wire[name]['committee_decision_status'],'recommendations':[],'policy_decisions':[]}))
     db.close()
     if filing_exclusion:
@@ -145,8 +148,8 @@ def test_independent_receipts_must_be_bound_and_anchored(evidence,kind):
 
 
 def test_one_missing_accounting_phase_cannot_be_laundered_by_operational_report(evidence):
-    with sqlite3.connect(evidence[1]/COHORTS[0]/'portfolio.db') as db:
-        db.execute('DELETE FROM session_phases WHERE phase=?',(PHASES[0],))
+    with sqlite3.connect(evidence[1] / GENERATION_DB_FILENAME) as db:
+        db.execute('DELETE FROM session_phases WHERE cohort_id=? AND phase=?',(COHORTS[0], PHASES[0]))
     result=collect(evidence)
     assert not result['qualifies'] and 'accounting' in result['reasons']
 
@@ -162,7 +165,7 @@ def test_corrupted_provenance_and_holds_fail_closed(evidence,kind):
         else: document['identity']['epoch_id']='other'
         path.write_text(SourceInputStore.encode(document))
     elif kind=='durable_health':
-        with sqlite3.connect(state/'metrics_v2.sqlite3') as db:
+        with sqlite3.connect(state / GENERATION_DB_FILENAME) as db:
             row=db.execute('SELECT health_id,payload_json FROM strategy_health LIMIT 1').fetchone()
             payload=json.loads(row[1]);payload['evidence']['screen_completed']=False
             db.execute('UPDATE strategy_health SET payload_json=? WHERE health_id=?',(json.dumps(payload),row[0]))
@@ -198,15 +201,6 @@ def _rewrite_screen(evidence, mutate):
     attempt.write_text(json.dumps(document))
 
 
-@pytest.mark.parametrize('evidence',['filing_exclusion'],indirect=True)
-def test_only_original_configured_edgar_dependency_failure_is_approved(evidence):
-    result=collect(evidence)
-    assert result['qualifies'],result
-    assert result['status']=='qualifying_reduced_scope'
-    assert result['source_observations']['edgar']=='failed'
-    assert result['unexpected_failures']==[]
-
-
 @pytest.mark.parametrize('kind',['failed','wrong_model','api','missing_response','low_effort','held','wrong_strategy'])
 def test_failed_or_non_native_model_outcome_cannot_supply_model_credit(evidence,kind):
     from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
@@ -222,7 +216,7 @@ def test_failed_or_non_native_model_outcome_cannot_supply_model_credit(evidence,
     elif kind=='missing_response': outcome['response_received']=False
     elif kind=='low_effort': provenance['reasoning_effort']='low'
     _rewrite_screen(evidence,lambda payload:payload['horizons']['30d']['signals'].append(
-        {'strategy':'litigation','metadata':{'analysis_status':'validated','research_model_outcome':outcome}}))
+        {'strategy':'earnings_call','metadata':{'analysis_status':'validated','research_model_outcome':outcome}}))
     if kind=='held':
         _rewrite_screen(evidence,lambda p:p['horizons']['30d']['signals'][0]['metadata'].update(non_actionable_reason='model_sample_incomplete'))
     elif kind=='wrong_strategy':
@@ -240,7 +234,7 @@ def test_complete_native_outcome_is_observed_without_forcing_a_second_model(evid
             'configured_model':'gpt-6-luna','returned_model':'gpt-6-luna','reasoning_effort':'high',
             'billing_mode':'chatgpt_plan','effective_output_limit':None,'response_id':'resp_1'}}
     _rewrite_screen(evidence,lambda payload:payload['horizons']['30d']['signals'].append(
-        {'strategy':'litigation','metadata':{'analysis_status':'validated','research_model_outcome':outcome}}))
+        {'strategy':'earnings_call','metadata':{'analysis_status':'validated','research_model_outcome':outcome}}))
     result=collect(evidence)
     assert result['qualifies'],result
     assert result['native_models']==['gpt-6-luna']
@@ -249,7 +243,7 @@ def test_complete_native_outcome_is_observed_without_forcing_a_second_model(evid
 
 def _rewrite_health(evidence, mutate):
     state=evidence[1]
-    with sqlite3.connect(state/'metrics_v2.sqlite3') as db:
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as db:
         values=[]
         for hid,body in db.execute('SELECT health_id,payload_json FROM strategy_health'):
             item=json.loads(body);mutate(item)
@@ -279,7 +273,7 @@ def test_source_acquisition_must_belong_to_the_normal_live_attempt(evidence):
 
 def test_retained_state_event_outcome_is_validated_even_if_no_priceable_signal(evidence):
     def add(health):
-        if health['strategy']=='state_economics':
+        if health['strategy']=='earnings_call':
             health['evidence']['state_economic_events']=[{'analysis_status':'failed',
                 'analysis_failure_reason':'analysis_unavailable','research_model_outcome':{}}]
     _rewrite_health(evidence,add)
@@ -298,9 +292,9 @@ def test_successful_native_sol_committee_is_observed_from_wire_and_ledger(eviden
         'model_provenance':{'configured_model':'gpt-6.1-sol','returned_model':'gpt-6.1-sol',
             'reasoning_effort':'high','billing_mode':'chatgpt_plan','effective_output_limit':None,'response_id':'resp_sol'}}
     wire[COHORTS[0]]['committee_decision_status']=status
-    with sqlite3.connect(state/COHORTS[0]/'portfolio.db') as db:
-        db.execute('UPDATE committee_decisions SET payload_json=?',
-            (json.dumps({'status':status,'recommendations':[],'policy_decisions':[]}),))
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as db:
+        db.execute('UPDATE committee_decisions SET payload_json=? WHERE cohort_id=?',
+            (json.dumps({'status':status,'recommendations':[],'policy_decisions':[]}), COHORTS[0]))
     _rewrite_screen(evidence,lambda payload:None)
     result=collect(evidence)
     assert result['qualifies'],result
@@ -318,17 +312,6 @@ def test_collector_does_not_modify_retained_files(evidence):
     after={str(path.relative_to(repo)):hashlib.sha256(path.read_bytes()).hexdigest()
            for path in repo.rglob('*') if path.is_file() and not path.name.endswith(('-shm','-wal'))}
     assert after==before
-
-
-@pytest.mark.parametrize('evidence',['filing_exclusion'],indirect=True)
-def test_other_source_failure_cannot_hide_behind_approved_edgar_exclusion(evidence):
-    def add(health):
-        if 'edgar' in health['evidence']['data_sources']:
-            health.update(status='data_failure')
-            health['evidence']['provider_errors']={'edgar':'filing_research_disabled','fred':'provider_error'}
-    _rewrite_health(evidence,add)
-    result=collect(evidence)
-    assert not result['qualifies'] and not result['checks']['screening']
 
 
 def test_health_dependency_scope_must_match_configured_strategy(evidence):

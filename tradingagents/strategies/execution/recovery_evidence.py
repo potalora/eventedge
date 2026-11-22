@@ -1305,27 +1305,33 @@ class RecoveryEvidenceStore:
         if extra_where:
             where = f"{extra_where} AND {where}"
         with self.db.connect(readonly=True) as conn:
-            count, total_bytes, largest, invalid = conn.execute(
-                f"""SELECT COUNT(*),
-                           COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0),
-                           COALESCE(MAX(length(CAST(payload_json AS BLOB))), 0),
-                           COALESCE(SUM(typeof(payload_json) != 'text'), 0)
-                    FROM {table} WHERE {where}""",
-                (epoch_id, session.isoformat()),
-            ).fetchone()
-            if (
-                count > max_records
-                or total_bytes > _MAX_CANDIDATE_SESSION_TOTAL_BYTES
-                or largest > _MAX_CANDIDATE_SESSION_RECORD_BYTES
-                or invalid
-            ):
-                raise ValueError(
-                    "candidate session evidence exceeds bound or is invalid"
-                )
-            return conn.execute(
-                f"SELECT {columns} FROM {table} WHERE {where} ORDER BY 1",
-                (epoch_id, session.isoformat()),
-            ).fetchall()
+            if not self.db.immutable:
+                conn.execute("BEGIN DEFERRED")
+            try:
+                count, total_bytes, largest, invalid = conn.execute(
+                    f"""SELECT COUNT(*),
+                               COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0),
+                               COALESCE(MAX(length(CAST(payload_json AS BLOB))), 0),
+                               COALESCE(SUM(typeof(payload_json) != 'text'), 0)
+                        FROM {table} WHERE {where}""",
+                    (epoch_id, session.isoformat()),
+                ).fetchone()
+                if (
+                    count > max_records
+                    or total_bytes > _MAX_CANDIDATE_SESSION_TOTAL_BYTES
+                    or largest > _MAX_CANDIDATE_SESSION_RECORD_BYTES
+                    or invalid
+                ):
+                    raise ValueError(
+                        "candidate session evidence exceeds bound or is invalid"
+                    )
+                return conn.execute(
+                    f"SELECT {columns} FROM {table} WHERE {where} ORDER BY 1",
+                    (epoch_id, session.isoformat()),
+                ).fetchall()
+            finally:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
 
     # ------------------------------------------------------------------
     # Normalized Candidate Signal Identity Bindings (zero 64 MB blobs)

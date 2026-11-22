@@ -201,6 +201,7 @@ class _FinnhubHTTPAdapter:
         self._api_key = api_key
         self._session = session
         self._base_url = base_url.rstrip("/")
+        self.last_status_code: int | None = None
 
     def get(
         self,
@@ -209,6 +210,7 @@ class _FinnhubHTTPAdapter:
         params: Mapping[str, Any] | None = None,
         timeout: tuple[float, float],
     ) -> Any:
+        self.last_status_code = None
         query = dict(params or {})
         query["token"] = self._api_key
         response = self._session.get(
@@ -216,6 +218,7 @@ class _FinnhubHTTPAdapter:
             params=query,
             timeout=timeout,
         )
+        self.last_status_code = getattr(response, "status_code", None)
         response.raise_for_status()
         return response.json()
 
@@ -396,6 +399,7 @@ class FinnhubSource:
         last_raw_exc: list[BaseException | None] = [None]
 
         def attempt_fn():
+            self._http.last_status_code = None
             remaining = effective_deadline - self._monotonic()
             if remaining <= 0:
                 raise SourceFetchError("Finnhub acquisition deadline exhausted", reason_code="timeout")
@@ -446,6 +450,12 @@ class FinnhubSource:
                     jitter=selected.jitter_s,
                 ):
                     result = provider_call("finnhub", endpoint_name, attempt_fn)
+            if (
+                diagnostics
+                and diagnostics[-1].get("http_status") is None
+                and isinstance(self._http.last_status_code, int)
+            ):
+                diagnostics[-1]["http_status"] = self._http.last_status_code
             if diagnostics and diagnostics[-1].get("recovered"):
                 recovered_status = self._status_code(last_raw_exc[0]) if last_raw_exc[0] is not None else None
                 logger.info(

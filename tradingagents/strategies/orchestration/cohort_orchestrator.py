@@ -529,6 +529,15 @@ class CohortOrchestrator:
         )
         return False
 
+    @staticmethod
+    def _cohort_recovery_binding(ledger: Any) -> str:
+        from tradingagents.strategies.execution.ids import stable_id
+
+        hook = getattr(ledger, "recovery_binding_id", None)
+        if callable(hook):
+            return hook()
+        return stable_id("cohort_binding", ledger.cohort_id, str(ledger.path))
+
     def _bound_critical_gap_cohorts(
         self, marker: CriticalGapMarker
     ) -> list[dict[str, Any]]:
@@ -539,7 +548,7 @@ class CohortOrchestrator:
         seen_bindings: set[str] = set()
         for cohort in self.cohorts:
             name = cohort["config"].name
-            binding = cohort["ledger"].recovery_binding_id()
+            binding = self._cohort_recovery_binding(cohort["ledger"])
             if name in current or binding in seen_bindings:
                 raise ValueError("critical gap cohort binding is duplicated")
             if cohort["ledger"].cohort_id != name:
@@ -683,7 +692,7 @@ class CohortOrchestrator:
         store = self._metric_store
         try:
             affected_cohorts = {
-                cohort["config"].name: cohort["ledger"].recovery_binding_id()
+                cohort["config"].name: self._cohort_recovery_binding(cohort["ledger"])
                 for cohort in self.cohorts
             }
             minimal_marker = CriticalGapMarker(

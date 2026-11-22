@@ -964,6 +964,10 @@ class GenerationConfig:
         """SHA-256 hex digest of canonical_json()."""
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> GenerationConfig:
+        """Frozen config contains immutable MappingProxyType fields; reuse self."""
+        return self
+
 
 def load_generation_config(
     path: str | Path,

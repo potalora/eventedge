@@ -19,6 +19,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
 from typing import Any
@@ -77,6 +78,9 @@ def _encode_frame_bytes(frame: pd.DataFrame) -> tuple[str, bytes, dict[str, Any]
         "index_freq": (
             frame.index.freqstr if isinstance(frame.index, pd.DatetimeIndex) else None
         ),
+        "index_dtype": (
+            str(frame.index.dtype) if isinstance(frame.index, pd.DatetimeIndex) else None
+        ),
         "empty": frame.empty,
         "columns": [str(c) for c in frame.columns],
         "index_name": frame.index.name,
@@ -84,7 +88,12 @@ def _encode_frame_bytes(frame: pd.DataFrame) -> tuple[str, bytes, dict[str, Any]
     if _has_pyarrow() and len(frame.columns) > 0:
         try:
             buf = io.BytesIO()
-            frame.to_parquet(buf, engine="pyarrow", index=True)
+            # Attrs are already persisted deterministically in meta["attrs"];
+            # clearing attrs on a shallow copy avoids dict-insertion-order drift
+            # in pyarrow's PANDAS_ATTRS schema metadata across encode/decode roundtrips.
+            clean = frame.copy(deep=False)
+            clean.attrs = {}
+            clean.to_parquet(buf, engine="pyarrow", index=True)
             return "parquet", buf.getvalue(), meta
         except Exception:
             pass
@@ -106,12 +115,21 @@ def _encode_frame_bytes(frame: pd.DataFrame) -> tuple[str, bytes, dict[str, Any]
 def _decode_frame_bytes(fmt: str, raw: bytes, meta: Mapping[str, Any]) -> pd.DataFrame:
     if fmt == "parquet":
         frame = pd.read_parquet(io.BytesIO(raw), engine="pyarrow")
-        freq = meta.get("index_freq")
-        if freq and isinstance(frame.index, pd.DatetimeIndex):
-            try:
-                frame.index = pd.DatetimeIndex(frame.index, freq=freq)
-            except Exception:
-                pass
+        if isinstance(frame.index, pd.DatetimeIndex):
+            index = frame.index
+            dtype_str = meta.get("index_dtype")
+            if isinstance(dtype_str, str) and dtype_str.startswith("datetime64"):
+                try:
+                    index = index.astype(dtype_str)
+                except Exception:
+                    pass
+            freq = meta.get("index_freq")
+            if freq:
+                try:
+                    index = pd.DatetimeIndex(index, freq=freq)
+                except Exception:
+                    pass
+            frame.index = index
     elif fmt == "gzip_json":
         obj = json.loads(gzip.decompress(raw).decode("utf-8"))
         cols = _from_plain(obj["columns"], depth=0)
@@ -234,6 +252,97 @@ def _store_table(
     }
 
 
+def _legacy_dtype(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"(object|bool|boolean|string|str|(?:u?int|float|Int|UInt|Float)(?:8|16|32|64)|datetime64\[(?:ns|us|ms|s)(?:, [A-Za-z0-9_+./:-]+)?\]|timedelta64\[(?:ns|us|ms|s)\])",
+        value,
+    ):
+        raise SourceInputError("unsupported pandas dtype")
+    return value
+
+
+_LEGACY_TYPE_FIELDS: dict[str, set[str]] = {
+    "mapping": {"items"},
+    "tuple": {"items"},
+    "float": {"value"},
+    "decimal": {"value"},
+    "date": {"value"},
+    "datetime": {"value"},
+    "timestamp": {"value"},
+    "missing": {"value"},
+    "index": {"items", "dtype", "name"},
+    "datetime_index": {"items", "dtype", "name", "freq"},
+    "range_index": {"start", "stop", "step", "name"},
+    "multi_index": {"items", "names"},
+    "series": {"items", "dtype", "index", "name", "attrs"},
+    "frame": {"series", "index", "columns", "attrs"},
+}
+
+
+def _from_legacy_typed(value: dict[str, Any], *, depth: int, table_dir: Path | None) -> Any:
+    tag = value["$type"]
+    if tag not in _LEGACY_TYPE_FIELDS or set(value) != _LEGACY_TYPE_FIELDS[tag] | {"$type"}:
+        raise SourceInputError("invalid source type or fields")
+
+    def walk(item: Any) -> Any:
+        return _from_plain(item, depth=depth + 1, table_dir=table_dir)
+
+    if tag == "mapping":
+        result = {}
+        for pair in value["items"]:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise SourceInputError("invalid mapping entry")
+            key, item = walk(pair[0]), walk(pair[1])
+            if key in result:
+                raise SourceInputError("duplicate mapping key")
+            result[key] = item
+        return result
+    if tag == "tuple":
+        return tuple(walk(item) for item in value["items"])
+    if tag == "float":
+        if value["value"] not in ("nan", "inf", "-inf"):
+            raise SourceInputError("invalid special float")
+        return float(value["value"])
+    if tag == "decimal":
+        return Decimal(value["value"])
+    if tag == "date":
+        return date.fromisoformat(value["value"])
+    if tag == "datetime":
+        return datetime.fromisoformat(value["value"])
+    if tag == "timestamp":
+        return pd.Timestamp(value["value"])
+    if tag == "missing":
+        if value["value"] not in ("NA", "NaT"):
+            raise SourceInputError("invalid missing value")
+        return pd.NA if value["value"] == "NA" else pd.NaT
+    if tag == "range_index":
+        return pd.RangeIndex(value["start"], value["stop"], value["step"], name=walk(value["name"]))
+    if tag == "multi_index":
+        return pd.MultiIndex.from_tuples([walk(item) for item in value["items"]], names=walk(value["names"]))
+    if tag in ("index", "datetime_index"):
+        items, name = [walk(item) for item in value["items"]], walk(value["name"])
+        dtype = _legacy_dtype(value["dtype"])
+        if tag == "datetime_index":
+            return pd.DatetimeIndex(items, dtype=dtype, name=name, freq=value["freq"])
+        return pd.Index(items, dtype=dtype, name=name, tupleize_cols=False)
+    if tag == "series":
+        result = pd.Series(
+            [walk(item) for item in value["items"]],
+            index=walk(value["index"]),
+            dtype=_legacy_dtype(value["dtype"]),
+            name=walk(value["name"]),
+        )
+        result.attrs = walk(value["attrs"])
+        return result
+    series, index, columns = walk(value["series"]), walk(value["index"]), walk(value["columns"])
+    if len(series) != len(columns) or any(len(item) != len(index) for item in series):
+        raise SourceInputError("invalid dataframe dimensions")
+    result = pd.concat(series, axis=1) if series else pd.DataFrame(index=index)
+    result.index, result.columns = index, columns
+    result.attrs = walk(value["attrs"])
+    return result
+
+
 def _from_plain(value: Any, *, depth: int = 0, table_dir: Path | None = None) -> Any:
     if depth > MAX_DEPTH:
         raise SourceInputError("source document exceeds nesting depth")
@@ -246,6 +355,13 @@ def _from_plain(value: Any, *, depth: int = 0, table_dir: Path | None = None) ->
     if isinstance(value, list):
         return [_from_plain(x, depth=depth + 1, table_dir=table_dir) for x in value]
     if isinstance(value, dict):
+        legacy_tag = value.get("$type")
+        if (
+            isinstance(legacy_tag, str)
+            and legacy_tag in _LEGACY_TYPE_FIELDS
+            and set(value) == _LEGACY_TYPE_FIELDS[legacy_tag] | {"$type"}
+        ):
+            return _from_legacy_typed(value, depth=depth, table_dir=table_dir)
         if "$t" not in value:
             return {k: _from_plain(v, depth=depth + 1, table_dir=table_dir) for k, v in value.items()}
         tag = value["$t"]
@@ -305,6 +421,8 @@ def _from_plain(value: Any, *, depth: int = 0, table_dir: Path | None = None) ->
 def configuration_fingerprint(config: Mapping[str, Any]) -> str:
     """Hash config canonically without persisting credentials."""
     def ordered(value: Any) -> Any:
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return ordered(value.to_dict())
         if isinstance(value, Mapping):
             return {str(k): ordered(v) for k, v in sorted(value.items(), key=lambda p: str(p[0]))}
         if isinstance(value, (tuple, list)):
@@ -329,6 +447,11 @@ def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horiz
     }
     for key, env_name in credentials.items():
         ar[key] = ar.get(key) or os.environ.get(env_name, "")
+    if ar.get("equity_universe_policy"):
+        ar["equity_universe_credentials"] = {
+            "key": os.environ.get("ALPACA_API_KEY", "").strip(),
+            "secret": os.environ.get("ALPACA_SECRET_KEY", "").strip(),
+        }
     omitted = {"state_dir", "source_cache_dir", "source_cache_ttl_s"}
     if exclude_horizon:
         omitted.add("horizon")
@@ -457,14 +580,20 @@ class SourceInputStore:
             raise SourceInputError("invalid source document") from error
 
     @staticmethod
-    def decode(encoded: str, *, max_bytes: int | None = None, max_nodes: int | None = None) -> Any:
+    def decode(
+        encoded: str,
+        *,
+        max_bytes: int | None = None,
+        max_nodes: int | None = None,
+        table_dir: Path | None = None,
+    ) -> Any:
         _ = max_nodes
         limit = MAX_BYTES if max_bytes is None else int(max_bytes)
         try:
             if not isinstance(encoded, str) or len(encoded.encode("utf-8")) > limit:
                 raise SourceInputError("source document exceeds byte limit")
             parsed = load_json_strict(encoded, max_bytes=limit)
-            return _from_plain(parsed, depth=0)
+            return _from_plain(parsed, depth=0, table_dir=table_dir)
         except SourceInputError:
             raise
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError, AttributeError) as error:

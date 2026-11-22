@@ -352,8 +352,13 @@ def test_mixed_recipient_fallback_failure_preserves_full_pipeline_health_and_rep
     assert result['outcome'] == 'degraded' and report['evidence_complete']
     assert not [row for row in report['sources']['recovered'] if row.get('source') == 'usaspending']
     assert [row for row in report['sources']['unresolved'] if row.get('provider') == 'usaspending']
-    envelopes = [SourceInputStore.decode(path.read_text()) for path in
-                 (Path(config['autoresearch']['state_dir']) / 'source_inputs').glob('*.json')]
+    envelopes = [
+        SourceInputStore.decode(
+            path.read_text(),
+            table_dir=path.parent / (path.stem + ".tables"),
+        )
+        for path in (Path(config['autoresearch']['state_dir']) / 'source_inputs').rglob('*.json')
+    ]
     acquired = [envelope['payload']['usaspending'] for envelope in envelopes
                 if 'usaspending' in envelope['payload']]
     assert len(acquired) == 1 and acquired[0]['error']

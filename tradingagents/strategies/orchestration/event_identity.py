@@ -171,39 +171,6 @@ def canonical_event_key(
             "year": _required(metadata, "year", strategy),
             "quarter": _required(metadata, "quarter", strategy),
         }
-    elif strategy == "insider_activity":
-        family = "form4_cluster"
-        filing_keys = metadata.get("filing_keys")
-        if _present(filing_keys):
-            if not isinstance(filing_keys, list):
-                raise ValueError("insider_activity candidate lacks source identity")
-            identities = sorted(str(item) for item in filing_keys)
-        else:
-            filings = _required(metadata, "filings", strategy)
-            if not isinstance(filings, list):
-                raise ValueError(
-                    "insider_activity candidate lacks source identity filings"
-                )
-            identities = sorted(
-                (_insider_filing_key(filing) for filing in filings), key=str
-            )
-        payload = {
-            "cluster_type": _required(metadata, "cluster_type", strategy),
-            "filings": identities,
-        }
-    elif strategy == "filing_analysis":
-        family = "sec_filing"
-        locator = metadata.get("accession_number") or metadata.get("file_url")
-        if not _present(locator):
-            locator = {
-                "entity_name": _required(metadata, "entity_name", strategy),
-                "form_type": _required(metadata, "form_type", strategy),
-                "file_date": _required(metadata, "file_date", strategy),
-            }
-        payload = {"locator": locator}
-    elif strategy == "regulatory_pipeline":
-        family = "regulations_document"
-        payload = _required(metadata, "document_id", strategy)
     elif strategy == "supply_chain":
         family = "news_article"
         locator = metadata.get("article_id") or metadata.get("url")
@@ -214,28 +181,6 @@ def canonical_event_key(
                 "published_at": _required(metadata, "published_at", strategy),
             }
         payload = locator
-    elif strategy == "litigation":
-        family = "legal_matter"
-        locator = metadata.get("docket_id") or metadata.get("url")
-        if not _present(locator):
-            locator = {
-                "release_date": _required(metadata, "release_date", strategy),
-                "title": _required(metadata, "title", strategy),
-            }
-        payload = locator
-    elif strategy == "congressional_trades":
-        trade_keys = _required(metadata, "trade_keys", strategy)
-        if not isinstance(trade_keys, list):
-            raise ValueError("congressional_trades candidate lacks source identity")
-        from tradingagents.strategies.modules.congressional_trades import (
-            congressional_cluster_event_key,
-        )
-
-        return congressional_cluster_event_key(
-            ticker,
-            str(_required(metadata, "cluster_direction", strategy)),
-            [str(item) for item in trade_keys],
-        )
     elif strategy == "govt_contracts":
         source = _required(metadata, "source", strategy)
         if source == "usaspending":
@@ -249,27 +194,6 @@ def canonical_event_key(
             }
         else:
             raise ValueError("govt_contracts candidate lacks source identity")
-    elif strategy == "state_economics":
-        if metadata.get('state_economics_policy') == 'state_unemployment_v1':
-            from ..data_sources.state_economics_policy import SERIES, day
-            event = _required(metadata, 'state_event', strategy)
-            if not isinstance(event, dict) or event.get('series_id') != SERIES.get(event.get('state')):
-                raise ValueError('invalid state source event identity')
-            period, vintage = day(event.get('observation_date')), day(event.get('vintage_date'))
-            native = f'fred:{event["series_id"]}:{period.isoformat()}:{vintage.isoformat()}'
-            if period.day != 1 or event.get('source_observation_id') != native:
-                raise ValueError('invalid state source event identity')
-            family, payload = 'fred_state_unemployment_vintage', native
-        else:
-            family = "state_economics_observation_window"
-            payload = {
-                "source_observation_ids": sorted(
-                    str(item)
-                    for item in _required(metadata, "source_observation_ids", strategy)
-                ),
-                "window_end": _required(metadata, "window_end", strategy),
-                "regional_sector": _required(metadata, "regional_sector", strategy),
-            }
     elif strategy == "weather_ag":
         family = "weather_observation_window"
         payload = {
@@ -287,16 +211,6 @@ def canonical_event_key(
             "window_end": _required(metadata, "window_end", strategy),
             "commodity": _required(metadata, "commodity", strategy),
         }
-    elif strategy == "quantum_readiness":
-        source_ids = metadata.get("source_ids")
-        if _present(source_ids):
-            if not isinstance(source_ids, list):
-                raise ValueError("quantum_readiness candidate lacks source identity")
-            family = "quantum_source_set"
-            payload = sorted(str(item) for item in source_ids)
-        else:
-            family = "quantum_observation_window"
-            payload = _required(metadata, "source_observation_window_id", strategy)
     else:
         raise ValueError(f"{strategy} candidate lacks a source identity family")
 

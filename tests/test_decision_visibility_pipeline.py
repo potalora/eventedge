@@ -28,7 +28,9 @@ def test_native_16_book_committee_holds_cash_and_retains_decision_status(pipelin
     from tradingagents.strategies import llm_utils
     with patch.object(llm_utils, "call_analysis_model", model):
         result, books, report = run_campaign(pipeline)
-    assert len(committee_calls) == 16
+    # gen003 uses 1 committee call per horizon (4/day across 30d/3m/6m/1y),
+    # shared deterministically across all 16 size tiers.
+    assert len(committee_calls) == 4
     assert sum(len(row.get("recommendations", [])) for row in books.values()) == 0
     assert sum(len(row.get("intents_staged", [])) for row in books.values()) == 0
     assert result["execution_valid"] is True and result["input_coverage_valid"] is True

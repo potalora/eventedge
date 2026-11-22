@@ -23,11 +23,12 @@ _EXPECTED_EVIDENCE = ("paper_trades.json", "signal_journal.jsonl")
 
 def _expected_user_tables() -> frozenset[str]:
     """Derive the canonical user-table set directly from current ledger DDL."""
-    from tradingagents.strategies.state.portfolio_ledger import _DDL
+    from tradingagents.strategies.state.generation_db import DDL_STATEMENTS
+    from tradingagents.strategies.state.ledger.connection import _AUXILIARY_DDL
 
     connection = sqlite3.connect(":memory:")
     try:
-        for statement in _DDL:
+        for statement in (*DDL_STATEMENTS, *_AUXILIARY_DDL):
             connection.execute(statement)
         return frozenset(
             str(row[0])
@@ -284,18 +285,33 @@ def _assert_clean_existing_ledger(
                     "SELECT metadata_key, metadata_value FROM schema_metadata"
                 )
             }
-            expected_metadata = {
-                "cohort_id": cohort_id,
-                "schema_version": str(SCHEMA_VERSION),
-            }
-            if metadata.get("cohort_id") != cohort_id:
-                found = metadata.get("cohort_id", "missing")
-                raise RuntimeError(
-                    f"existing ledger cohort mismatch: expected {cohort_id}, found {found}"
-                )
-            if metadata != expected_metadata:
+            allowed_keys = {"schema_version", "schema_name", "created_at", "cohort_id"}
+            if (
+                metadata.get("schema_version") != str(SCHEMA_VERSION)
+                or metadata.get("schema_name") != "eventedge_generation_db_v2"
+                or not metadata.get("created_at")
+                or not set(metadata) <= allowed_keys
+                or ("cohort_id" in metadata and metadata["cohort_id"] != cohort_id)
+            ):
+                if "cohort_id" in metadata and metadata["cohort_id"] != cohort_id:
+                    raise RuntimeError(
+                        f"existing ledger cohort mismatch: expected {cohort_id}, found {metadata['cohort_id']}"
+                    )
                 raise RuntimeError(
                     f"existing ledger {cohort_id} is not clean: schema metadata mismatch"
+                )
+            accounting_rows = connection.execute(
+                "SELECT * FROM accounting_state ORDER BY cohort_id"
+            ).fetchall()
+            if len(accounting_rows) != 1:
+                raise RuntimeError(
+                    f"existing ledger {cohort_id} is not clean: accounting_state "
+                    f"rows={len(accounting_rows)}"
+                )
+            accounting = accounting_rows[0]
+            if accounting["cohort_id"] != cohort_id:
+                raise RuntimeError(
+                    f"existing ledger cohort mismatch: expected {cohort_id}, found {accounting['cohort_id']}"
                 )
             cash_rows = connection.execute(
                 "SELECT * FROM cash_events ORDER BY cash_event_id"
@@ -308,23 +324,14 @@ def _assert_clean_existing_ledger(
                 or cash_rows[0]["session"] is not None
                 or cash_rows[0]["event_type"] != "opening"
                 or Decimal(str(cash_rows[0]["amount"])) != opening_cash
-                or cash_rows[0]["effective_at"] != "1970-01-01T00:00:00"
-                or cash_rows[0]["detail"] != "deterministic opening cash"
+                or cash_rows[0]["effective_at"] not in {"1970-01-01T00:00:00", "1970-01-01T00:00:00+00:00"}
+                or cash_rows[0]["detail"] not in {"initial cohort capital", "deterministic opening cash"}
             ):
                 raise RuntimeError(
                     f"existing ledger opening cash mismatch for {cohort_id}: "
                     f"expected {opening_cash}"
                 )
 
-            accounting_rows = connection.execute(
-                "SELECT * FROM accounting_state ORDER BY cohort_id"
-            ).fetchall()
-            if len(accounting_rows) != 1:
-                raise RuntimeError(
-                    f"existing ledger {cohort_id} is not clean: accounting_state "
-                    f"rows={len(accounting_rows)}"
-                )
-            accounting = accounting_rows[0]
             zero_fields = (
                 "realized_pnl",
                 "slippage_cost",
