@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -31,6 +32,39 @@ class Candidate:
     strategy_tags: tuple[str, ...] = ()
     risk_tags: tuple[str, ...] = ()
     journal_only: bool = False
+    raw_signal_score: float | None = None  # Quantitative signal strength; never overwritten by LLM
+    llm_conviction: float | None = None  # LLM conviction in [0.0, 1.0], None when unanalyzed
+
+    def __post_init__(self) -> None:
+        if self.raw_signal_score is None:
+            if (
+                not isinstance(self.score, bool)
+                and isinstance(self.score, (int, float))
+                and math.isfinite(self.score)
+            ):
+                self.raw_signal_score = float(self.score)
+        elif (
+            isinstance(self.raw_signal_score, bool)
+            or not isinstance(self.raw_signal_score, (int, float))
+            or not math.isfinite(self.raw_signal_score)
+        ):
+            raise ValueError("raw_signal_score must be a finite number or None")
+        else:
+            self.raw_signal_score = float(self.raw_signal_score)
+
+        if self.llm_conviction is not None:
+            self.set_llm_conviction(self.llm_conviction)
+
+    def set_llm_conviction(self, conviction: float) -> None:
+        """Record LLM conviction in [0.0, 1.0] without overwriting raw_signal_score."""
+        if (
+            isinstance(conviction, bool)
+            or not isinstance(conviction, (int, float))
+            or not math.isfinite(conviction)
+            or not (0.0 <= float(conviction) <= 1.0)
+        ):
+            raise ValueError("llm_conviction must be a finite number in [0.0, 1.0]")
+        self.llm_conviction = float(conviction)
 
 
 @dataclass

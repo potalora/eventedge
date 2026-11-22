@@ -93,7 +93,7 @@ class PortfolioPolicyConfig:
     max_strategy_exposure_pct: float
     max_event_cluster_exposure_pct: float
     max_position_risk_contribution_pct: float
-    risk_contribution_min_positions: int
+    short_eligible: bool
     max_short_exposure_pct: float
     max_single_short_pct: float
     max_correlated_shorts: int
@@ -101,7 +101,7 @@ class PortfolioPolicyConfig:
     margin_cash_buffer_pct: float
     volatility_lookback_sessions: int
     annualized_volatility_floor: float
-    congressional_exposure_pct: float
+    max_open_chase_pct: float
 
     def __init__(
         self,
@@ -134,16 +134,18 @@ class PortfolioPolicyConfig:
         profile: Any,
         policy_settings: Mapping[str, Any],
     ) -> "PortfolioPolicyConfig":
-        """Build a config from a cohort profile without cross-size fallbacks.
-
-        ``congressional_exposure_by_size`` must explicitly name the selected
-        profile.  A missing entry is a configuration error, rather than an
-        opportunity to inherit a larger cohort's policy.
-        """
+        """Build a config from a cohort profile without cross-size fallbacks."""
         try:
-            congressional_exposure = policy_settings[
-                "congressional_exposure_by_size"
-            ][profile.name]
+            max_open_chase_pct = float(policy_settings.get("max_open_chase_pct", 0.05))
+            if not isfinite(max_open_chase_pct) or not (0.0 < max_open_chase_pct <= 0.50):
+                raise ValueError("max_open_chase_pct must be in (0, 0.50]")
+            short_eligible = bool(
+                getattr(
+                    profile,
+                    "short_eligible",
+                    float(profile.max_short_exposure_pct) > 0.0,
+                )
+            )
             return cls(
                 _factory_token=_PORTFOLIO_POLICY_FACTORY_TOKEN,
                 profile_name=str(profile.name),
@@ -158,9 +160,7 @@ class PortfolioPolicyConfig:
                 max_position_risk_contribution_pct=float(
                     profile.max_position_risk_contribution_pct
                 ),
-                risk_contribution_min_positions=int(
-                    profile.risk_contribution_min_positions
-                ),
+                short_eligible=short_eligible,
                 max_short_exposure_pct=float(profile.max_short_exposure_pct),
                 max_single_short_pct=float(profile.max_single_short_pct),
                 max_correlated_shorts=int(profile.max_correlated_shorts),
@@ -172,7 +172,7 @@ class PortfolioPolicyConfig:
                 annualized_volatility_floor=float(
                     policy_settings["annualized_volatility_floor"]
                 ),
-                congressional_exposure_pct=float(congressional_exposure),
+                max_open_chase_pct=max_open_chase_pct,
             )
         except (AttributeError, KeyError, TypeError) as exc:
             raise ValueError(
@@ -501,10 +501,53 @@ class PortfolioPolicy:
             "duplicate_ticker",
             "consumed_event",
             "max_positions",
+            "short_ineligible",
             "borrow_unavailable",
             "max_correlated_shorts",
+            "max_open_chase_pct",
         }
     )
+
+    @classmethod
+    def is_hard_rejection(cls, reason: str) -> bool:
+        """Return True when a policy rejection cannot be cured by size trimming."""
+        return reason in cls._HARD_REJECTION_REASONS
+
+    def _inverse_volatility_cap(
+        self,
+        ticker: str,
+        context: PortfolioRiskContext,
+    ) -> float:
+        """Continuous inverse-volatility weight cap from position #1."""
+        cfg = context.config
+        candidate_volatility = max(
+            context.annualized_volatility.get(
+                ticker,
+                cfg.annualized_volatility_floor,
+            ),
+            cfg.annualized_volatility_floor,
+        )
+        return cfg.max_position_pct * (
+            cfg.annualized_volatility_floor / candidate_volatility
+        )
+
+    def target_weight(
+        self,
+        recommendation: "TradeRecommendation",
+        context: PortfolioRiskContext,
+    ) -> float:
+        """Compute deterministic inverse-vol target weight for horizon recs (size 0)."""
+        explicit = float(recommendation.position_size_pct)
+        if explicit > 0.0:
+            return explicit
+        if explicit < 0.0:
+            return explicit
+        confidence = float(recommendation.confidence)
+        if not isfinite(confidence) or confidence <= 0.0:
+            return 0.0
+        confidence = min(1.0, confidence)
+        inv_vol = self._inverse_volatility_cap(recommendation.ticker, context)
+        return round(min(context.config.max_position_pct, inv_vol) * confidence, 8)
 
     def apply(
         self,
@@ -526,16 +569,29 @@ class PortfolioPolicy:
         decisions: list[PortfolioPolicyDecision] = []
         working = context
         for recommendation in recommendations:
+            requested = self.target_weight(recommendation, working)
             allowed, reason = self._max_allowed_weight(recommendation, working)
-            weight = min(float(recommendation.position_size_pct), allowed)
-            trimmed = weight + self._EPSILON < float(
-                recommendation.position_size_pct
-            )
-            approved_weight = (
-                round(weight, 8)
-                if trimmed
-                else float(recommendation.position_size_pct)
-            )
+            if requested <= self._EPSILON:
+                reject_reason = (
+                    reason
+                    if allowed <= self._EPSILON and reason in self._HARD_REJECTION_REASONS
+                    else "nonpositive_weight"
+                )
+                decisions.append(
+                    PortfolioPolicyDecision(
+                        recommendation.ticker,
+                        recommendation.direction,
+                        recommendation.event_key,
+                        "rejected",
+                        reject_reason,
+                        requested,
+                        0.0,
+                    )
+                )
+                continue
+            weight = min(requested, allowed)
+            trimmed = weight + self._EPSILON < requested
+            approved_weight = round(weight, 8) if trimmed else requested
             # A positive cap residual can round to zero at approval precision.
             if weight <= self._EPSILON or approved_weight <= self._EPSILON:
                 decisions.append(
@@ -545,7 +601,7 @@ class PortfolioPolicy:
                         recommendation.event_key,
                         "rejected",
                         reason,
-                        float(recommendation.position_size_pct),
+                        requested,
                         0.0,
                     )
                 )
@@ -562,7 +618,7 @@ class PortfolioPolicy:
                     recommendation.event_key,
                     "trimmed" if trimmed else "accepted",
                     reason if trimmed else "accepted",
-                    float(recommendation.position_size_pct),
+                    requested,
                     float(constrained.position_size_pct),
                 )
             )
@@ -573,8 +629,16 @@ class PortfolioPolicy:
         self,
         recommendation: "TradeRecommendation",
         context: PortfolioRiskContext,
+        *,
+        overnight_gap_pct: float | None = None,
     ) -> tuple[bool, str]:
         """Return whether a recommendation fits without policy scaling."""
+        if (
+            overnight_gap_pct is not None
+            and abs(float(overnight_gap_pct))
+            > context.config.max_open_chase_pct + self._EPSILON
+        ):
+            return False, "max_open_chase_pct"
         allowed, reason = self._max_allowed_weight(recommendation, context)
         if recommendation.position_size_pct <= 0.0:
             if (
@@ -586,6 +650,14 @@ class PortfolioPolicy:
         if recommendation.position_size_pct <= allowed + self._EPSILON:
             return True, ""
         return False, reason
+
+    def max_allowed_weight(
+        self,
+        recommendation: "TradeRecommendation",
+        context: PortfolioRiskContext,
+    ) -> tuple[float, str]:
+        """Return (max_allowed_weight, binding_reason) for a recommendation."""
+        return self._max_allowed_weight(recommendation, context)
 
     def _max_allowed_weight(
         self,
@@ -638,13 +710,6 @@ class PortfolioPolicy:
                     f"strategy:{tag}",
                 )
             )
-            if tag == "congressional_trades":
-                caps.append(
-                    (
-                        cfg.congressional_exposure_pct - strategy_exposure[tag],
-                        "congressional_exposure",
-                    )
-                )
         for tag in risk_tags:
             caps.append(
                 (
@@ -673,6 +738,8 @@ class PortfolioPolicy:
             )
 
         if recommendation.direction == "short":
+            if not cfg.short_eligible:
+                return 0.0, "short_ineligible"
             if (
                 context.require_borrow
                 and context.borrow_available.get(recommendation.ticker) is not True
@@ -716,32 +783,10 @@ class PortfolioPolicy:
                 ]
             )
 
-        prospective_count = len(book) + 1
-        if prospective_count >= cfg.risk_contribution_min_positions:
-            candidate_volatility = max(
-                context.annualized_volatility.get(
-                    recommendation.ticker,
-                    cfg.annualized_volatility_floor,
-                ),
-                cfg.annualized_volatility_floor,
-            )
-            base_risk = sum(
-                abs(position.weight)
-                * max(
-                    position.annualized_volatility,
-                    cfg.annualized_volatility_floor,
-                )
-                for position in book
-            )
-            contribution_cap = cfg.max_position_risk_contribution_pct
-            risk_weight_cap = (
-                contribution_cap
-                * base_risk
-                / (candidate_volatility * (1.0 - contribution_cap))
-                if candidate_volatility > 0 and contribution_cap < 1.0
-                else cfg.max_position_pct
-            )
-            caps.append((risk_weight_cap, "max_risk_contribution"))
+        # Continuous inverse-volatility sizing cap applied smoothly from position #1
+        # (no cliff at 4 positions), respecting max_position_pct and annualized_volatility_floor.
+        inv_vol_cap = self._inverse_volatility_cap(recommendation.ticker, context)
+        caps.append((inv_vol_cap, "max_risk_contribution"))
 
         allowed = min(cap for cap, _ in caps)
         reason = next(

@@ -123,7 +123,8 @@ class TestRuleBasedShortGate:
     def test_single_strategy_long_accepted_at_threshold(self):
         committee = _rule_based_committee()
         recs = committee.synthesize(
-            [_long("MSFT", "earnings_call", 0.6)], total_capital=50_000,
+            [_long("MSFT", "earnings_call", PortfolioCommittee.LONG_CONVICTION_THRESHOLD)],
+            total_capital=50_000,
             strategy_confidence={"earnings_call": 1.0},
         )
         assert any(r.ticker == "MSFT" and r.direction == "long" for r in recs)
